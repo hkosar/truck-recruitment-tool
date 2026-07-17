@@ -327,3 +327,45 @@ carry-forward assets into the real Render + Supabase build.
 - Corridor search: launch requirement vs. fast-follow, and the routing-provider choice.
 - Exact "Generate Contact Options" export formats (call sheet / CSV / dialer push).
 - Email / postcard provider selection (Phases 2–3), with itemized costs.
+
+---
+
+## 17. Addendum — Feedback Round 1 ingested; full build plan produced (2026-07-17)
+
+The owner delivered feedback round 1 (`Recruiting_tool_feedback.docx`, 24 items), the
+**Twisted Nail brand assets** (monochrome wordmark/badge/icon + Montserrat; build subset
+committed at `brand/`), and a screenshot of the existing Owner Operator Database tool
+(Google Maps + numbered colored pins + legend + stat strip — the design language to
+mirror). All feedback is itemized, resolved specifically AND generalized tool-wide in
+**`docs/build-plan/03-feedback-resolution.md`** (F1–F24 × resolution × landing spot ×
+G1–G10 principles).
+
+**Structural changes it drove:** Batches screen → **Dashboard** (overview map above a
+batch table; tiles removed) · **multi-lane batches** (N radius/corridor zones per batch,
+union coverage — the Waco job with Austin + Dallas lanes) · corridor lanes take **custom
+pickup/dropoff every time** (presets deleted; resolves §14.2 — corridor ships at launch)
+· freight filter reinvented as **category checkboxes + a faceted "Other" value browser
+with per-value counts and include/exclude** ("wide net" concept removed) · safety
+exclusion filter removed in favor of a **pale-red warning system** propagated everywhere
+a carrier renders · **contact name/phone/email** columns + a contactability filter ·
+**multi-channel logging** (call/text/email) in the unified timeline · **batch activity
+feed** (auto events + comments) · batch = Name (first) + **Customer + Job** · "Send to
+Onboarding" → **"Mark as Promoted"** tracking action · reserved sidebar tabs for future
+modules · profile restructure with **3 design variants** to be picked in the next mockup
+round.
+
+**Decisions locked with the owner (D1–D6):** Google Maps Platform (billing prereq +
+hard quota caps; ~$0/mo at internal scale) · email-blast module = **fast-follow after
+launch** on a dedicated sending subdomain via ESP (legitimate deliverability; no address
+rotation) · L&I insurance/authority join at launch (resolves §14.3) · monochrome +
+Montserrat brand chrome with orange interaction accent.
+
+**Deliverable of this stage — the execution roadmap** at **`docs/build-plan/`**
+(README + 6 docs, ~2,000 lines): milestones **M0–M8** (M0 mockup v2 + profile variants →
+M1 foundations → M2 data pipeline w/ owner data-QA gate → M3 shell/auth → M4 search &
+batches → M5 working list & CRM → M6 hardening/launch w/ owner UAT → M7 email →
+M8 enrichment), full task cards with acceptance criteria, the Opus-manager/Sonnet-worker
+execution protocol, complete Supabase schema v2 DDL + RPC/RLS/realtime spec, the FMCSA
+ingestion pipeline spec, screen-by-screen frontend spec, verified itemized costs
+(**$26/mo MVP · $46/mo with email**, cited), and the verification/QA gate catalog.
+Development itself begins only when the owner starts the build stage.
