@@ -1,0 +1,113 @@
+# CI — Twisted Nail Carrier Recruiter
+#
+# Two independent jobs, one per npm package in the monorepo (app/, pipeline/).
+# Runs on every push and every pull request. Deliberately references no
+# secrets — lint/typecheck/build need none of the real Supabase/Google Maps/
+# Socrata/Resend values (those are runtime/deploy-time concerns, wired in
+# render.yaml instead).
+#
+# NOTE (M1.1 scaffolding): app/ and pipeline/ are being scaffolded by other
+# workers in parallel with this file, so their package-lock.json files may
+# not be committed yet the first several times this workflow runs. Both jobs
+# tolerate that on purpose:
+#   - Dependency caching uses actions/cache + hashFiles() rather than
+#     setup-node's built-in `cache: npm` input. That built-in cache HARD
+#     FAILS the step ("Dependencies lock file is not found") when the
+#     lockfile doesn't exist yet. hashFiles() on a missing file just returns
+#     an empty string, which costs a cache miss, never a failure.
+#   - The install step falls back to `npm install` when package-lock.json is
+#     absent, and uses `npm ci` (the reproducible, correct choice for CI)
+#     once a lockfile has actually been committed.
+# Once both packages have committed lockfiles this fallback always takes the
+# `npm ci` branch; it can be deleted then, but costs nothing to leave.
+
+name: CI
+
+on:
+  push:
+  pull_request:
+
+permissions:
+  contents: read
+
+jobs:
+  app:
+    name: app
+    runs-on: ubuntu-latest
+    defaults:
+      run:
+        working-directory: app
+    steps:
+      - name: Checkout
+        uses: actions/checkout@v4
+
+      - name: Set up Node 22
+        uses: actions/setup-node@v4
+        with:
+          node-version: 22
+
+      - name: Cache npm dependencies
+        uses: actions/cache@v4
+        with:
+          path: ~/.npm
+          key: ${{ runner.os }}-npm-app-${{ hashFiles('app/package-lock.json') }}
+          restore-keys: |
+            ${{ runner.os }}-npm-app-
+
+      - name: Install dependencies
+        run: |
+          if [ -f package-lock.json ]; then
+            npm ci
+          else
+            echo "::warning::app/package-lock.json not found - falling back to 'npm install'. Commit a lockfile and this step will prefer 'npm ci' automatically."
+            npm install
+          fi
+
+      - name: Lint
+        run: npm run lint
+
+      - name: Type check
+        # npx (not a bare `tsc`) so this resolves app's local TypeScript
+        # devDependency; a bare `tsc` isn't on PATH in a fresh Actions shell.
+        run: npx tsc --noEmit
+
+      - name: Build
+        run: npm run build
+
+  pipeline:
+    name: pipeline
+    runs-on: ubuntu-latest
+    defaults:
+      run:
+        working-directory: pipeline
+    steps:
+      - name: Checkout
+        uses: actions/checkout@v4
+
+      - name: Set up Node 22
+        uses: actions/setup-node@v4
+        with:
+          node-version: 22
+
+      - name: Cache npm dependencies
+        uses: actions/cache@v4
+        with:
+          path: ~/.npm
+          key: ${{ runner.os }}-npm-pipeline-${{ hashFiles('pipeline/package-lock.json') }}
+          restore-keys: |
+            ${{ runner.os }}-npm-pipeline-
+
+      - name: Install dependencies
+        run: |
+          if [ -f package-lock.json ]; then
+            npm ci
+          else
+            echo "::warning::pipeline/package-lock.json not found - falling back to 'npm install'. Commit a lockfile and this step will prefer 'npm ci' automatically."
+            npm install
+          fi
+
+      - name: Type check
+        run: npm run typecheck
+
+      - name: Build
+        run: npm run build

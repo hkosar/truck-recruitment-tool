@@ -1,0 +1,37 @@
+# Twisted Nail Carrier Recruiter — root .gitignore
+# Applies repo-wide across the monorepo (app/, pipeline/, supabase/, ...).
+# mockup/ keeps its own .gitignore for its self-contained-build specifics.
+
+# Dependencies
+node_modules/
+
+# Build output — app/dist (Vite), pipeline's compiled TS output, etc.
+dist/
+build/
+
+# Env files with real values — never committed. The *.env.example templates
+# (app/.env.example, pipeline/.env.example per the build plan) are NOT
+# matched by these exact-filename rules and stay committed on purpose.
+.env
+.env.local
+
+# Logs
+*.log
+
+# OS cruft
+.DS_Store
+
+# Test output
+coverage/
+playwright-report/
+
+# Supabase CLI local-dev state (branching + temp/config cache) — never the
+# source of truth, never commit. migrations/, seed.sql, config.toml under
+# supabase/ are committed as normal.
+supabase/.branches/
+supabase/.temp/
+
+# Committed brand assets — do NOT ignore. Converted Montserrat woff2 subsets
+# are checked into app/public/fonts/ (brand/README.md, build plan M0.2).
+# Explicit exception so no broader rule above ever swallows them.
+!app/public/fonts/*.woff2

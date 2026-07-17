@@ -1,0 +1,104 @@
+# render.yaml — Render Blueprint for the Twisted Nail Carrier Recruiter
+#
+# Defines the two services described in:
+#   - docs/build-plan/02-frontend-spec.md §1.1 ("Deployed as a Render static site")
+#   - docs/build-plan/01-architecture.md Part B §6.1 / §6.3 (pipeline cron service + schedule)
+#   - docs/build-plan/04-costs.md §1 "Render" (verified $/mo + the "one cron
+#     service, not several" cost-control rule, §7 rule 6)
+# Blueprint reference: https://render.com/docs/blueprint-spec
+#
+# HUNTER: connect this repo as a Blueprint in the Render dashboard (Hobby
+# workspace — 00-master-plan.md §3 owner-prerequisite for M1.3). On first
+# sync Render prompts you, once and interactively, for every `sync: false`
+# value below. Nothing sensitive is ever committed in this file — inline
+# comments say where each real value comes from.
+
+services:
+  # ---------------------------------------------------------------------
+  # 1) app/ — React/Vite SPA, served as a Render Static Site. $0/mo: the
+  #    free tier's 100GB bandwidth + 500 build-min comfortably covers 5
+  #    internal users (04-costs.md §1/§2 line A3).
+  # ---------------------------------------------------------------------
+  - type: web
+    name: twisted-nail-recruiter-app
+    runtime: static
+    # `npm install`, not `npm ci`: app/package-lock.json may not be
+    # committed yet — app/ is being scaffolded in parallel (M1.1). Switch to
+    # `npm ci` once a lockfile lands, for reproducible installs (mirrors the
+    # same fallback in .github/workflows/ci.yml).
+    buildCommand: cd app && npm install && npm run build
+    staticPublishPath: app/dist
+    routes:
+      # React Router v7 owns every client-side path — rewrite everything to
+      # index.html so deep links / hard refreshes don't 404 on Render's edge.
+      - type: rewrite
+        source: /*
+        destination: /index.html
+    envVars:
+      - key: NODE_VERSION
+        value: "22"
+      # Vite inlines VITE_* into the built JS at `npm run build` time
+      # (import.meta.env) — there's no server at runtime to read env vars
+      # from, so these must be set on THIS service even though it serves
+      # static files. Names per 02-frontend-spec.md §1.1 (app/.env.example).
+      # All sync: false — Render prompts for the real value on first
+      # Blueprint sync; nothing here is a committed secret.
+      - key: VITE_SUPABASE_URL
+        sync: false # HUNTER: prod Supabase project's API URL (00-master-plan §3 prerequisite)
+      - key: VITE_SUPABASE_ANON_KEY
+        sync: false # HUNTER: prod Supabase project's anon/public key (safe for a browser bundle)
+      - key: VITE_GOOGLE_MAPS_API_KEY
+        sync: false # HUNTER: browser key, HTTPS-referrer-locked to this site's domain (04-costs.md §7 rule 3)
+      - key: VITE_GOOGLE_MAPS_MAP_ID
+        sync: false # HUNTER: Map ID from the Google Cloud Console (Maps Platform -> Map Management)
+      - key: VITE_MAPS_PROVIDER
+        sync: false # HUNTER: "google" at launch (decision D1); "maplibre" only if the documented fallback is ever built
+
+  # ---------------------------------------------------------------------
+  # 2) pipeline/ — nightly FMCSA -> Supabase ingestion, as a Render Cron Job.
+  #    ~$1/mo, Render's per-cron-service runtime minimum (04-costs.md §1/§2
+  #    line A4).
+  #
+  #    Schedule below is the `pipeline-nightly` row of 01-architecture.md
+  #    Part B §6.3 ("Render cron schedules (UTC; owner is US Central)"):
+  #    "0 9 * * *" = 4am US Central, timed just after FMCSA's overnight
+  #    refresh. Render cron `schedule` always evaluates in UTC regardless of
+  #    service region.
+  #
+  #    Scope note: §6.3 also lists a monthly safety-snapshot schedule
+  #    (`pipeline-monthly-safety`, "0 8 5 * *") and a manual backfill
+  #    invocation. Neither is a separate service here on purpose —
+  #    04-costs.md §7 rule 6 is explicit that this build runs "ONE Render
+  #    cron service, not several (each carries its own $1/mo floor)", and
+  #    M1.3's acceptance criteria only calls for the one nightly service.
+  #    Whether monthly/backfill end up as a second scheduled Render Cron Job
+  #    (accepting its own $1 floor), this same service's entrypoint
+  #    branching on day-of-month, or a manually-triggered Render Job is
+  #    pipeline-ownership territory — see M2.6 "cron wiring" in
+  #    00-master-plan.md.
+  # ---------------------------------------------------------------------
+  - type: cron
+    name: pipeline
+    runtime: node
+    schedule: "0 9 * * *" # UTC. Part B §6.3 `pipeline-nightly`; re-anchor per open item R7 (01-architecture.md §7) once FMCSA's real refresh hour is confirmed from a week of data.
+    # `npm install`, not `npm ci`, for the same not-yet-scaffolded-lockfile
+    # reason as the app service above.
+    buildCommand: cd pipeline && npm install && npm run build
+    startCommand: cd pipeline && npm start
+    envVars:
+      - key: NODE_VERSION
+        value: "22"
+      # Names + purpose per 01-architecture.md Part B §6.2 "Env / secrets".
+      # All sync: false — set once, interactively, in the Render dashboard.
+      - key: SUPABASE_DB_URL
+        sync: false # HUNTER: prod Supabase session-pooler connection string, port 5432 (direct Postgres for COPY/staging upserts - not the PostgREST API URL)
+      - key: SOCRATA_APP_TOKEN
+        sync: false # HUNTER: free app token from dev.socrata.com (00-master-plan §3 prerequisite, needed before M2.1)
+      - key: RESEND_API_KEY
+        sync: false # HUNTER: sends pipeline failure + weekly DQ-report emails (Part B §2.5); reused by the M7 email module later
+      - key: ALERT_EMAIL
+        sync: false # HUNTER: address that receives those failure/DQ emails
+      - key: QCMOBILE_WEBKEY
+        sync: false # HUNTER: optional - powers on-demand carrier-profile verification (M5.8). Leave unset before then; the Inspections tile just shows its empty state (01-architecture.md amendment 16)
+      - key: PIPELINE_ENV
+        sync: false # HUNTER: set to "prod" for this service - it targets the production Supabase project. ("dev" is only for running the pipeline locally against the dev project, Part B §6.4.)
