@@ -1,0 +1,39 @@
+{
+  // Runtime model: both Render (see README "Render cron schedules") and local dev run this
+  // package directly via `tsx src/run.ts ...` against TypeScript source -- nothing here ever
+  // executes dist/**/*.js with plain `node`. That's why moduleResolution is "Bundler" rather
+  // than "NodeNext": Bundler resolution lets relative imports omit the ".js" extension
+  // (tsx/esbuild resolve `./config` to `./config.ts` regardless of what tsconfig says, but
+  // "NodeNext" would additionally *require* every relative import to be written with an
+  // explicit .js extension to satisfy `tsc --noEmit`, which buys nothing here since the
+  // compiled output is never the thing that runs). `npm run build` still exists (CI-friendly
+  // compile-and-emit check) -- if a future milestone switches to running compiled dist/
+  // output under plain `node`, switch to "NodeNext" and add .js extensions to every relative
+  // import at that time.
+  "compilerOptions": {
+    "target": "ES2023",
+    "lib": ["ES2023"],
+    "module": "ESNext",
+    "moduleResolution": "Bundler",
+    "moduleDetection": "force",
+    "types": ["node"],
+
+    "outDir": "dist",
+    "rootDir": "src",
+    "sourceMap": true,
+    "declaration": false,
+
+    "strict": true,
+    "noImplicitReturns": true,
+    "noFallthroughCasesInSwitch": true,
+    "noImplicitOverride": true,
+    "forceConsistentCasingInFileNames": true,
+    "esModuleInterop": true,
+    "resolveJsonModule": true,
+    "skipLibCheck": true,
+    "isolatedModules": true,
+    "verbatimModuleSyntax": false
+  },
+  "include": ["src/**/*.ts"],
+  "exclude": ["node_modules", "dist"]
+}

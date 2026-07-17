@@ -1,0 +1,29 @@
+{
+  "name": "@twisted-nail/pipeline",
+  "version": "0.1.0",
+  "private": true,
+  "description": "FMCSA -> Supabase nightly/monthly ingestion pipeline for the Twisted Nail Carrier Recruiter, deployed as one Render Cron Job. See docs/build-plan/01-architecture.md Part B.",
+  "type": "module",
+  "engines": {
+    "node": ">=22"
+  },
+  "scripts": {
+    "build": "tsc -p tsconfig.json",
+    "typecheck": "tsc --noEmit",
+    "start": "tsx src/run.ts nightly",
+    "monthly": "tsx src/run.ts monthly",
+    "backfill": "tsx src/run.ts backfill",
+    "dev": "tsx src/run.ts nightly --pages=1 --batches=1"
+  },
+  "dependencies": {
+    "@supabase/supabase-js": "^2.45.4",
+    "pg": "^8.13.1",
+    "zod": "^3.23.8"
+  },
+  "devDependencies": {
+    "@types/node": "^22.10.2",
+    "@types/pg": "^8.11.10",
+    "tsx": "^4.19.2",
+    "typescript": "^5.7.2"
+  }
+}
