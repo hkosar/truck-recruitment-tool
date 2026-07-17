@@ -287,3 +287,43 @@ during the clickable-mockup feedback loop:
 | Reduced public safety data (post-2025) limits safety filtering | Filter on still-public signals; set owner expectations |
 | Corridor search complexity | Treat as a distinct, possibly-phased capability; confirm priority (§14.2) |
 | Future SaaS pivot forcing a rewrite | Supabase RLS + clean tenancy boundaries from the start (build single-tenant, don't foreclose) |
+
+---
+
+## 16. Addendum — CRM & batch model (resolved after follow-up)
+
+Answers to the deferred Phase-1 CRM questions (§14.1) and the newly-introduced
+**batch / working-session** concept, now locked:
+
+- **Pipeline stages:** `New → Attempted → Contacted → Interested → Not a Fit`, plus
+  **Do Not Call**. Do Not Call is handled as a **global carrier flag**, not a per-batch
+  stage. "Qualified/handed off" is an **action** (Send to Onboarding), not a stage.
+- **Carrier profile:** one rich view of *all* FMCSA data (contact, insurance, safety,
+  inspections, general) + a call panel.
+- **Per-call log fields:** timestamp, who called, outcome/disposition, notes, next steps.
+- **List, not a queue:** one **shared** filterable list; **status is a filter dimension**;
+  updates are **live** for all ~5 users; **no dialer** (tracking layer only); no per-user
+  lead assignment.
+
+**The batch / working-session model:**
+- Step 1 is defining a search (geography + filters) and "grabbing a batch" of trucks. A
+  batch is **namable** ("Belt Construction Recruitment") and is the unit a user works in.
+- A batch is a **snapshot** (frozen membership) with a manual **Refresh** to pull in
+  newly-matching carriers. Carriers can belong to **multiple batches** (M:N).
+- **Status is per-batch** (each batch is an independent working session — the same carrier
+  can be "Interested" in one and "New" in another). **EXCEPTION: Do Not Call is global** —
+  set anywhere, it suppresses the carrier in every batch and channel.
+- **Contact history is unified per carrier** across all batches, even though status is
+  per-batch.
+
+**Deliverable produced:** a clickable, self-contained Phase-1 mockup (mock data) at
+`mockup/` — all screens, both geo search modes on a live Texas map, the tiered sand &
+gravel filter, the shared working list, the rich carrier profile + unified timeline, and
+the manager approval flow. See `mockup/README.md` for the mock→Supabase schema mapping.
+Data model, TypeScript-ready shapes, and the `search_definition` object are the
+carry-forward assets into the real Render + Supabase build.
+
+### Open items still deferred to the build-plan (Fable) stage
+- Corridor search: launch requirement vs. fast-follow, and the routing-provider choice.
+- Exact "Generate Contact Options" export formats (call sheet / CSV / dialer push).
+- Email / postcard provider selection (Phases 2–3), with itemized costs.

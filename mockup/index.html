@@ -1,0 +1,1881 @@
+<style>
+/* ============================================================================
+   Twisted Nail — Carrier Recruiter  ·  "Aggregate Dispatch Console"
+   Design system: asphalt/concrete neutrals · burnt-orange accent · labeled
+   semantic status chips · mono for data · light + dark, token-based.
+   ============================================================================ */
+
+:root {
+  /* --- Neutrals: "concrete" (light), slight warm-grey bias, deliberately picked --- */
+  --bg:            #eceae5;   /* room / behind surfaces */
+  --surface:       #f7f6f3;   /* primary panels */
+  --surface-2:     #fbfaf8;   /* raised / rows */
+  --surface-sunk:  #e4e2dc;   /* wells, tracks */
+  --border:        #d6d3cb;
+  --border-strong: #bfbbb0;
+  --text:          #22262b;   /* asphalt ink */
+  --text-muted:    #5c6169;
+  --text-subtle:   #8b8f96;
+
+  /* --- Accent: burnt safety-orange (the dump-truck color) --- */
+  --accent:        #e8611d;
+  --accent-hover:  #cf5314;
+  --accent-press:  #b8480f;
+  --accent-ink:    #ffffff;   /* text on accent */
+  --accent-tint:   #fbe7d8;   /* faint fill */
+  --accent-tint-2: #f6d3ba;
+  --accent-ring:   rgba(232, 97, 29, 0.38);
+
+  /* --- Pipeline status (labeled, distinct from accent) --- */
+  --st-new:        #64748b;  --st-new-tint:      #e7eaef;
+  --st-attempted:  #b07d10;  --st-attempted-tint:#f6eccf;
+  --st-contacted:  #2f6fed;  --st-contacted-tint:#dfe8fd;
+  --st-interested: #157f43;  --st-interested-tint:#d6efdf;
+  --st-notfit:     #8a8f98;  --st-notfit-tint:   #e8e8e6;
+  --st-dnc:        #d0342c;  --st-dnc-tint:      #f8dcd9;
+
+  /* --- Semantic (good/warn/crit/info) --- */
+  --good: #157f43;  --warn: #b07d10;  --crit: #d0342c;  --info: #2f6fed;
+  --good-tint:#d6efdf; --warn-tint:#f6eccf; --crit-tint:#f8dcd9; --info-tint:#dfe8fd;
+
+  /* --- Form / geometry / motion --- */
+  --radius:    6px;
+  --radius-sm: 4px;
+  --radius-lg: 10px;
+  --shadow-1: 0 1px 2px rgba(24,26,29,.06), 0 1px 1px rgba(24,26,29,.04);
+  --shadow-2: 0 4px 14px rgba(24,26,29,.10), 0 2px 4px rgba(24,26,29,.06);
+  --shadow-pop: 0 12px 34px rgba(24,26,29,.20), 0 4px 10px rgba(24,26,29,.12);
+  --map-land:  #dfe6e4;
+  --map-land-2:#cfd8d6;
+  --map-line:  #a7b2b0;
+
+  --sidebar-w: 236px;
+  --topbar-h:  56px;
+
+  --font-ui: -apple-system, BlinkMacSystemFont, "Segoe UI", Roboto, "Helvetica Neue", Arial, sans-serif;
+  --font-mono: ui-monospace, "SF Mono", "SFMono-Regular", "Cascadia Code", "JetBrains Mono", Menlo, Consolas, monospace;
+
+  --ease: cubic-bezier(.4, 0, .2, 1);
+}
+
+@media (prefers-color-scheme: dark) {
+  :root {
+    --bg:            #0e1216;   /* asphalt */
+    --surface:       #171c22;
+    --surface-2:     #1e242b;
+    --surface-sunk:  #0b0f13;
+    --border:        #2b333c;
+    --border-strong: #3a444f;
+    --text:          #e7eaed;
+    --text-muted:    #a3abb5;
+    --text-subtle:   #6f7883;
+
+    --accent:        #f26f2b;
+    --accent-hover:  #f9813f;
+    --accent-press:  #d95e1c;
+    --accent-ink:    #1a0f07;
+    --accent-tint:   #2c1a0f;
+    --accent-tint-2: #3d2413;
+    --accent-ring:   rgba(242, 111, 43, 0.45);
+
+    --st-new:#93a0b2;        --st-new-tint:#232b34;
+    --st-attempted:#d6a53a;  --st-attempted-tint:#33290f;
+    --st-contacted:#6fa1ff;  --st-contacted-tint:#152439;
+    --st-interested:#48bd77; --st-interested-tint:#122a1c;
+    --st-notfit:#828a94;     --st-notfit-tint:#242a30;
+    --st-dnc:#f2685f;        --st-dnc-tint:#361715;
+
+    --good:#48bd77; --warn:#d6a53a; --crit:#f2685f; --info:#6fa1ff;
+    --good-tint:#122a1c; --warn-tint:#33290f; --crit-tint:#361715; --info-tint:#152439;
+
+    --shadow-1: 0 1px 2px rgba(0,0,0,.4);
+    --shadow-2: 0 6px 18px rgba(0,0,0,.5);
+    --shadow-pop: 0 16px 40px rgba(0,0,0,.6);
+    --map-land:  #202a2d;
+    --map-land-2:#2a373a;
+    --map-line:  #3f4f52;
+  }
+}
+
+/* Explicit theme overrides win over the media query in both directions */
+:root[data-theme="light"] {
+  --bg:#eceae5; --surface:#f7f6f3; --surface-2:#fbfaf8; --surface-sunk:#e4e2dc;
+  --border:#d6d3cb; --border-strong:#bfbbb0; --text:#22262b; --text-muted:#5c6169; --text-subtle:#8b8f96;
+  --accent:#e8611d; --accent-hover:#cf5314; --accent-press:#b8480f; --accent-ink:#ffffff;
+  --accent-tint:#fbe7d8; --accent-tint-2:#f6d3ba; --accent-ring:rgba(232,97,29,.38);
+  --st-new:#64748b; --st-new-tint:#e7eaef; --st-attempted:#b07d10; --st-attempted-tint:#f6eccf;
+  --st-contacted:#2f6fed; --st-contacted-tint:#dfe8fd; --st-interested:#157f43; --st-interested-tint:#d6efdf;
+  --st-notfit:#8a8f98; --st-notfit-tint:#e8e8e6; --st-dnc:#d0342c; --st-dnc-tint:#f8dcd9;
+  --good:#157f43; --warn:#b07d10; --crit:#d0342c; --info:#2f6fed;
+  --good-tint:#d6efdf; --warn-tint:#f6eccf; --crit-tint:#f8dcd9; --info-tint:#dfe8fd;
+  --shadow-1:0 1px 2px rgba(24,26,29,.06),0 1px 1px rgba(24,26,29,.04);
+  --shadow-2:0 4px 14px rgba(24,26,29,.10),0 2px 4px rgba(24,26,29,.06);
+  --shadow-pop:0 12px 34px rgba(24,26,29,.20),0 4px 10px rgba(24,26,29,.12);
+  --map-land:#dfe6e4; --map-land-2:#cfd8d6; --map-line:#a7b2b0;
+}
+:root[data-theme="dark"] {
+  --bg:#0e1216; --surface:#171c22; --surface-2:#1e242b; --surface-sunk:#0b0f13;
+  --border:#2b333c; --border-strong:#3a444f; --text:#e7eaed; --text-muted:#a3abb5; --text-subtle:#6f7883;
+  --accent:#f26f2b; --accent-hover:#f9813f; --accent-press:#d95e1c; --accent-ink:#1a0f07;
+  --accent-tint:#2c1a0f; --accent-tint-2:#3d2413; --accent-ring:rgba(242,111,43,.45);
+  --st-new:#93a0b2; --st-new-tint:#232b34; --st-attempted:#d6a53a; --st-attempted-tint:#33290f;
+  --st-contacted:#6fa1ff; --st-contacted-tint:#152439; --st-interested:#48bd77; --st-interested-tint:#122a1c;
+  --st-notfit:#828a94; --st-notfit-tint:#242a30; --st-dnc:#f2685f; --st-dnc-tint:#361715;
+  --good:#48bd77; --warn:#d6a53a; --crit:#f2685f; --info:#6fa1ff;
+  --good-tint:#122a1c; --warn-tint:#33290f; --crit-tint:#361715; --info-tint:#152439;
+  --shadow-1:0 1px 2px rgba(0,0,0,.4); --shadow-2:0 6px 18px rgba(0,0,0,.5); --shadow-pop:0 16px 40px rgba(0,0,0,.6);
+  --map-land:#202a2d; --map-land-2:#2a373a; --map-line:#3f4f52;
+}
+
+/* --------------------------------- reset --------------------------------- */
+*, *::before, *::after { box-sizing: border-box; }
+* { margin: 0; }
+html, body { height: 100%; }
+body {
+  font-family: var(--font-ui);
+  background: var(--bg);
+  color: var(--text);
+  font-size: 14px;
+  line-height: 1.45;
+  -webkit-font-smoothing: antialiased;
+  text-rendering: optimizeLegibility;
+}
+#app { height: 100vh; overflow: hidden; }
+button, input, select, textarea { font: inherit; color: inherit; }
+button { cursor: pointer; background: none; border: none; }
+a { color: inherit; text-decoration: none; }
+svg { display: block; width: 16px; height: 16px; flex: none; }
+.badge svg { width: 13px; height: 13px; }
+.crumbs svg { width: 14px; height: 14px; }
+.modal-head svg { width: 20px; height: 20px; color: var(--accent); }
+::selection { background: var(--accent-tint-2); }
+:focus-visible { outline: 2px solid var(--accent); outline-offset: 2px; border-radius: 3px; }
+
+.mono { font-family: var(--font-mono); font-variant-numeric: tabular-nums; }
+.num  { font-variant-numeric: tabular-nums; }
+.eyebrow { font-size: 11px; font-weight: 700; letter-spacing: .09em; text-transform: uppercase; color: var(--text-subtle); }
+.muted { color: var(--text-muted); }
+.subtle{ color: var(--text-subtle); }
+
+/* --------------------------------- buttons --------------------------------- */
+.btn {
+  display: inline-flex; align-items: center; gap: 7px;
+  height: 34px; padding: 0 14px;
+  border-radius: var(--radius);
+  border: 1px solid var(--border-strong);
+  background: var(--surface-2);
+  color: var(--text);
+  font-size: 13px; font-weight: 600; white-space: nowrap;
+  transition: background .12s var(--ease), border-color .12s var(--ease), transform .04s var(--ease);
+}
+.btn:hover { background: var(--surface-sunk); }
+.btn:active { transform: translateY(1px); }
+.btn svg { width: 15px; height: 15px; }
+.btn.primary { background: var(--accent); border-color: var(--accent); color: var(--accent-ink); }
+.btn.primary:hover { background: var(--accent-hover); border-color: var(--accent-hover); }
+.btn.primary:active { background: var(--accent-press); }
+.btn.ghost { background: transparent; border-color: transparent; }
+.btn.ghost:hover { background: var(--surface-sunk); }
+.btn.danger { color: var(--crit); border-color: color-mix(in srgb, var(--crit) 40%, var(--border)); }
+.btn.danger:hover { background: var(--crit-tint); }
+.btn.sm { height: 28px; padding: 0 10px; font-size: 12px; border-radius: var(--radius-sm); }
+.btn.lg { height: 40px; padding: 0 18px; font-size: 14px; }
+.btn.block { width: 100%; justify-content: center; }
+.btn:disabled { opacity: .5; cursor: not-allowed; }
+.btn.icon { padding: 0; width: 34px; justify-content: center; }
+.btn.icon.sm { width: 28px; }
+
+/* --------------------------------- inputs --------------------------------- */
+.field { display: flex; flex-direction: column; gap: 6px; }
+.label { font-size: 12px; font-weight: 600; color: var(--text-muted); }
+.input, .select, .textarea {
+  height: 36px; padding: 0 11px;
+  background: var(--surface-2);
+  border: 1px solid var(--border-strong);
+  border-radius: var(--radius);
+  color: var(--text); font-size: 13px; width: 100%;
+  transition: border-color .12s var(--ease), box-shadow .12s var(--ease);
+}
+.textarea { height: auto; padding: 9px 11px; resize: vertical; min-height: 72px; line-height: 1.5; }
+.input:focus, .select:focus, .textarea:focus {
+  outline: none; border-color: var(--accent);
+  box-shadow: 0 0 0 3px var(--accent-ring);
+}
+.input::placeholder, .textarea::placeholder { color: var(--text-subtle); }
+.select { appearance: none; cursor: pointer;
+  background-image: linear-gradient(45deg, transparent 50%, var(--text-muted) 50%), linear-gradient(135deg, var(--text-muted) 50%, transparent 50%);
+  background-position: right 14px center, right 9px center; background-size: 5px 5px, 5px 5px; background-repeat: no-repeat;
+  padding-right: 28px;
+}
+.input-group { position: relative; display: flex; align-items: center; }
+.input-group svg { position: absolute; left: 10px; width: 15px; height: 15px; color: var(--text-subtle); pointer-events: none; }
+.input-group .input { padding-left: 32px; }
+
+.check { display: inline-flex; align-items: center; gap: 8px; cursor: pointer; user-select: none; font-size: 13px; }
+.check input { position: absolute; opacity: 0; width: 0; height: 0; }
+.check .box {
+  width: 17px; height: 17px; border-radius: 4px; border: 1.5px solid var(--border-strong);
+  background: var(--surface-2); display: grid; place-items: center; flex: none; transition: all .12s var(--ease);
+}
+.check .box svg { width: 12px; height: 12px; color: var(--accent-ink); opacity: 0; transform: scale(.6); transition: all .12s var(--ease); }
+.check input:checked + .box { background: var(--accent); border-color: var(--accent); }
+.check input:checked + .box svg { opacity: 1; transform: scale(1); }
+.check input:focus-visible + .box { box-shadow: 0 0 0 3px var(--accent-ring); }
+
+/* toggle switch */
+.switch { position: relative; display: inline-flex; align-items: center; gap: 10px; cursor: pointer; user-select: none; }
+.switch input { position: absolute; opacity: 0; }
+.switch .track { width: 38px; height: 22px; border-radius: 999px; background: var(--surface-sunk); border: 1px solid var(--border-strong); transition: all .15s var(--ease); flex: none; }
+.switch .track::after { content:""; position: absolute; top: 3px; left: 3px; width: 16px; height: 16px; border-radius: 50%; background: var(--text-subtle); transition: all .15s var(--ease); }
+.switch input:checked + .track { background: var(--accent); border-color: var(--accent); }
+.switch input:checked + .track::after { left: 19px; background: #fff; }
+.switch input:focus-visible + .track { box-shadow: 0 0 0 3px var(--accent-ring); }
+.switch.danger input:checked + .track { background: var(--crit); border-color: var(--crit); }
+
+/* range */
+input[type=range] { -webkit-appearance: none; appearance: none; height: 6px; border-radius: 999px; background: var(--surface-sunk); border: 1px solid var(--border); width: 100%; }
+input[type=range]::-webkit-slider-thumb { -webkit-appearance: none; width: 18px; height: 18px; border-radius: 50%; background: var(--accent); border: 2px solid var(--surface-2); box-shadow: var(--shadow-1); cursor: pointer; }
+input[type=range]::-moz-range-thumb { width: 16px; height: 16px; border-radius: 50%; background: var(--accent); border: 2px solid var(--surface-2); cursor: pointer; }
+
+/* segmented control */
+.seg { display: inline-flex; padding: 3px; gap: 3px; background: var(--surface-sunk); border: 1px solid var(--border); border-radius: var(--radius); }
+.seg button { height: 28px; padding: 0 12px; border-radius: var(--radius-sm); font-size: 12px; font-weight: 600; color: var(--text-muted); display: inline-flex; align-items: center; gap: 6px; transition: all .12s var(--ease); }
+.seg button svg { width: 14px; height: 14px; }
+.seg button.on { background: var(--surface-2); color: var(--text); box-shadow: var(--shadow-1); }
+.seg button:not(.on):hover { color: var(--text); }
+
+/* chips (filter terms) */
+.chip { display: inline-flex; align-items: center; gap: 6px; height: 26px; padding: 0 6px 0 10px; border-radius: 999px; background: var(--accent-tint); color: var(--accent-press); border: 1px solid var(--accent-tint-2); font-size: 12px; font-weight: 600; }
+.chip button { display: grid; place-items: center; width: 16px; height: 16px; border-radius: 50%; color: inherit; opacity: .7; }
+.chip button:hover { opacity: 1; background: rgba(0,0,0,.08); }
+.chip.flag { background: var(--surface-sunk); color: var(--text-muted); border-color: var(--border); }
+
+/* --------------------------------- status badge --------------------------------- */
+.badge { display: inline-flex; align-items: center; gap: 6px; height: 22px; padding: 0 9px; border-radius: 999px; font-size: 11.5px; font-weight: 700; letter-spacing: .01em; white-space: nowrap; }
+.badge .dot { width: 7px; height: 7px; border-radius: 50%; background: currentColor; flex: none; }
+.badge.new{color:var(--st-new);background:var(--st-new-tint);}
+.badge.attempted{color:var(--st-attempted);background:var(--st-attempted-tint);}
+.badge.contacted{color:var(--st-contacted);background:var(--st-contacted-tint);}
+.badge.interested{color:var(--st-interested);background:var(--st-interested-tint);}
+.badge.not_a_fit{color:var(--st-notfit);background:var(--st-notfit-tint);}
+.badge.dnc{color:var(--st-dnc);background:var(--st-dnc-tint);}
+.badge.tier1{color:var(--accent-press);background:var(--accent-tint);}
+.badge.tier2{color:var(--st-new);background:var(--st-new-tint);}
+.badge.plain{color:var(--text-muted);background:var(--surface-sunk);}
+.badge.good{color:var(--good);background:var(--good-tint);}
+.badge.warn{color:var(--warn);background:var(--warn-tint);}
+.badge.crit{color:var(--crit);background:var(--crit-tint);}
+.badge.info{color:var(--info);background:var(--info-tint);}
+
+/* --------------------------------- cards --------------------------------- */
+.card { background: var(--surface); border: 1px solid var(--border); border-radius: var(--radius-lg); box-shadow: var(--shadow-1); }
+
+/* --------------------------------- app shell --------------------------------- */
+.shell { display: grid; grid-template-columns: var(--sidebar-w) 1fr; height: 100vh; }
+.sidebar { background: var(--surface); border-right: 1px solid var(--border); display: flex; flex-direction: column; min-height: 0; }
+.brand { display: flex; align-items: center; gap: 10px; height: var(--topbar-h); padding: 0 16px; border-bottom: 1px solid var(--border); }
+.brand .mark { width: 30px; height: 30px; border-radius: 7px; background: var(--accent); display: grid; place-items: center; flex: none; box-shadow: var(--shadow-1); }
+.brand .mark svg { width: 18px; height: 18px; color: var(--accent-ink); }
+.brand .name { font-weight: 800; letter-spacing: -.01em; font-size: 15px; line-height: 1; }
+.brand .sub { font-size: 10px; font-weight: 700; letter-spacing: .13em; color: var(--text-subtle); text-transform: uppercase; margin-top: 3px; }
+.nav { padding: 12px 10px; display: flex; flex-direction: column; gap: 2px; overflow-y: auto; flex: 1; }
+.nav-label { padding: 12px 10px 5px; }
+.nav a { display: flex; align-items: center; gap: 11px; padding: 8px 10px; border-radius: var(--radius); color: var(--text-muted); font-weight: 600; font-size: 13px; transition: background .12s var(--ease), color .12s var(--ease); }
+.nav a svg { width: 17px; height: 17px; flex: none; }
+.nav a:hover { background: var(--surface-sunk); color: var(--text); }
+.nav a.on { background: var(--accent-tint); color: var(--accent-press); }
+.nav a .count { margin-left: auto; font-size: 11px; font-weight: 700; color: var(--text-subtle); background: var(--surface-sunk); padding: 1px 7px; border-radius: 999px; }
+.nav a.on .count { background: var(--accent-tint-2); color: var(--accent-press); }
+.side-foot { border-top: 1px solid var(--border); padding: 10px; }
+
+.usercell { display: flex; align-items: center; gap: 10px; padding: 7px 8px; border-radius: var(--radius); width: 100%; }
+.usercell:hover { background: var(--surface-sunk); }
+.avatar { width: 30px; height: 30px; border-radius: 50%; display: grid; place-items: center; font-size: 12px; font-weight: 700; color: #fff; flex: none; }
+.usercell .who { text-align: left; min-width: 0; }
+.usercell .who .nm { font-size: 13px; font-weight: 700; white-space: nowrap; overflow: hidden; text-overflow: ellipsis; }
+.usercell .who .rl { font-size: 11px; color: var(--text-subtle); }
+
+/* main column */
+.main { display: flex; flex-direction: column; min-width: 0; height: 100vh; }
+.topbar { height: var(--topbar-h); border-bottom: 1px solid var(--border); background: color-mix(in srgb, var(--surface) 82%, transparent); backdrop-filter: blur(6px); display: flex; align-items: center; gap: 14px; padding: 0 20px; flex: none; }
+.topbar .crumbs { display: flex; align-items: center; gap: 8px; font-size: 13px; color: var(--text-muted); min-width: 0; }
+.topbar .crumbs .cur { color: var(--text); font-weight: 700; white-space: nowrap; overflow: hidden; text-overflow: ellipsis; }
+.topbar .spacer { flex: 1; }
+.content { flex: 1; overflow-y: auto; overflow-x: hidden; }
+.page { max-width: 1240px; margin: 0 auto; padding: 22px 24px 60px; }
+.page.wide { max-width: none; }
+
+.page-head { display: flex; align-items: flex-start; gap: 16px; margin-bottom: 20px; }
+.page-head .h1 { font-size: 21px; font-weight: 800; letter-spacing: -.02em; }
+.page-head .desc { color: var(--text-muted); font-size: 13px; margin-top: 3px; max-width: 60ch; }
+.page-head .spacer { flex: 1; }
+
+/* --------------------------------- tables --------------------------------- */
+.tbl-wrap { overflow-x: auto; border: 1px solid var(--border); border-radius: var(--radius-lg); background: var(--surface); }
+table.tbl { width: 100%; border-collapse: collapse; font-size: 13px; }
+.tbl thead th { position: sticky; top: 0; z-index: 2; background: var(--surface); text-align: left; font-size: 11px; font-weight: 700; letter-spacing: .05em; text-transform: uppercase; color: var(--text-subtle); padding: 10px 12px; border-bottom: 1px solid var(--border); white-space: nowrap; }
+.tbl tbody td { padding: 10px 12px; border-bottom: 1px solid var(--border); vertical-align: middle; }
+.tbl tbody tr { transition: background .1s var(--ease); }
+.tbl tbody tr:hover { background: var(--surface-2); }
+.tbl tbody tr:last-child td { border-bottom: none; }
+.tbl tbody tr.sel { background: var(--accent-tint); }
+.tbl tbody tr.sel:hover { background: var(--accent-tint); }
+.tbl tbody tr.dnc { opacity: .62; }
+.tbl tbody tr.clickable { cursor: pointer; }
+.tbl .co { display: flex; flex-direction: column; gap: 1px; }
+.tbl .co .nm { font-weight: 700; }
+.tbl .co .meta { font-size: 11.5px; color: var(--text-subtle); }
+td.right, th.right { text-align: right; }
+.row-flash { animation: flash 1.4s var(--ease); }
+@keyframes flash { 0% { background: var(--accent-tint-2); } 100% { background: transparent; } }
+
+/* --------------------------------- tabs --------------------------------- */
+.tabs { display: flex; gap: 2px; border-bottom: 1px solid var(--border); }
+.tabs button { padding: 10px 14px; font-size: 13px; font-weight: 600; color: var(--text-muted); border-bottom: 2px solid transparent; margin-bottom: -1px; transition: color .12s var(--ease); }
+.tabs button:hover { color: var(--text); }
+.tabs button.on { color: var(--accent-press); border-bottom-color: var(--accent); }
+
+/* --------------------------------- map --------------------------------- */
+.map { position: relative; background: linear-gradient(160deg, var(--surface-2), var(--surface-sunk)); border: 1px solid var(--border); border-radius: var(--radius-lg); overflow: hidden; }
+.map svg { width: 100%; height: 100%; display: block; }
+.map .tx-land { fill: var(--map-land); stroke: var(--map-line); stroke-width: 1.2; stroke-linejoin: round; }
+.map .city-dot { fill: var(--text-subtle); }
+.map .city-lbl { fill: var(--text-muted); font-size: 9px; font-weight: 600; font-family: var(--font-ui); }
+.map .pin { transition: r .2s var(--ease), opacity .2s var(--ease); cursor: pointer; }
+.map .pin.match { fill: var(--accent); }
+.map .pin.dim { fill: var(--map-line); opacity: .4; }
+.map .radius-fill { fill: var(--accent); opacity: .1; stroke: var(--accent); stroke-width: 1.4; stroke-dasharray: 5 4; }
+.map .corridor-band { fill: none; stroke: var(--accent); opacity: .22; stroke-linecap: round; stroke-linejoin: round; }
+.map .corridor-line { fill: none; stroke: var(--accent); stroke-width: 2; stroke-dasharray: 6 5; }
+.map .anchor { fill: var(--accent); stroke: #fff; stroke-width: 2; }
+.map-legend { position: absolute; left: 12px; bottom: 12px; background: color-mix(in srgb, var(--surface) 88%, transparent); backdrop-filter: blur(4px); border: 1px solid var(--border); border-radius: var(--radius); padding: 8px 10px; font-size: 11px; display: flex; flex-direction: column; gap: 5px; box-shadow: var(--shadow-1); }
+.map-legend .lg { display: flex; align-items: center; gap: 7px; color: var(--text-muted); }
+.map-legend .sw { width: 10px; height: 10px; border-radius: 50%; flex: none; }
+.map-count { position: absolute; right: 12px; top: 12px; background: color-mix(in srgb, var(--surface) 90%, transparent); backdrop-filter: blur(4px); border: 1px solid var(--border); border-radius: var(--radius); padding: 8px 12px; box-shadow: var(--shadow-1); text-align: right; }
+.map-count b { font-size: 20px; font-weight: 800; font-family: var(--font-mono); font-variant-numeric: tabular-nums; color: var(--accent-press); }
+.map-count span { display: block; font-size: 10px; letter-spacing: .08em; text-transform: uppercase; color: var(--text-subtle); }
+
+/* --------------------------------- misc layout --------------------------------- */
+.stat-row { display: grid; grid-template-columns: repeat(auto-fit, minmax(150px, 1fr)); gap: 12px; }
+.stat { background: var(--surface); border: 1px solid var(--border); border-radius: var(--radius-lg); padding: 14px 16px; }
+.stat .k { font-size: 11px; font-weight: 700; letter-spacing: .06em; text-transform: uppercase; color: var(--text-subtle); }
+.stat .v { font-size: 26px; font-weight: 800; font-family: var(--font-mono); font-variant-numeric: tabular-nums; letter-spacing: -.02em; margin-top: 4px; }
+.stat .v small { font-size: 13px; color: var(--text-subtle); font-weight: 600; }
+
+.progress { display: flex; height: 8px; border-radius: 999px; overflow: hidden; background: var(--surface-sunk); }
+.progress i { display: block; height: 100%; }
+
+.divider { height: 1px; background: var(--border); border: none; }
+.mem-row { width: 100%; padding: 8px; border-radius: 6px; text-align: left; }
+.mem-row:hover { background: var(--surface-sunk); }
+
+.kv { display: grid; grid-template-columns: 128px 1fr; gap: 4px 14px; font-size: 13px; }
+.kv dt { color: var(--text-subtle); font-size: 12px; }
+.kv dd { color: var(--text); }
+
+.empty { text-align: center; padding: 48px 20px; color: var(--text-subtle); }
+.empty svg { width: 34px; height: 34px; margin: 0 auto 10px; opacity: .5; }
+
+/* --------------------------------- modal / toast / menu --------------------------------- */
+.scrim { position: fixed; inset: 0; background: rgba(10,12,14,.5); backdrop-filter: blur(2px); display: grid; place-items: center; z-index: 60; padding: 20px; animation: fade .15s var(--ease); }
+.modal { background: var(--surface); border: 1px solid var(--border); border-radius: var(--radius-lg); box-shadow: var(--shadow-pop); width: 100%; max-width: 460px; animation: pop .18s var(--ease); }
+.modal.lg { max-width: 720px; }
+.modal-head { padding: 16px 18px; border-bottom: 1px solid var(--border); display: flex; align-items: center; gap: 12px; }
+.modal-head .t { font-weight: 800; font-size: 16px; }
+.modal-body { padding: 18px; max-height: 68vh; overflow-y: auto; }
+.modal-foot { padding: 14px 18px; border-top: 1px solid var(--border); display: flex; gap: 10px; justify-content: flex-end; }
+@keyframes pop { from { opacity: 0; transform: translateY(8px) scale(.98); } to { opacity: 1; transform: none; } }
+@keyframes fade { from { opacity: 0; } to { opacity: 1; } }
+
+.menu { position: absolute; z-index: 70; background: var(--surface); border: 1px solid var(--border-strong); border-radius: var(--radius); box-shadow: var(--shadow-pop); padding: 5px; min-width: 180px; animation: pop .12s var(--ease); }
+.menu button { display: flex; align-items: center; gap: 10px; width: 100%; padding: 8px 10px; border-radius: var(--radius-sm); font-size: 13px; font-weight: 500; text-align: left; color: var(--text); }
+.menu button svg { width: 15px; height: 15px; color: var(--text-subtle); }
+.menu button:hover { background: var(--surface-sunk); }
+.menu button.danger { color: var(--crit); }
+.menu button.danger svg { color: var(--crit); }
+.menu .sep { height: 1px; background: var(--border); margin: 5px 0; }
+
+.toast-wrap { position: fixed; bottom: 20px; left: 50%; transform: translateX(-50%); z-index: 90; display: flex; flex-direction: column; gap: 8px; align-items: center; }
+.toast { display: flex; align-items: center; gap: 10px; background: var(--text); color: var(--bg); padding: 10px 16px; border-radius: 999px; font-size: 13px; font-weight: 600; box-shadow: var(--shadow-pop); animation: pop .18s var(--ease); }
+.toast svg { width: 16px; height: 16px; color: var(--accent); }
+
+/* --------------------------------- auth --------------------------------- */
+.auth { min-height: 100vh; display: grid; grid-template-columns: 1fr; place-items: center; padding: 24px; position: relative; overflow: hidden; }
+.auth::before { content: ""; position: absolute; inset: 0; background:
+  radial-gradient(1100px 500px at 80% -10%, var(--accent-tint), transparent 60%),
+  repeating-linear-gradient(135deg, transparent 0 22px, color-mix(in srgb, var(--border) 40%, transparent) 22px 23px);
+  opacity: .7; z-index: 0; }
+.auth-card { position: relative; z-index: 1; width: 100%; max-width: 400px; }
+.auth-brand { display: flex; align-items: center; gap: 12px; justify-content: center; margin-bottom: 22px; }
+.auth-brand .mark { width: 40px; height: 40px; border-radius: 9px; background: var(--accent); display: grid; place-items: center; box-shadow: var(--shadow-2); }
+.auth-brand .mark svg { width: 24px; height: 24px; color: var(--accent-ink); }
+.auth-brand .name { font-size: 19px; font-weight: 800; letter-spacing: -.02em; }
+.auth-brand .sub { font-size: 10px; font-weight: 700; letter-spacing: .14em; text-transform: uppercase; color: var(--text-subtle); }
+.auth-panel { background: var(--surface); border: 1px solid var(--border); border-radius: var(--radius-lg); box-shadow: var(--shadow-2); padding: 26px; }
+.auth-panel h1 { font-size: 18px; font-weight: 800; margin-bottom: 4px; }
+.auth-panel .lead { color: var(--text-muted); font-size: 13px; margin-bottom: 20px; }
+.auth-row { display: flex; align-items: center; justify-content: space-between; }
+.link { color: var(--accent-press); font-weight: 600; font-size: 13px; }
+.link:hover { text-decoration: underline; }
+.auth-foot { text-align: center; margin-top: 18px; font-size: 13px; color: var(--text-muted); }
+.demo-note { margin-top: 16px; padding: 11px 13px; border: 1px dashed var(--border-strong); border-radius: var(--radius); font-size: 12px; color: var(--text-muted); background: var(--surface-2); }
+.demo-note b { color: var(--text); }
+
+/* utility spacing */
+.stack { display: flex; flex-direction: column; }
+.row { display: flex; align-items: center; }
+.gap-4{gap:4px}.gap-6{gap:6px}.gap-8{gap:8px}.gap-10{gap:10px}.gap-12{gap:12px}.gap-16{gap:16px}.gap-20{gap:20px}.gap-24{gap:24px}
+.mt-4{margin-top:4px}.mt-8{margin-top:8px}.mt-12{margin-top:12px}.mt-16{margin-top:16px}.mt-20{margin-top:20px}.mt-24{margin-top:24px}
+.wrap{flex-wrap:wrap}.center{align-items:center}.between{justify-content:space-between}.end{justify-content:flex-end}.col{flex-direction:column}
+.grow{flex:1}.none{flex:none}
+.hide { display: none !important; }
+
+@media (prefers-reduced-motion: reduce) {
+  *, *::before, *::after { animation-duration: .001ms !important; transition-duration: .001ms !important; }
+}
+
+@media (max-width: 900px) {
+  :root { --sidebar-w: 0px; }
+  .sidebar { display: none; }
+  .shell { grid-template-columns: 1fr; }
+}
+</style>
+<div id="app"></div>
+<script>
+"use strict";
+/* ============================================================================
+   geo.js — Texas outline, map projection, and distance math.
+   All membership tests use real haversine miles on lng/lat; the SVG map is
+   only a visualization. Production swaps: geocoder -> carriers.geom, routing
+   engine -> corridor polyline, PostGIS ST_DWithin -> these JS tests.
+   ============================================================================ */
+
+// Simplified Texas boundary, clockwise [lng, lat]. Recognizable, not survey-grade.
+const TX_OUTLINE = [
+  [-103.04,36.50],[-100.00,36.50],[-100.00,34.75],[-99.58,34.56],[-99.20,34.21],
+  [-98.42,34.16],[-97.95,33.89],[-97.37,33.82],[-96.90,33.87],[-96.31,33.69],
+  [-95.62,33.93],[-94.75,33.75],[-94.43,33.64],[-94.04,33.02],[-94.04,31.98],
+  [-93.82,31.55],[-93.70,31.05],[-93.60,30.62],[-93.75,30.11],[-93.90,29.80],
+  [-94.70,29.42],[-95.10,29.10],[-95.70,28.80],[-96.32,28.44],[-96.78,28.19],
+  [-97.12,27.86],[-97.35,27.38],[-97.47,26.82],[-97.20,26.15],[-97.37,25.87],
+  [-98.20,26.06],[-99.02,26.39],[-99.44,27.04],[-99.48,27.49],[-100.00,28.05],
+  [-100.50,28.66],[-101.06,29.45],[-101.80,29.79],[-102.38,29.79],[-102.68,29.42],
+  [-103.16,28.98],[-103.98,29.30],[-104.46,29.92],[-104.92,30.62],[-105.60,31.15],
+  [-106.30,31.62],[-106.53,31.79],[-106.62,32.00],[-103.06,32.00],[-103.06,36.50]
+];
+
+// Cities: anchors for search + carrier clustering. major=true shows a map label.
+const CITIES = [
+  { name:"Houston",        lng:-95.37, lat:29.76, major:true },
+  { name:"San Antonio",    lng:-98.49, lat:29.42, major:true },
+  { name:"Austin",         lng:-97.74, lat:30.27, major:true },
+  { name:"Dallas",         lng:-96.80, lat:32.78, major:true },
+  { name:"Fort Worth",     lng:-97.33, lat:32.75, major:false },
+  { name:"El Paso",        lng:-106.49,lat:31.76, major:true },
+  { name:"Midland",        lng:-102.08,lat:32.00, major:true },
+  { name:"Odessa",         lng:-102.37,lat:31.85, major:false },
+  { name:"Lubbock",        lng:-101.86,lat:33.58, major:true },
+  { name:"Laredo",         lng:-99.51, lat:27.51, major:true },
+  { name:"Corpus Christi", lng:-97.40, lat:27.80, major:true },
+  { name:"Amarillo",       lng:-101.83,lat:35.22, major:true },
+  { name:"Waco",           lng:-97.15, lat:31.55, major:false },
+  { name:"Beaumont",       lng:-94.10, lat:30.08, major:false }
+];
+
+const TX_BOUNDS = { lngMin:-106.75, lngMax:-93.40, latMin:25.70, latMax:36.65 };
+const MID_LAT = (TX_BOUNDS.latMin + TX_BOUNDS.latMax) / 2;
+const COS_MID = Math.cos(MID_LAT * Math.PI / 180);
+const MI_PER_DEG_LAT = 69.0;
+
+/* Build an equirectangular projection fitted to a width×height box. */
+function makeProjection(width, height, pad) {
+  pad = pad || 14;
+  const b = TX_BOUNDS;
+  const projW = (b.lngMax - b.lngMin) * COS_MID;
+  const projH = (b.latMax - b.latMin);
+  const scale = Math.min((width - 2 * pad) / projW, (height - 2 * pad) / projH);
+  const offX = (width - projW * scale) / 2;
+  const offY = (height - projH * scale) / 2;
+  function project(lng, lat) {
+    const x = offX + (lng - b.lngMin) * COS_MID * scale;
+    const y = offY + (b.latMax - lat) * scale;
+    return [x, y];
+  }
+  return {
+    project,
+    scale,
+    milesToPx: (mi) => (mi / MI_PER_DEG_LAT) * scale,
+    pathFor: (pts) => pts.map((p, i) => (i ? "L" : "M") + project(p[0], p[1]).map(n => n.toFixed(1)).join(" ")).join(" ") + "Z"
+  };
+}
+
+/* Haversine great-circle distance in miles. */
+function haversineMiles(lng1, lat1, lng2, lat2) {
+  const R = 3958.8, toRad = Math.PI / 180;
+  const dLat = (lat2 - lat1) * toRad, dLng = (lng2 - lng1) * toRad;
+  const a = Math.sin(dLat / 2) ** 2 +
+            Math.cos(lat1 * toRad) * Math.cos(lat2 * toRad) * Math.sin(dLng / 2) ** 2;
+  return R * 2 * Math.asin(Math.sqrt(a));
+}
+
+/* Local flat-plane miles (fast, accurate over TX-scale spans) for corridor math. */
+function toPlane(lng, lat) {
+  return [ lng * COS_MID * MI_PER_DEG_LAT, lat * MI_PER_DEG_LAT ];
+}
+function pointToSegMiles(plng, plat, alng, alat, blng, blat) {
+  const p = toPlane(plng, plat), a = toPlane(alng, alat), b = toPlane(blng, blat);
+  const abx = b[0]-a[0], aby = b[1]-a[1];
+  const apx = p[0]-a[0], apy = p[1]-a[1];
+  const len2 = abx*abx + aby*aby || 1e-9;
+  let t = (apx*abx + apy*aby) / len2;
+  t = Math.max(0, Math.min(1, t));
+  const cx = a[0] + t*abx, cy = a[1] + t*aby;
+  return Math.hypot(p[0]-cx, p[1]-cy);
+}
+/* Distance from a point to a polyline (route), in miles. */
+function pointToRouteMiles(lng, lat, route) {
+  let min = Infinity;
+  for (let i = 0; i < route.length - 1; i++) {
+    const d = pointToSegMiles(lng, lat, route[i].lng, route[i].lat, route[i+1].lng, route[i+1].lat);
+    if (d < min) min = d;
+  }
+  return min;
+}
+/* ============================================================================
+   data.js — seeded, deterministic mock dataset (stable across reloads).
+   Mirrors the future Supabase schema (see mockup/README.md). Nothing here is
+   real; all carriers/contacts are fabricated for the prototype.
+   ============================================================================ */
+
+const NOW_MS = Date.parse("2026-07-15T15:00:00Z");
+const DAY = 86400000, HOUR = 3600000;
+
+/* mulberry32 — tiny seeded PRNG so the demo data never shifts under you. */
+function mulberry32(seed) {
+  return function () {
+    seed |= 0; seed = (seed + 0x6D2B79F5) | 0;
+    let t = Math.imul(seed ^ (seed >>> 15), 1 | seed);
+    t = (t + Math.imul(t ^ (t >>> 7), 61 | t)) ^ t;
+    return ((t ^ (t >>> 14)) >>> 0) / 4294967296;
+  };
+}
+const rng = mulberry32(20260715);
+const rnd = (a, b) => a + rng() * (b - a);
+const rndInt = (a, b) => Math.floor(rnd(a, b + 1));
+const pick = (arr) => arr[Math.floor(rng() * arr.length)];
+const chance = (p) => rng() < p;
+
+const GEO = ["Lone Star","Brazos","Permian","Hill Country","Trinity","Bluebonnet","Caprock",
+  "Guadalupe","Red River","Pecos","Comal","Frio","Balcones","Llano","Nueces","Alamo","Big Bend",
+  "Gulf Coast","Panhandle","Rio Grande","San Jacinto","Cross Timbers","Edwards","Blanco","Colorado River"];
+const SG_CORE = ["Aggregate","Sand & Gravel","Rock","Materials","Dirt Works","Gravel","Aggregates",
+  "Sand Co.","Rock & Sand","Stone","Base Material"];
+const T2_CORE = ["Construction","Dump Truck","Excavation","Ready Mix","Concrete","Building Supply","Site Works"];
+const T0_CORE = ["Logistics","Refrigerated","Tank Lines","Livestock","Van Lines","Distribution","Freightways"];
+const SUFFIX = ["Trucking","Transport","Hauling","Logistics","Carriers","Express","LLC","Inc."];
+const SG_OTHER = ["Sand and Gravel","Sand & Gravel","SAND/GRAVEL","Rock & Dirt","Aggregate Hauling","Gravel",
+  "Sand, Gravel, Rock","Dirt & Aggregate","Crushed Stone","Fill Dirt / Sand","Sand and gravel hauling",
+  "S&G Hauling","Rock, Sand, Base","aggregate / dirt"];
+const STREETS = ["Farm to Market Rd","County Rd","Industrial Blvd","Quarry Rd","Old Bastrop Hwy","Pit Rd",
+  "Commerce St","Aggregate Way","Loop","Business Park Dr","Ranch Rd","Highway 90"];
+const AREA_BY_CITY = { "Houston":"713","San Antonio":"210","Austin":"512","Dallas":"214","Fort Worth":"817",
+  "El Paso":"915","Midland":"432","Odessa":"432","Lubbock":"806","Laredo":"956","Corpus Christi":"361",
+  "Amarillo":"806","Waco":"254","Beaumont":"409" };
+// carrier home-city weights (more carriers around big metros)
+const CITY_WEIGHTS = [["Houston",22],["Dallas",18],["Fort Worth",10],["San Antonio",16],["Austin",16],
+  ["Midland",12],["Odessa",8],["Corpus Christi",8],["Laredo",7],["Lubbock",6],["Waco",7],["Amarillo",5],
+  ["El Paso",5],["Beaumont",5]];
+const CITY_PICK = CITY_WEIGHTS.flatMap(([c, w]) => Array(w).fill(c));
+const cityOf = (name) => CITIES.find(c => c.name === name);
+const slug = (s) => s.toLowerCase().replace(/[^a-z0-9]+/g, "").slice(0, 16);
+
+function phone(area) { return "(" + area + ") " + rndInt(200,989) + "-" + String(rndInt(1000,9999)); }
+function bipdPick() {
+  const r = rng();
+  if (r < 0.10) return 0;
+  if (r < 0.28) return 500000;
+  if (r < 0.45) return 750000;
+  if (r < 0.82) return 1000000;
+  return 2000000;
+}
+
+function makeCarrier(i) {
+  const r = rng();
+  const tier = r < 0.60 ? 1 : (r < 0.90 ? 2 : 0);
+  const cityName = pick(CITY_PICK);
+  const c0 = cityOf(cityName);
+  const lng = c0.lng + rnd(-0.55, 0.55);
+  const lat = c0.lat + rnd(-0.45, 0.45);
+  const geo = pick(GEO);
+  let legal, cargoOther = null, flags = [];
+  if (tier === 1) {
+    legal = geo + " " + pick(SG_CORE) + (chance(0.45) ? " " + pick(SUFFIX) : "");
+    cargoOther = pick(SG_OTHER);
+    flags = ["Commodities Dry Bulk"];
+    if (chance(0.6)) flags.push("Construction");
+    if (chance(0.4)) flags.push("Building Materials");
+  } else if (tier === 2) {
+    legal = geo + " " + pick(T2_CORE) + " " + pick(SUFFIX);
+    flags = pick([["Commodities Dry Bulk","Construction"], ["Construction","Building Materials"],
+                  ["Building Materials"], ["Commodities Dry Bulk"]]);
+    if (chance(0.15)) cargoOther = pick(["Base rock","Materials","Construction debris"]);
+  } else {
+    legal = geo + " " + pick(T0_CORE) + " " + pick(SUFFIX);
+    flags = pick([["General Freight"], ["Refrigerated Food"], ["Liquids/Gases"], ["Livestock"],
+                  ["Motor Vehicles"], ["General Freight","Building Materials"]]);
+  }
+  const units = Math.min(90, Math.max(1, Math.round(Math.abs(rnd(-6, 1)) ** 1.7 * 8) + rndInt(1, 4)));
+  const dnc = tier !== 0 && chance(0.02);
+  const area = AREA_BY_CITY[cityName] || "512";
+  const hasEmail = chance(0.22);
+  const authority = (function(){ const a = rng(); return a < 0.72 ? "active" : (a < 0.9 ? "pending" : "inactive"); })();
+  const bipd = bipdPick();
+  const crashes = chance(0.7) ? 0 : rndInt(1, 6);
+  const voos = Math.round(rnd(0, 42));
+  const rating = (function(){ const a = rng(); return a < 0.55 ? "None" : (a < 0.9 ? "Satisfactory" : "Conditional"); })();
+  const concerning = rating === "Conditional" || crashes >= 4 || voos > 34;
+
+  return {
+    dot: 1200000 + i * 137 + rndInt(0, 130),
+    legal_name: legal,
+    dba: chance(0.25) ? geo + " " + pick(["S&G","Aggregates","Hauling","Materials"]) : null,
+    tier,
+    cargoOther,
+    cargoFlags: flags,
+    city: cityName, state: "TX",
+    zip: String(rndInt(75001, 79999)),
+    street: rndInt(100, 9800) + " " + pick(STREETS),
+    lng, lat,
+    phone: phone(area),
+    cell: chance(0.55) ? phone(area) : null,
+    email: hasEmail ? (chance(0.5) ? "dispatch@" : "info@") + slug(legal) + ".com" : null,
+    fax: chance(0.15) ? phone(area) : null,
+    power_units: units,
+    drivers: units + rndInt(0, 3),
+    classdef: chance(0.82) ? "Authorized For Hire" : (chance(0.5) ? "Private (Property)" : "Exempt For Hire"),
+    operation: chance(0.7) ? "Interstate" : "Intrastate (Non-HM)",
+    active: chance(0.9),
+    mcs150: fmtDate(NOW_MS - rndInt(20, 1400) * DAY),
+    entity: "Carrier",
+    ins: {
+      authority_status: authority,
+      authority_type: pick(["Common","Contract","Common"]),
+      bipd_on_file: bipd,
+      bipd_required: 750000,
+      cargo_on_file: chance(0.6) ? 100000 : 0,
+      effective: fmtDate(NOW_MS - rndInt(30, 900) * DAY)
+    },
+    safety: {
+      crash_total: crashes,
+      inspections_24mo: rndInt(0, 40),
+      vehicle_oos_pct: voos,
+      driver_oos_pct: Math.round(rnd(0, 22)),
+      rating,
+      rating_date: fmtDate(NOW_MS - rndInt(60, 1600) * DAY),
+      concerning
+    },
+    inspections: [],
+    do_not_contact: dnc,
+    dnc_reason: dnc ? pick(["Asked not to be contacted","Retired / sold trucks","Works exclusively w/ competitor"]) : null,
+    dnc_by: dnc ? "u_manager" : null,
+    dnc_at: dnc ? NOW_MS - rndInt(4, 90) * DAY : null
+  };
+}
+
+function fmtDate(ms) {
+  const d = new Date(ms);
+  return d.getUTCFullYear() + "-" + String(d.getUTCMonth()+1).padStart(2,"0") + "-" + String(d.getUTCDate()).padStart(2,"0");
+}
+
+/* ---- build carriers ---- */
+const carriers = [];
+for (let i = 0; i < 200; i++) carriers.push(makeCarrier(i));
+const carrierByDot = {};
+carriers.forEach(c => carrierByDot[c.dot] = c);
+
+// A few detailed inspection rows for the first handful of worked carriers.
+function seedInspections(c, n) {
+  for (let k = 0; k < n; k++) {
+    c.inspections.push({
+      date: fmtDate(NOW_MS - rndInt(20, 700) * DAY),
+      state: "TX",
+      level: "Level " + pick(["I","II","III"]),
+      result: chance(0.7) ? "Clean" : "OOS",
+      violations: chance(0.7) ? 0 : rndInt(1, 4)
+    });
+  }
+}
+
+/* ---- users ---- */
+const users = [
+  { id:"u_manager", name:"Hunter Kosar",   email:"hunter@twistednail.com", role:"manager", status:"approved", color:"#e8611d", registered: NOW_MS - 120*DAY },
+  { id:"u_edit1",   name:"Marisol Vega",   email:"marisol@twistednail.com", role:"edit",    status:"approved", color:"#2f6fed", registered: NOW_MS - 96*DAY },
+  { id:"u_edit2",   name:"Dwight Fowler",  email:"dwight@twistednail.com",  role:"edit",    status:"approved", color:"#157f43", registered: NOW_MS - 54*DAY },
+  { id:"u_view1",   name:"Priya Nair",     email:"priya@twistednail.com",   role:"view",    status:"approved", color:"#7a5bd0", registered: NOW_MS - 30*DAY },
+  { id:"u_guest1",  name:"Cole Ramirez",   email:"cole.r@gmail.com",        role:"guest",   status:"pending",  color:"#b07d10", registered: NOW_MS - 2*DAY },
+  { id:"u_guest2",  name:"Tanya Brooks",   email:"tbrooks@haulpro.co",      role:"guest",   status:"pending",  color:"#64748b", registered: NOW_MS - 6*HOUR }
+];
+const userById = {}; users.forEach(u => userById[u.id] = u);
+const WORKERS = ["u_manager","u_edit1","u_edit2"];
+
+/* ---- search matching (single source: drives builder live-count AND batch snapshots) ---- */
+function carrierMatchesSearch(c, s) {
+  // cargo
+  if (s.cargo) {
+    const okTier = c.tier === 1 || (s.cargo.wideNet && c.tier === 2);
+    if (!okTier) return false;
+  }
+  // geo
+  if (s.geo) {
+    if (s.geo.mode === "radius") {
+      if (haversineMiles(c.lng, c.lat, s.geo.anchorLng, s.geo.anchorLat) > s.geo.radiusMi) return false;
+    } else if (s.geo.mode === "corridor") {
+      if (pointToRouteMiles(c.lng, c.lat, s.geo.route) > s.geo.bufferMi) return false;
+    }
+  }
+  if (s.forHire && c.classdef !== "Authorized For Hire") return false;
+  if (s.activeOnly && !c.active) return false;
+  if (s.authorizedOnly && c.ins.authority_status !== "active") return false;
+  if (s.interstateOnly && c.operation !== "Interstate") return false;
+  if (s.sizeMin != null && c.power_units < s.sizeMin) return false;
+  if (s.sizeMax != null && c.power_units > s.sizeMax) return false;
+  if (s.excludeSafety && c.safety.concerning) return false;
+  if (s.insuranceMin && !s.keepBelow && c.ins.bipd_on_file < s.insuranceMin) return false;
+  return true;
+}
+function searchMatches(s) { return carriers.filter(c => carrierMatchesSearch(c, s)); }
+
+/* ---- batches (search defs are the source of truth; membership is computed) ---- */
+const AUS = cityOf("Austin"), SAT = cityOf("San Antonio"), MID = cityOf("Midland"), DAL = cityOf("Dallas");
+const batchDefs = [
+  { id:"b_belt", name:"Belt Construction Recruitment", desc:"Trucks for the SH-45 belt widening job.",
+    created_by:"u_manager", snapshot_at: NOW_MS - 9*DAY, last_refreshed: NOW_MS - 2*DAY,
+    search:{ geo:{mode:"radius", anchor:"Austin, TX", anchorLng:AUS.lng, anchorLat:AUS.lat, radiusMi:55},
+             cargo:{wideNet:true}, forHire:true, activeOnly:true, sizeMin:1, sizeMax:200,
+             insuranceMin:500000, keepBelow:true } },
+  { id:"b_i35", name:"I-35 Corridor: Austin → San Antonio", desc:"Any truck within 40 mi of the run.",
+    created_by:"u_edit1", snapshot_at: NOW_MS - 5*DAY, last_refreshed: NOW_MS - 5*DAY,
+    search:{ geo:{mode:"corridor", label:"Austin → San Antonio",
+             route:[{lng:AUS.lng,lat:AUS.lat},{lng:-98.10,lat:29.89},{lng:SAT.lng,lat:SAT.lat}], bufferMi:40},
+             cargo:{wideNet:false}, forHire:true, activeOnly:true } },
+  { id:"b_permian", name:"Permian Basin Aggregates", desc:"Frac sand & aggregate haulers, Midland hub.",
+    created_by:"u_edit2", snapshot_at: NOW_MS - 14*DAY, last_refreshed: NOW_MS - 1*DAY,
+    search:{ geo:{mode:"radius", anchor:"Midland, TX", anchorLng:MID.lng, anchorLat:MID.lat, radiusMi:80},
+             cargo:{wideNet:true}, activeOnly:true } },
+  { id:"b_dfw", name:"DFW Metroplex · $1MM+", desc:"Well-insured aggregate carriers around Dallas.",
+    created_by:"u_manager", snapshot_at: NOW_MS - 20*DAY, last_refreshed: NOW_MS - 7*DAY,
+    search:{ geo:{mode:"radius", anchor:"Dallas, TX", anchorLng:DAL.lng, anchorLat:DAL.lat, radiusMi:60},
+             cargo:{wideNet:true}, insuranceMin:1000000, keepBelow:false, activeOnly:true } }
+];
+
+const STATUS_POOL = ["new","new","new","new","attempted","attempted","contacted","contacted","interested","not_a_fit"];
+const batches = [];
+const batchCarriers = [];   // {id, batch_id, dot, status, status_by, status_at, added_at, via_refresh, onboarded_at}
+const callLogs = [];        // {id, dot, batch_id, user_id, at, disposition, notes, next_steps, callback_at}
+let bcSeq = 0, clSeq = 0;
+
+const DISPO = {
+  attempted: ["no_answer","voicemail","no_answer"],
+  contacted: ["connected","callback","connected"],
+  interested:["interested","connected","callback"],
+  not_a_fit: ["not_interested","wrong_number"]
+};
+const NOTE = {
+  no_answer:"No answer, no VM set up.", voicemail:"Left voicemail w/ callback #.",
+  connected:"Reached dispatcher, walked through the belt job rates.",
+  callback:"Owner driving — asked to call back after 5pm.",
+  interested:"Interested. Wants the rate sheet emailed + a load count.",
+  not_interested:"Full up on committed freight this quarter.",
+  wrong_number:"Number disconnected — needs a better contact."
+};
+const NEXT = { no_answer:"Retry tomorrow AM.", voicemail:"Follow up in 2 days.",
+  connected:"Send rate sheet.", callback:"Call back after 5pm Thu.",
+  interested:"Send packet, then qualify insurance.", not_interested:"Re-touch next quarter.", wrong_number:"Skip-trace a new number." };
+
+batchDefs.forEach((bd, bi) => {
+  const matches = searchMatches(bd.search);
+  // cap snapshot size for realism, keep deterministic order
+  const cap = [70, 48, 55, 44][bi] || 50;
+  const members = matches.slice(0, cap);
+  batches.push({
+    id: bd.id, name: bd.name, desc: bd.desc, created_by: bd.created_by,
+    snapshot_at: bd.snapshot_at, last_refreshed: bd.last_refreshed,
+    search: bd.search, snapshot_count: members.length,
+    new_since: bi === 2 ? 6 : (bi === 0 ? 3 : 0)   // pretend a refresh would add these
+  });
+  members.forEach((c, idx) => {
+    let status = STATUS_POOL[Math.floor(rng() * STATUS_POOL.length)];
+    // first batch is more "worked"
+    if (bi === 0 && idx < 22) status = pick(["attempted","contacted","interested","contacted","not_a_fit"]);
+    const worker = pick(WORKERS);
+    const statusAt = NOW_MS - rndInt(1, 200) * HOUR;
+    const bc = {
+      id: "bc_" + (bcSeq++), batch_id: bd.id, dot: c.dot, status,
+      status_by: status === "new" ? null : worker,
+      status_at: status === "new" ? bd.snapshot_at : statusAt,
+      added_at: bd.snapshot_at, via_refresh: false,
+      onboarded_at: (status === "interested" && chance(0.25)) ? statusAt : null
+    };
+    batchCarriers.push(bc);
+    // call logs for worked carriers
+    if (status !== "new" && DISPO[status]) {
+      const n = status === "interested" ? rndInt(2, 3) : rndInt(1, 2);
+      for (let k = 0; k < n; k++) {
+        const disp = pick(DISPO[status]);
+        callLogs.push({
+          id: "cl_" + (clSeq++), dot: c.dot, batch_id: bd.id, user_id: worker,
+          at: statusAt - k * rndInt(6, 60) * HOUR, disposition: disp,
+          notes: NOTE[disp], next_steps: NEXT[disp],
+          callback_at: disp === "callback" ? NOW_MS + rndInt(4, 40) * HOUR : null
+        });
+      }
+    }
+  });
+});
+
+// Seed inspection detail on a few carriers that appear in the first batch.
+batchCarriers.filter(bc => bc.batch_id === "b_belt").slice(0, 6)
+  .forEach(bc => seedInspections(carrierByDot[bc.dot], rndInt(3, 6)));
+
+// Guarantee at least one carrier shared across the two central-TX batches shows
+// a cross-batch unified timeline — add a couple of extra logs from the corridor batch.
+(function crossBatchDemo() {
+  const beltDots = new Set(batchCarriers.filter(b => b.batch_id === "b_belt").map(b => b.dot));
+  const shared = batchCarriers.find(b => b.batch_id === "b_i35" && beltDots.has(b.dot));
+  if (shared) {
+    callLogs.push({ id:"cl_"+(clSeq++), dot: shared.dot, batch_id:"b_i35", user_id:"u_edit1",
+      at: NOW_MS - 30*HOUR, disposition:"connected",
+      notes:"Also a fit for the I-35 run — same owner, different job.", next_steps:"Coordinate both jobs.", callback_at:null });
+  }
+})();
+
+const DB = { carriers, carrierByDot, users, userById, batches, batchCarriers, callLogs };
+/* ============================================================================
+   ui.js — app state, render loop, event delegation, icons, shared helpers.
+   Dependency-free. Full re-render on discrete actions; text/range inputs use
+   targeted DOM patches so focus is never lost.
+   ============================================================================ */
+
+const state = {
+  session: null,               // { userId, remember }
+  screen: "login",
+  authView: "login",           // login | register | forgot
+  registered: false,
+  theme: null,                 // null=follow OS; 'light'|'dark' override
+  activeBatchId: null,
+  activeCarrierDot: null,
+  profileFromBatch: null,
+  profileTab: "overview",
+  builder: null,               // working search definition
+  list: { status: "all", q: "", view: "list", insurance: "any", size: "any", sort: "name" },
+  selection: {},               // dot -> true
+  overrides: {                 // mock mutations layered over seed data
+    status: {},                // "batchId:dot" -> status
+    dnc: {},                   // dot -> bool
+    onboarded: {},             // dot -> ms
+    userStatus: {},            // userId -> {status, role}
+    logs: []                   // new call logs {dot,batch_id,user_id,at,disposition,notes,next_steps}
+  },
+  modal: null,                 // { type, ...data }
+  menu: null,                  // { type, x, y, ...data }
+  toasts: [],
+  focus: null                  // selector to focus after render
+};
+
+/* ------------------------------- icons ------------------------------- */
+const ICONS = {
+  truck:'<path d="M1 3h14v10H1z"/><path d="M15 6h4l4 4v3h-8z"/><circle cx="5.5" cy="17.5" r="2.2"/><circle cx="18" cy="17.5" r="2.2"/>',
+  layers:'<polygon points="12 2 2 7 12 12 22 7 12 2"/><polyline points="2 17 12 22 22 17"/><polyline points="2 12 12 17 22 12"/>',
+  search:'<circle cx="11" cy="11" r="8"/><line x1="21" y1="21" x2="16.65" y2="16.65"/>',
+  users:'<path d="M17 21v-2a4 4 0 0 0-4-4H5a4 4 0 0 0-4 4v2"/><circle cx="9" cy="7" r="4"/><path d="M23 21v-2a4 4 0 0 0-3-3.87"/><path d="M16 3.13a4 4 0 0 1 0 7.75"/>',
+  pin:'<path d="M21 10c0 7-9 13-9 13s-9-6-9-13a9 9 0 0 1 18 0z"/><circle cx="12" cy="10" r="3"/>',
+  phone:'<path d="M22 16.92v3a2 2 0 0 1-2.18 2 19.8 19.8 0 0 1-8.63-3.07 19.5 19.5 0 0 1-6-6A19.8 19.8 0 0 1 2.12 4.18 2 2 0 0 1 4.11 2h3a2 2 0 0 1 2 1.72c.13.96.36 1.9.7 2.81a2 2 0 0 1-.45 2.11L8.09 9.91a16 16 0 0 0 6 6l1.27-1.27a2 2 0 0 1 2.11-.45c.9.34 1.85.57 2.81.7A2 2 0 0 1 22 16.92z"/>',
+  plus:'<line x1="12" y1="5" x2="12" y2="19"/><line x1="5" y1="12" x2="19" y2="12"/>',
+  refresh:'<polyline points="23 4 23 10 17 10"/><polyline points="1 20 1 14 7 14"/><path d="M3.51 9a9 9 0 0 1 14.85-3.36L23 10M1 14l4.64 4.36A9 9 0 0 0 20.49 15"/>',
+  check:'<polyline points="20 6 9 17 4 12"/>',
+  x:'<line x1="18" y1="6" x2="6" y2="18"/><line x1="6" y1="6" x2="18" y2="18"/>',
+  lock:'<rect x="3" y="11" width="18" height="11" rx="2"/><path d="M7 11V7a5 5 0 0 1 10 0v4"/>',
+  filter:'<polygon points="22 3 2 3 10 12.46 10 19 14 21 14 12.46 22 3"/>',
+  list:'<line x1="8" y1="6" x2="21" y2="6"/><line x1="8" y1="12" x2="21" y2="12"/><line x1="8" y1="18" x2="21" y2="18"/><line x1="3" y1="6" x2="3.01" y2="6"/><line x1="3" y1="12" x2="3.01" y2="12"/><line x1="3" y1="18" x2="3.01" y2="18"/>',
+  mapicon:'<polygon points="1 6 1 22 8 18 16 22 23 18 23 2 16 6 8 2 1 6"/><line x1="8" y1="2" x2="8" y2="18"/><line x1="16" y1="6" x2="16" y2="22"/>',
+  chevR:'<polyline points="9 18 15 12 9 6"/>',
+  chevD:'<polyline points="6 9 12 15 18 9"/>',
+  chevL:'<polyline points="15 18 9 12 15 6"/>',
+  sun:'<circle cx="12" cy="12" r="4"/><line x1="12" y1="1" x2="12" y2="3"/><line x1="12" y1="21" x2="12" y2="23"/><line x1="4.2" y1="4.2" x2="5.6" y2="5.6"/><line x1="18.4" y1="18.4" x2="19.8" y2="19.8"/><line x1="1" y1="12" x2="3" y2="12"/><line x1="21" y1="12" x2="23" y2="12"/><line x1="4.2" y1="19.8" x2="5.6" y2="18.4"/><line x1="18.4" y1="5.6" x2="19.8" y2="4.2"/>',
+  moon:'<path d="M21 12.79A9 9 0 1 1 11.21 3 7 7 0 0 0 21 12.79z"/>',
+  logout:'<path d="M9 21H5a2 2 0 0 1-2-2V5a2 2 0 0 1 2-2h4"/><polyline points="16 17 21 12 16 7"/><line x1="21" y1="12" x2="9" y2="12"/>',
+  edit:'<path d="M11 4H4a2 2 0 0 0-2 2v14a2 2 0 0 0 2 2h14a2 2 0 0 0 2-2v-7"/><path d="M18.5 2.5a2.12 2.12 0 0 1 3 3L12 15l-4 1 1-4z"/>',
+  trash:'<polyline points="3 6 5 6 21 6"/><path d="M19 6v14a2 2 0 0 1-2 2H7a2 2 0 0 1-2-2V6m3 0V4a2 2 0 0 1 2-2h4a2 2 0 0 1 2 2v2"/>',
+  mail:'<rect x="2" y="4" width="20" height="16" rx="2"/><polyline points="22,6 12,13 2,6"/>',
+  message:'<path d="M21 15a2 2 0 0 1-2 2H7l-4 4V5a2 2 0 0 1 2-2h14a2 2 0 0 1 2 2z"/>',
+  send:'<line x1="22" y1="2" x2="11" y2="13"/><polygon points="22 2 15 22 11 13 2 9 22 2"/>',
+  download:'<path d="M21 15v4a2 2 0 0 1-2 2H5a2 2 0 0 1-2-2v-4"/><polyline points="7 10 12 15 17 10"/><line x1="12" y1="15" x2="12" y2="3"/>',
+  printer:'<polyline points="6 9 6 2 18 2 18 9"/><path d="M6 18H4a2 2 0 0 1-2-2v-5a2 2 0 0 1 2-2h16a2 2 0 0 1 2 2v5a2 2 0 0 1-2 2h-2"/><rect x="6" y="14" width="12" height="8"/>',
+  clock:'<circle cx="12" cy="12" r="10"/><polyline points="12 6 12 12 16 14"/>',
+  alert:'<path d="M10.29 3.86 1.82 18a2 2 0 0 0 1.71 3h16.94a2 2 0 0 0 1.71-3L13.71 3.86a2 2 0 0 0-3.42 0z"/><line x1="12" y1="9" x2="12" y2="13"/><line x1="12" y1="17" x2="12.01" y2="17"/>',
+  shield:'<path d="M12 22s8-4 8-10V5l-8-3-8 3v7c0 6 8 10 8 10z"/>',
+  target:'<circle cx="12" cy="12" r="10"/><circle cx="12" cy="12" r="6"/><circle cx="12" cy="12" r="2"/>',
+  route:'<circle cx="6" cy="19" r="3"/><circle cx="18" cy="5" r="3"/><path d="M9 19h6a4 4 0 0 0 4-4V9"/><path d="M6 16V9"/>',
+  arrowR:'<line x1="5" y1="12" x2="19" y2="12"/><polyline points="12 5 19 12 12 19"/>',
+  eye:'<path d="M1 12s4-8 11-8 11 8 11 8-4 8-11 8-11-8-11-8z"/><circle cx="12" cy="12" r="3"/>',
+  usercheck:'<path d="M16 21v-2a4 4 0 0 0-4-4H5a4 4 0 0 0-4 4v2"/><circle cx="8.5" cy="7" r="4"/><polyline points="17 11 19 13 23 9"/>',
+  sliders:'<line x1="4" y1="21" x2="4" y2="14"/><line x1="4" y1="10" x2="4" y2="3"/><line x1="12" y1="21" x2="12" y2="12"/><line x1="12" y1="8" x2="12" y2="3"/><line x1="20" y1="21" x2="20" y2="16"/><line x1="20" y1="12" x2="20" y2="3"/><line x1="1" y1="14" x2="7" y2="14"/><line x1="9" y1="8" x2="15" y2="8"/><line x1="17" y1="16" x2="23" y2="16"/>',
+  activity:'<polyline points="22 12 18 12 15 21 9 3 6 12 2 12"/>',
+  building:'<path d="M3 21h18"/><path d="M5 21V5a2 2 0 0 1 2-2h6a2 2 0 0 1 2 2v16"/><path d="M15 21v-6a2 2 0 0 1 2-2h2a2 2 0 0 1 2 2v6"/><path d="M9 7h2M9 11h2"/>',
+  shieldcheck:'<path d="M12 22s8-4 8-10V5l-8-3-8 3v7c0 6 8 10 8 10z"/><polyline points="9 12 11.5 14.5 16 10"/>',
+  dots:'<circle cx="12" cy="5" r="1.6" fill="currentColor" stroke="none"/><circle cx="12" cy="12" r="1.6" fill="currentColor" stroke="none"/><circle cx="12" cy="19" r="1.6" fill="currentColor" stroke="none"/>'
+};
+function icon(name, cls) {
+  return '<svg class="' + (cls || "") + '" viewBox="0 0 24 24" fill="none" stroke="currentColor" ' +
+    'stroke-width="2" stroke-linecap="round" stroke-linejoin="round" aria-hidden="true">' + (ICONS[name] || "") + '</svg>';
+}
+
+/* ------------------------------- helpers ------------------------------- */
+function esc(s) { return String(s == null ? "" : s).replace(/[&<>"']/g, m => ({ "&":"&amp;","<":"&lt;",">":"&gt;",'"':"&quot;","'":"&#39;" }[m])); }
+function cur() { return state.session ? DB.userById[state.session.userId] : null; }
+function fmtRel(ms) {
+  const d = NOW_MS - ms;
+  if (d < 0) { const f = -d; if (f < HOUR) return "in " + Math.max(1, Math.round(f/60000)) + "m"; if (f < DAY) return "in " + Math.round(f/HOUR) + "h"; return "in " + Math.round(f/DAY) + "d"; }
+  if (d < 60000) return "just now";
+  if (d < HOUR) return Math.round(d/60000) + "m ago";
+  if (d < DAY) return Math.round(d/HOUR) + "h ago";
+  if (d < 2*DAY) return "yesterday";
+  if (d < 7*DAY) return Math.round(d/DAY) + "d ago";
+  const dt = new Date(ms), mo = ["Jan","Feb","Mar","Apr","May","Jun","Jul","Aug","Sep","Oct","Nov","Dec"];
+  return mo[dt.getUTCMonth()] + " " + dt.getUTCDate();
+}
+function fmtMoney(n) { if (!n) return "None"; if (n >= 1e6) return "$" + (n/1e6).toFixed(n % 1e6 ? 1 : 0) + "M"; if (n >= 1e3) return "$" + Math.round(n/1e3) + "K"; return "$" + n; }
+const STATUS = {
+  new:{label:"New",cls:"new"}, attempted:{label:"Attempted",cls:"attempted"}, contacted:{label:"Contacted",cls:"contacted"},
+  interested:{label:"Interested",cls:"interested"}, not_a_fit:{label:"Not a Fit",cls:"not_a_fit"}, dnc:{label:"Do Not Call",cls:"dnc"}
+};
+const STATUS_ORDER = ["new","attempted","contacted","interested","not_a_fit"];
+const DISPO_LABEL = { no_answer:"No answer", voicemail:"Voicemail", connected:"Connected", callback:"Callback", not_interested:"Not interested", wrong_number:"Wrong number", interested:"Interested" };
+const ROLE_LABEL = { manager:"Manager", edit:"Editor", view:"Viewer", guest:"Guest" };
+function badge(status) { const m = STATUS[status] || STATUS.new; return '<span class="badge ' + m.cls + '"><span class="dot"></span>' + m.label + "</span>"; }
+function avatar(u, size) { const s = size || 30; return '<span class="avatar" style="width:'+s+'px;height:'+s+'px;background:'+u.color+';font-size:'+(s*0.4)+'px">' + initials(u.name) + "</span>"; }
+function initials(n) { return n.split(/\s+/).slice(0,2).map(w => w[0]).join("").toUpperCase(); }
+
+/* effective (override-aware) accessors */
+function effDnc(dot) { return (dot in state.overrides.dnc) ? state.overrides.dnc[dot] : DB.carrierByDot[dot].do_not_contact; }
+function effStatus(batchId, dot) { const k = batchId + ":" + dot; if (k in state.overrides.status) return state.overrides.status[k]; const bc = DB.batchCarriers.find(b => b.batch_id === batchId && b.dot === dot); return bc ? bc.status : "new"; }
+function batchMembers(batchId) { return DB.batchCarriers.filter(b => b.batch_id === batchId); }
+function batchesForDot(dot) { return DB.batchCarriers.filter(b => b.dot === dot).map(b => b.batch_id); }
+function logsForDot(dot) {
+  const seed = DB.callLogs.filter(l => l.dot === dot);
+  const added = state.overrides.logs.filter(l => l.dot === dot);
+  return seed.concat(added).sort((a, b) => b.at - a.at);
+}
+function statusCounts(batchId) {
+  const c = { new:0, attempted:0, contacted:0, interested:0, not_a_fit:0, dnc:0 };
+  batchMembers(batchId).forEach(b => { if (effDnc(b.dot)) c.dnc++; else c[effStatus(batchId, b.dot)]++; });
+  return c;
+}
+
+/* ------------------------------- toasts / modal / menu ------------------------------- */
+let toastSeq = 0;
+function toast(msg, ic) {
+  const id = toastSeq++;
+  state.toasts.push({ id, msg, ic: ic || "check" });
+  render();
+  setTimeout(() => { state.toasts = state.toasts.filter(t => t.id !== id); render(); }, 2600);
+}
+function openModal(m) { state.menu = null; state.modal = m; render(); }
+function closeModal() { state.modal = null; render(); }
+function openMenu(m) { state.menu = m; render(); }
+function closeMenu() { if (state.menu) { state.menu = null; render(); } }
+
+/* ------------------------------- render ------------------------------- */
+const ACT = {};   // action handlers, populated across files
+
+function applyTheme() {
+  const root = document.documentElement;
+  if (state.theme) root.setAttribute("data-theme", state.theme);
+  else root.removeAttribute("data-theme");
+}
+function render() {
+  const root = document.getElementById("app");
+  applyTheme();
+  let html = (typeof SCREENS !== "undefined" && SCREENS[state.screen]) ? SCREENS[state.screen]() : '<div class="empty">…</div>';
+  html += overlays();
+  root.innerHTML = html;
+  if (state.focus) { const f = root.querySelector(state.focus); if (f) f.focus(); state.focus = null; }
+}
+function overlays() {
+  let h = "";
+  if (state.modal && typeof MODALS !== "undefined" && MODALS[state.modal.type]) h += MODALS[state.modal.type](state.modal);
+  if (state.menu && typeof MENUS !== "undefined" && MENUS[state.menu.type]) {
+    h += '<div class="menu" style="left:' + state.menu.x + 'px;top:' + state.menu.y + 'px">' + MENUS[state.menu.type](state.menu) + "</div>";
+  }
+  if (state.toasts.length) {
+    h += '<div class="toast-wrap">' + state.toasts.map(t => '<div class="toast">' + icon(t.ic) + esc(t.msg) + "</div>").join("") + "</div>";
+  }
+  return h;
+}
+
+/* ------------------------------- events ------------------------------- */
+function mount() {
+  const root = document.getElementById("app");
+  root.addEventListener("click", onClick);
+  root.addEventListener("input", onInput);
+  root.addEventListener("change", onChange);
+  root.addEventListener("submit", onSubmit);
+  root.addEventListener("keydown", onKeydown);
+  document.addEventListener("keydown", (e) => {
+    if (e.key === "Escape") { if (state.menu) closeMenu(); else if (state.modal) closeModal(); }
+  });
+}
+function onClick(e) {
+  const t = e.target.closest("[data-act]");
+  const inMenu = e.target.closest(".menu");
+  if (state.menu && !inMenu && !(t && t.dataset.act === state.menu.type)) closeMenu();
+  if (!t) return;
+  const act = t.dataset.act;
+  // Don't open a row when the click landed on an in-row control (checkbox, status select, buttons).
+  if (act === "openCarrier" && e.target.closest("select, input, button, label")) return;
+  // Backdrop click closes the modal; clicks inside the modal body do not.
+  if (act === "closeModal" && t.classList.contains("scrim") && e.target.closest(".modal")) return;
+  if (ACT[act]) { e.preventDefault(); ACT[act]({ ...t.dataset }, e, t); }
+}
+function onKeydown(e) {
+  const t = e.target;
+  if (e.key === "Enter" && t.dataset && t.dataset.keyadd) {
+    e.preventDefault();
+    if (ACT[t.dataset.keyadd]) ACT[t.dataset.keyadd]({ v: t.value });
+  }
+}
+function onChange(e) {
+  const t = e.target;
+  if (t.dataset && t.dataset.change && ACT[t.dataset.change]) {
+    ACT[t.dataset.change]({ ...t.dataset, value: t.type === "checkbox" ? t.checked : t.value }, e, t);
+  }
+}
+function onInput(e) {
+  const t = e.target;
+  if (!t.dataset) return;
+  if (t.dataset.echo) { const el = document.getElementById(t.dataset.echo); if (el) el.textContent = t.dataset.echoFmt === "mi" ? t.value + " mi" : t.value; }
+  if (t.dataset.live && ACT[t.dataset.live]) ACT[t.dataset.live]({ ...t.dataset, value: t.value }, e, t);
+  if (t.dataset.model) { setModel(t.dataset.model, t.value); }
+}
+function onSubmit(e) { const t = e.target.closest("[data-submit]"); if (t) { e.preventDefault(); if (ACT[t.dataset.submit]) ACT[t.dataset.submit]({ ...t.dataset }, e, t); } }
+function setModel(path, val) { const parts = path.split("."); let o = state; for (let i = 0; i < parts.length - 1; i++) o = o[parts[i]]; o[parts[parts.length - 1]] = val; }
+
+/* ------------------------------- generic actions ------------------------------- */
+ACT.nav = (d) => { state.screen = d.to; if (d.to !== "profile") state.activeCarrierDot = null; closeMenu(); render(); };
+ACT.toggleTheme = () => {
+  const isDark = document.documentElement.matches('[data-theme="dark"]') ||
+    (!document.documentElement.hasAttribute("data-theme") && matchMedia("(prefers-color-scheme: dark)").matches);
+  state.theme = isDark ? "light" : "dark"; render();
+};
+ACT.closeModal = () => closeModal();
+ACT.closeMenu = () => closeMenu();
+ACT.noop = () => {};
+ACT.userMenu = (d, e) => { const r = e.currentTarget.getBoundingClientRect(); openMenu({ type:"userMenu", x: Math.max(10, r.left), y: r.top - 8 - 96 }); };
+/* ============================================================================
+   screens.js — screen renderers, Texas map, shared components, modals, menus,
+   and screen-specific action handlers.
+   ============================================================================ */
+
+/* ------------------------------- map ------------------------------- */
+const PRESET_ROUTES = {
+  aus_sat: { label:"Austin → San Antonio", route:[{lng:-97.74,lat:30.27},{lng:-98.10,lat:29.89},{lng:-98.49,lat:29.42}] },
+  dal_ftw: { label:"Dallas → Fort Worth",  route:[{lng:-96.80,lat:32.78},{lng:-97.05,lat:32.76},{lng:-97.33,lat:32.75}] },
+  hou_cc:  { label:"Houston → Corpus Christi", route:[{lng:-95.37,lat:29.76},{lng:-96.40,lat:28.98},{lng:-97.40,lat:27.80}] },
+  mid_od:  { label:"Midland → Odessa",     route:[{lng:-102.08,lat:32.00},{lng:-102.37,lat:31.85}] }
+};
+function statusVar(s) { return "var(--st-" + ({ not_a_fit:"notfit" }[s] || s) + ")"; }
+
+function mapCore(pins, geo) {
+  const W = 640, H = 520, proj = makeProjection(W, H, 16);
+  const land = proj.pathFor(TX_OUTLINE);
+  const anchorMark = (x, y) => '<circle class="anchor" cx="' + x.toFixed(1) + '" cy="' + y.toFixed(1) + '" r="5"/>';
+  let overlay = "";
+  if (geo && geo.mode === "radius") {
+    const p = proj.project(geo.anchorLng, geo.anchorLat), r = proj.milesToPx(geo.radiusMi);
+    overlay = '<circle class="radius-fill" cx="' + p[0].toFixed(1) + '" cy="' + p[1].toFixed(1) + '" r="' + r.toFixed(1) + '"/>' + anchorMark(p[0], p[1]);
+  } else if (geo && geo.mode === "corridor") {
+    const pts = geo.route.map(q => proj.project(q.lng, q.lat));
+    const d = pts.map((p, i) => (i ? "L" : "M") + p[0].toFixed(1) + " " + p[1].toFixed(1)).join(" ");
+    const bw = proj.milesToPx(geo.bufferMi) * 2;
+    overlay = '<path class="corridor-band" style="stroke-width:' + bw.toFixed(1) + 'px" d="' + d + '"/>' +
+              '<path class="corridor-line" d="' + d + '"/>' + pts.map(p => anchorMark(p[0], p[1])).join("");
+  }
+  const cityDots = CITIES.filter(c => c.major).map(c => {
+    const p = proj.project(c.lng, c.lat);
+    return '<circle class="city-dot" cx="' + p[0].toFixed(1) + '" cy="' + p[1].toFixed(1) + '" r="2"/>' +
+           '<text class="city-lbl" x="' + (p[0]+5).toFixed(1) + '" y="' + (p[1]+3).toFixed(1) + '">' + esc(c.name) + "</text>";
+  }).join("");
+  const pinEls = pins.map(p => {
+    const q = proj.project(p.lng, p.lat);
+    const style = p.fill ? ' style="fill:' + p.fill + '"' : "";
+    const inter = p.dot ? ' data-act="openCarrier" data-dot="' + p.dot + '" data-from="' + (p.from || "") + '" style="cursor:pointer' + (p.fill ? ";fill:" + p.fill : "") + '"' : style;
+    return '<circle class="pin ' + (p.cls || "") + '" cx="' + q[0].toFixed(1) + '" cy="' + q[1].toFixed(1) + '" r="' + (p.r || 4) + '"' + inter + "><title>" + esc(p.title || "") + "</title></circle>";
+  }).join("");
+  return '<svg viewBox="0 0 ' + W + " " + H + '" preserveAspectRatio="xMidYMid meet">' +
+    '<path class="tx-land" d="' + land + '"/>' + cityDots + overlay + pinEls + "</svg>";
+}
+
+/* ------------------------------- shell ------------------------------- */
+function sidebar() {
+  const u = cur();
+  const onDash = ["dashboard","workingList"].includes(state.screen);
+  const item = (act, to, ic, label, count, on) =>
+    '<a data-act="' + act + '"' + (to ? ' data-to="' + to + '"' : "") + ' class="' + (on ? "on" : "") + '">' +
+      icon(ic) + "<span>" + label + "</span>" + (count != null ? '<span class="count">' + count + "</span>" : "") + "</a>";
+  return '<aside class="sidebar">' +
+    '<div class="brand"><div class="mark">' + icon("truck") + '</div><div><div class="name">Twisted Nail</div><div class="sub">Recruiter</div></div></div>' +
+    '<nav class="nav">' +
+      '<div class="nav-label eyebrow">Recruiting</div>' +
+      item("nav", "dashboard", "layers", "Batches", DB.batches.length, onDash) +
+      item("newBatch", null, "search", "New Search", null, state.screen === "builder") +
+      (u.role === "manager" ? '<div class="nav-label eyebrow">Admin</div>' + item("nav", "users", "users", "Users", DB.users.filter(x => (state.overrides.userStatus[x.id]?.status || x.status) === "pending").length || null, state.screen === "users") : "") +
+    "</nav>" +
+    '<div class="side-foot"><button class="usercell" data-act="userMenu">' + avatar(u) +
+      '<span class="who"><span class="nm">' + esc(u.name) + '</span><span class="rl">' + ROLE_LABEL[u.role] + "</span></span>" +
+      '<span style="margin-left:auto;color:var(--text-subtle)">' + icon("chevD") + "</span></button></div>" +
+    "</aside>";
+}
+function topbar(crumbs) {
+  return '<header class="topbar"><div class="crumbs">' + crumbs + '</div><div class="spacer"></div>' +
+    '<span class="badge good" title="Shared list — updates live for all users"><span class="dot"></span>Live</span>' +
+    '<button class="btn icon ghost" data-act="toggleTheme" title="Toggle theme">' + icon("sun") + "</button>" +
+    "</header>";
+}
+function appShell(inner, crumbs) {
+  return '<div class="shell">' + sidebar() + '<div class="main">' + topbar(crumbs) + '<div class="content">' + inner + "</div></div></div>";
+}
+function crumb(items) {
+  return items.map((it, i) => (i ? '<span style="color:var(--text-subtle)">' + icon("chevR", "") + "</span>" : "") +
+    (it.act ? '<a data-act="' + it.act + '"' + (it.to ? ' data-to="' + it.to + '"' : "") + ' style="cursor:pointer">' + esc(it.label) + "</a>"
+            : '<span class="' + (i === items.length - 1 ? "cur" : "") + '">' + esc(it.label) + "</span>")).join("");
+}
+
+/* ------------------------------- AUTH ------------------------------- */
+function authBrand() {
+  return '<div class="auth-brand"><div class="mark">' + icon("truck") + '</div><div><div class="name">Twisted Nail</div><div class="sub">Carrier Recruiter</div></div></div>';
+}
+function screenLogin() {
+  return '<div class="auth"><div class="auth-card">' + authBrand() +
+    '<form class="auth-panel" data-submit="signIn">' +
+      "<h1>Sign in</h1><p class='lead'>Recruit sand &amp; gravel carriers across Texas.</p>" +
+      '<div class="stack gap-16">' +
+        '<label class="field"><span class="label">Work email</span><span class="input-group">' + icon("mail") + '<input class="input" type="email" value="hunter@twistednail.com" autocomplete="username"></span></label>' +
+        '<label class="field"><span class="label">Password</span><span class="input-group">' + icon("lock") + '<input class="input" type="password" value="demo" autocomplete="current-password"></span></label>' +
+        '<div class="auth-row"><label class="check"><input type="checkbox" checked><span class="box">' + icon("check") + '</span><span>Remember me</span></label>' +
+          '<a class="link" data-act="gotoAuth" data-view="forgot">Forgot password?</a></div>' +
+        '<button class="btn primary lg block" type="submit">Sign in</button>' +
+      "</div>" +
+      '<div class="demo-note"><b>Prototype — sign in as any role:</b><div class="row wrap gap-6 mt-8">' +
+        DB.users.filter(u => u.status === "approved").map(u => '<button type="button" class="btn sm" data-act="demoLogin" data-uid="' + u.id + '">' + esc(u.name.split(" ")[0]) + " · " + ROLE_LABEL[u.role] + "</button>").join("") +
+        '<button type="button" class="btn sm" data-act="demoLogin" data-uid="u_guest1">New guest</button>' +
+      "</div></div>" +
+    "</form>" +
+    '<div class="auth-foot">New to the team? <a class="link" data-act="gotoAuth" data-view="register">Create an account</a></div>' +
+    "</div></div>";
+}
+function screenRegister() {
+  return '<div class="auth"><div class="auth-card">' + authBrand() +
+    '<form class="auth-panel" data-submit="doRegister">' +
+      "<h1>Create your account</h1><p class='lead'>New accounts start as a guest until a manager approves them.</p>" +
+      '<div class="stack gap-16">' +
+        '<label class="field"><span class="label">Full name</span><input class="input" value="Cole Ramirez"></label>' +
+        '<label class="field"><span class="label">Work email</span><input class="input" type="email" value="cole.r@gmail.com"></label>' +
+        '<label class="field"><span class="label">Password</span><input class="input" type="password" value="demo"></label>' +
+        '<button class="btn primary lg block" type="submit">Create account</button>' +
+      "</div>" +
+    "</form>" +
+    '<div class="auth-foot">Already have an account? <a class="link" data-act="gotoAuth" data-view="login">Sign in</a></div>' +
+    "</div></div>";
+}
+function screenForgot() {
+  return '<div class="auth"><div class="auth-card">' + authBrand() +
+    '<form class="auth-panel" data-submit="doForgot">' +
+      "<h1>Reset password</h1><p class='lead'>We'll email you a reset link.</p>" +
+      '<div class="stack gap-16"><label class="field"><span class="label">Work email</span><input class="input" type="email" value="hunter@twistednail.com"></label>' +
+      '<button class="btn primary lg block" type="submit">Send reset link</button></div>' +
+    "</form>" +
+    '<div class="auth-foot"><a class="link" data-act="gotoAuth" data-view="login">Back to sign in</a></div>' +
+    "</div></div>";
+}
+function screenGuest() {
+  const u = cur();
+  return '<div class="auth"><div class="auth-card">' + authBrand() +
+    '<div class="auth-panel" style="text-align:center">' +
+      '<div style="width:52px;height:52px;border-radius:50%;background:var(--warn-tint);color:var(--warn);display:grid;place-items:center;margin:4px auto 14px">' + icon("clock") + "</div>" +
+      "<h1>Account pending approval</h1>" +
+      "<p class='lead' style='margin-bottom:18px'>Thanks, " + esc(u ? u.name.split(" ")[0] : "there") + ". A manager needs to review and provision your account before you can access the recruiting tools. You'll get an email when you're in.</p>" +
+      '<div class="demo-note" style="text-align:left"><b>What you\'ll get access to:</b> the carrier database, search batches, and the call workflow — once a manager assigns your role (Editor or Viewer).</div>' +
+      '<button class="btn block mt-16" data-act="logout">' + icon("logout") + " Sign out</button>" +
+    "</div>" +
+    '<div class="auth-foot subtle">Guests only see this page until approved — that\'s the role gate in action.</div>' +
+    "</div></div>";
+}
+
+/* ------------------------------- DASHBOARD ------------------------------- */
+function screenDashboard() {
+  const cards = DB.batches.map(batchCard).join("");
+  const totalCarriers = new Set(DB.batchCarriers.map(b => b.dot)).size;
+  const inner = '<div class="page">' +
+    '<div class="page-head"><div><div class="h1">Recruiting Batches</div><div class="desc">Each batch is a saved search and an independent working session. Grab a batch of trucks, then work the shared call list.</div></div>' +
+      '<div class="spacer"></div><button class="btn primary" data-act="newBatch">' + icon("plus") + " New Search</button></div>" +
+    '<div class="stat-row mt-4" style="margin-bottom:20px">' +
+      stat("Active batches", DB.batches.length) +
+      stat("Carriers in play", totalCarriers) +
+      stat("Interested", DB.batchCarriers.filter(b => effStatus(b.batch_id, b.dot) === "interested" && !effDnc(b.dot)).length) +
+      stat("Sent to onboarding", DB.batchCarriers.filter(b => b.onboarded_at || state.overrides.onboarded[b.dot]).length) +
+    "</div>" +
+    '<div style="display:grid;grid-template-columns:repeat(auto-fill,minmax(340px,1fr));gap:16px">' + cards + "</div>" +
+    "</div>";
+  return appShell(inner, crumb([{ label:"Batches" }]));
+}
+function stat(k, v, sub) { return '<div class="stat"><div class="k">' + k + '</div><div class="v">' + v + (sub ? " <small>" + sub + "</small>" : "") + "</div></div>"; }
+function batchCard(b) {
+  const c = statusCounts(b.id), total = batchMembers(b.id).length;
+  const seg = (k, cls) => c[k] ? '<i style="width:' + (c[k]/total*100) + '%;background:' + statusVar(k) + '"></i>' : "";
+  const geo = b.search.geo;
+  const geoLabel = geo.mode === "radius" ? geo.anchor + " · " + geo.radiusMi + " mi" : geo.label + " · " + geo.bufferMi + " mi";
+  const creator = DB.userById[b.created_by];
+  return '<div class="card" style="padding:16px;cursor:pointer" data-act="openBatch" data-id="' + b.id + '">' +
+    '<div class="row between" style="align-items:flex-start"><div style="min-width:0"><div style="font-weight:800;font-size:15px">' + esc(b.name) + "</div>" +
+      '<div class="row gap-6 mt-4 muted" style="font-size:12px">' + icon(geo.mode === "radius" ? "target" : "route", "") + "<span style='white-space:nowrap;overflow:hidden;text-overflow:ellipsis'>" + esc(geoLabel) + "</span></div></div>" +
+      '<button class="btn icon ghost sm" data-act="batchMenu" data-id="' + b.id + '" style="flex:none">' + icon("dots") + "</button></div>" +
+    '<div class="row between mt-16" style="align-items:flex-end"><div><div class="eyebrow">Carriers</div><div class="mono" style="font-size:24px;font-weight:800">' + total + "</div></div>" +
+      '<div style="text-align:right"><div class="eyebrow">Interested</div><div class="mono" style="font-size:24px;font-weight:800;color:var(--st-interested)">' + c.interested + "</div></div></div>" +
+    '<div class="progress mt-12">' + STATUS_ORDER.map(k => seg(k)).join("") + (c.dnc ? '<i style="width:' + (c.dnc/total*100) + '%;background:var(--st-dnc)"></i>' : "") + "</div>" +
+    '<div class="row between mt-12 subtle" style="font-size:11.5px">' +
+      "<span>by " + esc(creator.name.split(" ")[0]) + "</span>" +
+      '<span class="row gap-6">' + (b.new_since ? '<span class="badge good" style="height:18px">+' + b.new_since + " new</span>" : "") + "refreshed " + fmtRel(b.last_refreshed) + "</span></div>" +
+    "</div>";
+}
+
+/* ------------------------------- SEARCH BUILDER ------------------------------- */
+function newBuilder() {
+  const a = cityOf("Austin");
+  return { name:"", geoMode:"radius", anchorType:"city", anchorCity:"Austin", anchorLng:a.lng, anchorLat:a.lat, radiusMi:50,
+    routeKey:"aus_sat", bufferMi:40, wideNet:true, matchTerms:["Sand & Gravel","Rock","Dirt","Aggregate"],
+    forHire:true, size:"any", insuranceMin:0, keepBelow:true, activeOnly:true, authorizedOnly:false, interstateOnly:false, excludeSafety:false };
+}
+const SIZE_RANGES = { any:[null,null], small:[1,5], mid:[6,20], large:[21,999] };
+function builderSearch(b) {
+  const geo = b.geoMode === "radius"
+    ? { mode:"radius", anchor:b.anchorCity + ", TX", anchorLng:b.anchorLng, anchorLat:b.anchorLat, radiusMi:+b.radiusMi }
+    : { mode:"corridor", label:PRESET_ROUTES[b.routeKey].label, route:PRESET_ROUTES[b.routeKey].route, bufferMi:+b.bufferMi };
+  const sz = SIZE_RANGES[b.size];
+  return { geo, cargo:{ wideNet:b.wideNet }, forHire:b.forHire, sizeMin:sz[0], sizeMax:sz[1],
+    insuranceMin:+b.insuranceMin, keepBelow:b.keepBelow, activeOnly:b.activeOnly, authorizedOnly:b.authorizedOnly,
+    interstateOnly:b.interstateOnly, excludeSafety:b.excludeSafety };
+}
+function builderPins(search, matchesSet) {
+  return DB.carriers.map(c => matchesSet.has(c) ? { lng:c.lng, lat:c.lat, cls:"match", r:4, title:c.legal_name }
+                                                : { lng:c.lng, lat:c.lat, cls:"dim", r:2.5 });
+}
+function screenBuilder() {
+  const b = state.builder, s = builderSearch(b), matches = searchMatches(s), mset = new Set(matches);
+  const inner = '<div class="page wide" style="padding:20px 24px 90px">' +
+    '<div class="page-head"><div><div class="h1">New Search</div><div class="desc">Define a geography and filters, watch the match count update live, then grab the batch.</div></div></div>' +
+    '<div style="display:grid;grid-template-columns:340px 1fr;gap:18px;align-items:start">' +
+      builderFilters(b) +
+      '<div class="stack gap-16">' +
+        '<div class="map" style="height:440px" id="b-map">' + mapCore(builderPins(s, mset), s.geo) + mapCount(matches.length) + mapLegend(true) + "</div>" +
+        '<div id="b-preview">' + builderPreview(matches) + "</div>" +
+      "</div>" +
+    "</div>" +
+    builderFooter(b, matches.length) +
+    "</div>";
+  return appShell(inner, crumb([{ label:"Batches", act:"nav", to:"dashboard" }, { label:"New Search" }]));
+}
+function mapCount(n) { return '<div class="map-count"><b id="b-count">' + n + "</b><span>matches</span></div>"; }
+function mapLegend(build) {
+  const rows = build
+    ? [["var(--accent)","Matches your filters"],["var(--map-line)","Other carriers"]]
+    : STATUS_ORDER.map(k => [statusVar(k), STATUS[k].label]);
+  return '<div class="map-legend">' + rows.map(r => '<div class="lg"><span class="sw" style="background:' + r[0] + '"></span>' + r[1] + "</div>").join("") + "</div>";
+}
+function fieldRow(label, control) { return '<div class="field"><span class="label">' + label + "</span>" + control + "</div>"; }
+function builderFilters(b) {
+  const cityOpts = CITIES.map(c => '<option value="' + c.name + '"' + (c.name === b.anchorCity ? " selected" : "") + ">" + c.name + ", TX</option>").join("");
+  const routeOpts = Object.keys(PRESET_ROUTES).map(k => '<option value="' + k + '"' + (k === b.routeKey ? " selected" : "") + ">" + PRESET_ROUTES[k].label + "</option>").join("");
+  const anchorSeg = ["address","pin","city","zip","county"].map(t => '<button type="button" class="' + (b.anchorType === t ? "on" : "") + '" data-act="bAnchorType" data-t="' + t + '">' + ({address:"Address",pin:"Pin",city:"City",zip:"ZIP",county:"County"}[t]) + "</button>").join("");
+  return '<div class="stack gap-16">' +
+    // geography
+    '<div class="card" style="padding:16px"><div class="eyebrow" style="margin-bottom:12px">Geography</div>' +
+      '<div class="seg" style="width:100%;margin-bottom:14px">' +
+        '<button type="button" style="flex:1;justify-content:center" class="' + (b.geoMode === "radius" ? "on" : "") + '" data-act="bMode" data-m="radius">' + icon("target") + "Radius</button>" +
+        '<button type="button" style="flex:1;justify-content:center" class="' + (b.geoMode === "corridor" ? "on" : "") + '" data-act="bMode" data-m="corridor">' + icon("route") + "Corridor</button>" +
+      "</div>" +
+      (b.geoMode === "radius"
+        ? '<div class="stack gap-12"><div class="seg" style="flex-wrap:wrap">' + anchorSeg + "</div>" +
+            fieldRow("Center on", '<select class="select" data-change="bAnchorCity">' + cityOpts + "</select>") +
+            '<div class="field"><div class="row between"><span class="label">Radius</span><span class="label mono" id="b-radius-lbl">' + b.radiusMi + ' mi</span></div>' +
+              '<input type="range" min="10" max="150" step="5" value="' + b.radiusMi + '" data-echo="b-radius-lbl" data-echo-fmt="mi" data-live="bRadius"></div></div>'
+        : '<div class="stack gap-12">' + fieldRow("Route", '<select class="select" data-change="bRoute">' + routeOpts + "</select>") +
+            '<div class="field"><div class="row between"><span class="label">Within</span><span class="label mono" id="b-buffer-lbl">' + b.bufferMi + ' mi</span></div>' +
+              '<input type="range" min="10" max="80" step="5" value="' + b.bufferMi + '" data-echo="b-buffer-lbl" data-echo-fmt="mi" data-live="bBuffer">' +
+              '<div class="subtle mt-4" style="font-size:11.5px">Distance from <b>any point</b> along the run — not just the endpoints.</div></div></div>') +
+    "</div>" +
+    // cargo
+    '<div class="card" style="padding:16px"><div class="row between" style="margin-bottom:10px"><div class="eyebrow">Freight — sand &amp; gravel</div>' + badge2("tier1", "Tier 1") + "</div>" +
+      '<div class="subtle" style="font-size:12px;margin-bottom:10px">Match the free-text "Other" cargo field for these terms:</div>' +
+      '<div class="row wrap gap-6" id="b-terms">' + b.matchTerms.map((t, i) => '<span class="chip">' + esc(t) + '<button data-act="bRmTerm" data-i="' + i + '">' + icon("x") + "</button></span>").join("") +
+        '<input class="input" style="width:120px;height:26px" placeholder="+ add term" data-keyadd="bAddTerm" id="b-term-input"></div>' +
+      '<label class="check mt-16"><input type="checkbox" ' + (b.wideNet ? "checked" : "") + ' data-change="bWideNet"><span class="box">' + icon("check") + '</span><span>Wide net — also include Dry Bulk / Construction / Building Materials flags <span class="subtle">(Tier 2)</span></span></label>' +
+    "</div>" +
+    // carrier filters
+    '<div class="card" style="padding:16px"><div class="eyebrow" style="margin-bottom:12px">Carrier filters</div><div class="stack gap-12">' +
+      fieldRow("Fleet size", '<select class="select" data-change="bSize"><option value="any"' + sel(b.size,"any") + ">Any size</option><option value=\"small\"" + sel(b.size,"small") + ">1–5 trucks</option><option value=\"mid\"" + sel(b.size,"mid") + ">6–20 trucks</option><option value=\"large\"" + sel(b.size,"large") + ">21+ trucks</option></select>") +
+      '<div class="field"><span class="label">Minimum insurance (BIPD)</span>' +
+        '<select class="select" data-change="bInsurance"><option value="0"' + sel(""+b.insuranceMin,"0") + ">Any</option><option value=\"500000\"" + sel(""+b.insuranceMin,"500000") + ">$500K+</option><option value=\"750000\"" + sel(""+b.insuranceMin,"750000") + ">$750K+</option><option value=\"1000000\"" + sel(""+b.insuranceMin,"1000000") + ">$1MM+</option><option value=\"2000000\"" + sel(""+b.insuranceMin,"2000000") + ">$2MM+</option></select>" +
+        '<label class="switch mt-8" style="' + (b.insuranceMin ? "" : "opacity:.45;pointer-events:none") + '"><input type="checkbox" ' + (b.keepBelow ? "checked" : "") + ' data-change="bKeepBelow"><span class="track"></span><span class="label">Keep below-threshold carriers visible</span></label></div>' +
+      '<div class="stack gap-8 mt-4">' +
+        toggleRow("For-hire only", "bForHire", b.forHire) +
+        toggleRow("Active registration only", "bActive", b.activeOnly) +
+        toggleRow("Authorized &amp; insured only", "bAuth", b.authorizedOnly) +
+        toggleRow("Interstate only", "bInterstate", b.interstateOnly) +
+        toggleRow("Exclude concerning safety", "bSafety", b.excludeSafety) +
+      "</div>" +
+    "</div></div></div>";
+}
+function badge2(cls, label) { return '<span class="badge ' + cls + '">' + label + "</span>"; }
+function sel(a, b) { return a === b ? " selected" : ""; }
+function toggleRow(label, act, on) {
+  return '<label class="switch" style="justify-content:space-between;width:100%"><span class="label">' + label + '</span><span style="position:relative;display:inline-flex"><input type="checkbox" ' + (on ? "checked" : "") + ' data-change="' + act + '"><span class="track"></span></span></label>';
+}
+function builderPreview(matches) {
+  if (!matches.length) return '<div class="card empty">' + icon("search") + "<div>No carriers match — loosen a filter.</div></div>";
+  const rows = matches.slice(0, 8).map(c =>
+    "<tr><td><div class='co'><span class='nm'>" + esc(c.legal_name) + "</span><span class='meta'>" + esc(c.city) + ", TX · " + tierTag(c.tier) + "</span></div></td>" +
+    "<td class='mono'>" + c.power_units + "</td><td>" + insBadge(c) + "</td><td class='mono muted'>" + esc(c.cargoOther || c.cargoFlags[0] || "—") + "</td></tr>").join("");
+  return '<div class="tbl-wrap"><table class="tbl"><thead><tr><th>Carrier</th><th>Trucks</th><th>Insurance</th><th>Cargo signal</th></tr></thead><tbody>' + rows + "</tbody></table>" +
+    (matches.length > 8 ? '<div class="subtle" style="padding:10px 12px;font-size:12px">+ ' + (matches.length - 8) + " more will be captured in the batch</div>" : "") + "</div>";
+}
+function tierTag(t) { return t === 1 ? "Tier 1 match" : (t === 2 ? "Tier 2" : "no match"); }
+function insBadge(c) {
+  const v = c.ins.bipd_on_file;
+  const cls = v >= 1000000 ? "good" : (v >= 500000 ? "warn" : "plain");
+  return '<span class="badge ' + cls + '">' + fmtMoney(v) + "</span>";
+}
+function builderFooter(b, n) {
+  return '<div style="position:fixed;left:var(--sidebar-w);right:0;bottom:0;background:var(--surface);border-top:1px solid var(--border);padding:12px 24px;display:flex;gap:14px;align-items:center;box-shadow:var(--shadow-2);z-index:20">' +
+    '<input class="input" style="max-width:340px" placeholder="Name this batch — e.g. Belt Construction Recruitment" value="' + esc(b.name) + '" data-model="builder.name" id="b-name">' +
+    '<div class="muted" style="font-size:13px"><b class="mono" style="color:var(--text)" id="b-foot-count">' + n + '</b> carriers will be grabbed into this batch</div>' +
+    '<div class="spacer" style="flex:1"></div>' +
+    '<button class="btn" data-act="nav" data-to="dashboard">Cancel</button>' +
+    '<button class="btn primary lg" data-act="grabBatch">' + icon("layers") + " Grab Batch</button></div>";
+}
+
+/* ------------------------------- WORKING LIST ------------------------------- */
+function distanceFor(c, geo) {
+  if (!geo) return null;
+  return geo.mode === "radius" ? haversineMiles(c.lng, c.lat, geo.anchorLng, geo.anchorLat) : pointToRouteMiles(c.lng, c.lat, geo.route);
+}
+function workingRows(batchId) {
+  const b = DB.batches.find(x => x.id === batchId), geo = b.search.geo, f = state.list;
+  let rows = batchMembers(batchId).map(m => {
+    const c = DB.carrierByDot[m.dot];
+    return { c, dnc: effDnc(m.dot), status: effStatus(batchId, m.dot), dist: distanceFor(c, geo), logs: logsForDot(m.dot) };
+  });
+  if (f.status !== "all") rows = rows.filter(r => f.status === "dnc" ? r.dnc : (!r.dnc && r.status === f.status));
+  if (f.q) { const q = f.q.toLowerCase(); rows = rows.filter(r => r.c.legal_name.toLowerCase().includes(q) || String(r.c.dot).includes(q) || r.c.city.toLowerCase().includes(q)); }
+  if (f.insurance !== "any") { const min = +f.insurance; rows = rows.filter(r => r.c.ins.bipd_on_file >= min); }
+  if (f.size !== "any") { const [lo, hi] = SIZE_RANGES[f.size]; rows = rows.filter(r => (lo == null || r.c.power_units >= lo) && (hi == null || r.c.power_units <= hi)); }
+  rows.sort((a, z) => f.sort === "distance" ? (a.dist||0) - (z.dist||0) : f.sort === "size" ? z.c.power_units - a.c.power_units :
+    f.sort === "recent" ? (z.logs[0]?.at||0) - (a.logs[0]?.at||0) : a.c.legal_name.localeCompare(z.c.legal_name));
+  return rows;
+}
+function screenWorkingList() {
+  const b = DB.batches.find(x => x.id === state.activeBatchId);
+  if (!b) { state.screen = "dashboard"; return screenDashboard(); }
+  const rows = workingRows(b.id), counts = statusCounts(b.id), total = batchMembers(b.id).length;
+  const geo = b.search.geo;
+  const geoLabel = geo.mode === "radius" ? geo.anchor + " · " + geo.radiusMi + " mi radius" : geo.label + " · " + geo.bufferMi + " mi corridor";
+  const selCount = Object.keys(state.selection).filter(d => state.selection[d]).length;
+
+  const filterChip = (key, label, n, cls) =>
+    '<button class="badge ' + (cls || "plain") + '" style="cursor:pointer;height:28px;' + (state.list.status === key ? "outline:2px solid var(--accent);outline-offset:1px" : "opacity:.8") + '" data-act="listStatus" data-s="' + key + '">' + label + ' <b class="mono" style="margin-left:2px">' + n + "</b></button>";
+
+  const head = '<div class="page-head"><div style="min-width:0">' +
+      '<div class="h1">' + esc(b.name) + "</div>" +
+      '<div class="desc row gap-8 center">' + icon(geo.mode === "radius" ? "target" : "route", "") + esc(geoLabel) + ' · snapshot of <b class="mono">' + total + '</b> carriers</div></div>' +
+    '<div class="spacer"></div>' +
+    (b.new_since ? '<button class="btn" data-act="refreshBatch" data-id="' + b.id + '">' + icon("refresh") + " Refresh <span class='badge good' style='height:18px;margin-left:2px'>+" + b.new_since + "</span></button>" : '<button class="btn" data-act="refreshBatch" data-id="' + b.id + '">' + icon("refresh") + " Refresh</button>") +
+    '<button class="btn icon" data-act="batchMenu" data-id="' + b.id + '">' + icon("dots") + "</button></div>";
+
+  const filters = '<div class="card" style="padding:12px 14px;margin-bottom:14px">' +
+    '<div class="row wrap gap-6 between">' +
+      '<div class="row wrap gap-6 center">' +
+        filterChip("all", "All", total, "info") +
+        STATUS_ORDER.map(k => filterChip(k, STATUS[k].label, counts[k], k)).join("") +
+        (counts.dnc ? filterChip("dnc", "Do Not Call", counts.dnc, "dnc") : "") +
+      "</div>" +
+      '<div class="seg"><button class="' + (state.list.view === "list" ? "on" : "") + '" data-act="listView" data-v="list">' + icon("list") + "List</button>" +
+        '<button class="' + (state.list.view === "map" ? "on" : "") + '" data-act="listView" data-v="map">' + icon("mapicon") + "Map</button></div>" +
+    "</div>" +
+    '<div class="row wrap gap-8 mt-12">' +
+      '<span class="input-group" style="max-width:260px">' + icon("search") + '<input class="input" placeholder="Search name, USDOT, city" value="' + esc(state.list.q) + '" data-model="list.q" data-live="listSearch"></span>' +
+      '<select class="select" style="width:auto" data-change="listInsurance"><option value="any"' + sel(state.list.insurance,"any") + '>Any insurance</option><option value="500000"' + sel(state.list.insurance,"500000") + '>$500K+</option><option value="1000000"' + sel(state.list.insurance,"1000000") + '>$1MM+</option></select>' +
+      '<select class="select" style="width:auto" data-change="listSize"><option value="any"' + sel(state.list.size,"any") + '>Any size</option><option value="small"' + sel(state.list.size,"small") + '>1–5</option><option value="mid"' + sel(state.list.size,"mid") + '>6–20</option><option value="large"' + sel(state.list.size,"large") + '>21+</option></select>' +
+      '<div class="spacer" style="flex:1"></div>' +
+      '<select class="select" style="width:auto" data-change="listSort"><option value="name"' + sel(state.list.sort,"name") + '>Sort: Name</option><option value="distance"' + sel(state.list.sort,"distance") + '>Sort: Distance</option><option value="size"' + sel(state.list.sort,"size") + '>Sort: Fleet size</option><option value="recent"' + sel(state.list.sort,"recent") + '>Sort: Recent contact</option></select>' +
+    "</div></div>";
+
+  const body = state.list.view === "map" ? workingMap(b, rows) : workingTable(b, rows);
+  const bulkbar = selCount ? bulkBar(selCount) : "";
+  const inner = '<div class="page wide">' + head + filters + '<div id="wl-body">' + body + "</div>" + bulkbar + "</div>";
+  return appShell(inner, crumb([{ label:"Batches", act:"nav", to:"dashboard" }, { label:b.name }]));
+}
+function workingMap(b, rows) {
+  const pins = rows.map(r => ({ lng:r.c.lng, lat:r.c.lat, dot:r.c.dot, from:b.id, r:5,
+    fill: r.dnc ? "var(--st-dnc)" : statusVar(r.status), title: r.c.legal_name + " — " + (r.dnc ? "Do Not Call" : STATUS[r.status].label) }));
+  return '<div class="map" style="height:560px">' + mapCore(pins, b.search.geo) + mapLegend(false) + "</div>";
+}
+function workingTable(b, rows) {
+  if (!rows.length) return '<div class="card empty">' + icon("filter") + "<div>No carriers match these filters.</div></div>";
+  const allSel = rows.filter(r => !r.dnc).every(r => state.selection[r.c.dot]) && rows.some(r => !r.dnc);
+  const body = rows.map(r => {
+    const c = r.c, last = r.logs[0];
+    const cb = r.dnc ? '<td style="width:34px"></td>'
+      : '<td style="width:34px"><label class="check"><input type="checkbox" ' + (state.selection[c.dot] ? "checked" : "") + ' data-change="selRow" data-dot="' + c.dot + '"><span class="box">' + icon("check") + "</span></label></td>";
+    const statusCell = r.dnc
+      ? '<td>' + badge("dnc") + " " + '<span class="subtle" title="Global — set from another batch">' + icon("lock", "") + "</span></td>"
+      : '<td><select class="select sm" style="width:130px;color:' + statusVar(r.status) + ';font-weight:700" data-change="rowStatus" data-dot="' + c.dot + '" data-batch="' + b.id + '">' +
+          STATUS_ORDER.map(k => '<option value="' + k + '"' + sel(r.status,k) + ">" + STATUS[k].label + "</option>").join("") +
+          '<option value="dnc">Do Not Call…</option></select></td>';
+    return '<tr class="clickable ' + (r.dnc ? "dnc" : "") + (state.selection[c.dot] ? " sel" : "") + '" data-act="openCarrier" data-dot="' + c.dot + '" data-from="' + b.id + '">' +
+      cb +
+      "<td><div class='co'><span class='nm'>" + esc(c.legal_name) + "</span><span class='meta'>USDOT <span class='mono'>" + c.dot + "</span>" + (c.tier === 1 ? " · " + badge2("tier1","S&G") : "") + "</span></div></td>" +
+      "<td><div class='stack'><span>" + esc(c.city) + ", TX</span>" + (r.dist != null ? "<span class='meta subtle mono'>" + r.dist.toFixed(0) + " mi</span>" : "") + "</div></td>" +
+      "<td class='mono'>" + c.power_units + "</td>" +
+      "<td>" + insBadge(c) + "</td>" +
+      "<td>" + safetyDot(c) + "</td>" +
+      statusCell +
+      "<td class='muted' style='font-size:12px'>" + (last ? DISPO_LABEL[last.disposition] + "<br><span class='subtle'>" + fmtRel(last.at) + "</span>" : "—") + "</td>" +
+      "<td class='right'>" +
+        (r.dnc ? "" : '<button class="btn sm" data-act="logCall" data-dot="' + c.dot + '" data-batch="' + b.id + '">' + icon("phone") + "Log</button>") + "</td>" +
+    "</tr>";
+  }).join("");
+  return '<div class="tbl-wrap"><table class="tbl"><thead><tr>' +
+    '<th><label class="check"><input type="checkbox" ' + (allSel ? "checked" : "") + ' data-change="selAll"><span class="box">' + icon("check") + "</span></label></th>" +
+    "<th>Carrier</th><th>Location</th><th>Trucks</th><th>Insurance</th><th>Safety</th><th>Status</th><th>Last contact</th><th></th></tr></thead><tbody>" + body + "</tbody></table></div>";
+}
+function safetyDot(c) {
+  const s = c.safety;
+  const cls = s.concerning ? "crit" : (s.rating === "Satisfactory" ? "good" : "plain");
+  const label = s.concerning ? "Review" : (s.rating === "Satisfactory" ? "Clean" : "—");
+  return '<span class="badge ' + cls + '" title="' + s.crash_total + " crashes · " + s.vehicle_oos_pct + '% OOS">' + label + "</span>";
+}
+function bulkBar(n) {
+  return '<div style="position:fixed;left:calc(var(--sidebar-w) + 24px);right:24px;bottom:20px;background:var(--text);color:var(--bg);border-radius:12px;padding:10px 12px 10px 18px;display:flex;align-items:center;gap:12px;box-shadow:var(--shadow-pop);z-index:30">' +
+    '<b class="mono">' + n + "</b> selected" +
+    '<div class="spacer" style="flex:1"></div>' +
+    '<button class="btn sm" data-act="bulkStatus" data-s="contacted" style="background:transparent;color:var(--bg);border-color:rgba(255,255,255,.25)">Mark contacted</button>' +
+    '<button class="btn sm" data-act="bulkStatus" data-s="interested" style="background:transparent;color:var(--bg);border-color:rgba(255,255,255,.25)">Mark interested</button>' +
+    '<button class="btn primary sm" data-act="genContact">' + icon("send") + " Generate Contact Options</button>" +
+    '<button class="btn icon sm" data-act="clearSel" style="background:transparent;color:var(--bg);border-color:rgba(255,255,255,.25)">' + icon("x") + "</button></div>";
+}
+
+/* ------------------------------- CARRIER PROFILE ------------------------------- */
+function screenProfile() {
+  const c = DB.carrierByDot[state.activeCarrierDot];
+  if (!c) { state.screen = "dashboard"; return screenDashboard(); }
+  const dnc = effDnc(c.dot), fromBatch = state.profileFromBatch ? DB.batches.find(b => b.id === state.profileFromBatch) : null;
+  const onboarded = c.dot in state.overrides.onboarded || DB.batchCarriers.some(b => b.dot === c.dot && b.onboarded_at);
+  const crumbs = fromBatch ? [{ label:"Batches", act:"nav", to:"dashboard" }, { label:fromBatch.name, act:"openBatch", to:fromBatch.id }, { label:c.legal_name }]
+                           : [{ label:"Batches", act:"nav", to:"dashboard" }, { label:c.legal_name }];
+
+  const header = '<div class="card" style="padding:18px 20px;margin-bottom:16px">' +
+    '<div class="row between wrap gap-12" style="align-items:flex-start">' +
+      '<div style="min-width:0"><div class="row gap-10 center wrap">' +
+        '<h1 style="font-size:22px;font-weight:800">' + esc(c.legal_name) + "</h1>" +
+        (c.tier === 1 ? badge2("tier1","Sand & Gravel") : c.tier === 2 ? badge2("tier2","Tier 2") : '<span class="badge plain">No cargo match</span>') +
+        (c.active ? '<span class="badge good"><span class="dot"></span>Active</span>' : '<span class="badge plain">Inactive</span>') +
+        (dnc ? '<span class="badge dnc">' + icon("lock","") + " Do Not Call</span>" : "") +
+      "</div>" +
+      '<div class="row gap-16 mt-8 muted" style="font-size:13px;flex-wrap:wrap">' +
+        "<span>USDOT <b class='mono' style='color:var(--text)'>" + c.dot + "</b></span>" +
+        (c.dba ? "<span>DBA " + esc(c.dba) + "</span>" : "") +
+        "<span>" + icon("pin","") + " " + esc(c.city) + ", TX</span>" +
+        "<span>" + esc(c.classdef) + "</span></div></div>" +
+      '<div class="row gap-8 none">' +
+        (onboarded ? '<span class="badge good" style="height:34px;padding:0 12px">' + icon("check","") + " In onboarding</span>"
+                   : '<button class="btn primary" data-act="sendOnboard" data-dot="' + c.dot + '">' + icon("arrowR") + " Send to Onboarding</button>") +
+      "</div></div>" +
+    '<div class="row between wrap gap-12 mt-16" style="padding-top:14px;border-top:1px solid var(--border)">' +
+      '<label class="switch danger"><input type="checkbox" ' + (dnc ? "checked" : "") + ' data-act="toggleDnc" data-dot="' + c.dot + '"><span class="track"></span>' +
+        '<span><b>Do Not Call</b> <span class="subtle">— global, suppresses this carrier in every batch &amp; channel</span></span></label>' +
+      '<div class="row gap-8">' + contactChip("phone", c.phone) + (c.cell ? contactChip("phone", c.cell + " (cell)") : "") + (c.email ? contactChip("mail", c.email) : '<span class="badge plain">' + icon("mail","") + " no email on file</span>") + "</div>" +
+    "</div></div>";
+
+  const main = '<div class="card" style="padding:0"><div class="tabs" style="padding:0 8px">' +
+    ["overview","insurance","safety","inspections","general"].map(t => '<button class="' + (state.profileTab === t ? "on" : "") + '" data-act="profileTab" data-t="' + t + '">' + ({overview:"Overview",insurance:"Insurance",safety:"Safety",inspections:"Inspections",general:"General"}[t]) + "</button>").join("") +
+    '</div><div style="padding:18px 20px">' + profileTab(c) + "</div></div>";
+
+  const rail = '<div class="stack gap-16">' + callPanel(c, fromBatch, dnc) + batchMembership(c) + "</div>";
+
+  const inner = '<div class="page">' +
+    (fromBatch ? '<a class="link row gap-6 center" style="margin-bottom:12px" data-act="openBatch" data-id="' + fromBatch.id + '">' + icon("chevL") + " Back to " + esc(fromBatch.name) + "</a>" : "") +
+    header +
+    '<div style="display:grid;grid-template-columns:1fr 360px;gap:16px;align-items:start">' + main + rail + "</div></div>";
+  return appShell(inner, crumb(crumbs));
+}
+function contactChip(ic, text) { return '<span class="badge plain" style="height:30px">' + icon(ic,"") + " " + esc(text) + "</span>"; }
+function profileTab(c) {
+  if (state.profileTab === "insurance") {
+    const i = c.ins;
+    return kv([["Authority status", '<span class="badge ' + (i.authority_status==="active"?"good":i.authority_status==="pending"?"warn":"plain") + '">' + i.authority_status + "</span>"],
+      ["Authority type", i.authority_type],
+      ["BIPD on file", '<b class="mono">' + fmtMoney(i.bipd_on_file) + "</b>" + (i.bipd_on_file >= 1000000 ? ' <span class="badge good">meets $1MM</span>' : i.bipd_on_file ? ' <span class="badge warn">below $1MM</span>' : ' <span class="badge crit">none</span>')],
+      ["BIPD required", '<span class="mono">' + fmtMoney(i.bipd_required) + "</span>"],
+      ["Cargo insurance", '<span class="mono">' + fmtMoney(i.cargo_on_file) + "</span>"],
+      ["Effective", '<span class="mono">' + i.effective + "</span>"]]) +
+      '<div class="demo-note mt-16">Insurance &amp; authority come from FMCSA\'s <b>Licensing &amp; Insurance</b> dataset, joined to the census on USDOT #.</div>';
+  }
+  if (state.profileTab === "safety") {
+    const s = c.safety;
+    return '<div class="stat-row" style="margin-bottom:16px">' +
+      stat("Crashes (24mo)", s.crash_total) + stat("Inspections", s.inspections_24mo) +
+      stat("Vehicle OOS", s.vehicle_oos_pct, "%") + stat("Driver OOS", s.driver_oos_pct, "%") + "</div>" +
+      kv([["Safety rating", '<span class="badge ' + (s.rating==="Satisfactory"?"good":s.rating==="Conditional"?"crit":"plain") + '">' + s.rating + "</span>"], ["Rating date", '<span class="mono">' + s.rating_date + "</span>"]]) +
+      (s.concerning ? '<div class="demo-note mt-16" style="border-color:var(--crit);color:var(--crit)">' + icon("alert","") + " Flagged: concerning safety history (excluded when the safety filter is on).</div>"
+                    : '<div class="demo-note mt-16">Public safety signals only — FMCSA removed BASIC percentile scores from public display in 2025.</div>');
+  }
+  if (state.profileTab === "inspections") {
+    if (!c.inspections.length) return '<div class="empty">' + icon("shield") + "<div>No inspection detail on file for this carrier.</div></div>";
+    return '<div class="tbl-wrap"><table class="tbl"><thead><tr><th>Date</th><th>State</th><th>Level</th><th>Result</th><th>Violations</th></tr></thead><tbody>' +
+      c.inspections.map(x => "<tr><td class='mono'>" + x.date + "</td><td>" + x.state + "</td><td>" + x.level + "</td><td>" + (x.result==="Clean"?'<span class="badge good">Clean</span>':'<span class="badge crit">OOS</span>') + "</td><td class='mono'>" + x.violations + "</td></tr>").join("") +
+      "</tbody></table></div>";
+  }
+  if (state.profileTab === "general") {
+    return kv([["Legal name", esc(c.legal_name)], ["DBA", c.dba ? esc(c.dba) : "—"], ["Entity type", c.entity],
+      ["Operation", c.operation], ["Classification", c.classdef], ["Power units", '<span class="mono">' + c.power_units + "</span>"],
+      ["Drivers", '<span class="mono">' + c.drivers + "</span>"], ["MCS-150 date", '<span class="mono">' + c.mcs150 + "</span>"],
+      ["Physical address", esc(c.street + ", " + c.city + ", TX " + c.zip)]]);
+  }
+  // overview
+  const cargo = (c.cargoOther ? '<span class="badge tier1">Other: "' + esc(c.cargoOther) + '"</span> ' : "") + c.cargoFlags.map(f => '<span class="badge plain">' + esc(f) + "</span>").join(" ");
+  return '<div class="stat-row" style="margin-bottom:18px">' +
+      stat("Trucks", c.power_units) + stat("Drivers", c.drivers) + stat("Insurance", fmtMoney(c.ins.bipd_on_file)) + stat("Safety", c.safety.concerning ? "Review" : "OK") + "</div>" +
+    '<div class="eyebrow" style="margin-bottom:8px">Cargo carried</div><div class="row wrap gap-6" style="margin-bottom:18px">' + (cargo || "—") + "</div>" +
+    kv([["Phone", '<span class="mono">' + esc(c.phone) + "</span>"], ["Cell", c.cell ? '<span class="mono">' + esc(c.cell) + "</span>" : "—"],
+      ["Email", c.email ? esc(c.email) : '<span class="subtle">not on file</span>'], ["Address", esc(c.city + ", TX " + c.zip)]]);
+}
+function kv(rows) { return '<dl class="kv">' + rows.map(r => "<dt>" + r[0] + "</dt><dd>" + r[1] + "</dd>").join("") + "</dl>"; }
+function callPanel(c, fromBatch, dnc) {
+  const logs = logsForDot(c.dot);
+  const statusControl = dnc
+    ? '<div class="badge dnc" style="height:32px">' + icon("lock","") + " Do Not Call — calling disabled</div>"
+    : fromBatch
+      ? '<select class="select" data-change="rowStatus" data-dot="' + c.dot + '" data-batch="' + fromBatch.id + '" style="font-weight:700;color:' + statusVar(effStatus(fromBatch.id, c.dot)) + '">' +
+          STATUS_ORDER.map(k => '<option value="' + k + '"' + sel(effStatus(fromBatch.id, c.dot), k) + ">" + STATUS[k].label + "</option>").join("") + '<option value="dnc">Do Not Call…</option></select>'
+      : '<div class="subtle" style="font-size:12px">Open this carrier from a batch to set a working status.</div>';
+  const timeline = logs.length ? logs.map(l => {
+    const u = DB.userById[l.user_id], bt = DB.batches.find(b => b.id === l.batch_id);
+    return '<div class="row gap-10" style="padding:12px 0;border-top:1px solid var(--border)">' + avatar(u, 26) +
+      '<div style="min-width:0;flex:1"><div class="row between center"><span class="badge ' + dispoCls(l.disposition) + '">' + DISPO_LABEL[l.disposition] + "</span>" +
+        '<span class="subtle mono" style="font-size:11px">' + fmtRel(l.at) + "</span></div>" +
+        (l.notes ? '<div style="font-size:12.5px;margin-top:5px">' + esc(l.notes) + "</div>" : "") +
+        (l.next_steps ? '<div class="subtle" style="font-size:11.5px;margin-top:3px">Next: ' + esc(l.next_steps) + "</div>" : "") +
+        '<div class="subtle" style="font-size:11px;margin-top:4px">' + esc(u.name.split(" ")[0]) + (bt ? " · " + esc(bt.name) : "") + "</div></div></div>";
+  }).join("") : '<div class="subtle" style="font-size:12.5px;padding:12px 0">No contact attempts logged yet.</div>';
+
+  return '<div class="card" style="padding:16px">' +
+    '<div class="row between center" style="margin-bottom:12px"><div class="eyebrow">Call workflow</div>' +
+      (fromBatch ? '<span class="subtle" style="font-size:11px">in ' + esc(fromBatch.name) + "</span>" : "") + "</div>" +
+    '<div class="field" style="margin-bottom:12px"><span class="label">Status in this batch</span>' + statusControl + "</div>" +
+    (dnc ? "" : '<button class="btn primary block" data-act="logCall" data-dot="' + c.dot + '"' + (fromBatch ? ' data-batch="' + fromBatch.id + '"' : "") + ">" + icon("phone") + " Log a call</button>") +
+    '<div class="eyebrow" style="margin:18px 0 2px">Contact history <span class="subtle">· all batches</span></div>' + timeline + "</div>";
+}
+function dispoCls(d) { return ["connected","interested"].includes(d) ? "good" : ["no_answer","wrong_number","not_interested"].includes(d) ? "plain" : "warn"; }
+function batchMembership(c) {
+  const mems = DB.batchCarriers.filter(b => b.dot === c.dot);
+  if (!mems.length) return "";
+  return '<div class="card" style="padding:16px"><div class="eyebrow" style="margin-bottom:10px">In these batches <span class="subtle">· ' + mems.length + "</span></div>" +
+    mems.map(m => { const b = DB.batches.find(x => x.id === m.batch_id); const st = effStatus(b.id, c.dot);
+      return '<button class="mem-row row between center" data-act="openBatchCarrier" data-batch="' + b.id + '" data-dot="' + c.dot + '">' +
+        '<span style="font-size:13px;font-weight:600;text-align:left">' + esc(b.name) + "</span>" + (effDnc(c.dot) ? badge("dnc") : badge(st)) + "</button>";
+    }).join("") +
+    '<div class="subtle" style="font-size:11px;margin-top:8px;padding-top:8px;border-top:1px solid var(--border)">Status is tracked <b>per batch</b> — this carrier can be "Interested" in one and "New" in another.</div></div>';
+}
+
+/* ------------------------------- USERS ADMIN ------------------------------- */
+function userRow(u) {
+  const ov = state.overrides.userStatus[u.id];
+  const status = ov ? ov.status : u.status, role = ov ? ov.role : u.role;
+  return { u, status, role };
+}
+function screenUsers() {
+  if (cur().role !== "manager") { state.screen = "dashboard"; return screenDashboard(); }
+  const all = DB.users.map(userRow);
+  const pending = all.filter(r => r.status === "pending");
+  const active = all.filter(r => r.status !== "pending");
+  const inner = '<div class="page">' +
+    '<div class="page-head"><div><div class="h1">Users &amp; Access</div><div class="desc">Approve new accounts and set roles. Guests can only see a landing page until you provision them.</div></div></div>' +
+    (pending.length ? '<div class="card" style="padding:16px;margin-bottom:18px;border-color:var(--warn)">' +
+      '<div class="row gap-8 center" style="margin-bottom:12px">' + icon("clock","") + '<b>Pending approval</b><span class="badge warn">' + pending.length + "</span></div>" +
+      pending.map(r => '<div class="row between center wrap gap-10" style="padding:10px 0;border-top:1px solid var(--border)">' +
+        '<div class="row gap-10 center">' + avatar(r.u) + "<div><div style='font-weight:700'>" + esc(r.u.name) + "</div><div class='subtle' style='font-size:12px'>" + esc(r.u.email) + " · registered " + fmtRel(r.u.registered) + "</div></div></div>" +
+        '<div class="row gap-8"><button class="btn sm" data-act="rejectUser" data-uid="' + r.u.id + '">Reject</button>' +
+          '<button class="btn primary sm" data-act="approveUser" data-uid="' + r.u.id + '">' + icon("usercheck") + " Approve</button></div></div>").join("") +
+      "</div>" : "") +
+    '<div class="tbl-wrap"><table class="tbl"><thead><tr><th>User</th><th>Email</th><th>Role</th><th>Status</th><th></th></tr></thead><tbody>' +
+      active.map(r => "<tr><td><div class='row gap-10 center'>" + avatar(r.u, 28) + "<span class='nm' style='font-weight:700'>" + esc(r.u.name) + "</span></div></td>" +
+        "<td class='muted'>" + esc(r.u.email) + "</td>" +
+        "<td>" + (r.u.id === "u_manager" ? '<span class="badge tier1">Manager</span>' : '<select class="select sm" style="width:110px" data-change="setRole" data-uid="' + r.u.id + '"><option value="edit"' + sel(r.role,"edit") + ">Editor</option><option value=\"view\"" + sel(r.role,"view") + ">Viewer</option><option value=\"manager\"" + sel(r.role,"manager") + ">Manager</option></select>") + "</td>" +
+        "<td>" + (r.status === "suspended" ? '<span class="badge crit">Suspended</span>' : '<span class="badge good"><span class="dot"></span>Approved</span>') + "</td>" +
+        "<td class='right'>" + (r.u.id === "u_manager" ? '<span class="subtle" style="font-size:12px">you</span>' : '<button class="btn sm danger" data-act="suspendUser" data-uid="' + r.u.id + '">' + (r.status === "suspended" ? "Restore" : "Suspend") + "</button>") + "</td></tr>").join("") +
+    "</tbody></table></div></div>";
+  return appShell(inner, crumb([{ label:"Users" }]));
+}
+
+/* ------------------------------- MENUS ------------------------------- */
+const MENUS = {
+  userMenu: () => { const u = cur(); return '<div style="padding:8px 10px"><div style="font-weight:700">' + esc(u.name) + '</div><div class="subtle" style="font-size:12px">' + esc(u.email) + " · " + ROLE_LABEL[u.role] + "</div></div><div class='sep'></div>" +
+    '<button data-act="toggleTheme">' + icon("moon") + ' Toggle theme</button><button data-act="logout">' + icon("logout") + " Sign out</button>"; },
+  batchMenu: (m) => '<button data-act="renameBatch" data-id="' + m.id + '">' + icon("edit") + ' Rename</button>' +
+    '<button data-act="refreshBatch" data-id="' + m.id + '">' + icon("refresh") + " Refresh members</button><div class='sep'></div>" +
+    '<button class="danger" data-act="deleteBatch" data-id="' + m.id + '">' + icon("trash") + " Delete batch</button>"
+};
+
+/* ------------------------------- MODALS ------------------------------- */
+const MODALS = {
+  dnc: (m) => modalWrap("Set Do Not Call?", "lock",
+    "<p>This flags <b>" + esc(DB.carrierByDot[m.dot].legal_name) + "</b> as <b>Do Not Call</b>. It's a <b>global</b> suppression — the carrier will be locked in <b>every batch</b> and across all future channels (call, email, text, mail).</p>",
+    '<button class="btn" data-act="closeModal">Cancel</button><button class="btn danger" data-act="confirmDnc" data-dot="' + m.dot + '">' + icon("lock") + " Set Do Not Call</button>"),
+  undnc: (m) => modalWrap("Clear Do Not Call?", "check",
+    "<p>Re-enable contact for <b>" + esc(DB.carrierByDot[m.dot].legal_name) + "</b> across all batches?</p>",
+    '<button class="btn" data-act="closeModal">Cancel</button><button class="btn primary" data-act="confirmUndnc" data-dot="' + m.dot + '">Clear flag</button>'),
+  onboard: (m) => modalWrap("Send to Onboarding?", "arrowR",
+    "<p>This hands <b>" + esc(DB.carrierByDot[m.dot].legal_name) + "</b> (USDOT <span class='mono'>" + m.dot + "</span>) to the carrier onboarding tool. Only the USDOT # is passed — onboarding re-imports the FMCSA data automatically.</p>",
+    '<button class="btn" data-act="closeModal">Cancel</button><button class="btn primary" data-act="confirmOnboard" data-dot="' + m.dot + '">' + icon("arrowR") + " Send USDOT " + m.dot + "</button>"),
+  rename: (m) => modalWrap("Rename batch", "edit",
+    '<label class="field"><span class="label">Batch name</span><input class="input" id="rename-input" value="' + esc(DB.batches.find(b => b.id === m.id).name) + '"></label>',
+    '<button class="btn" data-act="closeModal">Cancel</button><button class="btn primary" data-act="confirmRename" data-id="' + m.id + '">Save</button>'),
+  del: (m) => modalWrap("Delete batch?", "trash",
+    "<p>Delete <b>" + esc(DB.batches.find(b => b.id === m.id).name) + "</b> and its working statuses? The carriers stay in your database and other batches. This can't be undone.</p>",
+    '<button class="btn" data-act="closeModal">Cancel</button><button class="btn danger" data-act="confirmDelete" data-id="' + m.id + '">Delete batch</button>'),
+  refresh: (m) => modalWrap("Batch refreshed", "refresh",
+    "<p>Re-ran the saved search. <b>" + m.added + " new</b> carrier" + (m.added === 1 ? "" : "s") + " matched since the snapshot and " + (m.added ? "were added" : "nothing changed") + ". Existing members and their statuses were kept.</p>",
+    '<button class="btn primary" data-act="closeModal">Done</button>'),
+  log: (m) => {
+    const c = DB.carrierByDot[m.dot];
+    return modalWrap("Log a call — " + esc(c.legal_name), "phone",
+      '<form data-submit="submitLog" id="logform"><input type="hidden" data-dot="' + m.dot + '"' + (m.batch ? ' data-batch="' + m.batch + '"' : "") + '>' +
+      '<div class="row gap-16 mt-4" style="margin-bottom:12px"><span class="badge plain" style="height:30px">' + icon("phone","") + " " + esc(c.phone) + "</span>" + (c.cell ? '<span class="badge plain" style="height:30px">' + esc(c.cell) + " (cell)</span>" : "") + "</div>" +
+      '<div class="stack gap-12">' +
+        fieldRow("Outcome", '<select class="select" id="log-dispo">' + ["connected","no_answer","voicemail","callback","interested","not_interested","wrong_number"].map(d => '<option value="' + d + '">' + DISPO_LABEL[d] + "</option>").join("") + "</select>") +
+        fieldRow("Notes", '<textarea class="textarea" id="log-notes" placeholder="What was said…"></textarea>') +
+        fieldRow("Next steps", '<input class="input" id="log-next" placeholder="e.g. Send rate sheet, call back Thu">') +
+        (m.batch ? fieldRow("Update status in this batch to", '<select class="select" id="log-status"><option value="">— leave unchanged —</option>' + STATUS_ORDER.map(k => '<option value="' + k + '">' + STATUS[k].label + "</option>").join("") + "</select>") : "") +
+      "</div></form>",
+      '<button class="btn" data-act="closeModal">Cancel</button><button class="btn primary" data-act="submitLogBtn">' + icon("check") + " Save call</button>");
+  },
+  contact: (m) => {
+    const dots = m.dots, rows = dots.map(d => DB.carrierByDot[d]);
+    const withPhone = rows.filter(r => r.phone).length, withEmail = rows.filter(r => r.email).length;
+    return modalWrapLg("Generate Contact Options", "send",
+      '<div class="row gap-10 wrap" style="margin-bottom:14px">' +
+        '<span class="badge info" style="height:28px"><b class="mono">' + rows.length + "</b>&nbsp;carriers</span>" +
+        '<span class="badge good" style="height:28px">' + icon("phone","") + " " + withPhone + " with phone</span>" +
+        '<span class="badge ' + (withEmail ? "warn" : "plain") + '" style="height:28px">' + icon("mail","") + " " + withEmail + " with email</span></div>" +
+      '<div class="tbl-wrap" style="max-height:280px;overflow-y:auto"><table class="tbl"><thead><tr><th>Carrier</th><th>Phone</th><th>Cell</th><th>City</th></tr></thead><tbody>' +
+        rows.map(r => "<tr><td class='nm' style='font-weight:600'>" + esc(r.legal_name) + "</td><td class='mono'>" + esc(r.phone) + "</td><td class='mono muted'>" + (r.cell ? esc(r.cell) : "—") + "</td><td>" + esc(r.city) + "</td></tr>").join("") +
+        "</tbody></table></div>" +
+      '<div class="row wrap gap-8 mt-16"><button class="btn" data-act="toast" data-msg="Call sheet ready — ' + rows.length + ' carriers" data-ic="printer">' + icon("printer") + ' Print call sheet</button>' +
+        '<button class="btn" data-act="toast" data-msg="Exported ' + rows.length + ' rows to CSV" data-ic="download">' + icon("download") + ' Export CSV</button>' +
+        '<button class="btn" data-act="toast" data-msg="Copied ' + rows.length + ' USDOT numbers" data-ic="check">' + icon("check") + ' Copy USDOT list</button></div>' +
+      '<div class="demo-note mt-16">Email &amp; text blasts arrive in later phases — this Phase-1 step produces the <b>call sheet</b> your team works from. Do-Not-Call carriers are automatically excluded.</div>',
+      '<button class="btn primary" data-act="closeModal">Done</button>');
+  },
+  approve: (m) => {
+    const u = DB.userById[m.uid];
+    return modalWrap("Approve " + esc(u.name), "usercheck",
+      "<p>Give <b>" + esc(u.name) + "</b> access and assign a role:</p>" +
+      '<div class="stack gap-8 mt-12"><label class="check" style="padding:10px;border:1px solid var(--border);border-radius:8px"><input type="radio" name="approle" value="edit" checked><span class="box">' + icon("check") + '</span><span><b>Editor</b> — search, work the list, log calls, change statuses</span></label>' +
+      '<label class="check" style="padding:10px;border:1px solid var(--border);border-radius:8px"><input type="radio" name="approle" value="view"><span class="box">' + icon("check") + '</span><span><b>Viewer</b> — read-only access to batches and carriers</span></label></div>',
+      '<button class="btn" data-act="closeModal">Cancel</button><button class="btn primary" data-act="confirmApprove" data-uid="' + m.uid + '">Approve &amp; provision</button>');
+  }
+};
+function modalWrap(title, ic, body, foot) {
+  return '<div class="scrim" data-act="closeModal"><div class="modal"><div class="modal-head">' + icon(ic) + '<span class="t">' + esc(title) + '</span></div><div class="modal-body">' + body + '</div><div class="modal-foot">' + foot + "</div></div></div>";
+}
+function modalWrapLg(title, ic, body, foot) {
+  return '<div class="scrim" data-act="closeModal"><div class="modal lg"><div class="modal-head">' + icon(ic) + '<span class="t">' + esc(title) + '</span></div><div class="modal-body">' + body + '</div><div class="modal-foot">' + foot + "</div></div></div>";
+}
+
+/* ------------------------------- SCREENS map ------------------------------- */
+const SCREENS = {
+  login: screenLogin, register: screenRegister, forgot: screenForgot, guest: screenGuest,
+  dashboard: screenDashboard, builder: screenBuilder, workingList: screenWorkingList,
+  profile: screenProfile, users: screenUsers
+};
+/* ============================================================================
+   main.js — remaining action handlers, live-patch helpers, and boot.
+   ============================================================================ */
+
+let newBatchSeq = 1;
+
+/* ---- targeted patches (avoid full re-render mid text/slider input) ---- */
+function patchBuilder() {
+  const b = state.builder, s = builderSearch(b), matches = searchMatches(s), mset = new Set(matches);
+  const map = document.getElementById("b-map");
+  if (map) map.innerHTML = mapCore(builderPins(s, mset), s.geo) + mapCount(matches.length) + mapLegend(true);
+  const prev = document.getElementById("b-preview");
+  if (prev) prev.innerHTML = builderPreview(matches);
+  const fc = document.getElementById("b-foot-count");
+  if (fc) fc.textContent = matches.length;
+}
+function patchList() {
+  const b = DB.batches.find(x => x.id === state.activeBatchId);
+  const el = document.getElementById("wl-body");
+  if (el && b) el.innerHTML = state.list.view === "map" ? workingMap(b, workingRows(b.id)) : workingTable(b, workingRows(b.id));
+}
+
+/* ---- auth ---- */
+ACT.gotoAuth = (d) => { state.screen = d.view; render(); };
+ACT.signIn = () => { state.session = { userId: "u_manager", remember: true }; state.screen = "dashboard"; render(); };
+ACT.demoLogin = (d) => {
+  const u = DB.userById[d.uid]; state.session = { userId: u.id, remember: true };
+  const eff = (state.overrides.userStatus[u.id] && state.overrides.userStatus[u.id].status) || u.status;
+  state.screen = (u.role === "guest" && eff !== "approved") ? "guest" : "dashboard"; render();
+};
+ACT.doRegister = () => { state.session = { userId: "u_guest1", remember: true }; state.screen = "guest"; render(); };
+ACT.doForgot = () => { state.screen = "login"; toast("Password reset link sent", "mail"); };
+ACT.logout = () => { state.session = null; state.menu = null; state.screen = "login"; render(); };
+
+/* ---- batches ---- */
+ACT.newBatch = () => { state.builder = newBuilder(); state.screen = "builder"; render(); };
+ACT.openBatch = (d) => {
+  state.activeBatchId = d.id || d.to; state.selection = {};
+  state.list = { status: "all", q: "", view: "list", insurance: "any", size: "any", sort: "name" };
+  state.screen = "workingList"; state.menu = null; render();
+};
+ACT.batchMenu = (d, e, t) => {
+  const r = t.getBoundingClientRect();
+  openMenu({ type: "batchMenu", id: d.id, x: Math.max(10, Math.min(r.right - 190, window.innerWidth - 200)), y: r.bottom + 6 });
+};
+ACT.renameBatch = (d) => openModal({ type: "rename", id: d.id });
+ACT.confirmRename = (d) => { const v = document.getElementById("rename-input").value.trim(); const b = DB.batches.find(x => x.id === d.id); if (b && v) b.name = v; closeModal(); toast("Batch renamed"); };
+ACT.deleteBatch = (d) => openModal({ type: "del", id: d.id });
+ACT.confirmDelete = (d) => {
+  const i = DB.batches.findIndex(x => x.id === d.id); if (i >= 0) DB.batches.splice(i, 1);
+  for (let k = DB.batchCarriers.length - 1; k >= 0; k--) if (DB.batchCarriers[k].batch_id === d.id) DB.batchCarriers.splice(k, 1);
+  state.screen = "dashboard"; closeModal(); toast("Batch deleted");
+};
+ACT.refreshBatch = (d) => {
+  const b = DB.batches.find(x => x.id === d.id); if (!b) return;
+  const have = new Set(batchMembers(b.id).map(m => m.dot));
+  const fresh = searchMatches(b.search).filter(c => !have.has(c.dot)).slice(0, b.new_since || 0);
+  fresh.forEach(c => DB.batchCarriers.push({ id: "bc_" + (bcSeq++), batch_id: b.id, dot: c.dot, status: "new", status_by: null, status_at: NOW_MS, added_at: NOW_MS, via_refresh: true, onboarded_at: null }));
+  b.new_since = 0; b.last_refreshed = NOW_MS; state.menu = null;
+  openModal({ type: "refresh", added: fresh.length });
+};
+ACT.grabBatch = () => {
+  const b = state.builder, s = builderSearch(b), matches = searchMatches(s);
+  const name = (b.name || "").trim() || (b.geoMode === "radius" ? b.anchorCity + " Aggregates" : PRESET_ROUTES[b.routeKey].label);
+  const id = "b_u" + (newBatchSeq++);
+  DB.batches.push({ id, name, desc: "Created just now.", created_by: state.session.userId, snapshot_at: NOW_MS, last_refreshed: NOW_MS, search: s, snapshot_count: matches.length, new_since: 0 });
+  matches.forEach(c => DB.batchCarriers.push({ id: "bc_" + (bcSeq++), batch_id: id, dot: c.dot, status: "new", status_by: null, status_at: NOW_MS, added_at: NOW_MS, via_refresh: false, onboarded_at: null }));
+  state.activeBatchId = id; state.selection = {};
+  state.list = { status: "all", q: "", view: "list", insurance: "any", size: "any", sort: "name" };
+  state.screen = "workingList"; toast('Grabbed ' + matches.length + ' carriers into "' + name + '"', "layers");
+};
+
+/* ---- builder controls ---- */
+ACT.bMode = (d) => { state.builder.geoMode = d.m; render(); };
+ACT.bAnchorType = (d) => { state.builder.anchorType = d.t; render(); };
+ACT.bAnchorCity = (d) => { const c = cityOf(d.value); state.builder.anchorCity = c.name; state.builder.anchorLng = c.lng; state.builder.anchorLat = c.lat; patchBuilder(); };
+ACT.bRoute = (d) => { state.builder.routeKey = d.value; patchBuilder(); };
+ACT.bRadius = (d) => { state.builder.radiusMi = +d.value; patchBuilder(); };
+ACT.bBuffer = (d) => { state.builder.bufferMi = +d.value; patchBuilder(); };
+ACT.bWideNet = (d) => { state.builder.wideNet = d.value; patchBuilder(); };
+ACT.bAddTerm = (d) => { const v = (d.v || "").trim(); if (v) state.builder.matchTerms.push(v); state.focus = "#b-term-input"; render(); };
+ACT.bRmTerm = (d) => { state.builder.matchTerms.splice(+d.i, 1); render(); };
+ACT.bSize = (d) => { state.builder.size = d.value; patchBuilder(); };
+ACT.bInsurance = (d) => { state.builder.insuranceMin = +d.value; render(); };
+ACT.bKeepBelow = (d) => { state.builder.keepBelow = d.value; patchBuilder(); };
+ACT.bForHire = (d) => { state.builder.forHire = d.value; patchBuilder(); };
+ACT.bActive = (d) => { state.builder.activeOnly = d.value; patchBuilder(); };
+ACT.bAuth = (d) => { state.builder.authorizedOnly = d.value; patchBuilder(); };
+ACT.bInterstate = (d) => { state.builder.interstateOnly = d.value; patchBuilder(); };
+ACT.bSafety = (d) => { state.builder.excludeSafety = d.value; patchBuilder(); };
+
+/* ---- working list ---- */
+ACT.listStatus = (d) => { state.list.status = d.s; render(); };
+ACT.listView = (d) => { state.list.view = d.v; render(); };
+ACT.listSearch = (d) => { state.list.q = d.value; patchList(); };
+ACT.listInsurance = (d) => { state.list.insurance = d.value; render(); };
+ACT.listSize = (d) => { state.list.size = d.value; render(); };
+ACT.listSort = (d) => { state.list.sort = d.value; render(); };
+ACT.selRow = (d) => { state.selection[d.dot] = d.value; render(); };
+ACT.selAll = (d) => {
+  const b = DB.batches.find(x => x.id === state.activeBatchId);
+  workingRows(b.id).filter(r => !r.dnc).forEach(r => state.selection[r.c.dot] = d.value);
+  render();
+};
+ACT.clearSel = () => { state.selection = {}; render(); };
+ACT.bulkStatus = (d) => {
+  const dots = Object.keys(state.selection).filter(k => state.selection[k]);
+  dots.forEach(dot => { if (!effDnc(dot)) state.overrides.status[state.activeBatchId + ":" + dot] = d.s; });
+  state.selection = {}; toast(dots.length + " carriers → " + STATUS[d.s].label);
+};
+ACT.genContact = () => {
+  const dots = Object.keys(state.selection).filter(k => state.selection[k] && !effDnc(k));
+  if (!dots.length) { toast("No contactable carriers selected", "alert"); return; }
+  openModal({ type: "contact", dots });
+};
+ACT.rowStatus = (d) => {
+  if (d.value === "dnc") { openModal({ type: "dnc", dot: d.dot }); return; }
+  state.overrides.status[d.batch + ":" + d.dot] = d.value; toast('Status → ' + STATUS[d.value].label);
+};
+
+/* ---- carrier profile ---- */
+ACT.openCarrier = (d) => { state.activeCarrierDot = +d.dot; state.profileFromBatch = d.from || null; state.profileTab = "overview"; state.screen = "profile"; state.menu = null; render(); };
+ACT.openBatchCarrier = (d) => { state.profileFromBatch = d.batch; state.activeCarrierDot = +d.dot; state.profileTab = "overview"; state.screen = "profile"; render(); };
+ACT.profileTab = (d) => { state.profileTab = d.t; render(); };
+ACT.toggleDnc = (d) => { if (effDnc(d.dot)) openModal({ type: "undnc", dot: d.dot }); else openModal({ type: "dnc", dot: d.dot }); };
+ACT.confirmDnc = (d) => { state.overrides.dnc[d.dot] = true; closeModal(); toast("Do Not Call set — suppressed in every batch", "lock"); };
+ACT.confirmUndnc = (d) => { state.overrides.dnc[d.dot] = false; closeModal(); toast("Do Not Call cleared"); };
+ACT.sendOnboard = (d) => openModal({ type: "onboard", dot: d.dot });
+ACT.confirmOnboard = (d) => { state.overrides.onboarded[d.dot] = NOW_MS; closeModal(); toast("Sent USDOT " + d.dot + " to onboarding", "arrowR"); };
+ACT.logCall = (d) => openModal({ type: "log", dot: d.dot, batch: d.batch || null });
+function saveLog() {
+  const m = state.modal, dispo = val("log-dispo"), notes = val("log-notes"), next = val("log-next");
+  const statusEl = document.getElementById("log-status");
+  state.overrides.logs.push({ id: "cl_" + (clSeq++), dot: +m.dot, batch_id: m.batch || null, user_id: state.session.userId, at: NOW_MS, disposition: dispo, notes, next_steps: next, callback_at: dispo === "callback" ? NOW_MS + DAY : null });
+  if (m.batch && statusEl && statusEl.value) state.overrides.status[m.batch + ":" + m.dot] = statusEl.value;
+  closeModal(); toast("Call logged", "phone");
+}
+ACT.submitLog = () => saveLog();
+ACT.submitLogBtn = () => saveLog();
+function val(id) { const el = document.getElementById(id); return el ? el.value : ""; }
+
+/* ---- users admin ---- */
+ACT.approveUser = (d) => openModal({ type: "approve", uid: d.uid });
+ACT.confirmApprove = (d) => {
+  const r = document.querySelector('input[name=approle]:checked');
+  const role = r ? r.value : "edit";
+  state.overrides.userStatus[d.uid] = { status: "approved", role };
+  closeModal(); toast(DB.userById[d.uid].name.split(" ")[0] + " approved as " + ROLE_LABEL[role], "usercheck");
+};
+ACT.rejectUser = (d) => { state.overrides.userStatus[d.uid] = { status: "suspended", role: "guest" }; toast("Account rejected"); };
+ACT.setRole = (d) => {
+  const u = DB.userById[d.uid], cur = state.overrides.userStatus[d.uid];
+  const status = cur ? cur.status : u.status;
+  state.overrides.userStatus[d.uid] = { status: status === "pending" ? "approved" : status, role: d.value };
+  toast("Role updated to " + ROLE_LABEL[d.value]);
+};
+ACT.suspendUser = (d) => {
+  const u = DB.userById[d.uid], cur = state.overrides.userStatus[d.uid];
+  const status = cur ? cur.status : u.status, role = cur ? cur.role : u.role;
+  state.overrides.userStatus[d.uid] = { status: status === "suspended" ? "approved" : "suspended", role };
+  render();
+};
+
+/* ---- generic ---- */
+ACT.toast = (d) => toast(d.msg, d.ic);
+ACT.userMenu = (d, e, t) => { const r = t.getBoundingClientRect(); openMenu({ type: "userMenu", x: r.left, y: Math.max(10, r.top - 112) }); };
+
+/* ---- boot ---- */
+window.ACT = ACT;
+mount();
+render();
+</script>
