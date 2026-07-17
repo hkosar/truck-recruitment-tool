@@ -1,0 +1,214 @@
+/* ============================================================================
+   Design tokens — Twisted Nail Carrier Recruiter (production brand system)
+   docs/build-plan/02-frontend-spec.md §1.5.
+
+   Neutrals go TRUE MONOCHROME here (v1 mockup's warm "concrete" bias is
+   dropped per the brand direction). Accent + pipeline-status + semantic
+   hexes are carried over VERBATIM from mockup/src/styles.css so the v1
+   feedback (F15/G5 warning system, status colors) stays valid unchanged.
+
+   Mechanism mirrors the mockup exactly: `:root` light defaults, an
+   `@media (prefers-color-scheme: dark)` fallback for users who never set an
+   explicit preference, then `:root[data-theme="light|dark"]` explicit
+   overrides that win in both directions once ThemeProvider stamps the
+   attribute (see theme/ThemeProvider.tsx + index.html's bootstrap script).
+   ============================================================================ */
+
+:root {
+  /* neutrals — monochrome */
+  --bg: #f4f4f4;
+  --surface: #ffffff;
+  --surface-2: #fafafa;
+  --surface-sunk: #ececec;
+  --border: #e2e2e2;
+  --border-strong: #c7c7c7;
+  --text: #141414;
+  --text-muted: #595959;
+  --text-subtle: #8c8c8c;
+
+  /* accent — hi-vis orange (interaction only, never chrome; §1.5 rule) */
+  --accent: #e8611d;
+  --accent-hover: #cf5314;
+  --accent-press: #b8480f;
+  --accent-ink: #ffffff;
+  --accent-tint: #fbe7d8;
+  --accent-tint-2: #f6d3ba;
+  --accent-ring: rgba(232, 97, 29, 0.38);
+
+  /* pipeline status (batch_carrier_status + dnc) */
+  --st-new: #64748b;
+  --st-new-tint: #e7eaef;
+  --st-attempted: #b07d10;
+  --st-attempted-tint: #f6eccf;
+  --st-contacted: #2f6fed;
+  --st-contacted-tint: #dfe8fd;
+  --st-interested: #157f43;
+  --st-interested-tint: #d6efdf;
+  --st-notfit: #8a8f98;
+  --st-notfit-tint: #e8e8e6;
+  --st-dnc: #d0342c;
+  --st-dnc-tint: #f8dcd9;
+
+  /* semantic + warning row wash (F15) */
+  --good: #157f43;
+  --warn: #b07d10;
+  --crit: #d0342c;
+  --info: #2f6fed;
+  --good-tint: #d6efdf;
+  --warn-tint: #f6eccf;
+  --crit-tint: #f8dcd9;
+  --info-tint: #dfe8fd;
+  --row-warning: #fdf3f2;
+
+  /* layout (mockup carry-forward; used by AppShell/Sidebar/Topbar) */
+  --sidebar-w: 236px;
+  --topbar-h: 56px;
+  --shadow-1: 0 1px 2px rgba(24, 26, 29, 0.06), 0 1px 1px rgba(24, 26, 29, 0.04);
+  --shadow-2: 0 4px 14px rgba(24, 26, 29, 0.1), 0 2px 4px rgba(24, 26, 29, 0.06);
+  --shadow-pop: 0 12px 34px rgba(24, 26, 29, 0.2), 0 4px 10px rgba(24, 26, 29, 0.12);
+}
+
+@media (prefers-color-scheme: dark) {
+  :root {
+    --bg: #0f0f10;
+    --surface: #17181a;
+    --surface-2: #1e2022;
+    --surface-sunk: #0a0a0b;
+    --border: #2a2c2f;
+    --border-strong: #3d4045;
+    --text: #ececec;
+    --text-muted: #a6a6a9;
+    --text-subtle: #737377;
+
+    --accent: #f26f2b;
+    --accent-hover: #f9813f;
+    --accent-press: #d95e1c;
+    --accent-ink: #1a0f07;
+    --accent-tint: #2c1a0f;
+    --accent-tint-2: #3d2413;
+    --accent-ring: rgba(242, 111, 43, 0.45);
+
+    --st-new: #93a0b2;
+    --st-new-tint: #232b34;
+    --st-attempted: #d6a53a;
+    --st-attempted-tint: #33290f;
+    --st-contacted: #6fa1ff;
+    --st-contacted-tint: #152439;
+    --st-interested: #48bd77;
+    --st-interested-tint: #122a1c;
+    --st-notfit: #828a94;
+    --st-notfit-tint: #242a30;
+    --st-dnc: #f2685f;
+    --st-dnc-tint: #361715;
+
+    --good: #48bd77;
+    --warn: #d6a53a;
+    --crit: #f2685f;
+    --info: #6fa1ff;
+    --good-tint: #122a1c;
+    --warn-tint: #33290f;
+    --crit-tint: #361715;
+    --info-tint: #152439;
+    --row-warning: #2a1614;
+
+    --shadow-1: 0 1px 2px rgba(0, 0, 0, 0.4);
+    --shadow-2: 0 6px 18px rgba(0, 0, 0, 0.5);
+    --shadow-pop: 0 16px 40px rgba(0, 0, 0, 0.6);
+  }
+}
+
+/* Explicit theme (ThemeProvider / index.html bootstrap) wins over the media
+   query in both directions. */
+:root[data-theme='light'] {
+  --bg: #f4f4f4;
+  --surface: #ffffff;
+  --surface-2: #fafafa;
+  --surface-sunk: #ececec;
+  --border: #e2e2e2;
+  --border-strong: #c7c7c7;
+  --text: #141414;
+  --text-muted: #595959;
+  --text-subtle: #8c8c8c;
+
+  --accent: #e8611d;
+  --accent-hover: #cf5314;
+  --accent-press: #b8480f;
+  --accent-ink: #ffffff;
+  --accent-tint: #fbe7d8;
+  --accent-tint-2: #f6d3ba;
+  --accent-ring: rgba(232, 97, 29, 0.38);
+
+  --st-new: #64748b;
+  --st-new-tint: #e7eaef;
+  --st-attempted: #b07d10;
+  --st-attempted-tint: #f6eccf;
+  --st-contacted: #2f6fed;
+  --st-contacted-tint: #dfe8fd;
+  --st-interested: #157f43;
+  --st-interested-tint: #d6efdf;
+  --st-notfit: #8a8f98;
+  --st-notfit-tint: #e8e8e6;
+  --st-dnc: #d0342c;
+  --st-dnc-tint: #f8dcd9;
+
+  --good: #157f43;
+  --warn: #b07d10;
+  --crit: #d0342c;
+  --info: #2f6fed;
+  --good-tint: #d6efdf;
+  --warn-tint: #f6eccf;
+  --crit-tint: #f8dcd9;
+  --info-tint: #dfe8fd;
+  --row-warning: #fdf3f2;
+
+  --shadow-1: 0 1px 2px rgba(24, 26, 29, 0.06), 0 1px 1px rgba(24, 26, 29, 0.04);
+  --shadow-2: 0 4px 14px rgba(24, 26, 29, 0.1), 0 2px 4px rgba(24, 26, 29, 0.06);
+  --shadow-pop: 0 12px 34px rgba(24, 26, 29, 0.2), 0 4px 10px rgba(24, 26, 29, 0.12);
+}
+
+:root[data-theme='dark'] {
+  --bg: #0f0f10;
+  --surface: #17181a;
+  --surface-2: #1e2022;
+  --surface-sunk: #0a0a0b;
+  --border: #2a2c2f;
+  --border-strong: #3d4045;
+  --text: #ececec;
+  --text-muted: #a6a6a9;
+  --text-subtle: #737377;
+
+  --accent: #f26f2b;
+  --accent-hover: #f9813f;
+  --accent-press: #d95e1c;
+  --accent-ink: #1a0f07;
+  --accent-tint: #2c1a0f;
+  --accent-tint-2: #3d2413;
+  --accent-ring: rgba(242, 111, 43, 0.45);
+
+  --st-new: #93a0b2;
+  --st-new-tint: #232b34;
+  --st-attempted: #d6a53a;
+  --st-attempted-tint: #33290f;
+  --st-contacted: #6fa1ff;
+  --st-contacted-tint: #152439;
+  --st-interested: #48bd77;
+  --st-interested-tint: #122a1c;
+  --st-notfit: #828a94;
+  --st-notfit-tint: #242a30;
+  --st-dnc: #f2685f;
+  --st-dnc-tint: #361715;
+
+  --good: #48bd77;
+  --warn: #d6a53a;
+  --crit: #f2685f;
+  --info: #6fa1ff;
+  --good-tint: #122a1c;
+  --warn-tint: #33290f;
+  --crit-tint: #361715;
+  --info-tint: #152439;
+  --row-warning: #2a1614;
+
+  --shadow-1: 0 1px 2px rgba(0, 0, 0, 0.4);
+  --shadow-2: 0 6px 18px rgba(0, 0, 0, 0.5);
+  --shadow-pop: 0 16px 40px rgba(0, 0, 0, 0.6);
+}

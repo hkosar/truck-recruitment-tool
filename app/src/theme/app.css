@@ -1,0 +1,99 @@
+/* Tailwind v4 entry point — CSS-first `@theme`, no tailwind.config.js.
+   docs/build-plan/02-frontend-spec.md §1.5 "Tailwind wiring". */
+@import 'tailwindcss';
+@import './tokens.css';
+@import './fonts.css';
+
+/* `@theme inline` maps our swappable CSS custom properties (tokens.css,
+   which change value under :root[data-theme]) onto Tailwind's utility
+   namespaces. `inline` (vs. plain `@theme`) keeps the generated utilities
+   referencing var(--token) at runtime instead of baking in a resolved
+   value at build time — required for the tokens to actually swap with the
+   theme attribute. One line per token; component code should never author
+   a raw hex outside tokens.css (§1.5 rule). */
+@theme inline {
+  --color-bg: var(--bg);
+  --color-surface: var(--surface);
+  --color-surface-2: var(--surface-2);
+  --color-surface-sunk: var(--surface-sunk);
+  --color-border: var(--border);
+  --color-border-strong: var(--border-strong);
+  --color-text: var(--text);
+  --color-text-muted: var(--text-muted);
+  --color-text-subtle: var(--text-subtle);
+
+  --color-accent: var(--accent);
+  --color-accent-hover: var(--accent-hover);
+  --color-accent-press: var(--accent-press);
+  --color-accent-ink: var(--accent-ink);
+  --color-accent-tint: var(--accent-tint);
+  --color-accent-tint-2: var(--accent-tint-2);
+  --color-accent-ring: var(--accent-ring);
+
+  --color-st-new: var(--st-new);
+  --color-st-new-tint: var(--st-new-tint);
+  --color-st-attempted: var(--st-attempted);
+  --color-st-attempted-tint: var(--st-attempted-tint);
+  --color-st-contacted: var(--st-contacted);
+  --color-st-contacted-tint: var(--st-contacted-tint);
+  --color-st-interested: var(--st-interested);
+  --color-st-interested-tint: var(--st-interested-tint);
+  --color-st-notfit: var(--st-notfit);
+  --color-st-notfit-tint: var(--st-notfit-tint);
+  --color-st-dnc: var(--st-dnc);
+  --color-st-dnc-tint: var(--st-dnc-tint);
+
+  --color-good: var(--good);
+  --color-warn: var(--warn);
+  --color-crit: var(--crit);
+  --color-info: var(--info);
+  --color-good-tint: var(--good-tint);
+  --color-warn-tint: var(--warn-tint);
+  --color-crit-tint: var(--crit-tint);
+  --color-info-tint: var(--info-tint);
+  --color-row-warning: var(--row-warning);
+
+  --font-ui: var(--font-ui);
+  --font-mono: var(--font-mono);
+
+  /* F22/§1.5: 4/6/10px radius scale -> rounded-sm/md/lg */
+  --radius-sm: 4px;
+  --radius-md: 6px;
+  --radius-lg: 10px;
+
+  --shadow-elev-1: var(--shadow-1);
+  --shadow-elev-2: var(--shadow-2);
+  --shadow-elev-pop: var(--shadow-pop);
+}
+
+@layer base {
+  html,
+  body,
+  #root {
+    height: 100%;
+  }
+
+  body {
+    background: var(--bg);
+    color: var(--text);
+    font-family: var(--font-ui);
+    -webkit-font-smoothing: antialiased;
+    text-rendering: optimizeLegibility;
+  }
+
+  /* All numeric table cells: money, counts, USDOT, phone (§1.5). */
+  .tabular-data {
+    font-family: var(--font-mono);
+    font-variant-numeric: tabular-nums;
+  }
+
+  ::selection {
+    background: var(--accent-tint-2);
+  }
+
+  :focus-visible {
+    outline: 2px solid var(--accent);
+    outline-offset: 2px;
+    border-radius: 3px;
+  }
+}

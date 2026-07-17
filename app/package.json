@@ -1,0 +1,46 @@
+{
+  "name": "twisted-nail-carrier-recruiter",
+  "private": true,
+  "version": "0.1.0",
+  "description": "Twisted Nail Carrier Recruiter — production React app (build-plan docs/build-plan/02-frontend-spec.md).",
+  "type": "module",
+  "engines": {
+    "node": ">=22.12.0"
+  },
+  "scripts": {
+    "dev": "vite",
+    "build": "tsc --noEmit -p tsconfig.json && vite build",
+    "preview": "vite preview",
+    "lint": "eslint .",
+    "typecheck": "tsc --noEmit -p tsconfig.json"
+  },
+  "dependencies": {
+    "@googlemaps/js-api-loader": "^2.1.1",
+    "@googlemaps/markerclusterer": "^2.6.2",
+    "@supabase/supabase-js": "^2.110.7",
+    "@tanstack/react-query": "^5.101.2",
+    "@tanstack/react-virtual": "^3.14.6",
+    "@turf/buffer": "^7.3.5",
+    "@turf/simplify": "^7.3.5",
+    "react": "^19.2.7",
+    "react-dom": "^19.2.7",
+    "react-router-dom": "^7.18.1",
+    "zustand": "^5.0.14"
+  },
+  "devDependencies": {
+    "@eslint/js": "^9.39.5",
+    "@tailwindcss/vite": "^4.3.3",
+    "@types/node": "^22.20.1",
+    "@types/react": "^19.2.17",
+    "@types/react-dom": "^19.2.3",
+    "@vitejs/plugin-react": "^5.2.0",
+    "eslint": "^9.39.5",
+    "eslint-plugin-react-hooks": "^7.1.1",
+    "eslint-plugin-react-refresh": "^0.5.3",
+    "globals": "^17.7.0",
+    "tailwindcss": "^4.3.3",
+    "typescript": "^5.9.3",
+    "typescript-eslint": "^8.64.0",
+    "vite": "^7.3.6"
+  }
+}

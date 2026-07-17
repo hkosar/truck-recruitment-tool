@@ -1,0 +1,71 @@
+/* ============================================================================
+   Self-hosted Montserrat — docs/build-plan/02-frontend-spec.md §1.5.
+
+   Source: brand/fonts/Montserrat-*.ttf (Regular/Medium/SemiBold/Bold/
+   ExtraBold/Black — 400/500/600/700/800/900, upright only; no italic or
+   Light/300 files exist in brand/fonts/ today, so no italic @font-face
+   rules are declared here — add them if/when those assets show up).
+
+   These .woff2 files are NOT part of this scaffold (fonttools TTF->WOFF2
+   conversion is a separate build step, tracked in docs/build-plan). Until
+   they exist at public/fonts/montserrat/, the browser silently falls back
+   to the system-ui stack below — nothing breaks, text just isn't Montserrat
+   yet. Drop the converted files into public/fonts/montserrat/ to activate.
+   ============================================================================ */
+
+@font-face {
+  font-family: 'Montserrat';
+  src: url('/fonts/montserrat/Montserrat-Regular.woff2') format('woff2');
+  font-weight: 400;
+  font-style: normal;
+  font-display: swap;
+}
+
+@font-face {
+  font-family: 'Montserrat';
+  src: url('/fonts/montserrat/Montserrat-Medium.woff2') format('woff2');
+  font-weight: 500;
+  font-style: normal;
+  font-display: swap;
+}
+
+@font-face {
+  font-family: 'Montserrat';
+  src: url('/fonts/montserrat/Montserrat-SemiBold.woff2') format('woff2');
+  font-weight: 600;
+  font-style: normal;
+  font-display: swap;
+}
+
+@font-face {
+  font-family: 'Montserrat';
+  src: url('/fonts/montserrat/Montserrat-Bold.woff2') format('woff2');
+  font-weight: 700;
+  font-style: normal;
+  font-display: swap;
+}
+
+@font-face {
+  font-family: 'Montserrat';
+  src: url('/fonts/montserrat/Montserrat-ExtraBold.woff2') format('woff2');
+  font-weight: 800;
+  font-style: normal;
+  font-display: swap;
+}
+
+@font-face {
+  font-family: 'Montserrat';
+  src: url('/fonts/montserrat/Montserrat-Black.woff2') format('woff2');
+  font-weight: 900;
+  font-style: normal;
+  font-display: swap;
+}
+
+:root {
+  --font-ui: 'Montserrat', -apple-system, BlinkMacSystemFont, 'Segoe UI', Roboto, 'Helvetica Neue', Arial,
+    sans-serif;
+  /* data/mono keeps the mockup stack verbatim — USDOT numbers, counts, money,
+     all tabular-nums'd numeric cells (§1.5). */
+  --font-mono: ui-monospace, 'SF Mono', 'SFMono-Regular', 'Cascadia Code', 'JetBrains Mono', Menlo, Consolas,
+    monospace;
+}

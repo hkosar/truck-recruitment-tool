@@ -1,0 +1,56 @@
+<!doctype html>
+<html lang="en">
+  <head>
+    <meta charset="UTF-8" />
+    <meta name="viewport" content="width=device-width, initial-scale=1.0" />
+    <meta name="color-scheme" content="light dark" />
+    <meta name="theme-color" content="#e8611d" />
+    <title>Twisted Nail — Carrier Recruiter</title>
+
+    <!-- Brand fonts: preload the two weights used above the fold (headings 700/800,
+         UI 500/600). Files land in public/fonts/montserrat/ (see theme/fonts.css);
+         this scaffold ships public/fonts/.gitkeep only — the real .woff2s are a
+         fonttools conversion of brand/fonts/*.ttf, out of scope here. -->
+    <link
+      rel="preload"
+      href="/fonts/montserrat/Montserrat-SemiBold.woff2"
+      as="font"
+      type="font/woff2"
+      crossorigin="anonymous"
+    />
+    <link
+      rel="preload"
+      href="/fonts/montserrat/Montserrat-Bold.woff2"
+      as="font"
+      type="font/woff2"
+      crossorigin="anonymous"
+    />
+
+    <!-- Synchronous theme bootstrap: stamp data-theme before first paint so there is
+         no flash of the wrong theme. Mirrors theme/ThemeProvider.tsx, which takes
+         over reactively (incl. OS-preference changes) after hydration. The storage
+         key MUST match ThemeProvider's THEME_STORAGE_KEY constant. -->
+    <script>
+      (function () {
+        try {
+          var KEY = 'tnbs-recruiter:theme';
+          var stored = window.localStorage.getItem(KEY);
+          var theme =
+            stored === 'light' || stored === 'dark'
+              ? stored
+              : window.matchMedia('(prefers-color-scheme: dark)').matches
+                ? 'dark'
+                : 'light';
+          document.documentElement.setAttribute('data-theme', theme);
+        } catch (err) {
+          // localStorage unavailable (privacy mode, etc.) — fall back to CSS's
+          // own @media (prefers-color-scheme) rules in theme/tokens.css.
+        }
+      })();
+    </script>
+  </head>
+  <body>
+    <div id="root"></div>
+    <script type="module" src="/src/main.tsx"></script>
+  </body>
+</html>
