@@ -38,6 +38,7 @@ select count(*) from batch_zones where batch_id = (select id from batches order 
 select dot_number from batch_carriers group by dot_number having count(distinct batch_id) > 1 limit 1;  -- cross-batch carrier exists
 select count(*) from carriers where do_not_contact;              -- >= 1
 select * from carrier_warnings where warning_reasons <> '{}' limit 5;  -- warnings render
+-- refresh-candidate invariant: per seed batch, >= 1 matching carrier that is NOT a member
 -- matcher sanity: zone union returns more than either zone alone
 -- facet scope rule: facet_other_values with cargo removed ≠ zeroed
 ```
@@ -54,6 +55,7 @@ select * from carrier_warnings where warning_reasons <> '{}' limit 5;  -- warnin
 | edit | insert batch_activity with activity_type != 'comment' | denied |
 | manager | update cargo_other_values.match_group | allowed (curation) |
 | any authed | update carriers sync-owned columns | denied (column grants) |
+| **disabled** user (canonical status value — 01 reconciliation #14) | any select beyond own profile; any write | denied; app signs out with message |
 
 Each case is a Playwright-or-script assertion using real JWTs from seeded fixture users. All 4 roles exercised. Any "allowed" that should be denied is a launch blocker.
 
@@ -81,12 +83,13 @@ Runs headless in CI against a seeded dev project; ~0 external requests except Su
 6. **Dashboard:** rename visible ("Dashboard"); table row click navigates; batch appears with customer · job; no tile grid present.
 7. **Batch page:** status chips filter; in-batch search filters; warnings-only shows only pale-red rows with chips; contact name/phone/email columns render; URL-sync restores state on reload.
 8. **Status + logging:** row status change persists + appears in activity feed; log a Call, a Text, an Email (channel dispositions differ) → unified timeline shows all three with channel icons; batch-context status update from log modal works.
-9. **Bulk + sheet:** select-all-matching → bulk status writes one activity row; Generate Contact Options excludes the DNC carrier with an explicit note; sheet shows contact name + email columns; **no "Copy USDOT list" control exists anywhere** (assert absence); CSV downloads with specified columns; print route renders.
+9. **Bulk + sheet:** select-all-matching → bulk status writes one activity row; Generate Contact Options excludes the DNC carrier with an explicit note; sheet shows contact name + email columns; **no "Copy USDOT list" control exists anywhere** (assert absence); CSV downloads with specified columns; print route renders; **print and CSV each write an `export` activity-feed row** (`log_export` — 01 reconciliation #19).
 10. **Profile:** identity header carries General/Overview facts; verification tiles show verdict tones; warning carrier's header is pale-red with chips; research quick-links open expected URLs (href assertions); Mark as Promoted → badge + activity + undoable; DNC toggle → confirm modal → carrier locked in EVERY batch (assert in a second batch).
 11. **Cross-batch invariant:** seeded shared carrier shows different per-batch statuses + one merged timeline.
 12. **Refresh:** seeded "newly matching" carrier is added with `added_via_refresh`, count bumps, feed logs "+N".
 13. **Realtime:** two browser contexts — status change in A appears in B ≤ ~2s; comment posted in A streams into B's feed.
 14. **Reserved tabs:** sidebar shows the four disabled future-tool entries; clicking does nothing/navigates nowhere.
+15. **Map subset (stubbed `MapAdapter` in CI — no real tiles/quota):** adapter receives numbered pins whose numbers equal the current filtered+sorted list rows under two different sorts; **warning carriers' pins carry `warning: true`** (crit-ring treatment); legend entries + per-status counts match chip counts; legend click toggles that status's pins; pin click navigates to the carrier with `?batch=`; lane overlays (circle + corridor band per lane, with material/label chips) passed for every lane. **Plus one manual staging map pass** (real Google key) before the M5→M6 gate: visual check of pins/legend/lanes/zoom/pan/fullscreen, recorded with screenshots.
 
 ## 5. Performance budgets (M6.3, measured on staging real data)
 
@@ -98,7 +101,8 @@ Runs headless in CI against a seeded dev project; ~0 external requests except Su
 | `facet_other_values` P95 | < 1.2s |
 | Map: 5,000 slim pins render | < 1.5s, no dropped-frame scroll jank in list |
 | Bulk status 1,000 rows | < 3s end-to-end |
-| Nightly pipeline chain on Render cron | < 30 min (alert beyond) |
+| Nightly pipeline chain on Render cron | < 60 min (alert beyond — 01 reconciliation #20) |
+| Wizard debounce discipline (cost + UX) | ≤1 `count_carriers` call per 350ms while dragging; corridor Routes call on drag-end only (≤1 per edit gesture) — asserted by counting stubbed calls in the wizard E2E |
 
 ## 6. Launch checklist (M6.6)
 

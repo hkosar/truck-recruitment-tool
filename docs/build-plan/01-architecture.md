@@ -38,6 +38,89 @@ differ** (00-master-plan §0.3).
 6. **Geometry column:** `carriers.geom` is `geography(Point,4326)` (Part A's matcher
    casts accordingly); `lat`/`lng` float mirrors exist for cheap reads (Part B writes both).
 
+### Adversarial-review amendments (binding; added after the cross-doc critic pass)
+
+7. **Part A DDL is canonical, amended as follows before M1.2 cuts migrations** (resolves
+   the Part A ↔ Part B schema drift):
+   - `carriers` gains Part B's sync bookkeeping: `row_hash text`, `last_changed_at timestamptz`,
+     `source_missing_since date` — plus every Part B §2.3 mapped column absent from Part A's
+     CREATE TABLE (`fmcsa_add_date`, `duns_number`, `hm_ind`, `prior_revoke_flag`,
+     `prior_revoke_dot_number`, `recordable_crash_rate`, `docket_display`, `mail_*` address set,
+     `owned_trucks/tractors/trailers` (+leased), `mcs150_mileage`, `mcs150_mileage_year`,
+     `phy_zip5`, `phy_county`, `fleetsize`, `truck_units`, `bus_units`, `total_cdl`).
+   - Cargo free-text: canonical columns are `crgo_cargoothr_desc` (raw, 1:1 Socrata) **plus**
+     derived `cargo_other_norm`. Part B's `cargo_other_raw` alias means `crgo_cargoothr_desc`.
+   - **Insurance/authority storage (two layers, adopted):** `carrier_insurance` stays the 1:1
+     rolled-up row (authority statuses + `bipd_on_file` + **added `bipd_required`,
+     `bipd_cancel_date date`, `insurance_effective_date`**) and a new append-only
+     `carrier_insurance_filings` table (natural key `(dot_number, docket_number, policy_no,
+     effective_date)`) holds the raw L&I filings; the nightly rollup (Part B §2.4) writes the
+     1:1 row. Part B's `carrier_authority` merges INTO `carrier_insurance` (no separate table).
+   - `geocode_precision` enum: Part A's 7 values stand; Part B's tiers map
+     street → (`rooftop`|`range_interpolated`|`geometric_center`), zip → `zip_centroid`,
+     city → `city_centroid`.
+   - `carrier_safety`: PK `dot_number` (latest snapshot only) + `snapshot_month date` column.
+   - Extensions migration adds `citext` (used by `email_address`).
+   - New table `carrier_qc_snapshots` (QCMobile per-carrier cache: `dot_number` PK, `payload
+     jsonb`, `fetched_at`; feeds `carrier_inspections` rows) — see amendment 16.
+8. **Warning vocabulary (canonical, closed, NINE codes):** `carrier_inactive`, `no_insurance`,
+   `insurance_below_standard`, **`insurance_expiring_30d`** (mirrors the owner's existing
+   tool's "Insurance Expiring Soon" — F24; input = `bipd_cancel_date`), `authority_not_active`,
+   `safety_rating`, `high_oos`, `recent_crashes`, **`missing_from_source`** (input =
+   `source_missing_since`). Computed **live** by `internal.warning_reasons` + view (D6 stands —
+   never stored); Part B computes only the *inputs*. 02's 5-code `WarningCode` list and Part B's
+   DQ list both regenerate from these nine; 02's chip copy extends accordingly.
+9. **`contact_disposition` enum adds `no_response`** (02's text/email modals use it).
+10. **`batch_members_map` gains parity args**: the same filter set as extended `batch_members`
+    (status[], q, warnings_only, min_insurance, size range, has_phone/has_email) **plus**
+    `p_sort/p_dir`, returning rows in list order with `row_num int` — this is what makes
+    "list # = pin #" true under every sort/filter (M5.3 AC). It already returns `has_warnings`,
+    and the frontend `Pin` type gains `warning?: boolean`: warning pins render a crit-colored
+    ring around the status fill + a "Needs review" legend row — G5's "wherever the carrier is
+    displayed" includes map pins.
+11. **Aggregate additions (frontend needs → real sources):** new RPC
+    `batch_status_counts(p_batch_id)` → per-status counts + `dnc_count` + `warnings_count` +
+    `with_phone` + `with_email`; `batch_dashboard` view gains `warnings_count` and `with_phone`;
+    new tiny RPC `dashboard_totals()` → `{active_batches, distinct_carriers, with_phone,
+    interested, promoted}` for the dashboard StatStrip; `count_carriers` gains `tier1_count`
+    (carriers whose `cargo_other_norm` matches a curated `is_sand_gravel` value); per-lane
+    contribution counts = N parallel single-zone `count_carriers` calls (client-side, debounced).
+12. **Routing = Google Routes API only** (REST `computeRoutes`, `TRAFFIC_UNAWARE`, polyline
+    field mask, browser key referrer-locked). 02's `DirectionsService` mentions read as this;
+    the JS loader loads libraries `["marker","geometry"]` only (no `places`, no legacy routes lib).
+13. **Carrier-universe numbers (canonical):** ingest scope = TX **active** carriers
+    (`status_code='A'`, ~150–220k rows); carriers later missing from the active slice keep their
+    rows and trigger `missing_from_source` (warning code 8) — batch members are never deleted.
+    04's 60–80k lines under-counted; sizing statements re-based on ~200k (fits Supabase Pro
+    comfortably; `census_raw` retained). **M2.7's real-data backfill runs on the PROD Pro
+    project** (it exists from M1); the free dev project keeps synthetic seed only; M6.6 cutover
+    verifies/tops-up rather than re-backfilling.
+14. **`user_status` canonical value is `disabled`** (02's "suspended" reads as `disabled`).
+15. **Realtime, unified:** publication = `batches, batch_zones, batch_carriers, batch_activity,
+    contact_logs, profiles` (profiles added for the manager pending-badge; RLS-safe). Channels:
+    dashboard = `batches` + `batch_activity`; batch page = `batch_carriers` + `batch_activity` +
+    `contact_logs` (batch-filtered); profile = `contact_logs` (dot-filtered); users admin =
+    `profiles` (manager only).
+16. **Inspections data path exists (F7):** a Supabase **Edge Function** `qc-fetch` holds the
+    FMCSA WebKey (server-side secret), fetches QCMobile inspections/crashes on profile view,
+    caches 24h into `carrier_qc_snapshots` → `carrier_inspections`. Built as task M5.8; the
+    WebKey owner-prerequisite blocks M5.8 (not launch — the tile shows "fetching…"/"no data yet"
+    states until then).
+17. **F14 suggestion layer (canonical):** Part A's curated `cargo_other_values` table +
+    `facet_suggested_keywords` RPC are the single mechanism. Part B's separate
+    `cargo_other_suggestions` table is **dropped**; its seed-term + trigram mechanic becomes the
+    ingest-side populator of `cargo_other_values.match_group`. 02's suggested-chip list is
+    rendered from the RPC output (the hardcoded list in 02 §3b is illustrative only).
+18. **Per-lane "material" label (owner's material concept — restored):** `batch_zones.label`
+    is **user-editable** in the lane editor ("Material / lane label", placeholder e.g.
+    "Limestone from Austin"), defaulting to the generated geographic text; lane chips, the
+    dashboard Lanes column, and map lane index chips display it. Owner confirms treatment at
+    the M0.4 walkthrough (logged in 03).
+19. **Sheet/CSV exports write activity:** 02 §3e calls `log_export(batch_id, 'call_sheet'|'csv',
+    row_count)` so F11's feed records exports; E2E asserts the activity row.
+20. **Nightly pipeline runtime ceiling is 60 minutes** (Part B's own estimate is 25–45 min);
+    M2.6 AC, 04 §7 rule 6, and 05 §5 all use 60. Cost impact ≈ $0 (the $1/mo cron floor).
+
 ---
 
 # Part A — Supabase Schema v2 (database & API)
@@ -882,7 +965,7 @@ Client channel plan (Realtime Postgres Changes respects RLS — unauthorized use
 
 ## 8. Seed strategy (dev)
 
-- **`supabase/seed.sql`** (data only, deterministic — `select setseed(0.42)`): ~800 synthetic TX carriers via `generate_series`, mirroring `mockup/src/data.js` distributions (60% Tier-1 with `crgo_cargoothr_desc` drawn from the mockup's `SG_OTHER` variant list, 30% Tier-2 flag-only, 10% off-target; metro-weighted geocoded points with jitter; ~22% email fill to preserve the honest-coverage story G10; ~10% no insurance / 18% $500k / bulk $750k–$1MM+; a few Conditional ratings and ≥4-crash rows so warnings render). Then: matching `carrier_insurance`/`carrier_safety` rows, `cargo_other_values` upsert with curation pre-applied, 2 seed batches (one 2-zone multi-lane radius batch, one corridor batch — exercising F21), snapshot members with mixed statuses, contact logs across channels (F8), activity rows, one carrier shared by both batches with cross-batch timeline (the mockup's demo invariant), one DNC carrier.
+- **`supabase/seed.sql`** (data only, deterministic — `select setseed(0.42)`): ~800 synthetic TX carriers via `generate_series`, mirroring `mockup/src/data.js` distributions (60% Tier-1 with `crgo_cargoothr_desc` drawn from the mockup's `SG_OTHER` variant list, 30% Tier-2 flag-only, 10% off-target; metro-weighted geocoded points with jitter; ~22% email fill to preserve the honest-coverage story G10; ~10% no insurance / 18% $500k / bulk $750k–$1MM+; a few Conditional ratings and ≥4-crash rows so warnings render). Then: matching `carrier_insurance`/`carrier_safety` rows, `cargo_other_values` upsert with curation pre-applied, 2 seed batches (one 2-zone multi-lane radius batch, one corridor batch — exercising F21), snapshot members with mixed statuses, contact logs across channels (F8), activity rows, one carrier shared by both batches with cross-batch timeline (the mockup's demo invariant), one DNC carrier, and **≥1 carrier per seed batch that matches the batch's definition but is NOT a member** (the refresh-candidate invariant E2E #12 depends on).
 - **`scripts/seed-auth-users.ts`** (service key, local only): creates the 5 mockup users via `auth.admin.createUser` (hunter/manager approved, two edit, one view, one pending guest) then updates `profiles.role/status` — auth rows cannot be reliably seeded in plain SQL across GoTrue versions.
 - **Staging with real data:** run the actual Render ingest against `phy_state='TX'` into a staging Supabase project; first run doubles as the brief-§4 Tier-1 coverage measurement (report distinct `cargo_other_norm` values + fill rates from `cargo_other_values` + `count_carriers`).
 

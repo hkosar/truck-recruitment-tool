@@ -131,7 +131,7 @@ The fallback is **more expensive than Google at our scale**, so Google stays pri
 3. **API key restrictions:** browser key locked to the app's HTTPS referrer + only the 3 needed APIs; server key (if any) IP-locked.
 4. **Frontend discipline:** one persistent map instance per SPA session (loads bill per initialization); corridor route recompute on drag-end only, debounced.
 5. **Supabase spend cap ON** (Pro toggle): overages error instead of billing; disk-usage alert at 6GB of the 8GB.
-6. **One Render cron service, not several** (each carries its own $1 floor); alert if nightly runtime exceeds 30 min (runaway job = per-second billing).
+6. **One Render cron service, not several** (each carries its own $1 floor); alert if nightly runtime exceeds 60 min (runaway job = per-second billing; normal chain is 25–45 min — 01 reconciliation #20).
 7. **Email:** stay on flat-rate Resend Pro; app-level daily send ceiling (e.g. 500/day) + mandatory suppression/DNC check before every send; monitor bounce/complaint rates weekly during warm-up.
 8. **Enrichment dial:** hard monthly job cap of 1,000 Place Details lookups (inside the free tier); raising it is an explicit owner decision worth exactly $20 per extra 1,000.
 9. **Sentry:** client `sampleRate` tuned + spike protection on, to live inside the free 5k errors/mo.
@@ -144,3 +144,13 @@ The fallback is **more expensive than Google at our scale**, so Google stays pri
 - **Enrichment adds $0/mo at the recommended 1,000-lookups/mo throttle**; it is a metered dial at $20 per extra 1,000, plus an optional ~$180 one-time full backfill.
 - **Google Maps stays $0** for a 5-user internal tool with ~10–20× headroom per SKU; the MapLibre/OSRM fallback would cost $20–105/mo and is deferred behind an interface, not bought.
 - **No mandatory one-time cash. Total worst-case steady state with every module on and the enrichment dial at maximum: ~$126/mo; expected: $46/mo.**
+
+### Post-review amendment (sizing correction — 01 reconciliation #13)
+
+This document's "~60–80k TX carriers" figure under-counted; the canonical ingest scope is
+**TX active carriers, ~150–220k rows**. Consequences, re-verified: Supabase **Pro (8GB)
+absorbs it comfortably** (~0.5–1GB with `census_raw` + indexes) — the $25 line and Micro
+compute stand; the one-time Census-geocoder backfill is **~15–22 batches** (still one to
+two free ingest nights on the $1 cron); and the **M2.7 real-data backfill runs on the
+production Pro project**, not the free 500MB dev project (which keeps synthetic seed
+only). **No dollar amounts change.**

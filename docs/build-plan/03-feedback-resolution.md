@@ -56,6 +56,23 @@ append below with fresh F-numbers **before** any implementation.
 3. **Warning vocabulary** — the 7 warning codes and their thresholds (BIPD < $1MM, OOS > ~1.5× national averages, ≥4 crashes/24mo, Conditional/Unsatisfactory rating, inactive status/authority, no insurance) are our concretization of "safety or insurance or something needs to be looked at." Thresholds are config, tunable after you see real distributions in the M2.7 data review.
 4. **Facet scope rule** — the value counts shown in the Other-cargo browser are computed with your current lanes+filters applied but cargo criteria removed (otherwise selecting a value would zero every other count). Documented in 01 §5.3.
 5. **Owner-gate placement** — exactly three human gates: M0.4 design sign-off, M2.7 data-QA review, M6 UAT/launch. Everything else is automated gates.
+6. **Material = per-lane label** — your "material" idea (Waco job: limestone from Austin, sand from Dallas) is captured as a **user-editable label on each lane** ("Material / lane label"), shown on lane chips, the dashboard Lanes column, and the map. If material should instead be a structured batch- or lane-level field (filterable, reportable), say so at the M0.4 walkthrough — it's a small schema addition at that stage. (01 reconciliation #18)
+7. **CSV export kept** — your sheet feedback ("exporting to csv, copy usdot list I don't think is useful") reads two ways; we removed USDOT-copy (you explained why) and **kept CSV**. Confirm or kill it at M0.4.
+8. **Contact-name research** — the research quick-links search the company AND the officer/contact name (when on file), plus a Texas SOS business-registry search — per your "search the company and contact name… business database" note. (Full automated enrichment stays M8.)
+9. **Inspections tile is fed on-demand** — QCMobile lookups (server-side key, 24h cache) populate the Inspections verification tile when a profile is opened (M5.8); needs your free FMCSA WebKey (prereq list). Until then the tile shows an honest empty state.
+
+### Adversarial completeness pass (post-assembly)
+
+An independent review agent re-derived coverage from your verbatim feedback and hunted
+cross-document contradictions: **21 findings (1 critical, 11 major, 9 minor) — all
+resolved** via the binding amendments in `01-architecture.md` § "Adversarial-review
+amendments" (#7–#20) plus targeted patches here, in `00-master-plan.md`, and in
+`05-verification.md`. Notables: the schema/pipeline sub-specs were unified (#7), the
+warning vocabulary is now one nine-code list including "insurance expiring ≤30d"
+mirroring your existing tool's counter (#8), map pins now carry warning treatment (#10),
+corridor routing is pinned to the modern Routes API (#12), and the ingest scope/sizing
+was corrected to TX-active ~150–220k carriers with the real-data backfill running on the
+production project (#13).
 
 ### Owner decisions recorded this round (asked & answered)
 
