@@ -14,15 +14,19 @@ const state = {
   activeCarrierDot: null,
   profileFromBatch: null,
   profileTab: "overview",
-  builder: null,               // working search definition
-  list: { status: "all", q: "", view: "list", insurance: "any", size: "any", sort: "name" },
+  profileVariant: "console",    // console | dossier | ledger  (F7 — 3 variants)
+  wizard: null,                 // multi-step new-search draft
+  builder: null,                // (legacy) working search definition
+  list: { status: "all", q: "", view: "list", insurance: "any", size: "any", contact: "any", warnings: false, sort: "name" },
   selection: {},               // dot -> true
   overrides: {                 // mock mutations layered over seed data
     status: {},                // "batchId:dot" -> status
     dnc: {},                   // dot -> bool
-    onboarded: {},             // dot -> ms
+    promoted: {},              // dot -> ms  (F23 Mark as Promoted)
     userStatus: {},            // userId -> {status, role}
-    logs: []                   // new call logs {dot,batch_id,user_id,at,disposition,notes,next_steps}
+    logs: [],                  // new contact logs {dot,batch_id,user_id,at,channel,disposition,notes,next_steps}
+    activity: [],              // new activity {id,batch_id,type,actor_id,at,payload,body}
+    newBatches: []             // batch ids created this session
   },
   modal: null,                 // { type, ...data }
   menu: null,                  // { type, x, y, ...data }
@@ -71,7 +75,13 @@ const ICONS = {
   activity:'<polyline points="22 12 18 12 15 21 9 3 6 12 2 12"/>',
   building:'<path d="M3 21h18"/><path d="M5 21V5a2 2 0 0 1 2-2h6a2 2 0 0 1 2 2v16"/><path d="M15 21v-6a2 2 0 0 1 2-2h2a2 2 0 0 1 2 2v6"/><path d="M9 7h2M9 11h2"/>',
   shieldcheck:'<path d="M12 22s8-4 8-10V5l-8-3-8 3v7c0 6 8 10 8 10z"/><polyline points="9 12 11.5 14.5 16 10"/>',
-  dots:'<circle cx="12" cy="5" r="1.6" fill="currentColor" stroke="none"/><circle cx="12" cy="12" r="1.6" fill="currentColor" stroke="none"/><circle cx="12" cy="19" r="1.6" fill="currentColor" stroke="none"/>'
+  dots:'<circle cx="12" cy="5" r="1.6" fill="currentColor" stroke="none"/><circle cx="12" cy="12" r="1.6" fill="currentColor" stroke="none"/><circle cx="12" cy="19" r="1.6" fill="currentColor" stroke="none"/>',
+  nail:'<path d="M7 3h10l-3 4v3l2 2-3 1v3l-1 4-1-4v-3l-3-1 2-2V7z" fill="currentColor" stroke="none"/>',
+  external:'<path d="M18 13v6a2 2 0 0 1-2 2H5a2 2 0 0 1-2-2V8a2 2 0 0 1 2-2h6"/><polyline points="15 3 21 3 21 9"/><line x1="10" y1="14" x2="21" y2="3"/>',
+  star:'<polygon points="12 2 15.09 8.26 22 9.27 17 14.14 18.18 21.02 12 17.77 5.82 21.02 7 14.14 2 9.27 8.91 8.26 12 2"/>',
+  copy:'<rect x="9" y="9" width="13" height="13" rx="2"/><path d="M5 15H4a2 2 0 0 1-2-2V4a2 2 0 0 1 2-2h9a2 2 0 0 1 2 2v1"/>',
+  comment:'<path d="M21 11.5a8.38 8.38 0 0 1-.9 3.8 8.5 8.5 0 0 1-7.6 4.7 8.38 8.38 0 0 1-3.8-.9L3 21l1.9-5.7a8.38 8.38 0 0 1-.9-3.8 8.5 8.5 0 0 1 4.7-7.6 8.38 8.38 0 0 1 3.8-.9h.5a8.48 8.48 0 0 1 8 8v.5z"/>',
+  grip:'<circle cx="9" cy="6" r="1.4" fill="currentColor" stroke="none"/><circle cx="15" cy="6" r="1.4" fill="currentColor" stroke="none"/><circle cx="9" cy="12" r="1.4" fill="currentColor" stroke="none"/><circle cx="15" cy="12" r="1.4" fill="currentColor" stroke="none"/><circle cx="9" cy="18" r="1.4" fill="currentColor" stroke="none"/><circle cx="15" cy="18" r="1.4" fill="currentColor" stroke="none"/>'
 };
 function icon(name, cls) {
   return '<svg class="' + (cls || "") + '" viewBox="0 0 24 24" fill="none" stroke="currentColor" ' +
@@ -98,7 +108,13 @@ const STATUS = {
   interested:{label:"Interested",cls:"interested"}, not_a_fit:{label:"Not a Fit",cls:"not_a_fit"}, dnc:{label:"Do Not Call",cls:"dnc"}
 };
 const STATUS_ORDER = ["new","attempted","contacted","interested","not_a_fit"];
-const DISPO_LABEL = { no_answer:"No answer", voicemail:"Voicemail", connected:"Connected", callback:"Callback", not_interested:"Not interested", wrong_number:"Wrong number", interested:"Interested" };
+const DISPO_LABEL = { no_answer:"No answer", voicemail:"Voicemail", connected:"Connected", callback:"Callback", not_interested:"Not interested", wrong_number:"Wrong number", interested:"Interested", sent:"Sent", replied:"Replied", no_response:"No response", bounced:"Bounced" };
+const DISPO_BY_CHANNEL = {
+  call: ["connected","no_answer","voicemail","callback","interested","not_interested","wrong_number"],
+  text: ["sent","replied","no_response","wrong_number"],
+  email:["sent","replied","bounced","no_response"]
+};
+const CHANNEL = { call:{label:"Call",ic:"phone"}, text:{label:"Text",ic:"message"}, email:{label:"Email",ic:"mail"} };
 const ROLE_LABEL = { manager:"Manager", edit:"Editor", view:"Viewer", guest:"Guest" };
 function badge(status) { const m = STATUS[status] || STATUS.new; return '<span class="badge ' + m.cls + '"><span class="dot"></span>' + m.label + "</span>"; }
 function avatar(u, size) { const s = size || 30; return '<span class="avatar" style="width:'+s+'px;height:'+s+'px;background:'+u.color+';font-size:'+(s*0.4)+'px">' + initials(u.name) + "</span>"; }
@@ -114,9 +130,24 @@ function logsForDot(dot) {
   const added = state.overrides.logs.filter(l => l.dot === dot);
   return seed.concat(added).sort((a, b) => b.at - a.at);
 }
+function lastLog(dot) { const l = logsForDot(dot); return l.length ? l[0] : null; }
+function effPromoted(dot) { return (dot in state.overrides.promoted) ? state.overrides.promoted[dot] : (DB.batchCarriers.find(b => b.dot === dot && b.promoted_at) ? DB.batchCarriers.find(b => b.dot === dot && b.promoted_at).promoted_at : null); }
+function warnListFor(dot) { return warningsFor(DB.carrierByDot[dot]).map(code => ({ code, label: WARN[code].label, tone: WARN[code].tone })); }
+function activityForBatch(batchId) {
+  const seed = DB.activity.filter(a => a.batch_id === batchId);
+  const added = state.overrides.activity.filter(a => a.batch_id === batchId);
+  return seed.concat(added).sort((a, b) => b.at - a.at);
+}
 function statusCounts(batchId) {
-  const c = { new:0, attempted:0, contacted:0, interested:0, not_a_fit:0, dnc:0 };
-  batchMembers(batchId).forEach(b => { if (effDnc(b.dot)) c.dnc++; else c[effStatus(batchId, b.dot)]++; });
+  const c = { new:0, attempted:0, contacted:0, interested:0, not_a_fit:0, dnc:0, warnings:0, phone:0, email:0, promoted:0, total:0 };
+  batchMembers(batchId).forEach(b => {
+    const cr = DB.carrierByDot[b.dot]; c.total++;
+    if (effDnc(b.dot)) c.dnc++; else c[effStatus(batchId, b.dot)]++;
+    if (warningsFor(cr).length) c.warnings++;
+    if (cr.phone || cr.cell) c.phone++;
+    if (cr.email) c.email++;
+    if (effPromoted(b.dot)) c.promoted++;
+  });
   return c;
 }
 
