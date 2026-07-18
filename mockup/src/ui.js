@@ -9,7 +9,7 @@ const state = {
   screen: "login",
   authView: "login",           // login | register | forgot
   registered: false,
-  theme: null,                 // null=follow OS; 'light'|'dark' override
+  gsearch: "",                 // global search query (navy-bar search box)
   activeBatchId: null,
   activeCarrierDot: null,
   profileFromBatch: null,
@@ -203,14 +203,8 @@ function closeMenu() { if (state.menu) { state.menu = null; render(); } }
 /* ------------------------------- render ------------------------------- */
 const ACT = {};   // action handlers, populated across files
 
-function applyTheme() {
-  const root = document.documentElement;
-  if (state.theme) root.setAttribute("data-theme", state.theme);
-  else root.removeAttribute("data-theme");
-}
 function render() {
   const root = document.getElementById("app");
-  applyTheme();
   let html = (typeof SCREENS !== "undefined" && SCREENS[state.screen]) ? SCREENS[state.screen]() : '<div class="empty">…</div>';
   html += overlays();
   root.innerHTML = html;
@@ -306,13 +300,16 @@ function onSubmit(e) { const t = e.target.closest("[data-submit]"); if (t) { e.p
 function setModel(path, val) { const parts = path.split("."); let o = state; for (let i = 0; i < parts.length - 1; i++) o = o[parts[i]]; o[parts[parts.length - 1]] = val; }
 
 /* ------------------------------- generic actions ------------------------------- */
-ACT.nav = (d) => { state.screen = d.to; if (d.to !== "profile") state.activeCarrierDot = null; closeMenu(); render(); };
-ACT.toggleTheme = () => {
-  const isDark = document.documentElement.matches('[data-theme="dark"]') ||
-    (!document.documentElement.hasAttribute("data-theme") && matchMedia("(prefers-color-scheme: dark)").matches);
-  state.theme = isDark ? "light" : "dark"; render();
-};
+ACT.nav = (d) => { state.screen = d.to; if (d.to !== "profile") state.activeCarrierDot = null; state.gsearch = ""; closeMenu(); render(); };
 ACT.closeModal = () => closeModal();
 ACT.closeMenu = () => closeMenu();
 ACT.noop = () => {};
-ACT.userMenu = (d, e) => { const r = e.currentTarget.getBoundingClientRect(); openMenu({ type:"userMenu", x: Math.max(10, r.left), y: r.top - 8 - 96 }); };
+/* global search (navy bar): patch the popover in place so the input keeps focus */
+ACT.gSearch = (d) => {
+  state.gsearch = d.value;
+  const g = document.querySelector(".gsearch"); if (!g) return;
+  const old = g.querySelector(".gs-pop"); if (old) old.remove();
+  g.insertAdjacentHTML("beforeend", gsearchPop());
+};
+/* user menu opens below the appbar avatar */
+ACT.userMenu = (d, e) => { const r = e.currentTarget.getBoundingClientRect(); openMenu({ type:"userMenu", x: Math.max(10, Math.min(r.right - 210, window.innerWidth - 220)), y: r.bottom + 6 }); };

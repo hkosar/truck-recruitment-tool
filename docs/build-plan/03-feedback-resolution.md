@@ -145,3 +145,41 @@ never wrap a thought mid-line when vertical space exists (3–5 lines per row av
 
 **Mockup v4 shipped** (same URL). Verified headless: 16 flows, 0 errors, 0 external
 requests. Awaiting: New Search layout pick (1–5) · material label structure · CSV keep/cut.
+
+---
+
+## Round 4 — 2026-07-18 · Layout pick + TNBS Design System adoption (mockup v5→v6)
+
+**F48 resolved:** owner picked **Layout 3 — Columns**. v5 built it out as the one
+New Search screen (picker + other four layouts retired): full-width overview map +
+live coverage strip on top, three aligned columns below ([Details+Lanes] · [Freight] ·
+[Filters]), reflowing 3→2→1 on narrow viewports.
+
+**F49 — TNBS Design System v1.0 (locked, portable spec) supersedes the mockup's
+provisional design language.** Spec committed verbatim at `docs/tnbs-design-system.md`
+(with an appendix recording the recruiter's application mappings). Headlines:
+
+| Change | Was (v1–v5) | Now (v6, spec) |
+|--------|-------------|----------------|
+| Accent | Burnt safety-orange | **Navy #1e3a6e — the only accent** |
+| Theme | Light + dark toggle | **Light only**; toggle removed |
+| Chrome | Light topbar, brand in sidebar | **Navy 56px bar** (white circular badge + wordmark, global search, Live pill, avatar) + slim crumb strip; light 216px sidebar, 11%-navy active |
+| Geometry | 10px cards, layered shadows | **5px cards / 3px elements, shadows ≈ none** — borders + zebra do the work |
+| Tables | Plain rows, 11px/700 headers | **Zebra + row-hover + compact 13px/9px rows; 10.5px/800 uppercase headers on th-bg; selection tint + 3px inset navy bar; tabular-nums** |
+| Status colors | Ad-hoc hues | Closed **ok/warn/bad/info** set (pills = tinted fill + same-hue ink + label) |
+| Category colors | — | **cat-1/2/3 spent on lane identity** (zones, chips, legends — always beside letter + label) |
+| KPI/type scale | 21px mono KPIs | **25px/800 Montserrat tabular; 20px/800 titles; 11px/800 uppercase labels; links 700** |
+
+Owner decisions this round (AskUserQuestion): chrome = **navy bar + sidebar nav** (bar
+tabs reserved for future cross-tool nav) · columns split = **keep [Details+Lanes]/Freight/Filters** ·
+builder map = **taller (430px)** · review links = **fresh URL every round** (stale-cache workaround).
+Agent judgment call flagged for veto: lane identity carries the category colors.
+
+New capability shipped with the chrome: **global search** in the navy bar (carriers by
+name/USDOT, batches by name/customer) with grouped results popover.
+
+**Mockup v6 shipped** (fresh URL, per link policy). Verified headless: 16 flows
+including new TNBS assertions (navy tokens, no theme toggle, navy bar, zebra + th-bg
+computed styles, selected-row inset bar, cat-colored zones, global search → carrier
+profile), 0 errors, 0 external requests. Still awaiting from earlier rounds: material
+label structure · CSV keep/cut.

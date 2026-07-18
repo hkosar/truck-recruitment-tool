@@ -18,22 +18,27 @@ function tearPin(x, y, r, fill, num, warn, inter, title) {
   const numEl = num != null ? '<text class="pin-lbl" style="font-size:' + (rb*1.15) + 'px" x="' + x + '" y="' + cy + '">' + num + "</text>" : "";
   return ring + '<path class="pin tear" d="' + d + '" style="fill:' + fill + '"' + (inter || "") + "><title>" + esc(title || "") + "</title></path>" + numEl;
 }
+/* Category identity colors — spent on LANE identity (fixed order A/B/C, always
+   rendered beside the lane letter + material label, never color alone). */
+const CATZ = ["var(--cat-1)", "var(--cat-2)", "var(--cat-3)"];
+function laneColor(i) { return CATZ[i % 3]; }
 function mapCore(pins, zones) {
   const proj = PROJ;
   const land = proj.pathFor(TX_OUTLINE);
   const hwys = TX_HIGHWAYS.map(h => '<path class="hwy" d="' + h.pts.map((p, i) => (i ? "L" : "M") + proj.project(p[0], p[1]).map(n => n.toFixed(1)).join(" ")).join(" ") + '"/>').join("");
-  const anchorMark = (x, y) => '<circle class="anchor" cx="' + x.toFixed(1) + '" cy="' + y.toFixed(1) + '" r="4"/>';
-  const laneChip = (x, y, zi) => { const L = "ABCDEFGH"[zi] || "?"; return '<circle class="lane-chip-bg" cx="' + x.toFixed(1) + '" cy="' + (y-13).toFixed(1) + '" r="7.5"/><text class="lane-chip-tx" x="' + x.toFixed(1) + '" y="' + (y-13).toFixed(1) + '">' + L + "</text>"; };
+  const anchorMark = (x, y, zc) => '<circle class="anchor" style="fill:' + zc + '" cx="' + x.toFixed(1) + '" cy="' + y.toFixed(1) + '" r="4"/>';
+  const laneChip = (x, y, li, zc) => { const L = "ABCDEFGH"[li] || "?"; return '<circle class="lane-chip-bg" style="fill:' + zc + '" cx="' + x.toFixed(1) + '" cy="' + (y-13).toFixed(1) + '" r="7.5"/><text class="lane-chip-tx" x="' + x.toFixed(1) + '" y="' + (y-13).toFixed(1) + '">' + L + "</text>"; };
   let overlay = "";
   (zones || []).forEach((z, zi) => {
+    const li = z.li != null ? z.li : zi, zc = laneColor(li);
     if (z.type === "radius") {
       const p = proj.project(z.anchorLng, z.anchorLat), r = proj.milesToPx(z.radiusMi);
-      overlay += '<circle class="radius-fill" cx="' + p[0].toFixed(1) + '" cy="' + p[1].toFixed(1) + '" r="' + r.toFixed(1) + '"/>' + anchorMark(p[0], p[1]) + laneChip(p[0], p[1], zi);
+      overlay += '<circle class="radius-fill" style="fill:' + zc + ';stroke:' + zc + '" cx="' + p[0].toFixed(1) + '" cy="' + p[1].toFixed(1) + '" r="' + r.toFixed(1) + '"/>' + anchorMark(p[0], p[1], zc) + laneChip(p[0], p[1], li, zc);
     } else if (z.type === "corridor" && z.route) {
       const pts = z.route.map(q => proj.project(q.lng, q.lat));
       const d = pts.map((p, i) => (i ? "L" : "M") + p[0].toFixed(1) + " " + p[1].toFixed(1)).join(" ");
       const bw = proj.milesToPx(z.bufferMi) * 2;
-      overlay += '<path class="corridor-band" style="stroke-width:' + bw.toFixed(1) + 'px" d="' + d + '"/><path class="corridor-line" d="' + d + '"/>' + pts.map(p => anchorMark(p[0], p[1])).join("") + laneChip(pts[0][0], pts[0][1], zi);
+      overlay += '<path class="corridor-band" style="stroke:' + zc + ';stroke-width:' + bw.toFixed(1) + 'px" d="' + d + '"/><path class="corridor-line" style="stroke:' + zc + '" d="' + d + '"/>' + pts.map(p => anchorMark(p[0], p[1], zc)).join("") + laneChip(pts[0][0], pts[0][1], li, zc);
     }
   });
   const cityDots = CITIES.map(c => { const p = proj.project(c.lng, c.lat); return '<circle class="city-dot" cx="' + p[0].toFixed(1) + '" cy="' + p[1].toFixed(1) + '" r="1.8"/><text class="city-lbl" x="' + (p[0]+4.5).toFixed(1) + '" y="' + (p[1]+3).toFixed(1) + '">' + esc(c.name) + "</text>"; }).join("");
@@ -56,6 +61,12 @@ function mapBox(id, pins, zones, extras, h) {
 }
 function mapCount(n, label) { return '<div class="map-count"><b id="b-count">' + n + "</b><span>" + (label||"matches") + "</span></div>"; }
 function mapLegend(rows) { return '<div class="map-legend">' + rows.map(r => '<div class="lg"><span class="sw" style="background:' + r[0] + '"></span>' + r[1] + "</div>").join("") + "</div>"; }
+function builderLegend(zones) {
+  const laneRows = (zones || []).map((z, i) => '<div class="lg"><span class="sw" style="background:' + laneColor(i) + ';border-radius:2px"></span><b>' + "ABCDEFGH"[i] + " ·</b> " + esc(z.label || (z.type === "radius" ? z.anchor : z.origin + " → " + z.dest)) + "</div>").join("");
+  return '<div class="map-legend">' + laneRows +
+    '<div class="lg"><span class="sw" style="background:var(--accent)"></span>Matches filters</div>' +
+    '<div class="lg"><span class="sw" style="background:var(--crit)"></span>Has a warning flag</div></div>';
+}
 function statusLegend(counts) {
   const rows = STATUS_ORDER.map(k => [statusVar(k), STATUS[k].label + (counts ? " · " + counts[k] : "")]);
   if (counts && counts.dnc) rows.push(["var(--st-dnc)", "Do Not Call · " + counts.dnc]);
@@ -70,14 +81,36 @@ function zoneBBox(zones) {
   return [x0, y0, x1, y1];
 }
 
-/* ------------------------------- shell ------------------------------- */
+/* ------------------------------- shell (TNBS chrome) ------------------------------- */
+/* Navy 56px bar: white badge + wordmark · global search · Live pill · avatar.
+   Below: light 216px sidebar (nav, 11%-navy active) + crumb strip + content. */
+function gsearchPop() {
+  const q = (state.gsearch || "").trim().toLowerCase();
+  if (q.length < 2) return "";
+  const cs = DB.carriers.filter(c => c.legal_name.toLowerCase().includes(q) || String(c.dot).includes(q)).slice(0, 5);
+  const bs = DB.batches.filter(b => b.name.toLowerCase().includes(q) || (b.customer || "").toLowerCase().includes(q)).slice(0, 3);
+  let h = "";
+  if (bs.length) h += '<div class="gs-sec">Batches</div>' + bs.map(b => '<button class="gs-row" data-act="openBatch" data-id="' + b.id + '">' + icon("layers") + '<span class="t">' + esc(b.name) + '</span><span class="m">' + esc(b.customer || "") + "</span></button>").join("");
+  if (cs.length) h += '<div class="gs-sec">Carriers</div>' + cs.map(c => '<button class="gs-row" data-act="openCarrier" data-dot="' + c.dot + '">' + icon("target") + '<span class="t">' + esc(c.legal_name) + '</span><span class="m">USDOT ' + c.dot + "</span></button>").join("");
+  if (!h) h = '<div class="gs-empty">No carriers or batches match &ldquo;' + esc(q) + "&rdquo;</div>";
+  return '<div class="gs-pop">' + h + "</div>";
+}
+function appbar() {
+  const u = cur();
+  return '<header class="appbar">' +
+    '<div class="brand"><div class="mark">' + icon("nail") + '</div><div><div class="name">Twisted Nail</div><div class="sub">Recruiter</div></div></div>' +
+    '<div class="gsearch">' + icon("search") + '<input class="gs-in" id="gs-in" placeholder="Search carriers, batches, USDOT…" value="' + esc(state.gsearch || "") + '" data-live="gSearch" autocomplete="off">' + gsearchPop() + "</div>" +
+    '<div class="spacer"></div>' +
+    '<span class="pill" title="Shared list — updates live for all users"><span class="dot"></span>Live</span>' +
+    '<button class="usercell" data-act="userMenu">' + avatar(u) + '<span class="who"><span class="nm">' + esc(u.name) + '</span><span class="rl">' + ROLE_LABEL[u.role] + "</span></span></button>" +
+    "</header>";
+}
 function sidebar() {
   const u = cur();
   const pend = DB.users.filter(x => (state.overrides.userStatus[x.id]?.status || x.status) === "pending").length;
   const item = (act, to, ic, label, count, on) => '<a data-act="' + act + '"' + (to ? ' data-to="' + to + '"' : "") + ' class="' + (on ? "on" : "") + '">' + icon(ic) + "<span>" + label + "</span>" + (count != null ? '<span class="count">' + count + "</span>" : "") + "</a>";
   const reserved = (ic, label) => '<a class="reserved" data-act="reservedTab" data-label="' + label + '">' + icon(ic) + "<span>" + label + '</span><span class="soon">soon</span></a>';
   return '<aside class="sidebar">' +
-    '<div class="brand"><div class="mark">' + icon("nail") + '</div><div><div class="name">Twisted Nail</div><div class="sub">Recruiter</div></div></div>' +
     '<nav class="nav">' +
       '<div class="nav-label eyebrow">Recruiting</div>' +
       item("nav", "dashboard", "layers", "Dashboard", DB.batches.length, ["dashboard","workingList"].includes(state.screen)) +
@@ -86,15 +119,10 @@ function sidebar() {
       reserved("mail", "Email") + reserved("message", "Text") + reserved("send", "Mail") + reserved("building", "Enrichment") +
       (u.role === "manager" ? '<div class="nav-label eyebrow">Admin</div>' + item("nav", "users", "users", "Users", pend || null, state.screen === "users") : "") +
     "</nav>" +
-    '<div class="side-foot"><button class="usercell" data-act="userMenu">' + avatar(u) + '<span class="who"><span class="nm">' + esc(u.name) + '</span><span class="rl">' + ROLE_LABEL[u.role] + "</span></span><span style=\"margin-left:auto;color:var(--text-subtle)\">" + icon("chevD") + "</span></button></div>" +
     "</aside>";
 }
-function topbar(crumbs) {
-  return '<header class="topbar"><div class="crumbs">' + crumbs + '</div><div class="spacer"></div>' +
-    '<span class="badge good" title="Shared list — updates live for all users"><span class="dot"></span>Live</span>' +
-    '<button class="btn icon ghost" data-act="toggleTheme" title="Toggle theme">' + icon("sun") + "</button></header>";
-}
-function appShell(inner, crumbs) { return '<div class="shell">' + sidebar() + '<div class="main">' + topbar(crumbs) + '<div class="content">' + inner + "</div></div></div>"; }
+function crumbstrip(crumbs) { return '<div class="crumbstrip"><div class="crumbs">' + crumbs + '</div><div class="spacer"></div></div>'; }
+function appShell(inner, crumbs) { return '<div class="shell">' + appbar() + '<div class="body">' + sidebar() + '<div class="main">' + crumbstrip(crumbs) + '<div class="content">' + inner + "</div></div></div></div>"; }
 function crumb(items) { return items.map((it, i) => (i ? '<span style="color:var(--text-subtle)">' + icon("chevR") + "</span>" : "") + (it.act ? '<a data-act="' + it.act + '"' + (it.to ? ' data-to="' + it.to + '" data-id="' + it.to + '"' : "") + ' style="cursor:pointer">' + esc(it.label) + "</a>" : '<span class="' + (i === items.length-1 ? "cur" : "") + '">' + esc(it.label) + "</span>")).join(""); }
 function sel(a, b) { return a === b ? " selected" : ""; }
 function cityOptions(v) { return CITY_NAMES.map(n => '<option value="' + n + '"' + sel(v, n) + ">" + n + ", TX</option>").join(""); }
@@ -158,9 +186,9 @@ function screenDashboard() {
   const withPhone = new Set(DB.batchCarriers.filter(b => { const c = DB.carrierByDot[b.dot]; return c.phone || c.cell; }).map(b => b.dot)).size;
   const strip = statStrip(stat("Active batches", DB.batches.length) + stat("Carriers in play", totalCarriers) + stat("With phone", withPhone) + stat("Interested", interested, "good") + stat("Promoted", promoted, "accent"));
 
-  // F30: map starts EMPTY; jobs toggle on via the legend; zones stay accent orange.
+  // F30: map starts EMPTY; jobs toggle on via the legend. Lane colors reset per batch.
   const onJobs = DB.batches.filter(b => state.dashJobs[b.id]);
-  const zones = []; onJobs.forEach(b => b.zones.forEach(z => zones.push(z)));
+  const zones = []; onJobs.forEach(b => b.zones.forEach((z, i) => zones.push(Object.assign({}, z, { li: i }))));
   const pins = onJobs.map(b => { const z = b.zones[0]; const p = z.type === "radius" ? { lng:z.anchorLng, lat:z.anchorLat } : { lng:z.originLng, lat:z.originLat }; const bi = DB.batches.indexOf(b); return { lng:p.lng, lat:p.lat, num: bi+1, fill:"var(--accent)", title:b.name, r:8, shape:"pin", job:b.id }; });
   const legend = '<div class="map-legend jobs"><div class="lg" style="font-weight:700;color:var(--text)">Jobs — toggle to show</div>' +
     DB.batches.map((b, bi) => { const on = !!state.dashJobs[b.id]; return '<button class="lg jobrow ' + (on ? "on" : "") + '" data-act="dashToggleJob" data-id="' + b.id + '"><span class="jbox">' + (on ? icon("check") : "") + '</span><span class="mono" style="color:var(--accent-press);font-weight:800">' + (bi+1) + '</span> ' + esc(b.name) + "</button>"; }).join("") +
@@ -173,13 +201,13 @@ function screenDashboard() {
   const rows = DB.batches.map((b, bi) => {
     const c = statusCounts(b.id);
     const la = activityForBatch(b.id)[0];
-    const stageCells = STATUS_ORDER.map(k => '<td class="center mono" style="' + (c[k] ? "" : "color:var(--text-subtle)") + '">' + c[k] + "</td>").join("");
+    const stageCells = STATUS_ORDER.map(k => '<td class="center num" style="' + (c[k] ? "" : "color:var(--text-subtle)") + '">' + c[k] + "</td>").join("");
     return '<tr class="clickable" data-act="openBatch" data-id="' + b.id + '">' +
-      '<td class="mono center" style="width:28px;color:var(--accent-press);font-weight:800">' + (bi+1) + "</td>" +
+      '<td class="num center" style="width:28px;color:var(--accent);font-weight:800">' + (bi+1) + "</td>" +
       "<td><div class='co oneline'><span class='nm'>" + esc(b.name) + "</span><span class='meta'>" + esc(b.customer) + "</span><span class='meta'>" + esc(b.job) + "</span></div></td>" +
       "<td><div class='lanes-cell'>" + b.zones.map(z => "<div>" + laneLine(z) + "</div>").join("") + "</div></td>" +
-      "<td class='center mono'>" + c.total + "</td>" + stageCells +
-      "<td class='center'>" + (c.dnc ? '<span class="mono" style="color:var(--st-dnc)">' + c.dnc + "</span>" : '<span class="subtle">0</span>') + "</td>" +
+      "<td class='center num' style='font-weight:700'>" + c.total + "</td>" + stageCells +
+      "<td class='center'>" + (c.dnc ? '<span class="num" style="color:var(--st-dnc);font-weight:700">' + c.dnc + "</span>" : '<span class="subtle">0</span>') + "</td>" +
       "<td>" + (c.warnings ? '<span class="wchip crit">' + icon("alert") + c.warnings + "</span>" : '<span class="subtle">—</span>') + "</td>" +
       "<td class='muted center' style='font-size:12px;white-space:nowrap'>" + (la ? fmtRel(la.at) : "—") + "</td>" +
       '<td class="right"><button class="btn icon ghost sm" data-act="batchMenu" data-id="' + b.id + '">' + icon("dots") + "</button></td></tr>";
@@ -225,12 +253,12 @@ function builderMap(w, h, withCov, extraCls) {
     const wp = matches.filter(c => c.phone || c.cell).length, we = matches.filter(c => c.email).length, t1 = matches.filter(c => c.tier === 1).length;
     cov = '<div class="strip mt-12" id="wiz-cov">' + stat("Matches", matches.length, "accent") + stat("With phone", wp) + stat("With email", we, we ? "" : "crit") + stat("Sand & gravel", t1, "good") + "</div>";
   }
-  return '<div class="' + (extraCls || "") + '"><div id="wiz-map-holder" data-h="' + h + '">' + mapBox("builder", pins, zones, mapCount(matches.length) + mapLegend([["var(--accent)","Matches filters"],["var(--crit)","Has a warning flag"]]), h) + "</div>" + cov + "</div>";
+  return '<div class="' + (extraCls || "") + '"><div id="wiz-map-holder" data-h="' + h + '">' + mapBox("builder", pins, zones, mapCount(matches.length) + builderLegend(zones), h) + "</div>" + cov + "</div>";
 }
 /* Columns body: full-width overview map + live coverage strip on top, then three
    aligned columns — [Details + Lanes] · [Freight] · [Filters] — all visible at once. */
 function builderBody(w) {
-  return builderMap(w, 330, true, "ns-topmap") +
+  return builderMap(w, 430, true, "ns-topmap") +
     '<div class="cols-grid mt-14">' +
       '<div class="stack gap-14">' + panelDetails(w) + panelLanes(w) + "</div>" +
       "<div>" + panelFreight(w) + "</div>" +
@@ -244,7 +272,7 @@ function panelDetails(w) {
     '<label class="field grow"><span class="label">Job</span><input class="input" placeholder="What job / project?" value="' + esc(w.job) + '" data-model="wizard.job"></label></div></div></div>';
 }
 function panelLanes(w) {
-  const laneList = w.lanes.length ? w.lanes.map((z, i) => '<div class="lane"><div class="idx">' + "ABCDEFGH"[i] + '</div><div class="lmeta"><div class="lmat">' + esc(z.label || (z.type === "radius" ? "Radius lane" : "Corridor lane")) + '</div><div class="lgeo">' + (z.type === "radius" ? icon("target") + " " + esc(z.anchor) + " · " + z.radiusMi + " mi" : icon("route") + " " + esc(z.origin) + " → " + esc(z.dest) + " · " + z.bufferMi + " mi") + '</div></div><button class="btn icon ghost sm" data-act="wzEditLane" data-id="' + z.id + '">' + icon("edit") + '</button><button class="btn icon ghost sm" data-act="wzRmLane" data-id="' + z.id + '">' + icon("x") + "</button></div>").join("") : '<div class="subtle" style="font-size:12.5px;padding:4px 0 8px">Add a radius or a corridor — coverage is the union of every lane.</div>';
+  const laneList = w.lanes.length ? w.lanes.map((z, i) => '<div class="lane"><div class="idx" style="background:' + laneColor(i) + ';color:#fff">' + "ABCDEFGH"[i] + '</div><div class="lmeta"><div class="lmat">' + esc(z.label || (z.type === "radius" ? "Radius lane" : "Corridor lane")) + '</div><div class="lgeo">' + (z.type === "radius" ? icon("target") + " " + esc(z.anchor) + " · " + z.radiusMi + " mi" : icon("route") + " " + esc(z.origin) + " → " + esc(z.dest) + " · " + z.bufferMi + " mi") + '</div></div><button class="btn icon ghost sm" data-act="wzEditLane" data-id="' + z.id + '">' + icon("edit") + '</button><button class="btn icon ghost sm" data-act="wzRmLane" data-id="' + z.id + '">' + icon("x") + "</button></div>").join("") : '<div class="subtle" style="font-size:12.5px;padding:4px 0 8px">Add a radius or a corridor — coverage is the union of every lane.</div>';
   return '<div class="card" style="padding:16px"><div class="eyebrow" style="margin-bottom:10px">Lanes <span class="subtle">· ' + w.lanes.length + "</span></div>" + laneList +
     (w.editing ? wizLaneEditor(w) : '<div class="row gap-8 mt-12"><button class="btn sm" data-act="wzAddLane" data-t="radius">' + icon("target") + ' Add radius</button><button class="btn sm" data-act="wzAddLane" data-t="corridor">' + icon("route") + " Add corridor</button></div>") + "</div>";
 }

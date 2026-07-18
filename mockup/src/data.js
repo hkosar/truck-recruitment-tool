@@ -221,7 +221,7 @@ const SG_OTHER_VALUES = cargoOtherValues.filter(v => v.is_sg).map(v => v.value);
 /* ---- users ---- */
 const users = [
   { id:"u_manager", name:"Hunter Kosar",   email:"hunter@twistednail.com", role:"manager", status:"approved", color:"#111418", registered: NOW_MS - 120*DAY },
-  { id:"u_edit1",   name:"Marisol Vega",   email:"marisol@twistednail.com", role:"edit",    status:"approved", color:"#e8611d", registered: NOW_MS - 96*DAY },
+  { id:"u_edit1",   name:"Marisol Vega",   email:"marisol@twistednail.com", role:"edit",    status:"approved", color:"#35547e", registered: NOW_MS - 96*DAY },
   { id:"u_edit2",   name:"Dwight Fowler",  email:"dwight@twistednail.com",  role:"edit",    status:"approved", color:"#3a4757", registered: NOW_MS - 54*DAY },
   { id:"u_view1",   name:"Priya Nair",     email:"priya@twistednail.com",   role:"view",    status:"approved", color:"#6b7482", registered: NOW_MS - 30*DAY },
   { id:"u_guest1",  name:"Cole Ramirez",   email:"cole.r@gmail.com",        role:"guest",   status:"pending",  color:"#8a5a2b", registered: NOW_MS - 2*DAY },

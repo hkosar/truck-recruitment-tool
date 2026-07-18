@@ -6,131 +6,81 @@
 @font-face{font-family:'Montserrat';font-style:normal;font-weight:700;font-display:swap;src:url(data:font/woff2;base64,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) format('woff2');}
 @font-face{font-family:'Montserrat';font-style:normal;font-weight:800;font-display:swap;src:url(data:font/woff2;base64,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) format('woff2');}
 /* ============================================================================
-   Twisted Nail — Carrier Recruiter  ·  "Aggregate Dispatch Console"
-   Design system: asphalt/concrete neutrals · burnt-orange accent · labeled
-   semantic status chips · mono for data · light + dark, token-based.
+   Twisted Nail — Carrier Recruiter
+   TNBS Design System v1.0 (locked 2026-07-18): Montserrat only · navy is the
+   ONLY accent · light only (no dark mode) · tight "Blueprint" geometry —
+   borders and zebra do the work, not shadows. See docs/tnbs-design-system.md.
    ============================================================================ */
 
 :root {
-  /* --- Neutrals: "concrete" (light), slight warm-grey bias, deliberately picked --- */
-  --bg:            #eceae5;   /* room / behind surfaces */
-  --surface:       #f7f6f3;   /* primary panels */
-  --surface-2:     #fbfaf8;   /* raised / rows */
-  --surface-sunk:  #e4e2dc;   /* wells, tracks */
-  --border:        #d6d3cb;
-  --border-strong: #bfbbb0;
-  --text:          #22262b;   /* asphalt ink */
-  --text-muted:    #5c6169;
-  --text-subtle:   #8b8f96;
+  /* --- Surfaces: cool slate, light --- */
+  --bg:            #eef1f5;   /* app background */
+  --surface:       #ffffff;   /* cards, tables, panels */
+  --surface-2:     #ffffff;   /* inputs, buttons (borders differentiate) */
+  --surface-sunk:  #e9edf2;   /* wells, tracks, seg controls */
+  --border:        #dde3ea;
+  --border-strong: #c4ccd6;
+  --text:          #1c2530;
+  --text-muted:    #52606e;
+  --text-subtle:   #86909e;
 
-  /* --- Accent: burnt safety-orange (the dump-truck color) --- */
-  --accent:        #e8611d;
-  --accent-hover:  #cf5314;
-  --accent-press:  #b8480f;
-  --accent-ink:    #ffffff;   /* text on accent */
-  --accent-tint:   #fbe7d8;   /* faint fill */
-  --accent-tint-2: #f6d3ba;
-  --accent-ring:   rgba(232, 97, 29, 0.38);
+  /* --- Brand accent: navy (the company hat color). The ONLY accent. --- */
+  --accent:        #1e3a6e;
+  --accent-hover:  #27498a;
+  --accent-press:  #16294c;
+  --accent-ink:    #ffffff;   /* text/icons on navy */
+  --accent-tint:   #e6ecf7;   /* 11%-navy tint fills (active nav, chips) */
+  --accent-tint-2: #d3ddef;
+  --accent-ring:   rgba(30, 58, 110, 0.32);
 
-  /* --- Pipeline status (labeled, distinct from accent) --- */
-  --st-new:        #64748b;  --st-new-tint:      #e7eaef;
-  --st-attempted:  #b07d10;  --st-attempted-tint:#f6eccf;
-  --st-contacted:  #2f6fed;  --st-contacted-tint:#dfe8fd;
-  --st-interested: #157f43;  --st-interested-tint:#d6efdf;
-  --st-notfit:     #8a8f98;  --st-notfit-tint:   #e8e8e6;
-  --st-dnc:        #d0342c;  --st-dnc-tint:      #f8dcd9;
+  /* --- App chrome (navy top bar) --- */
+  --bar:      #1a3560;
+  --bar-line: #14294c;
 
-  /* --- Semantic (good/warn/crit/info) --- */
-  --good: #157f43;  --warn: #b07d10;  --crit: #d0342c;  --info: #2f6fed;
-  --good-tint:#d6efdf; --warn-tint:#f6eccf; --crit-tint:#f8dcd9; --info-tint:#dfe8fd;
+  /* --- Tables --- */
+  --zebra:     #f6f9fc;   /* even rows */
+  --row-line:  #e8edf3;   /* row separators */
+  --row-hover: #eef3f9;
+  --selected:  #e6eefb;   /* selected row fill (+3px inset navy bar, first cell) */
+  --th-bg:     #eef2f7;   /* table header background */
 
-  /* --- Form / geometry / motion --- */
-  --radius:    6px;
-  --radius-sm: 4px;
-  --radius-lg: 10px;
-  --shadow-1: 0 1px 2px rgba(24,26,29,.06), 0 1px 1px rgba(24,26,29,.04);
-  --shadow-2: 0 4px 14px rgba(24,26,29,.10), 0 2px 4px rgba(24,26,29,.06);
-  --shadow-pop: 0 12px 34px rgba(24,26,29,.20), 0 4px 10px rgba(24,26,29,.12);
-  --map-land:  #dfe6e4;
-  --map-land-2:#cfd8d6;
-  --map-line:  #a7b2b0;
+  /* --- Pipeline status → closed ok/warn/bad/info set (state ONLY, labeled) --- */
+  --st-new:        #52606e;  --st-new-tint:      #e9edf2;
+  --st-attempted:  #b45c0c;  --st-attempted-tint:#f7eeda;
+  --st-contacted:  #1e3a6e;  --st-contacted-tint:#e6ecf7;
+  --st-interested: #15803d;  --st-interested-tint:#e6f1ea;
+  --st-notfit:     #86909e;  --st-notfit-tint:   #eaedf1;
+  --st-dnc:        #a4262c;  --st-dnc-tint:      #f6e7e8;
 
-  --sidebar-w: 236px;
+  /* --- Semantic (ok/warn/bad/info) --- */
+  --good: #15803d;  --warn: #b45c0c;  --crit: #a4262c;  --info: #1e3a6e;
+  --good-tint:#e6f1ea; --warn-tint:#f7eeda; --crit-tint:#f6e7e8; --info-tint:#e6ecf7;
+
+  /* --- Category identity (colorblind-safe set; fixed order; never color-alone).
+         Spent on LANE identity here: lane A/B/C zones, chips, legends. --- */
+  --cat-1: #6a5ca8;
+  --cat-2: #08949e;
+  --cat-3: #b5701c;
+
+  /* --- Geometry: tight, technical ("Blueprint"). Shadows ~none. --- */
+  --radius:    3px;    /* buttons, inputs, small elements */
+  --radius-sm: 3px;
+  --radius-lg: 5px;    /* cards, tables, panels */
+  --shadow-1: 0 1px 2px rgba(28,37,48,.06);
+  --shadow-2: 0 1px 2px rgba(28,37,48,.06);
+  --shadow-pop: 0 8px 24px rgba(28,37,48,.16);   /* overlays only (menus/modals) */
+  --map-land:  #e2e8ee;
+  --map-land-2:#d2dae2;
+  --map-line:  #aab6c2;
+
+  --sidebar-w: 216px;
   --topbar-h:  56px;
+  --crumb-h:   38px;
 
-  --font-ui: "Montserrat", -apple-system, BlinkMacSystemFont, "Segoe UI", Roboto, "Helvetica Neue", Arial, sans-serif;
+  --font-ui: "Montserrat", "Segoe UI", system-ui, sans-serif;
   --font-mono: ui-monospace, "SF Mono", "SFMono-Regular", "Cascadia Code", "JetBrains Mono", Menlo, Consolas, monospace;
 
   --ease: cubic-bezier(.4, 0, .2, 1);
-}
-
-@media (prefers-color-scheme: dark) {
-  :root {
-    --bg:            #0e1216;   /* asphalt */
-    --surface:       #171c22;
-    --surface-2:     #1e242b;
-    --surface-sunk:  #0b0f13;
-    --border:        #2b333c;
-    --border-strong: #3a444f;
-    --text:          #e7eaed;
-    --text-muted:    #a3abb5;
-    --text-subtle:   #6f7883;
-
-    --accent:        #f26f2b;
-    --accent-hover:  #f9813f;
-    --accent-press:  #d95e1c;
-    --accent-ink:    #1a0f07;
-    --accent-tint:   #2c1a0f;
-    --accent-tint-2: #3d2413;
-    --accent-ring:   rgba(242, 111, 43, 0.45);
-
-    --st-new:#93a0b2;        --st-new-tint:#232b34;
-    --st-attempted:#d6a53a;  --st-attempted-tint:#33290f;
-    --st-contacted:#6fa1ff;  --st-contacted-tint:#152439;
-    --st-interested:#48bd77; --st-interested-tint:#122a1c;
-    --st-notfit:#828a94;     --st-notfit-tint:#242a30;
-    --st-dnc:#f2685f;        --st-dnc-tint:#361715;
-
-    --good:#48bd77; --warn:#d6a53a; --crit:#f2685f; --info:#6fa1ff;
-    --good-tint:#122a1c; --warn-tint:#33290f; --crit-tint:#361715; --info-tint:#152439;
-
-    --shadow-1: 0 1px 2px rgba(0,0,0,.4);
-    --shadow-2: 0 6px 18px rgba(0,0,0,.5);
-    --shadow-pop: 0 16px 40px rgba(0,0,0,.6);
-    --map-land:  #202a2d;
-    --map-land-2:#2a373a;
-    --map-line:  #3f4f52;
-  }
-}
-
-/* Explicit theme overrides win over the media query in both directions */
-:root[data-theme="light"] {
-  --bg:#eceae5; --surface:#f7f6f3; --surface-2:#fbfaf8; --surface-sunk:#e4e2dc;
-  --border:#d6d3cb; --border-strong:#bfbbb0; --text:#22262b; --text-muted:#5c6169; --text-subtle:#8b8f96;
-  --accent:#e8611d; --accent-hover:#cf5314; --accent-press:#b8480f; --accent-ink:#ffffff;
-  --accent-tint:#fbe7d8; --accent-tint-2:#f6d3ba; --accent-ring:rgba(232,97,29,.38);
-  --st-new:#64748b; --st-new-tint:#e7eaef; --st-attempted:#b07d10; --st-attempted-tint:#f6eccf;
-  --st-contacted:#2f6fed; --st-contacted-tint:#dfe8fd; --st-interested:#157f43; --st-interested-tint:#d6efdf;
-  --st-notfit:#8a8f98; --st-notfit-tint:#e8e8e6; --st-dnc:#d0342c; --st-dnc-tint:#f8dcd9;
-  --good:#157f43; --warn:#b07d10; --crit:#d0342c; --info:#2f6fed;
-  --good-tint:#d6efdf; --warn-tint:#f6eccf; --crit-tint:#f8dcd9; --info-tint:#dfe8fd;
-  --shadow-1:0 1px 2px rgba(24,26,29,.06),0 1px 1px rgba(24,26,29,.04);
-  --shadow-2:0 4px 14px rgba(24,26,29,.10),0 2px 4px rgba(24,26,29,.06);
-  --shadow-pop:0 12px 34px rgba(24,26,29,.20),0 4px 10px rgba(24,26,29,.12);
-  --map-land:#dfe6e4; --map-land-2:#cfd8d6; --map-line:#a7b2b0;
-}
-:root[data-theme="dark"] {
-  --bg:#0e1216; --surface:#171c22; --surface-2:#1e242b; --surface-sunk:#0b0f13;
-  --border:#2b333c; --border-strong:#3a444f; --text:#e7eaed; --text-muted:#a3abb5; --text-subtle:#6f7883;
-  --accent:#f26f2b; --accent-hover:#f9813f; --accent-press:#d95e1c; --accent-ink:#1a0f07;
-  --accent-tint:#2c1a0f; --accent-tint-2:#3d2413; --accent-ring:rgba(242,111,43,.45);
-  --st-new:#93a0b2; --st-new-tint:#232b34; --st-attempted:#d6a53a; --st-attempted-tint:#33290f;
-  --st-contacted:#6fa1ff; --st-contacted-tint:#152439; --st-interested:#48bd77; --st-interested-tint:#122a1c;
-  --st-notfit:#828a94; --st-notfit-tint:#242a30; --st-dnc:#f2685f; --st-dnc-tint:#361715;
-  --good:#48bd77; --warn:#d6a53a; --crit:#f2685f; --info:#6fa1ff;
-  --good-tint:#122a1c; --warn-tint:#33290f; --crit-tint:#361715; --info-tint:#152439;
-  --shadow-1:0 1px 2px rgba(0,0,0,.4); --shadow-2:0 6px 18px rgba(0,0,0,.5); --shadow-pop:0 16px 40px rgba(0,0,0,.6);
-  --map-land:#202a2d; --map-land-2:#2a373a; --map-line:#3f4f52;
 }
 
 /* --------------------------------- reset --------------------------------- */
@@ -159,7 +109,7 @@ svg { display: block; width: 16px; height: 16px; flex: none; }
 
 .mono { font-family: var(--font-mono); font-variant-numeric: tabular-nums; }
 .num  { font-variant-numeric: tabular-nums; }
-.eyebrow { font-size: 11px; font-weight: 700; letter-spacing: .09em; text-transform: uppercase; color: var(--text-subtle); }
+.eyebrow { font-size: 11px; font-weight: 800; letter-spacing: .08em; text-transform: uppercase; color: var(--text-subtle); }
 .muted { color: var(--text-muted); }
 .subtle{ color: var(--text-subtle); }
 
@@ -171,7 +121,7 @@ svg { display: block; width: 16px; height: 16px; flex: none; }
   border: 1px solid var(--border-strong);
   background: var(--surface-2);
   color: var(--text);
-  font-size: 13px; font-weight: 600; white-space: nowrap;
+  font-size: 12.5px; font-weight: 700; white-space: nowrap;
   transition: background .12s var(--ease), border-color .12s var(--ease), transform .04s var(--ease);
 }
 .btn:hover { background: var(--surface-sunk); }
@@ -257,7 +207,7 @@ input[type=range]::-moz-range-thumb { width: 16px; height: 16px; border-radius: 
 .chip.flag { background: var(--surface-sunk); color: var(--text-muted); border-color: var(--border); }
 
 /* --------------------------------- status badge --------------------------------- */
-.badge { display: inline-flex; align-items: center; gap: 6px; height: 22px; padding: 0 9px; border-radius: 999px; font-size: 11.5px; font-weight: 700; letter-spacing: .01em; white-space: nowrap; }
+.badge { display: inline-flex; align-items: center; gap: 6px; height: 22px; padding: 0 9px; border-radius: 999px; font-size: 11px; font-weight: 700; letter-spacing: .01em; white-space: nowrap; }
 .badge .dot { width: 7px; height: 7px; border-radius: 50%; background: currentColor; flex: none; }
 .badge.new{color:var(--st-new);background:var(--st-new-tint);}
 .badge.attempted{color:var(--st-attempted);background:var(--st-attempted-tint);}
@@ -277,60 +227,87 @@ input[type=range]::-moz-range-thumb { width: 16px; height: 16px; border-radius: 
 .card { background: var(--surface); border: 1px solid var(--border); border-radius: var(--radius-lg); box-shadow: var(--shadow-1); }
 
 /* --------------------------------- app shell --------------------------------- */
-.shell { display: grid; grid-template-columns: var(--sidebar-w) 1fr; height: 100vh; }
+/* TNBS chrome: navy 56px top bar (white badge + wordmark, global search, avatar)
+   over a light ~216px sidebar + content column. Light only. */
+.shell { display: flex; flex-direction: column; height: 100vh; }
+.appbar { height: var(--topbar-h); background: var(--bar); border-bottom: 1px solid var(--bar-line); display: flex; align-items: center; gap: 14px; padding: 0 16px; flex: none; color: #fff; }
+.appbar .brand { display: flex; align-items: center; gap: 10px; }
+.appbar .mark { width: 32px; height: 32px; border-radius: 50%; background: #fff; display: grid; place-items: center; flex: none; }
+.appbar .mark svg { width: 18px; height: 18px; color: var(--bar); }
+.appbar .name { font-weight: 800; letter-spacing: -.01em; font-size: 15px; line-height: 1; color: #fff; }
+.appbar .sub { font-size: 9.5px; font-weight: 700; letter-spacing: .13em; color: rgba(255,255,255,.65); text-transform: uppercase; margin-top: 3px; }
+.appbar .spacer { flex: 1; }
+.appbar .pill { display: inline-flex; align-items: center; gap: 6px; height: 24px; padding: 0 10px; border-radius: 999px; background: rgba(255,255,255,.14); color: #fff; font-size: 11px; font-weight: 700; }
+.appbar .pill .dot { width: 7px; height: 7px; border-radius: 50%; background: #4ec27c; }
+
+/* global search (in the navy bar) */
+.gsearch { position: relative; width: min(400px, 34vw); }
+.gsearch > svg { position: absolute; left: 10px; top: 50%; transform: translateY(-50%); width: 14px; height: 14px; color: rgba(255,255,255,.6); pointer-events: none; }
+.gs-in { height: 32px; width: 100%; background: rgba(255,255,255,.13); border: 1px solid rgba(255,255,255,.16); border-radius: var(--radius); color: #fff; padding: 0 10px 0 32px; font-size: 12.5px; }
+.gs-in::placeholder { color: rgba(255,255,255,.55); }
+.gs-in:focus { outline: none; background: rgba(255,255,255,.22); border-color: rgba(255,255,255,.45); }
+.gs-pop { position: absolute; top: 38px; left: 0; right: 0; background: var(--surface); border: 1px solid var(--border-strong); border-radius: var(--radius-lg); box-shadow: var(--shadow-pop); padding: 5px; z-index: 80; color: var(--text); }
+.gs-sec { font-size: 10px; font-weight: 800; text-transform: uppercase; letter-spacing: .08em; color: var(--text-subtle); padding: 6px 9px 3px; }
+.gs-row { display: flex; align-items: center; gap: 9px; width: 100%; padding: 7px 9px; border-radius: var(--radius); font-size: 12.5px; text-align: left; color: var(--text); }
+.gs-row:hover { background: var(--row-hover); }
+.gs-row svg { width: 14px; height: 14px; color: var(--text-subtle); flex: none; }
+.gs-row .t { font-weight: 700; white-space: nowrap; overflow: hidden; text-overflow: ellipsis; }
+.gs-row .m { color: var(--text-subtle); font-size: 11px; margin-left: auto; flex: none; font-variant-numeric: tabular-nums; }
+.gs-empty { padding: 10px 9px; font-size: 12px; color: var(--text-subtle); }
+
+.body { display: grid; grid-template-columns: var(--sidebar-w) 1fr; flex: 1; min-height: 0; }
 .sidebar { background: var(--surface); border-right: 1px solid var(--border); display: flex; flex-direction: column; min-height: 0; }
-.brand { display: flex; align-items: center; gap: 10px; height: var(--topbar-h); padding: 0 16px; border-bottom: 1px solid var(--border); }
-.brand .mark { width: 30px; height: 30px; border-radius: 7px; background: var(--accent); display: grid; place-items: center; flex: none; box-shadow: var(--shadow-1); }
-.brand .mark svg { width: 18px; height: 18px; color: var(--accent-ink); }
-.brand .name { font-weight: 800; letter-spacing: -.01em; font-size: 15px; line-height: 1; }
-.brand .sub { font-size: 10px; font-weight: 700; letter-spacing: .13em; color: var(--text-subtle); text-transform: uppercase; margin-top: 3px; }
 .nav { padding: 12px 10px; display: flex; flex-direction: column; gap: 2px; overflow-y: auto; flex: 1; }
 .nav-label { padding: 12px 10px 5px; }
 .nav a { display: flex; align-items: center; gap: 11px; padding: 8px 10px; border-radius: var(--radius); color: var(--text-muted); font-weight: 600; font-size: 13px; transition: background .12s var(--ease), color .12s var(--ease); }
 .nav a svg { width: 17px; height: 17px; flex: none; }
 .nav a:hover { background: var(--surface-sunk); color: var(--text); }
-.nav a.on { background: var(--accent-tint); color: var(--accent-press); }
-.nav a .count { margin-left: auto; font-size: 11px; font-weight: 700; color: var(--text-subtle); background: var(--surface-sunk); padding: 1px 7px; border-radius: 999px; }
-.nav a.on .count { background: var(--accent-tint-2); color: var(--accent-press); }
+.nav a.on { background: var(--accent-tint); color: var(--accent); font-weight: 800; }
+.nav a .count { margin-left: auto; font-size: 11px; font-weight: 700; color: var(--text-subtle); background: var(--surface-sunk); padding: 1px 7px; border-radius: 999px; font-variant-numeric: tabular-nums; }
+.nav a.on .count { background: var(--accent-tint-2); color: var(--accent); }
 .side-foot { border-top: 1px solid var(--border); padding: 10px; }
 
-.usercell { display: flex; align-items: center; gap: 10px; padding: 7px 8px; border-radius: var(--radius); width: 100%; }
-.usercell:hover { background: var(--surface-sunk); }
+.usercell { display: flex; align-items: center; gap: 10px; padding: 5px 8px; border-radius: var(--radius); }
+.appbar .usercell:hover { background: rgba(255,255,255,.12); }
 .avatar { width: 30px; height: 30px; border-radius: 50%; display: grid; place-items: center; font-size: 12px; font-weight: 700; color: #fff; flex: none; }
-.usercell .who { text-align: left; min-width: 0; }
-.usercell .who .nm { font-size: 13px; font-weight: 700; white-space: nowrap; overflow: hidden; text-overflow: ellipsis; }
-.usercell .who .rl { font-size: 11px; color: var(--text-subtle); }
+.appbar .avatar { border: 2px solid rgba(255,255,255,.85); }
+.usercell .who { display: flex; flex-direction: column; text-align: left; min-width: 0; }
+.usercell .who .nm { font-size: 12.5px; font-weight: 700; white-space: nowrap; overflow: hidden; text-overflow: ellipsis; color: #fff; }
+.usercell .who .rl { font-size: 10.5px; color: rgba(255,255,255,.65); }
 
 /* main column */
-.main { display: flex; flex-direction: column; min-width: 0; height: 100vh; }
-.topbar { height: var(--topbar-h); border-bottom: 1px solid var(--border); background: color-mix(in srgb, var(--surface) 82%, transparent); backdrop-filter: blur(6px); display: flex; align-items: center; gap: 14px; padding: 0 20px; flex: none; }
-.topbar .crumbs { display: flex; align-items: center; gap: 8px; font-size: 13px; color: var(--text-muted); min-width: 0; }
-.topbar .crumbs .cur { color: var(--text); font-weight: 700; white-space: nowrap; overflow: hidden; text-overflow: ellipsis; }
-.topbar .spacer { flex: 1; }
+.main { display: flex; flex-direction: column; min-width: 0; min-height: 0; }
+.crumbstrip { height: var(--crumb-h); border-bottom: 1px solid var(--border); background: var(--surface); display: flex; align-items: center; gap: 14px; padding: 0 20px; flex: none; }
+.crumbstrip .crumbs { display: flex; align-items: center; gap: 8px; font-size: 12.5px; color: var(--text-muted); min-width: 0; }
+.crumbstrip .crumbs .cur { color: var(--text); font-weight: 700; white-space: nowrap; overflow: hidden; text-overflow: ellipsis; }
+.crumbstrip .spacer { flex: 1; }
 .content { flex: 1; overflow-y: auto; overflow-x: hidden; }
 .page { max-width: 1240px; margin: 0 auto; padding: 22px 24px 60px; }
 .page.wide { max-width: none; }
 
 .page-head { display: flex; align-items: flex-start; gap: 16px; margin-bottom: 20px; }
-.page-head .h1 { font-size: 21px; font-weight: 800; letter-spacing: -.02em; }
+.page-head .h1 { font-size: 20px; font-weight: 800; letter-spacing: -.02em; }
 .page-head .desc { color: var(--text-muted); font-size: 13px; margin-top: 3px; max-width: 60ch; }
 .page-head .spacer { flex: 1; }
 
 /* --------------------------------- tables --------------------------------- */
 .tbl-wrap { overflow-x: auto; border: 1px solid var(--border); border-radius: var(--radius-lg); background: var(--surface); }
 table.tbl { width: 100%; border-collapse: collapse; font-size: 13px; }
-.tbl thead th { position: sticky; top: 0; z-index: 2; background: var(--surface); text-align: left; font-size: 11px; font-weight: 700; letter-spacing: .05em; text-transform: uppercase; color: var(--text-subtle); padding: 10px 12px; border-bottom: 1px solid var(--border); white-space: nowrap; }
-.tbl tbody td { padding: 10px 12px; border-bottom: 1px solid var(--border); vertical-align: middle; }
+.tbl thead th { position: sticky; top: 0; z-index: 2; background: var(--th-bg); text-align: left; font-size: 10.5px; font-weight: 800; letter-spacing: .07em; text-transform: uppercase; color: var(--text-muted); padding: 8px 12px; border-bottom: 1px solid var(--border); white-space: nowrap; }
+.tbl tbody td { padding: 9px 12px; border-bottom: 1px solid var(--row-line); vertical-align: middle; }
 .tbl tbody tr { transition: background .1s var(--ease); }
-.tbl tbody tr:hover { background: var(--surface-2); }
+.tbl tbody tr:nth-child(even) { background: var(--zebra); }
+.tbl tbody tr:hover { background: var(--row-hover); }
 .tbl tbody tr:last-child td { border-bottom: none; }
-.tbl tbody tr.sel { background: var(--accent-tint); }
-.tbl tbody tr.sel:hover { background: var(--accent-tint); }
+.tbl tbody tr.sel, .tbl tbody tr.sel:nth-child(even) { background: var(--selected); }
+.tbl tbody tr.sel td:first-child { box-shadow: inset 3px 0 0 var(--accent); }
+.tbl tbody tr.sel:hover { background: var(--selected); }
 .tbl tbody tr.dnc { opacity: .62; }
 .tbl tbody tr.clickable { cursor: pointer; }
 .tbl .co { display: flex; flex-direction: column; gap: 1px; }
 .tbl .co .nm { font-weight: 700; }
 .tbl .co .meta { font-size: 11.5px; color: var(--text-subtle); }
+.tbl td, .tbl th { font-variant-numeric: tabular-nums; }
 td.right, th.right { text-align: right; }
 .row-flash { animation: flash 1.4s var(--ease); }
 @keyframes flash { 0% { background: var(--accent-tint-2); } 100% { background: transparent; } }
@@ -358,14 +335,14 @@ td.right, th.right { text-align: right; }
 .map-legend .lg { display: flex; align-items: center; gap: 7px; color: var(--text-muted); }
 .map-legend .sw { width: 10px; height: 10px; border-radius: 50%; flex: none; }
 .map-count { position: absolute; right: 12px; top: 12px; background: color-mix(in srgb, var(--surface) 90%, transparent); backdrop-filter: blur(4px); border: 1px solid var(--border); border-radius: var(--radius); padding: 8px 12px; box-shadow: var(--shadow-1); text-align: right; }
-.map-count b { font-size: 20px; font-weight: 800; font-family: var(--font-mono); font-variant-numeric: tabular-nums; color: var(--accent-press); }
+.map-count b { font-size: 20px; font-weight: 800; font-variant-numeric: tabular-nums; color: var(--accent-press); }
 .map-count span { display: block; font-size: 10px; letter-spacing: .08em; text-transform: uppercase; color: var(--text-subtle); }
 
 /* --------------------------------- misc layout --------------------------------- */
 .stat-row { display: grid; grid-template-columns: repeat(auto-fit, minmax(150px, 1fr)); gap: 12px; }
 .stat { background: var(--surface); border: 1px solid var(--border); border-radius: var(--radius-lg); padding: 14px 16px; }
 .stat .k { font-size: 11px; font-weight: 700; letter-spacing: .06em; text-transform: uppercase; color: var(--text-subtle); }
-.stat .v { font-size: 26px; font-weight: 800; font-family: var(--font-mono); font-variant-numeric: tabular-nums; letter-spacing: -.02em; margin-top: 4px; }
+.stat .v { font-size: 26px; font-weight: 800; font-variant-numeric: tabular-nums; letter-spacing: -.02em; margin-top: 4px; }
 .stat .v small { font-size: 13px; color: var(--text-subtle); font-weight: 600; }
 
 .progress { display: flex; height: 8px; border-radius: 999px; overflow: hidden; background: var(--surface-sunk); }
@@ -402,8 +379,8 @@ td.right, th.right { text-align: right; }
 .menu .sep { height: 1px; background: var(--border); margin: 5px 0; }
 
 .toast-wrap { position: fixed; bottom: 20px; left: 50%; transform: translateX(-50%); z-index: 90; display: flex; flex-direction: column; gap: 8px; align-items: center; }
-.toast { display: flex; align-items: center; gap: 10px; background: var(--text); color: var(--bg); padding: 10px 16px; border-radius: 999px; font-size: 13px; font-weight: 600; box-shadow: var(--shadow-pop); animation: pop .18s var(--ease); }
-.toast svg { width: 16px; height: 16px; color: var(--accent); }
+.toast { display: flex; align-items: center; gap: 10px; background: var(--text); color: #fff; padding: 10px 16px; border-radius: 999px; font-size: 13px; font-weight: 600; box-shadow: var(--shadow-pop); animation: pop .18s var(--ease); }
+.toast svg { width: 16px; height: 16px; color: #aebfda; }
 
 /* --------------------------------- auth --------------------------------- */
 .auth { min-height: 100vh; display: grid; grid-template-columns: 1fr; place-items: center; padding: 24px; position: relative; overflow: hidden; }
@@ -413,15 +390,16 @@ td.right, th.right { text-align: right; }
   opacity: .7; z-index: 0; }
 .auth-card { position: relative; z-index: 1; width: 100%; max-width: 400px; }
 .auth-brand { display: flex; align-items: center; gap: 12px; justify-content: center; margin-bottom: 22px; }
-.auth-brand .mark { width: 40px; height: 40px; border-radius: 9px; background: var(--accent); display: grid; place-items: center; box-shadow: var(--shadow-2); }
-.auth-brand .mark svg { width: 24px; height: 24px; color: var(--accent-ink); }
+/* black badge on light surfaces (spec: white badge lives on the navy bar) */
+.auth-brand .mark { width: 42px; height: 42px; border-radius: 50%; background: #141a21; display: grid; place-items: center; }
+.auth-brand .mark svg { width: 24px; height: 24px; color: #fff; }
 .auth-brand .name { font-size: 19px; font-weight: 800; letter-spacing: -.02em; }
 .auth-brand .sub { font-size: 10px; font-weight: 700; letter-spacing: .14em; text-transform: uppercase; color: var(--text-subtle); }
 .auth-panel { background: var(--surface); border: 1px solid var(--border); border-radius: var(--radius-lg); box-shadow: var(--shadow-2); padding: 26px; }
 .auth-panel h1 { font-size: 18px; font-weight: 800; margin-bottom: 4px; }
 .auth-panel .lead { color: var(--text-muted); font-size: 13px; margin-bottom: 20px; }
 .auth-row { display: flex; align-items: center; justify-content: space-between; }
-.link { color: var(--accent-press); font-weight: 600; font-size: 13px; }
+.link { color: var(--accent); font-weight: 700; font-size: 13px; }
 .link:hover { text-decoration: underline; }
 .auth-foot { text-align: center; margin-top: 18px; font-size: 13px; color: var(--text-muted); }
 .demo-note { margin-top: 16px; padding: 11px 13px; border: 1px dashed var(--border-strong); border-radius: var(--radius); font-size: 12px; color: var(--text-muted); background: var(--surface-2); }
@@ -440,18 +418,16 @@ td.right, th.right { text-align: right; }
   *, *::before, *::after { animation-duration: .001ms !important; transition-duration: .001ms !important; }
 }
 
-@media (max-width: 900px) {
+/* one chrome breakpoint (spec): sidebar collapses; tables scroll in their wraps */
+@media (max-width: 760px) {
   :root { --sidebar-w: 0px; }
   .sidebar { display: none; }
-  .shell { grid-template-columns: 1fr; }
+  .body { grid-template-columns: 1fr; }
+  .gsearch { display: none; }
 }
 /* ============================================================================
    _components.css — v2 components layered on the base design system.
    ============================================================================ */
-
-/* brand mark: nail on orange */
-.brand .mark svg { color: var(--accent-ink); width: 18px; height: 18px; }
-.auth-brand .mark svg { color: var(--accent-ink); }
 
 /* reserved (disabled) future-tool nav (F2) */
 .nav .nav-label.reserved { margin-top: 14px; }
@@ -473,8 +449,8 @@ tr.warn-row:hover > td { background: color-mix(in srgb, var(--crit-tint) 82%, va
 /* ---- stat strip (F24 kinship) ---- */
 .strip { display: grid; grid-template-columns: repeat(auto-fit, minmax(116px, 1fr)); gap: 1px; background: var(--border); border: 1px solid var(--border); border-radius: var(--radius-lg); overflow: hidden; }
 .strip .cell { background: var(--surface); padding: 11px 15px; }
-.strip .cell .k { font-size: 10px; font-weight: 700; letter-spacing: .07em; text-transform: uppercase; color: var(--text-subtle); }
-.strip .cell .v { font-size: 21px; font-weight: 800; font-family: var(--font-mono); font-variant-numeric: tabular-nums; letter-spacing: -.02em; margin-top: 3px; }
+.strip .cell .k { font-size: 10px; font-weight: 800; letter-spacing: .07em; text-transform: uppercase; color: var(--text-subtle); }
+.strip .cell .v { font-size: 25px; font-weight: 800; font-variant-numeric: tabular-nums; letter-spacing: -.02em; margin-top: 3px; }
 .strip .cell.accent .v { color: var(--accent-press); }
 .strip .cell.crit .v { color: var(--crit); }
 .strip .cell.good .v { color: var(--st-interested); }
@@ -1003,7 +979,7 @@ const SG_OTHER_VALUES = cargoOtherValues.filter(v => v.is_sg).map(v => v.value);
 /* ---- users ---- */
 const users = [
   { id:"u_manager", name:"Hunter Kosar",   email:"hunter@twistednail.com", role:"manager", status:"approved", color:"#111418", registered: NOW_MS - 120*DAY },
-  { id:"u_edit1",   name:"Marisol Vega",   email:"marisol@twistednail.com", role:"edit",    status:"approved", color:"#e8611d", registered: NOW_MS - 96*DAY },
+  { id:"u_edit1",   name:"Marisol Vega",   email:"marisol@twistednail.com", role:"edit",    status:"approved", color:"#35547e", registered: NOW_MS - 96*DAY },
   { id:"u_edit2",   name:"Dwight Fowler",  email:"dwight@twistednail.com",  role:"edit",    status:"approved", color:"#3a4757", registered: NOW_MS - 54*DAY },
   { id:"u_view1",   name:"Priya Nair",     email:"priya@twistednail.com",   role:"view",    status:"approved", color:"#6b7482", registered: NOW_MS - 30*DAY },
   { id:"u_guest1",  name:"Cole Ramirez",   email:"cole.r@gmail.com",        role:"guest",   status:"pending",  color:"#8a5a2b", registered: NOW_MS - 2*DAY },
@@ -1195,7 +1171,7 @@ const state = {
   screen: "login",
   authView: "login",           // login | register | forgot
   registered: false,
-  theme: null,                 // null=follow OS; 'light'|'dark' override
+  gsearch: "",                 // global search query (navy-bar search box)
   activeBatchId: null,
   activeCarrierDot: null,
   profileFromBatch: null,
@@ -1389,14 +1365,8 @@ function closeMenu() { if (state.menu) { state.menu = null; render(); } }
 /* ------------------------------- render ------------------------------- */
 const ACT = {};   // action handlers, populated across files
 
-function applyTheme() {
-  const root = document.documentElement;
-  if (state.theme) root.setAttribute("data-theme", state.theme);
-  else root.removeAttribute("data-theme");
-}
 function render() {
   const root = document.getElementById("app");
-  applyTheme();
   let html = (typeof SCREENS !== "undefined" && SCREENS[state.screen]) ? SCREENS[state.screen]() : '<div class="empty">…</div>';
   html += overlays();
   root.innerHTML = html;
@@ -1492,16 +1462,19 @@ function onSubmit(e) { const t = e.target.closest("[data-submit]"); if (t) { e.p
 function setModel(path, val) { const parts = path.split("."); let o = state; for (let i = 0; i < parts.length - 1; i++) o = o[parts[i]]; o[parts[parts.length - 1]] = val; }
 
 /* ------------------------------- generic actions ------------------------------- */
-ACT.nav = (d) => { state.screen = d.to; if (d.to !== "profile") state.activeCarrierDot = null; closeMenu(); render(); };
-ACT.toggleTheme = () => {
-  const isDark = document.documentElement.matches('[data-theme="dark"]') ||
-    (!document.documentElement.hasAttribute("data-theme") && matchMedia("(prefers-color-scheme: dark)").matches);
-  state.theme = isDark ? "light" : "dark"; render();
-};
+ACT.nav = (d) => { state.screen = d.to; if (d.to !== "profile") state.activeCarrierDot = null; state.gsearch = ""; closeMenu(); render(); };
 ACT.closeModal = () => closeModal();
 ACT.closeMenu = () => closeMenu();
 ACT.noop = () => {};
-ACT.userMenu = (d, e) => { const r = e.currentTarget.getBoundingClientRect(); openMenu({ type:"userMenu", x: Math.max(10, r.left), y: r.top - 8 - 96 }); };
+/* global search (navy bar): patch the popover in place so the input keeps focus */
+ACT.gSearch = (d) => {
+  state.gsearch = d.value;
+  const g = document.querySelector(".gsearch"); if (!g) return;
+  const old = g.querySelector(".gs-pop"); if (old) old.remove();
+  g.insertAdjacentHTML("beforeend", gsearchPop());
+};
+/* user menu opens below the appbar avatar */
+ACT.userMenu = (d, e) => { const r = e.currentTarget.getBoundingClientRect(); openMenu({ type:"userMenu", x: Math.max(10, Math.min(r.right - 210, window.innerWidth - 220)), y: r.bottom + 6 }); };
 /* ============================================================================
    screens.js — v3 screens: interactive map, dashboard, New Search control panel.
    ============================================================================ */
@@ -1522,22 +1495,27 @@ function tearPin(x, y, r, fill, num, warn, inter, title) {
   const numEl = num != null ? '<text class="pin-lbl" style="font-size:' + (rb*1.15) + 'px" x="' + x + '" y="' + cy + '">' + num + "</text>" : "";
   return ring + '<path class="pin tear" d="' + d + '" style="fill:' + fill + '"' + (inter || "") + "><title>" + esc(title || "") + "</title></path>" + numEl;
 }
+/* Category identity colors — spent on LANE identity (fixed order A/B/C, always
+   rendered beside the lane letter + material label, never color alone). */
+const CATZ = ["var(--cat-1)", "var(--cat-2)", "var(--cat-3)"];
+function laneColor(i) { return CATZ[i % 3]; }
 function mapCore(pins, zones) {
   const proj = PROJ;
   const land = proj.pathFor(TX_OUTLINE);
   const hwys = TX_HIGHWAYS.map(h => '<path class="hwy" d="' + h.pts.map((p, i) => (i ? "L" : "M") + proj.project(p[0], p[1]).map(n => n.toFixed(1)).join(" ")).join(" ") + '"/>').join("");
-  const anchorMark = (x, y) => '<circle class="anchor" cx="' + x.toFixed(1) + '" cy="' + y.toFixed(1) + '" r="4"/>';
-  const laneChip = (x, y, zi) => { const L = "ABCDEFGH"[zi] || "?"; return '<circle class="lane-chip-bg" cx="' + x.toFixed(1) + '" cy="' + (y-13).toFixed(1) + '" r="7.5"/><text class="lane-chip-tx" x="' + x.toFixed(1) + '" y="' + (y-13).toFixed(1) + '">' + L + "</text>"; };
+  const anchorMark = (x, y, zc) => '<circle class="anchor" style="fill:' + zc + '" cx="' + x.toFixed(1) + '" cy="' + y.toFixed(1) + '" r="4"/>';
+  const laneChip = (x, y, li, zc) => { const L = "ABCDEFGH"[li] || "?"; return '<circle class="lane-chip-bg" style="fill:' + zc + '" cx="' + x.toFixed(1) + '" cy="' + (y-13).toFixed(1) + '" r="7.5"/><text class="lane-chip-tx" x="' + x.toFixed(1) + '" y="' + (y-13).toFixed(1) + '">' + L + "</text>"; };
   let overlay = "";
   (zones || []).forEach((z, zi) => {
+    const li = z.li != null ? z.li : zi, zc = laneColor(li);
     if (z.type === "radius") {
       const p = proj.project(z.anchorLng, z.anchorLat), r = proj.milesToPx(z.radiusMi);
-      overlay += '<circle class="radius-fill" cx="' + p[0].toFixed(1) + '" cy="' + p[1].toFixed(1) + '" r="' + r.toFixed(1) + '"/>' + anchorMark(p[0], p[1]) + laneChip(p[0], p[1], zi);
+      overlay += '<circle class="radius-fill" style="fill:' + zc + ';stroke:' + zc + '" cx="' + p[0].toFixed(1) + '" cy="' + p[1].toFixed(1) + '" r="' + r.toFixed(1) + '"/>' + anchorMark(p[0], p[1], zc) + laneChip(p[0], p[1], li, zc);
     } else if (z.type === "corridor" && z.route) {
       const pts = z.route.map(q => proj.project(q.lng, q.lat));
       const d = pts.map((p, i) => (i ? "L" : "M") + p[0].toFixed(1) + " " + p[1].toFixed(1)).join(" ");
       const bw = proj.milesToPx(z.bufferMi) * 2;
-      overlay += '<path class="corridor-band" style="stroke-width:' + bw.toFixed(1) + 'px" d="' + d + '"/><path class="corridor-line" d="' + d + '"/>' + pts.map(p => anchorMark(p[0], p[1])).join("") + laneChip(pts[0][0], pts[0][1], zi);
+      overlay += '<path class="corridor-band" style="stroke:' + zc + ';stroke-width:' + bw.toFixed(1) + 'px" d="' + d + '"/><path class="corridor-line" style="stroke:' + zc + '" d="' + d + '"/>' + pts.map(p => anchorMark(p[0], p[1], zc)).join("") + laneChip(pts[0][0], pts[0][1], li, zc);
     }
   });
   const cityDots = CITIES.map(c => { const p = proj.project(c.lng, c.lat); return '<circle class="city-dot" cx="' + p[0].toFixed(1) + '" cy="' + p[1].toFixed(1) + '" r="1.8"/><text class="city-lbl" x="' + (p[0]+4.5).toFixed(1) + '" y="' + (p[1]+3).toFixed(1) + '">' + esc(c.name) + "</text>"; }).join("");
@@ -1560,6 +1538,12 @@ function mapBox(id, pins, zones, extras, h) {
 }
 function mapCount(n, label) { return '<div class="map-count"><b id="b-count">' + n + "</b><span>" + (label||"matches") + "</span></div>"; }
 function mapLegend(rows) { return '<div class="map-legend">' + rows.map(r => '<div class="lg"><span class="sw" style="background:' + r[0] + '"></span>' + r[1] + "</div>").join("") + "</div>"; }
+function builderLegend(zones) {
+  const laneRows = (zones || []).map((z, i) => '<div class="lg"><span class="sw" style="background:' + laneColor(i) + ';border-radius:2px"></span><b>' + "ABCDEFGH"[i] + " ·</b> " + esc(z.label || (z.type === "radius" ? z.anchor : z.origin + " → " + z.dest)) + "</div>").join("");
+  return '<div class="map-legend">' + laneRows +
+    '<div class="lg"><span class="sw" style="background:var(--accent)"></span>Matches filters</div>' +
+    '<div class="lg"><span class="sw" style="background:var(--crit)"></span>Has a warning flag</div></div>';
+}
 function statusLegend(counts) {
   const rows = STATUS_ORDER.map(k => [statusVar(k), STATUS[k].label + (counts ? " · " + counts[k] : "")]);
   if (counts && counts.dnc) rows.push(["var(--st-dnc)", "Do Not Call · " + counts.dnc]);
@@ -1574,14 +1558,36 @@ function zoneBBox(zones) {
   return [x0, y0, x1, y1];
 }
 
-/* ------------------------------- shell ------------------------------- */
+/* ------------------------------- shell (TNBS chrome) ------------------------------- */
+/* Navy 56px bar: white badge + wordmark · global search · Live pill · avatar.
+   Below: light 216px sidebar (nav, 11%-navy active) + crumb strip + content. */
+function gsearchPop() {
+  const q = (state.gsearch || "").trim().toLowerCase();
+  if (q.length < 2) return "";
+  const cs = DB.carriers.filter(c => c.legal_name.toLowerCase().includes(q) || String(c.dot).includes(q)).slice(0, 5);
+  const bs = DB.batches.filter(b => b.name.toLowerCase().includes(q) || (b.customer || "").toLowerCase().includes(q)).slice(0, 3);
+  let h = "";
+  if (bs.length) h += '<div class="gs-sec">Batches</div>' + bs.map(b => '<button class="gs-row" data-act="openBatch" data-id="' + b.id + '">' + icon("layers") + '<span class="t">' + esc(b.name) + '</span><span class="m">' + esc(b.customer || "") + "</span></button>").join("");
+  if (cs.length) h += '<div class="gs-sec">Carriers</div>' + cs.map(c => '<button class="gs-row" data-act="openCarrier" data-dot="' + c.dot + '">' + icon("target") + '<span class="t">' + esc(c.legal_name) + '</span><span class="m">USDOT ' + c.dot + "</span></button>").join("");
+  if (!h) h = '<div class="gs-empty">No carriers or batches match &ldquo;' + esc(q) + "&rdquo;</div>";
+  return '<div class="gs-pop">' + h + "</div>";
+}
+function appbar() {
+  const u = cur();
+  return '<header class="appbar">' +
+    '<div class="brand"><div class="mark">' + icon("nail") + '</div><div><div class="name">Twisted Nail</div><div class="sub">Recruiter</div></div></div>' +
+    '<div class="gsearch">' + icon("search") + '<input class="gs-in" id="gs-in" placeholder="Search carriers, batches, USDOT…" value="' + esc(state.gsearch || "") + '" data-live="gSearch" autocomplete="off">' + gsearchPop() + "</div>" +
+    '<div class="spacer"></div>' +
+    '<span class="pill" title="Shared list — updates live for all users"><span class="dot"></span>Live</span>' +
+    '<button class="usercell" data-act="userMenu">' + avatar(u) + '<span class="who"><span class="nm">' + esc(u.name) + '</span><span class="rl">' + ROLE_LABEL[u.role] + "</span></span></button>" +
+    "</header>";
+}
 function sidebar() {
   const u = cur();
   const pend = DB.users.filter(x => (state.overrides.userStatus[x.id]?.status || x.status) === "pending").length;
   const item = (act, to, ic, label, count, on) => '<a data-act="' + act + '"' + (to ? ' data-to="' + to + '"' : "") + ' class="' + (on ? "on" : "") + '">' + icon(ic) + "<span>" + label + "</span>" + (count != null ? '<span class="count">' + count + "</span>" : "") + "</a>";
   const reserved = (ic, label) => '<a class="reserved" data-act="reservedTab" data-label="' + label + '">' + icon(ic) + "<span>" + label + '</span><span class="soon">soon</span></a>';
   return '<aside class="sidebar">' +
-    '<div class="brand"><div class="mark">' + icon("nail") + '</div><div><div class="name">Twisted Nail</div><div class="sub">Recruiter</div></div></div>' +
     '<nav class="nav">' +
       '<div class="nav-label eyebrow">Recruiting</div>' +
       item("nav", "dashboard", "layers", "Dashboard", DB.batches.length, ["dashboard","workingList"].includes(state.screen)) +
@@ -1590,15 +1596,10 @@ function sidebar() {
       reserved("mail", "Email") + reserved("message", "Text") + reserved("send", "Mail") + reserved("building", "Enrichment") +
       (u.role === "manager" ? '<div class="nav-label eyebrow">Admin</div>' + item("nav", "users", "users", "Users", pend || null, state.screen === "users") : "") +
     "</nav>" +
-    '<div class="side-foot"><button class="usercell" data-act="userMenu">' + avatar(u) + '<span class="who"><span class="nm">' + esc(u.name) + '</span><span class="rl">' + ROLE_LABEL[u.role] + "</span></span><span style=\"margin-left:auto;color:var(--text-subtle)\">" + icon("chevD") + "</span></button></div>" +
     "</aside>";
 }
-function topbar(crumbs) {
-  return '<header class="topbar"><div class="crumbs">' + crumbs + '</div><div class="spacer"></div>' +
-    '<span class="badge good" title="Shared list — updates live for all users"><span class="dot"></span>Live</span>' +
-    '<button class="btn icon ghost" data-act="toggleTheme" title="Toggle theme">' + icon("sun") + "</button></header>";
-}
-function appShell(inner, crumbs) { return '<div class="shell">' + sidebar() + '<div class="main">' + topbar(crumbs) + '<div class="content">' + inner + "</div></div></div>"; }
+function crumbstrip(crumbs) { return '<div class="crumbstrip"><div class="crumbs">' + crumbs + '</div><div class="spacer"></div></div>'; }
+function appShell(inner, crumbs) { return '<div class="shell">' + appbar() + '<div class="body">' + sidebar() + '<div class="main">' + crumbstrip(crumbs) + '<div class="content">' + inner + "</div></div></div></div>"; }
 function crumb(items) { return items.map((it, i) => (i ? '<span style="color:var(--text-subtle)">' + icon("chevR") + "</span>" : "") + (it.act ? '<a data-act="' + it.act + '"' + (it.to ? ' data-to="' + it.to + '" data-id="' + it.to + '"' : "") + ' style="cursor:pointer">' + esc(it.label) + "</a>" : '<span class="' + (i === items.length-1 ? "cur" : "") + '">' + esc(it.label) + "</span>")).join(""); }
 function sel(a, b) { return a === b ? " selected" : ""; }
 function cityOptions(v) { return CITY_NAMES.map(n => '<option value="' + n + '"' + sel(v, n) + ">" + n + ", TX</option>").join(""); }
@@ -1662,9 +1663,9 @@ function screenDashboard() {
   const withPhone = new Set(DB.batchCarriers.filter(b => { const c = DB.carrierByDot[b.dot]; return c.phone || c.cell; }).map(b => b.dot)).size;
   const strip = statStrip(stat("Active batches", DB.batches.length) + stat("Carriers in play", totalCarriers) + stat("With phone", withPhone) + stat("Interested", interested, "good") + stat("Promoted", promoted, "accent"));
 
-  // F30: map starts EMPTY; jobs toggle on via the legend; zones stay accent orange.
+  // F30: map starts EMPTY; jobs toggle on via the legend. Lane colors reset per batch.
   const onJobs = DB.batches.filter(b => state.dashJobs[b.id]);
-  const zones = []; onJobs.forEach(b => b.zones.forEach(z => zones.push(z)));
+  const zones = []; onJobs.forEach(b => b.zones.forEach((z, i) => zones.push(Object.assign({}, z, { li: i }))));
   const pins = onJobs.map(b => { const z = b.zones[0]; const p = z.type === "radius" ? { lng:z.anchorLng, lat:z.anchorLat } : { lng:z.originLng, lat:z.originLat }; const bi = DB.batches.indexOf(b); return { lng:p.lng, lat:p.lat, num: bi+1, fill:"var(--accent)", title:b.name, r:8, shape:"pin", job:b.id }; });
   const legend = '<div class="map-legend jobs"><div class="lg" style="font-weight:700;color:var(--text)">Jobs — toggle to show</div>' +
     DB.batches.map((b, bi) => { const on = !!state.dashJobs[b.id]; return '<button class="lg jobrow ' + (on ? "on" : "") + '" data-act="dashToggleJob" data-id="' + b.id + '"><span class="jbox">' + (on ? icon("check") : "") + '</span><span class="mono" style="color:var(--accent-press);font-weight:800">' + (bi+1) + '</span> ' + esc(b.name) + "</button>"; }).join("") +
@@ -1677,13 +1678,13 @@ function screenDashboard() {
   const rows = DB.batches.map((b, bi) => {
     const c = statusCounts(b.id);
     const la = activityForBatch(b.id)[0];
-    const stageCells = STATUS_ORDER.map(k => '<td class="center mono" style="' + (c[k] ? "" : "color:var(--text-subtle)") + '">' + c[k] + "</td>").join("");
+    const stageCells = STATUS_ORDER.map(k => '<td class="center num" style="' + (c[k] ? "" : "color:var(--text-subtle)") + '">' + c[k] + "</td>").join("");
     return '<tr class="clickable" data-act="openBatch" data-id="' + b.id + '">' +
-      '<td class="mono center" style="width:28px;color:var(--accent-press);font-weight:800">' + (bi+1) + "</td>" +
+      '<td class="num center" style="width:28px;color:var(--accent);font-weight:800">' + (bi+1) + "</td>" +
       "<td><div class='co oneline'><span class='nm'>" + esc(b.name) + "</span><span class='meta'>" + esc(b.customer) + "</span><span class='meta'>" + esc(b.job) + "</span></div></td>" +
       "<td><div class='lanes-cell'>" + b.zones.map(z => "<div>" + laneLine(z) + "</div>").join("") + "</div></td>" +
-      "<td class='center mono'>" + c.total + "</td>" + stageCells +
-      "<td class='center'>" + (c.dnc ? '<span class="mono" style="color:var(--st-dnc)">' + c.dnc + "</span>" : '<span class="subtle">0</span>') + "</td>" +
+      "<td class='center num' style='font-weight:700'>" + c.total + "</td>" + stageCells +
+      "<td class='center'>" + (c.dnc ? '<span class="num" style="color:var(--st-dnc);font-weight:700">' + c.dnc + "</span>" : '<span class="subtle">0</span>') + "</td>" +
       "<td>" + (c.warnings ? '<span class="wchip crit">' + icon("alert") + c.warnings + "</span>" : '<span class="subtle">—</span>') + "</td>" +
       "<td class='muted center' style='font-size:12px;white-space:nowrap'>" + (la ? fmtRel(la.at) : "—") + "</td>" +
       '<td class="right"><button class="btn icon ghost sm" data-act="batchMenu" data-id="' + b.id + '">' + icon("dots") + "</button></td></tr>";
@@ -1729,12 +1730,12 @@ function builderMap(w, h, withCov, extraCls) {
     const wp = matches.filter(c => c.phone || c.cell).length, we = matches.filter(c => c.email).length, t1 = matches.filter(c => c.tier === 1).length;
     cov = '<div class="strip mt-12" id="wiz-cov">' + stat("Matches", matches.length, "accent") + stat("With phone", wp) + stat("With email", we, we ? "" : "crit") + stat("Sand & gravel", t1, "good") + "</div>";
   }
-  return '<div class="' + (extraCls || "") + '"><div id="wiz-map-holder" data-h="' + h + '">' + mapBox("builder", pins, zones, mapCount(matches.length) + mapLegend([["var(--accent)","Matches filters"],["var(--crit)","Has a warning flag"]]), h) + "</div>" + cov + "</div>";
+  return '<div class="' + (extraCls || "") + '"><div id="wiz-map-holder" data-h="' + h + '">' + mapBox("builder", pins, zones, mapCount(matches.length) + builderLegend(zones), h) + "</div>" + cov + "</div>";
 }
 /* Columns body: full-width overview map + live coverage strip on top, then three
    aligned columns — [Details + Lanes] · [Freight] · [Filters] — all visible at once. */
 function builderBody(w) {
-  return builderMap(w, 330, true, "ns-topmap") +
+  return builderMap(w, 430, true, "ns-topmap") +
     '<div class="cols-grid mt-14">' +
       '<div class="stack gap-14">' + panelDetails(w) + panelLanes(w) + "</div>" +
       "<div>" + panelFreight(w) + "</div>" +
@@ -1748,7 +1749,7 @@ function panelDetails(w) {
     '<label class="field grow"><span class="label">Job</span><input class="input" placeholder="What job / project?" value="' + esc(w.job) + '" data-model="wizard.job"></label></div></div></div>';
 }
 function panelLanes(w) {
-  const laneList = w.lanes.length ? w.lanes.map((z, i) => '<div class="lane"><div class="idx">' + "ABCDEFGH"[i] + '</div><div class="lmeta"><div class="lmat">' + esc(z.label || (z.type === "radius" ? "Radius lane" : "Corridor lane")) + '</div><div class="lgeo">' + (z.type === "radius" ? icon("target") + " " + esc(z.anchor) + " · " + z.radiusMi + " mi" : icon("route") + " " + esc(z.origin) + " → " + esc(z.dest) + " · " + z.bufferMi + " mi") + '</div></div><button class="btn icon ghost sm" data-act="wzEditLane" data-id="' + z.id + '">' + icon("edit") + '</button><button class="btn icon ghost sm" data-act="wzRmLane" data-id="' + z.id + '">' + icon("x") + "</button></div>").join("") : '<div class="subtle" style="font-size:12.5px;padding:4px 0 8px">Add a radius or a corridor — coverage is the union of every lane.</div>';
+  const laneList = w.lanes.length ? w.lanes.map((z, i) => '<div class="lane"><div class="idx" style="background:' + laneColor(i) + ';color:#fff">' + "ABCDEFGH"[i] + '</div><div class="lmeta"><div class="lmat">' + esc(z.label || (z.type === "radius" ? "Radius lane" : "Corridor lane")) + '</div><div class="lgeo">' + (z.type === "radius" ? icon("target") + " " + esc(z.anchor) + " · " + z.radiusMi + " mi" : icon("route") + " " + esc(z.origin) + " → " + esc(z.dest) + " · " + z.bufferMi + " mi") + '</div></div><button class="btn icon ghost sm" data-act="wzEditLane" data-id="' + z.id + '">' + icon("edit") + '</button><button class="btn icon ghost sm" data-act="wzRmLane" data-id="' + z.id + '">' + icon("x") + "</button></div>").join("") : '<div class="subtle" style="font-size:12.5px;padding:4px 0 8px">Add a radius or a corridor — coverage is the union of every lane.</div>';
   return '<div class="card" style="padding:16px"><div class="eyebrow" style="margin-bottom:10px">Lanes <span class="subtle">· ' + w.lanes.length + "</span></div>" + laneList +
     (w.editing ? wizLaneEditor(w) : '<div class="row gap-8 mt-12"><button class="btn sm" data-act="wzAddLane" data-t="radius">' + icon("target") + ' Add radius</button><button class="btn sm" data-act="wzAddLane" data-t="corridor">' + icon("route") + " Add corridor</button></div>") + "</div>";
 }
@@ -1897,7 +1898,7 @@ function workingMap(b, rows) {
     fill: r.dnc ? "var(--st-dnc)" : statusVar(r.status), warn: r.warns.length > 0, title: r.c.legal_name }));
   // F42: lanes + materials live here, with the status key.
   const counts = statusCounts(b.id);
-  const laneRows = b.zones.map((z, i) => '<div class="lg"><span class="mono" style="color:var(--accent-press);font-weight:800">' + "ABCDEFGH"[i] + "</span> " + esc(z.label || "") + ' <span class="subtle">· ' + (z.type === "radius" ? esc(z.anchor.replace(", TX","")) + " " + z.radiusMi + "mi" : esc(z.origin.replace(", TX","")) + "→" + esc(z.dest.replace(", TX","")) + " " + z.bufferMi + "mi") + "</span></div>").join("");
+  const laneRows = b.zones.map((z, i) => '<div class="lg"><span class="sw" style="background:' + laneColor(i) + ';border-radius:2px"></span><b>' + "ABCDEFGH"[i] + "</b>&nbsp;" + esc(z.label || "") + ' <span class="subtle">· ' + (z.type === "radius" ? esc(z.anchor.replace(", TX","")) + " " + z.radiusMi + "mi" : esc(z.origin.replace(", TX","")) + "→" + esc(z.dest.replace(", TX","")) + " " + z.bufferMi + "mi") + "</span></div>").join("");
   const legend = '<div class="map-legend">' + STATUS_ORDER.map(k => '<div class="lg"><span class="sw" style="background:' + statusVar(k) + '"></span>' + STATUS[k].label + " · " + counts[k] + "</div>").join("") +
     (counts.dnc ? '<div class="lg"><span class="sw" style="background:var(--st-dnc)"></span>Do Not Call · ' + counts.dnc + "</div>" : "") +
     '<div class="lg" style="font-weight:700;color:var(--text);margin-top:4px">Lanes</div>' + laneRows + "</div>";
@@ -2081,7 +2082,7 @@ function screenUsers() {
 
 /* ------------------------------- MENUS ------------------------------- */
 const MENUS = {
-  userMenu: () => { const u = cur(); return '<div style="padding:8px 10px"><div style="font-weight:700">' + esc(u.name) + '</div><div class="subtle" style="font-size:12px">' + esc(u.email) + " · " + ROLE_LABEL[u.role] + "</div></div><div class='sep'></div><button data-act=\"toggleTheme\">" + icon("moon") + ' Toggle theme</button><button data-act="logout">' + icon("logout") + " Sign out</button>"; },
+  userMenu: () => { const u = cur(); return '<div style="padding:8px 10px"><div style="font-weight:700">' + esc(u.name) + '</div><div class="subtle" style="font-size:12px">' + esc(u.email) + " · " + ROLE_LABEL[u.role] + "</div></div><div class='sep'></div><button data-act=\"logout\">" + icon("logout") + " Sign out</button>"; },
   batchMenu: (m) => '<button data-act="renameBatch" data-id="' + m.id + '">' + icon("edit") + ' Rename</button><button data-act="refreshBatch" data-id="' + m.id + '">' + icon("refresh") + " Refresh members</button><div class='sep'></div><button class=\"danger\" data-act=\"deleteBatch\" data-id=\"" + m.id + "\">" + icon("trash") + " Delete batch</button>"
 };
 
@@ -2135,7 +2136,7 @@ function patchWiz() {
   if (holder) {
     const h = +(holder.getAttribute("data-h") || 430);
     const pins = matches.slice(0, 400).map(c => ({ lng:c.lng, lat:c.lat, r:3.5, warn:warningsFor(c).length>0, title:c.legal_name }));
-    holder.innerHTML = mapBox("builder", pins, zones, mapCount(matches.length) + mapLegend([["var(--accent)","Matches filters"],["var(--crit)","Has a warning flag"]]), h);
+    holder.innerHTML = mapBox("builder", pins, zones, mapCount(matches.length) + builderLegend(zones), h);
     const svg = holder.querySelector("svg"); if (svg && state.mapView.builder) svg.setAttribute("viewBox", state.mapView.builder);
   }
   const fc = document.getElementById("b-foot-count"); if (fc) fc.textContent = matches.length;
@@ -2156,12 +2157,11 @@ ACT.doRegister = () => { state.session = { userId:"u_guest1", remember:true }; s
 ACT.doForgot = () => { state.screen = "login"; toast("Password reset link sent", "mail"); };
 ACT.logout = () => { state.session = null; state.menu = null; state.screen = "login"; render(); };
 ACT.reservedTab = (d) => toast(d.label + " — coming in a later phase", "clock");
-ACT.userMenu = (d, e, t) => { const r = t.getBoundingClientRect(); openMenu({ type:"userMenu", x:r.left, y:Math.max(10, r.top - 112) }); };
 ACT.toast = (d) => toast(d.msg, d.ic);
 
 /* ---- batches ---- */
 ACT.newBatch = () => { state.wizard = newWizard(); state.screen = "builder"; render(); };
-ACT.openBatch = (d) => { state.activeBatchId = d.id || d.to; state.selection = {}; state.list = LIST_DEFAULT(); state.feedOpen = false; state.screen = "workingList"; state.menu = null; render(); };
+ACT.openBatch = (d) => { state.activeBatchId = d.id || d.to; state.selection = {}; state.list = LIST_DEFAULT(); state.feedOpen = false; state.gsearch = ""; state.screen = "workingList"; state.menu = null; render(); };
 ACT.batchMenu = (d, e, t) => { const r = t.getBoundingClientRect(); openMenu({ type:"batchMenu", id:d.id, x:Math.max(10, Math.min(r.right-190, window.innerWidth-200)), y:r.bottom+6 }); };
 ACT.renameBatch = (d) => openModal({ type:"rename", id:d.id });
 ACT.confirmRename = (d) => { const v = document.getElementById("rename-input").value.trim(); const b = DB.batches.find(x => x.id === d.id); if (b && v) b.name = v; closeModal(); toast("Batch renamed"); };
@@ -2245,7 +2245,7 @@ ACT.exportSheet = (d) => { if (d.batch) addAct(d.batch, "export", { kind: d.kind
 ACT.rowStatus = (d) => { if (d.value === "dnc") { openModal({ type:"dnc", dot:d.dot }); return; } state.overrides.status[d.batch + ":" + d.dot] = d.value; addAct(d.batch, "status_change", { dot:+d.dot, to:d.value }); toast("Status → " + STATUS[d.value].label); };
 
 /* ---- carrier profile ---- */
-ACT.openCarrier = (d) => { state.activeCarrierDot = +d.dot; state.profileFromBatch = d.from || null; state.screen = "profile"; state.menu = null; render(); };
+ACT.openCarrier = (d) => { state.activeCarrierDot = +d.dot; state.profileFromBatch = d.from || null; state.gsearch = ""; state.screen = "profile"; state.menu = null; render(); };
 ACT.openBatchCarrier = (d) => { state.profileFromBatch = d.batch; state.activeCarrierDot = +d.dot; state.screen = "profile"; render(); };
 ACT.profVariant = (d) => { state.profileVariant = d.v; render(); };
 ACT.promote = (d) => openModal({ type:"promote", dot:d.dot });

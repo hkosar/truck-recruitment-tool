@@ -82,7 +82,7 @@ function workingMap(b, rows) {
     fill: r.dnc ? "var(--st-dnc)" : statusVar(r.status), warn: r.warns.length > 0, title: r.c.legal_name }));
   // F42: lanes + materials live here, with the status key.
   const counts = statusCounts(b.id);
-  const laneRows = b.zones.map((z, i) => '<div class="lg"><span class="mono" style="color:var(--accent-press);font-weight:800">' + "ABCDEFGH"[i] + "</span> " + esc(z.label || "") + ' <span class="subtle">· ' + (z.type === "radius" ? esc(z.anchor.replace(", TX","")) + " " + z.radiusMi + "mi" : esc(z.origin.replace(", TX","")) + "→" + esc(z.dest.replace(", TX","")) + " " + z.bufferMi + "mi") + "</span></div>").join("");
+  const laneRows = b.zones.map((z, i) => '<div class="lg"><span class="sw" style="background:' + laneColor(i) + ';border-radius:2px"></span><b>' + "ABCDEFGH"[i] + "</b>&nbsp;" + esc(z.label || "") + ' <span class="subtle">· ' + (z.type === "radius" ? esc(z.anchor.replace(", TX","")) + " " + z.radiusMi + "mi" : esc(z.origin.replace(", TX","")) + "→" + esc(z.dest.replace(", TX","")) + " " + z.bufferMi + "mi") + "</span></div>").join("");
   const legend = '<div class="map-legend">' + STATUS_ORDER.map(k => '<div class="lg"><span class="sw" style="background:' + statusVar(k) + '"></span>' + STATUS[k].label + " · " + counts[k] + "</div>").join("") +
     (counts.dnc ? '<div class="lg"><span class="sw" style="background:var(--st-dnc)"></span>Do Not Call · ' + counts.dnc + "</div>" : "") +
     '<div class="lg" style="font-weight:700;color:var(--text);margin-top:4px">Lanes</div>' + laneRows + "</div>";
@@ -266,7 +266,7 @@ function screenUsers() {
 
 /* ------------------------------- MENUS ------------------------------- */
 const MENUS = {
-  userMenu: () => { const u = cur(); return '<div style="padding:8px 10px"><div style="font-weight:700">' + esc(u.name) + '</div><div class="subtle" style="font-size:12px">' + esc(u.email) + " · " + ROLE_LABEL[u.role] + "</div></div><div class='sep'></div><button data-act=\"toggleTheme\">" + icon("moon") + ' Toggle theme</button><button data-act="logout">' + icon("logout") + " Sign out</button>"; },
+  userMenu: () => { const u = cur(); return '<div style="padding:8px 10px"><div style="font-weight:700">' + esc(u.name) + '</div><div class="subtle" style="font-size:12px">' + esc(u.email) + " · " + ROLE_LABEL[u.role] + "</div></div><div class='sep'></div><button data-act=\"logout\">" + icon("logout") + " Sign out</button>"; },
   batchMenu: (m) => '<button data-act="renameBatch" data-id="' + m.id + '">' + icon("edit") + ' Rename</button><button data-act="refreshBatch" data-id="' + m.id + '">' + icon("refresh") + " Refresh members</button><div class='sep'></div><button class=\"danger\" data-act=\"deleteBatch\" data-id=\"" + m.id + "\">" + icon("trash") + " Delete batch</button>"
 };
 

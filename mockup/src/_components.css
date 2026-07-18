@@ -2,10 +2,6 @@
    _components.css — v2 components layered on the base design system.
    ============================================================================ */
 
-/* brand mark: nail on orange */
-.brand .mark svg { color: var(--accent-ink); width: 18px; height: 18px; }
-.auth-brand .mark svg { color: var(--accent-ink); }
-
 /* reserved (disabled) future-tool nav (F2) */
 .nav .nav-label.reserved { margin-top: 14px; }
 .nav a.reserved { opacity: .55; cursor: default; }
@@ -26,8 +22,8 @@ tr.warn-row:hover > td { background: color-mix(in srgb, var(--crit-tint) 82%, va
 /* ---- stat strip (F24 kinship) ---- */
 .strip { display: grid; grid-template-columns: repeat(auto-fit, minmax(116px, 1fr)); gap: 1px; background: var(--border); border: 1px solid var(--border); border-radius: var(--radius-lg); overflow: hidden; }
 .strip .cell { background: var(--surface); padding: 11px 15px; }
-.strip .cell .k { font-size: 10px; font-weight: 700; letter-spacing: .07em; text-transform: uppercase; color: var(--text-subtle); }
-.strip .cell .v { font-size: 21px; font-weight: 800; font-family: var(--font-mono); font-variant-numeric: tabular-nums; letter-spacing: -.02em; margin-top: 3px; }
+.strip .cell .k { font-size: 10px; font-weight: 800; letter-spacing: .07em; text-transform: uppercase; color: var(--text-subtle); }
+.strip .cell .v { font-size: 25px; font-weight: 800; font-variant-numeric: tabular-nums; letter-spacing: -.02em; margin-top: 3px; }
 .strip .cell.accent .v { color: var(--accent-press); }
 .strip .cell.crit .v { color: var(--crit); }
 .strip .cell.good .v { color: var(--st-interested); }

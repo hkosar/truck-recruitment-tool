@@ -13,7 +13,7 @@ function patchWiz() {
   if (holder) {
     const h = +(holder.getAttribute("data-h") || 430);
     const pins = matches.slice(0, 400).map(c => ({ lng:c.lng, lat:c.lat, r:3.5, warn:warningsFor(c).length>0, title:c.legal_name }));
-    holder.innerHTML = mapBox("builder", pins, zones, mapCount(matches.length) + mapLegend([["var(--accent)","Matches filters"],["var(--crit)","Has a warning flag"]]), h);
+    holder.innerHTML = mapBox("builder", pins, zones, mapCount(matches.length) + builderLegend(zones), h);
     const svg = holder.querySelector("svg"); if (svg && state.mapView.builder) svg.setAttribute("viewBox", state.mapView.builder);
   }
   const fc = document.getElementById("b-foot-count"); if (fc) fc.textContent = matches.length;
@@ -34,12 +34,11 @@ ACT.doRegister = () => { state.session = { userId:"u_guest1", remember:true }; s
 ACT.doForgot = () => { state.screen = "login"; toast("Password reset link sent", "mail"); };
 ACT.logout = () => { state.session = null; state.menu = null; state.screen = "login"; render(); };
 ACT.reservedTab = (d) => toast(d.label + " — coming in a later phase", "clock");
-ACT.userMenu = (d, e, t) => { const r = t.getBoundingClientRect(); openMenu({ type:"userMenu", x:r.left, y:Math.max(10, r.top - 112) }); };
 ACT.toast = (d) => toast(d.msg, d.ic);
 
 /* ---- batches ---- */
 ACT.newBatch = () => { state.wizard = newWizard(); state.screen = "builder"; render(); };
-ACT.openBatch = (d) => { state.activeBatchId = d.id || d.to; state.selection = {}; state.list = LIST_DEFAULT(); state.feedOpen = false; state.screen = "workingList"; state.menu = null; render(); };
+ACT.openBatch = (d) => { state.activeBatchId = d.id || d.to; state.selection = {}; state.list = LIST_DEFAULT(); state.feedOpen = false; state.gsearch = ""; state.screen = "workingList"; state.menu = null; render(); };
 ACT.batchMenu = (d, e, t) => { const r = t.getBoundingClientRect(); openMenu({ type:"batchMenu", id:d.id, x:Math.max(10, Math.min(r.right-190, window.innerWidth-200)), y:r.bottom+6 }); };
 ACT.renameBatch = (d) => openModal({ type:"rename", id:d.id });
 ACT.confirmRename = (d) => { const v = document.getElementById("rename-input").value.trim(); const b = DB.batches.find(x => x.id === d.id); if (b && v) b.name = v; closeModal(); toast("Batch renamed"); };
@@ -123,7 +122,7 @@ ACT.exportSheet = (d) => { if (d.batch) addAct(d.batch, "export", { kind: d.kind
 ACT.rowStatus = (d) => { if (d.value === "dnc") { openModal({ type:"dnc", dot:d.dot }); return; } state.overrides.status[d.batch + ":" + d.dot] = d.value; addAct(d.batch, "status_change", { dot:+d.dot, to:d.value }); toast("Status → " + STATUS[d.value].label); };
 
 /* ---- carrier profile ---- */
-ACT.openCarrier = (d) => { state.activeCarrierDot = +d.dot; state.profileFromBatch = d.from || null; state.screen = "profile"; state.menu = null; render(); };
+ACT.openCarrier = (d) => { state.activeCarrierDot = +d.dot; state.profileFromBatch = d.from || null; state.gsearch = ""; state.screen = "profile"; state.menu = null; render(); };
 ACT.openBatchCarrier = (d) => { state.profileFromBatch = d.batch; state.activeCarrierDot = +d.dot; state.screen = "profile"; render(); };
 ACT.profVariant = (d) => { state.profileVariant = d.v; render(); };
 ACT.promote = (d) => openModal({ type:"promote", dot:d.dot });
