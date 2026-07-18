@@ -11,8 +11,9 @@ function patchWiz() {
   const w = state.wizard, zones = wizardZones(w), s = Object.assign({}, wizardSearch(w), { zones }), matches = searchMatches(s);
   const holder = document.getElementById("wiz-map-holder");
   if (holder) {
+    const h = +(holder.getAttribute("data-h") || 430);
     const pins = matches.slice(0, 400).map(c => ({ lng:c.lng, lat:c.lat, r:3.5, warn:warningsFor(c).length>0, title:c.legal_name }));
-    holder.innerHTML = mapBox("builder", pins, zones, mapCount(matches.length) + mapLegend([["var(--accent)","Matches filters"],["var(--crit)","Has a warning flag"]]), 430);
+    holder.innerHTML = mapBox("builder", pins, zones, mapCount(matches.length) + mapLegend([["var(--accent)","Matches filters"],["var(--crit)","Has a warning flag"]]), h);
     const svg = holder.querySelector("svg"); if (svg && state.mapView.builder) svg.setAttribute("viewBox", state.mapView.builder);
   }
   const fc = document.getElementById("b-foot-count"); if (fc) fc.textContent = matches.length;
@@ -66,6 +67,13 @@ ACT.dashToggleJob = (d) => {
   if (on) { const b = DB.batches.find(x => x.id === d.id); if (b) { const bb = zoneBBox(b.zones); zoomToBox("dash", bb[0], bb[1], bb[2], bb[3], 40); } }
 };
 ACT.dashZoomJob = (d) => { const b = DB.batches.find(x => x.id === d.id); if (b) { state.dashJobs[d.id] = true; render(); const bb = zoneBBox(b.zones); zoomToBox("dash", bb[0], bb[1], bb[2], bb[3], 40); } };
+
+/* ---- New Search layouts (F48) ---- */
+ACT.nsLayout = (d) => { state.nsLayout = +d.l; state.nsDrawer = null; render(); };
+ACT.nsAcc = (d) => { state.nsAcc[d.k] = !state.nsAcc[d.k]; render(); };
+ACT.nsTab = (d) => { state.nsTab = d.t; render(); };
+ACT.nsDrawer = (d) => { state.nsDrawer = d.d; render(); };
+ACT.nsDrawerClose = (d, e) => { if (e && e.target.closest(".drawer") && !e.target.closest('[data-act="nsDrawerClose"].btn')) return; state.nsDrawer = null; render(); };
 
 /* ---- New Search control panel ---- */
 ACT.wzAddLane = (d) => {

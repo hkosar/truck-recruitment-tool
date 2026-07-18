@@ -121,3 +121,27 @@ zoom/pan preview maps with teardrop status pins + highway context, stage-count c
 collapsed activity bar below centered tiles, dedicated stacked Warnings column,
 uniform contact typography, `$X.X MM / $NNN K` money format, renamed reserved tabs.
 Verified headless: 15 flows, 0 errors, 0 external requests.
+
+## Round 3 — 2026-07-18 (`Truck_Recruitment_Page_feedback.docx`, on mockup v3)
+
+New principle: **G15 — column alignment**: columns are centered by default; the leftmost
+identity column (Carrier), Contact, and any bubble/badge column (Insurance, Warnings,
+Tags) are left-aligned. And a sharpening of G14: **one complete thought per line** —
+never wrap a thought mid-line when vertical space exists (3–5 lines per row available).
+
+| F# | Owner's feedback (condensed) | Resolution | Status |
+|----|------------------------------|------------|--------|
+| F38 | Map functionality must be significantly better in development | Production commitment stands (Google Maps, D1/M4.1); preview map is the stand-in | Noted |
+| F39 | Dashboard batch cell: Title / Company / Project on lines 1-2-3, not lumped | Three discrete lines, each nowrap+ellipsis | ✅ v4 |
+| F40 | Carriers/stage numbers centered | Numeric columns centered (G15) | ✅ v4 |
+| F41 | Lanes: complete thought per line ("Austin → Waco · 35 mi" = one line) | One lane per line, nowrap | ✅ v4 |
+| F42 | "A · Fill sand & base" chip in batch header = dead space, unclear (red-X screenshot) | Header chips removed; lanes+materials moved into the map legend; header shows "· N lanes" inline | ✅ v4 |
+| F43 | Same table craft comments apply to the batch table | Applied (F39-41 treatment) | ✅ v4 |
+| F44 | S&G tag mislocated; # column useless → replace with Tags; multiple cargo tags per carrier all worth seeing | # column → **Tags** column: stacked S&G + Dry Bulk / Constr / Bldg Mat per carrier | ✅ v4 |
+| F45 | Alignment principle (centered default; left for carrier/contact/bubbles) | G15 applied across tables | ✅ v4 |
+| F46 | Last-contact: "callback in one day" must not split; use the 3-5 available lines | Outcome / time / callback each a complete nowrap line | ✅ v4 |
+| F47 | Quick-log needs call + text + email buttons | Row actions = three channel icon buttons opening the log modal preset to that channel | ✅ v4 |
+| F48 | New Search still too dense — present **5 layout options**, iterate | Five layouts behind a picker on the New Search page: **1 Split Panel** (baseline) · **2 Map Canvas** (full-bleed map, floating collapsible dock) · **3 Columns** (everything side-by-side, map on top) · **4 Tabbed Workbench** (one section at a time, free navigation) · **5 Command Chips** (definition as an editable chip bar over a full-width map, drawer editors) | ⏳ owner picks |
+
+**Mockup v4 shipped** (same URL). Verified headless: 16 flows, 0 errors, 0 external
+requests. Awaiting: New Search layout pick (1–5) · material label structure · CSV keep/cut.

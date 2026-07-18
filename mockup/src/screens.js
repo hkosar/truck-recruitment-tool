@@ -167,23 +167,24 @@ function screenDashboard() {
     (onJobs.length ? '<div class="lg subtle" style="font-size:10.5px">click a pin or name again to zoom</div>' : "") + "</div>";
   const map = mapBox("dash", pins, zones, legend + (onJobs.length === 0 ? '<div class="map-empty">Toggle a job to plot it</div>' : ""), 360);
 
-  // F31: per-stage numeric columns instead of the stacked bar.
-  const stageHead = STATUS_ORDER.map(k => '<th class="right" title="' + STATUS[k].label + '"><span class="coldot" style="background:' + statusVar(k) + '"></span>' + ({new:"New",attempted:"Att",contacted:"Con",interested:"Int",not_a_fit:"NaF"}[k]) + "</th>").join("");
+  // F31: per-stage numeric columns; F40/G15: numerics centered; F39/F41: one thought per line.
+  const stageHead = STATUS_ORDER.map(k => '<th class="center" title="' + STATUS[k].label + '"><span class="coldot" style="background:' + statusVar(k) + '"></span>' + ({new:"New",attempted:"Att",contacted:"Con",interested:"Int",not_a_fit:"NaF"}[k]) + "</th>").join("");
+  const laneLine = z => z.type === "radius" ? esc(z.anchor.replace(", TX","")) + " · " + z.radiusMi + " mi radius" : esc(z.origin.replace(", TX","")) + " → " + esc(z.dest.replace(", TX","")) + " · " + z.bufferMi + " mi";
   const rows = DB.batches.map((b, bi) => {
     const c = statusCounts(b.id);
     const la = activityForBatch(b.id)[0];
-    const stageCells = STATUS_ORDER.map(k => '<td class="right mono" style="' + (c[k] ? "" : "color:var(--text-subtle)") + '">' + c[k] + "</td>").join("");
+    const stageCells = STATUS_ORDER.map(k => '<td class="center mono" style="' + (c[k] ? "" : "color:var(--text-subtle)") + '">' + c[k] + "</td>").join("");
     return '<tr class="clickable" data-act="openBatch" data-id="' + b.id + '">' +
-      '<td class="mono" style="width:28px;text-align:center;color:var(--accent-press);font-weight:800">' + (bi+1) + "</td>" +
-      "<td><div class='co'><span class='nm'>" + esc(b.name) + "</span><span class='meta'>" + esc(b.customer) + " · " + esc(b.job) + "</span></div></td>" +
-      "<td style='font-size:11.5px;color:var(--text-muted)'>" + esc(laneSummary(b)) + "</td>" +
-      "<td class='right mono'>" + c.total + "</td>" + stageCells +
-      "<td class='right'>" + (c.dnc ? '<span class="mono" style="color:var(--st-dnc)">' + c.dnc + "</span>" : '<span class="subtle">0</span>') + "</td>" +
-      "<td class='right'>" + (c.warnings ? '<span class="wchip crit">' + icon("alert") + c.warnings + "</span>" : '<span class="subtle">—</span>') + "</td>" +
-      "<td class='muted' style='font-size:12px'>" + (la ? fmtRel(la.at) : "—") + "</td>" +
+      '<td class="mono center" style="width:28px;color:var(--accent-press);font-weight:800">' + (bi+1) + "</td>" +
+      "<td><div class='co oneline'><span class='nm'>" + esc(b.name) + "</span><span class='meta'>" + esc(b.customer) + "</span><span class='meta'>" + esc(b.job) + "</span></div></td>" +
+      "<td><div class='lanes-cell'>" + b.zones.map(z => "<div>" + laneLine(z) + "</div>").join("") + "</div></td>" +
+      "<td class='center mono'>" + c.total + "</td>" + stageCells +
+      "<td class='center'>" + (c.dnc ? '<span class="mono" style="color:var(--st-dnc)">' + c.dnc + "</span>" : '<span class="subtle">0</span>') + "</td>" +
+      "<td>" + (c.warnings ? '<span class="wchip crit">' + icon("alert") + c.warnings + "</span>" : '<span class="subtle">—</span>') + "</td>" +
+      "<td class='muted center' style='font-size:12px;white-space:nowrap'>" + (la ? fmtRel(la.at) : "—") + "</td>" +
       '<td class="right"><button class="btn icon ghost sm" data-act="batchMenu" data-id="' + b.id + '">' + icon("dots") + "</button></td></tr>";
   }).join("");
-  const table = '<div class="tbl-wrap"><table class="tbl"><thead><tr><th>#</th><th>Batch</th><th>Lanes</th><th class="right">Carriers</th>' + stageHead + '<th class="right">DNC</th><th class="right">Warn</th><th>Last activity</th><th></th></tr></thead><tbody>' + rows + "</tbody></table></div>";
+  const table = '<div class="tbl-wrap"><table class="tbl"><thead><tr><th class="center">#</th><th>Batch</th><th>Lanes</th><th class="center">Carriers</th>' + stageHead + '<th class="center">DNC</th><th>Warn</th><th class="center">Last activity</th><th></th></tr></thead><tbody>' + rows + "</tbody></table></div>";
 
   const inner = '<div class="page"><div class="page-head" style="justify-content:center;text-align:center"><div class="h1">Dashboard</div><div class="spacer"></div><button class="btn primary" data-act="newBatch">' + icon("plus") + " New Search</button></div>" +
     strip + '<div class="mt-16">' + map + "</div><div class=\"mt-16\">" + table + "</div></div>";
@@ -206,21 +207,67 @@ function wizardSearch(w) {
 }
 function wizardZones(w) { return w.editing ? w.lanes.concat([w.editing]).filter(z => z.type) : w.lanes; }
 
+/* F48: five display-organization strategies for the same content, behind a picker. */
+const NS_LAYOUTS = [[1,"Split Panel"],[2,"Map Canvas"],[3,"Columns"],[4,"Tabbed"],[5,"Command Chips"]];
 function screenBuilder() {
-  const w = state.wizard;
-  const inner = '<div class="page wide" style="padding-bottom:84px"><div class="page-head"><div class="h1">New Search</div></div>' +
-    '<div class="builder-grid">' +
-      '<div class="stack gap-14">' + panelDetails(w) + panelLanes(w) + panelFreight(w) + panelFilters(w) + "</div>" +
-      builderMapPane(w) +
-    "</div>" + builderFooter(w) + "</div>";
+  const w = state.wizard, L = state.nsLayout || 1;
+  const picker = '<div class="ns-picker"><span class="eyebrow">Layout options — pick one, we iterate</span><div class="variant-switch">' +
+    NS_LAYOUTS.map(v => '<button class="' + (L === v[0] ? "on" : "") + '" data-act="nsLayout" data-l="' + v[0] + '">' + v[0] + " · " + v[1] + "</button>").join("") + "</div></div>";
+  const body = L === 2 ? nsCanvas(w) : L === 3 ? nsColumns(w) : L === 4 ? nsTabbed(w) : L === 5 ? nsChips(w) : nsSplit(w);
+  const inner = '<div class="page wide" style="padding-bottom:84px"><div class="page-head"><div class="h1">New Search</div></div>' + picker + body + builderFooter(w) + "</div>";
   return appShell(inner, crumb([{ label:"Dashboard", act:"nav", to:"dashboard" }, { label:"New Search" }]));
 }
-function builderMapPane(w) {
+function builderMap(w, h, withCov, extraCls) {
   const s = wizardSearch(w), zones = wizardZones(w), matches = searchMatches(Object.assign({}, s, { zones }));
-  const withPhone = matches.filter(c => c.phone || c.cell).length, withEmail = matches.filter(c => c.email).length, tier1 = matches.filter(c => c.tier === 1).length;
   const pins = matches.slice(0, 400).map(c => ({ lng:c.lng, lat:c.lat, r:3.5, warn:warningsFor(c).length > 0, title:c.legal_name }));
-  return '<div class="wizard-map"><div id="wiz-map-holder">' + mapBox("builder", pins, zones, mapCount(matches.length) + mapLegend([["var(--accent)","Matches filters"],["var(--crit)","Has a warning flag"]]), 430) + "</div>" +
-    '<div class="strip mt-12" id="wiz-cov">' + stat("Matches", matches.length, "accent") + stat("With phone", withPhone) + stat("With email", withEmail, withEmail ? "" : "crit") + stat("Sand & gravel", tier1, "good") + "</div></div>";
+  let cov = "";
+  if (withCov) {
+    const wp = matches.filter(c => c.phone || c.cell).length, we = matches.filter(c => c.email).length, t1 = matches.filter(c => c.tier === 1).length;
+    cov = '<div class="strip mt-12" id="wiz-cov">' + stat("Matches", matches.length, "accent") + stat("With phone", wp) + stat("With email", we, we ? "" : "crit") + stat("Sand & gravel", t1, "good") + "</div>";
+  }
+  return '<div class="' + (extraCls || "") + '"><div id="wiz-map-holder" data-h="' + h + '">' + mapBox("builder", pins, zones, mapCount(matches.length) + mapLegend([["var(--accent)","Matches filters"],["var(--crit)","Has a warning flag"]]), h) + "</div>" + cov + "</div>";
+}
+/* L1 — Split Panel (baseline) */
+function nsSplit(w) {
+  return '<div class="builder-grid"><div class="stack gap-14">' + panelDetails(w) + panelLanes(w) + panelFreight(w) + panelFilters(w) + "</div>" + builderMap(w, 430, true, "wizard-map") + "</div>";
+}
+/* L2 — Map Canvas: full-bleed map, floating collapsible dock */
+function nsCanvas(w) {
+  const acc = state.nsAcc;
+  const sec = (key, title, inner2) => '<div class="acc"><button class="acc-head" data-act="nsAcc" data-k="' + key + '">' + (acc[key] ? icon("chevD") : icon("chevR")) + "<b>" + title + '</b></button>' + (acc[key] ? '<div class="acc-body">' + inner2 + "</div>" : "") + "</div>";
+  const dock = '<div class="canvas-dock">' +
+    sec("details", "Details", panelDetails(w)) + sec("lanes", "Lanes · " + w.lanes.length, panelLanes(w)) +
+    sec("freight", "Freight", panelFreight(w)) + sec("filters", "Filters", panelFilters(w)) + "</div>";
+  return '<div class="canvas-wrap">' + builderMap(w, 620, false, "") + dock + "</div>";
+}
+/* L3 — Columns: everything visible side by side, map on top */
+function nsColumns(w) {
+  return builderMap(w, 300, false, "") +
+    '<div class="cols-grid mt-14"><div class="stack gap-14">' + panelDetails(w) + panelLanes(w) + "</div><div>" + panelFreight(w) + "</div><div>" + panelFilters(w) + "</div></div>";
+}
+/* L4 — Tabbed Workbench: one section at a time (free navigation, not a sequence) */
+function nsTabbed(w) {
+  const t = state.nsTab || "details";
+  const tabs = [["details","Details"],["lanes","Lanes · " + w.lanes.length],["freight","Freight"],["filters","Filters"]];
+  const bar = '<div class="tabs" style="margin-bottom:12px">' + tabs.map(x => '<button class="' + (t === x[0] ? "on" : "") + '" data-act="nsTab" data-t="' + x[0] + '">' + x[1] + "</button>").join("") + "</div>";
+  const body = t === "lanes" ? panelLanes(w) : t === "freight" ? panelFreight(w) : t === "filters" ? panelFilters(w) : panelDetails(w);
+  return '<div class="builder-grid"><div>' + bar + body + "</div>" + builderMap(w, 430, true, "wizard-map") + "</div>";
+}
+/* L5 — Command Chips: definition as an editable chip bar over a full-width map */
+function nsChips(w) {
+  const laneChipsHtml = w.lanes.map((z, i) => '<button class="defchip" data-act="nsDrawer" data-d="lanes">' + "ABCDEFGH"[i] + " · " + esc(z.label || (z.type === "radius" ? z.anchor : z.origin + "→" + z.dest)) + "</button>").join("");
+  const inc = w.cargo.other.include.length, flags = w.cargo.flags.length;
+  const chipbar = '<div class="chipbar">' +
+    '<button class="defchip name" data-act="nsDrawer" data-d="details">' + icon("edit") + (w.name ? esc(w.name) : "Name this batch…") + (w.customer ? ' <span class="subtle">· ' + esc(w.customer) + "</span>" : "") + "</button>" +
+    laneChipsHtml +
+    '<button class="defchip" data-act="nsDrawer" data-d="lanes">' + icon("plus") + " Lane</button>" +
+    '<button class="defchip" data-act="nsDrawer" data-d="freight">' + icon("layers") + " Freight · " + flags + " flags · " + inc + ' incl</button>' +
+    '<button class="defchip" data-act="nsDrawer" data-d="filters">' + icon("filter") + " Filters</button>" +
+    "</div>";
+  const drawer = state.nsDrawer ? '<div class="drawer-scrim" data-act="nsDrawerClose"><div class="drawer">' +
+    '<div class="row between center" style="margin-bottom:10px"><b>' + ({details:"Details",lanes:"Lanes",freight:"Freight",filters:"Filters"}[state.nsDrawer]) + '</b><button class="btn icon ghost sm" data-act="nsDrawerClose">' + icon("x") + "</button></div>" +
+    (state.nsDrawer === "lanes" ? panelLanes(w) : state.nsDrawer === "freight" ? panelFreight(w) : state.nsDrawer === "filters" ? panelFilters(w) : panelDetails(w)) + "</div></div>" : "";
+  return chipbar + '<div class="mt-12">' + builderMap(w, 460, true, "") + "</div>" + drawer;
 }
 function panelDetails(w) {
   return '<div class="card" style="padding:16px"><div class="eyebrow" style="margin-bottom:10px">Details</div><div class="stack gap-12">' +

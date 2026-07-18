@@ -28,8 +28,8 @@ function screenWorkingList() {
   if (!b) { state.screen = "dashboard"; return screenDashboard(); }
   const rows = workingRows(b.id), counts = statusCounts(b.id);
   const selCount = Object.keys(state.selection).filter(d => state.selection[d]).length;
-  const laneChips = b.zones.map((z, i) => '<span class="badge plain" style="height:24px">' + "ABCDEFGH"[i] + " · " + esc(z.label || (z.type==="radius"?z.anchor:z.origin+"→"+z.dest)) + "</span>").join(" ");
-  const head = '<div class="page-head"><div style="min-width:0"><div class="h1">' + esc(b.name) + '</div><div class="muted" style="font-size:13px;margin-top:2px">' + esc(b.customer) + " · " + esc(b.job) + '</div><div class="row wrap gap-6 mt-8">' + laneChips + "</div></div><div class=\"spacer\"></div>" +
+  // F42: lane/material chips removed from the header (dead space); they live in the map legend now.
+  const head = '<div class="page-head"><div style="min-width:0"><div class="h1">' + esc(b.name) + '</div><div class="muted" style="font-size:13px;margin-top:2px">' + esc(b.customer) + " · " + esc(b.job) + " · " + b.zones.length + " lane" + (b.zones.length===1?"":"s") + '</div></div><div class="spacer"></div>' +
     (b.new_since ? '<button class="btn" data-act="refreshBatch" data-id="' + b.id + '">' + icon("refresh") + " Refresh <span class='badge good' style='height:18px;margin-left:2px'>+" + b.new_since + "</span></button>" : '<button class="btn" data-act="refreshBatch" data-id="' + b.id + '">' + icon("refresh") + " Refresh</button>") +
     '<button class="btn icon" data-act="batchMenu" data-id="' + b.id + '">' + icon("dots") + "</button></div>";
   const feed = activityCard(b.id);   // F32: collapsed by default, rendered BELOW the stat tiles
@@ -80,7 +80,22 @@ function activityCard(batchId) {
 function workingMap(b, rows) {
   const pins = rows.map((r, i) => ({ lng:r.c.lng, lat:r.c.lat, dot:r.c.dot, from:b.id, r:7, num:i+1, shape:"pin",
     fill: r.dnc ? "var(--st-dnc)" : statusVar(r.status), warn: r.warns.length > 0, title: r.c.legal_name }));
-  return mapBox("batch", pins, b.zones, statusLegend(statusCounts(b.id)), 560);
+  // F42: lanes + materials live here, with the status key.
+  const counts = statusCounts(b.id);
+  const laneRows = b.zones.map((z, i) => '<div class="lg"><span class="mono" style="color:var(--accent-press);font-weight:800">' + "ABCDEFGH"[i] + "</span> " + esc(z.label || "") + ' <span class="subtle">· ' + (z.type === "radius" ? esc(z.anchor.replace(", TX","")) + " " + z.radiusMi + "mi" : esc(z.origin.replace(", TX","")) + "→" + esc(z.dest.replace(", TX","")) + " " + z.bufferMi + "mi") + "</span></div>").join("");
+  const legend = '<div class="map-legend">' + STATUS_ORDER.map(k => '<div class="lg"><span class="sw" style="background:' + statusVar(k) + '"></span>' + STATUS[k].label + " · " + counts[k] + "</div>").join("") +
+    (counts.dnc ? '<div class="lg"><span class="sw" style="background:var(--st-dnc)"></span>Do Not Call · ' + counts.dnc + "</div>" : "") +
+    '<div class="lg" style="font-weight:700;color:var(--text);margin-top:4px">Lanes</div>' + laneRows + "</div>";
+  return mapBox("batch", pins, b.zones, legend, 560);
+}
+/* F44: cargo-signal tags — S&G is not the only one worth seeing; carriers can carry several. */
+function tagsFor(c) {
+  const t = [];
+  if (c.tier === 1) t.push('<span class="badge tier1" style="height:17px">S&amp;G</span>');
+  if (c.cargoFlags.includes("Commodities Dry Bulk")) t.push('<span class="badge plain" style="height:17px">Dry Bulk</span>');
+  if (c.cargoFlags.includes("Construction")) t.push('<span class="badge plain" style="height:17px">Constr</span>');
+  if (c.cargoFlags.includes("Building Materials")) t.push('<span class="badge plain" style="height:17px">Bldg Mat</span>');
+  return t.length ? '<span class="wchips stack">' + t.join("") + "</span>" : '<span class="subtle">—</span>';
 }
 function safetyDot(c) { const w = warningsFor(c); const bad = w.some(x => ["safety_rating","high_oos","recent_crashes"].includes(x)); return bad ? '<span class="badge crit">Review</span>' : (c.safety.rating === "Satisfactory" ? '<span class="badge good">Clean</span>' : '<span class="subtle">—</span>'); }
 function workingTable(b, rows) {
@@ -89,25 +104,28 @@ function workingTable(b, rows) {
   const body = rows.map((r, i) => {
     const c = r.c, last = r.logs[0], warn = r.warns.length > 0;
     const cb = r.dnc ? '<td></td>' : '<td onclick="event.stopPropagation()"><label class="check"><input type="checkbox" ' + (state.selection[c.dot]?"checked":"") + ' data-change="selRow" data-dot="' + c.dot + '"><span class="box">' + icon("check") + "</span></label></td>";
-    const statusCell = r.dnc ? '<td>' + badge("dnc") + " " + icon("lock") + "</td>" :
-      '<td onclick="event.stopPropagation()"><select class="select sm" style="width:126px;color:' + statusVar(r.status) + ';font-weight:700" data-change="rowStatus" data-dot="' + c.dot + '" data-batch="' + b.id + '">' + STATUS_ORDER.map(k => '<option value="' + k + '"' + sel(r.status,k) + ">" + STATUS[k].label + "</option>").join("") + '<option value="dnc">Do Not Call…</option></select></td>';
+    const statusCell = r.dnc ? '<td class="center">' + badge("dnc") + " " + icon("lock") + "</td>" :
+      '<td class="center" onclick="event.stopPropagation()"><select class="select sm" style="width:126px;margin:0 auto;color:' + statusVar(r.status) + ';font-weight:700" data-change="rowStatus" data-dot="' + c.dot + '" data-batch="' + b.id + '">' + STATUS_ORDER.map(k => '<option value="' + k + '"' + sel(r.status,k) + ">" + STATUS[k].label + "</option>").join("") + '<option value="dnc">Do Not Call…</option></select></td>';
+    // F46: one complete thought per line — outcome / time / callback each on their own line.
     const lastCell = last
-      ? "<div class='lc-line'>" + icon(CHANNEL[last.channel||"call"].ic) + "<span>" + DISPO_LABEL[last.disposition] + "</span></div><div class='lc-sub'>" + fmtRel(last.at) + (last.callback_at ? " · callback " + fmtRel(last.callback_at) : "") + "</div>"
+      ? "<div class='lc-line'>" + icon(CHANNEL[last.channel||"call"].ic) + "<span>" + DISPO_LABEL[last.disposition] + "</span></div><div class='lc-sub'>" + fmtRel(last.at) + "</div>" + (last.callback_at ? "<div class='lc-sub' style='white-space:nowrap'>callback " + fmtRel(last.callback_at) + "</div>" : "")
       : "—";
+    // F47: quick-log per channel.
+    const quick = r.dnc ? "" : Object.keys(CHANNEL).map(ch => '<button class="btn icon sm" title="Log ' + CHANNEL[ch].label + '" data-act="logCall" data-dot="' + c.dot + '" data-batch="' + b.id + '" data-channel="' + ch + '">' + icon(CHANNEL[ch].ic) + "</button>").join("");
     return '<tr class="clickable ' + (warn ? "warn-row" : "") + (r.dnc ? " dnc" : "") + (state.selection[c.dot] ? " sel" : "") + '" data-act="openCarrier" data-dot="' + c.dot + '" data-from="' + b.id + '">' +
       cb +
-      '<td class="mono" style="text-align:center;color:var(--text-subtle)">' + (i+1) + "</td>" +
-      "<td><div class='co'><span class='nm'>" + esc(c.legal_name) + (c.tier===1?' <span class="badge tier1" style="height:16px">S&amp;G</span>':"") + "</span><span class='meta'>USDOT <span class='mono'>" + c.dot + "</span></span></div></td>" +
+      "<td>" + tagsFor(c) + "</td>" +
+      "<td><div class='co'><span class='nm'>" + esc(c.legal_name) + "</span><span class='meta'>USDOT <span class='mono'>" + c.dot + "</span></span></div></td>" +
       "<td>" + contactCell(c) + "</td>" +
-      "<td><div class='stack'><span>" + esc(c.city) + "</span>" + (r.dist!=null?"<span class='meta subtle mono'>"+r.dist.toFixed(0)+" mi</span>":"") + "</div></td>" +
-      "<td class='mono right'>" + c.power_units + "</td>" +
+      "<td class='center'><div class='stack' style='align-items:center'><span>" + esc(c.city) + "</span>" + (r.dist!=null?"<span class='meta subtle mono'>"+r.dist.toFixed(0)+" mi</span>":"") + "</div></td>" +
+      "<td class='mono center'>" + c.power_units + "</td>" +
       "<td>" + insBadge(c) + "</td>" +
       "<td>" + (warn ? warnChips(c.dot, true) : '<span class="subtle">—</span>') + "</td>" +
       statusCell +
-      "<td class='muted' style='font-size:12px'>" + lastCell + "</td>" +
-      "<td class='right'>" + (r.dnc ? "" : '<button class="btn sm" data-act="logCall" data-dot="' + c.dot + '" data-batch="' + b.id + '">' + icon("phone") + "Log</button>") + "</td></tr>";
+      "<td class='muted center' style='font-size:12px'>" + lastCell + "</td>" +
+      "<td class='right' style='white-space:nowrap'><span class='row gap-4'>" + quick + "</span></td></tr>";
   }).join("");
-  return '<div class="tbl-wrap"><table class="tbl"><thead><tr><th><label class="check"><input type="checkbox" ' + (allSel?"checked":"") + ' data-change="selAll"><span class="box">' + icon("check") + '</span></label></th><th>#</th><th style="min-width:200px">Carrier</th><th style="min-width:170px">Contact</th><th>Location</th><th class="right">Trucks</th><th>Insurance</th><th style="min-width:150px">Warnings</th><th>Status</th><th style="min-width:130px">Last contact</th><th></th></tr></thead><tbody>' + body + "</tbody></table></div>";
+  return '<div class="tbl-wrap"><table class="tbl"><thead><tr><th><label class="check"><input type="checkbox" ' + (allSel?"checked":"") + ' data-change="selAll"><span class="box">' + icon("check") + '</span></label></th><th style="min-width:86px">Tags</th><th style="min-width:200px">Carrier</th><th style="min-width:170px">Contact</th><th class="center">Location</th><th class="center">Trucks</th><th>Insurance</th><th style="min-width:150px">Warnings</th><th class="center">Status</th><th class="center" style="min-width:130px">Last contact</th><th></th></tr></thead><tbody>' + body + "</tbody></table></div>";
 }
 function bulkBar(n) {
   return '<div style="position:fixed;left:calc(var(--sidebar-w) + 24px);right:24px;bottom:20px;background:var(--text);color:var(--bg);border-radius:12px;padding:10px 12px 10px 18px;display:flex;align-items:center;gap:12px;box-shadow:var(--shadow-pop);z-index:30"><b class="mono">' + n + "</b> selected<div class=\"spacer\" style=\"flex:1\"></div>" +

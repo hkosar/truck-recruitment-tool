@@ -214,3 +214,32 @@ tr.warn-row:hover > td { background: color-mix(in srgb, var(--crit-tint) 82%, va
 
 /* New Search control panel (F26) */
 .builder-grid { display: grid; grid-template-columns: minmax(360px, 430px) 1fr; gap: 18px; align-items: start; }
+
+/* ============================ v4 additions (round 3) ============================ */
+
+/* G15: alignment — centered numerics; left for carrier/contact/bubble columns */
+.tbl td.center, .tbl th.center { text-align: center; }
+
+/* F39/F41: one complete thought per line in dashboard cells */
+.co.oneline .nm, .co.oneline .meta { display: block; white-space: nowrap; overflow: hidden; text-overflow: ellipsis; max-width: 250px; }
+.lanes-cell { font-size: 11.5px; color: var(--text-muted); }
+.lanes-cell div { white-space: nowrap; }
+
+/* F48: New Search layout picker + layouts */
+.ns-picker { display: flex; align-items: center; gap: 12px; margin-bottom: 14px; flex-wrap: wrap; }
+.canvas-wrap { position: relative; }
+.canvas-dock { position: absolute; left: 12px; top: 12px; bottom: 12px; width: 350px; overflow-y: auto; display: flex; flex-direction: column; gap: 8px; z-index: 6; }
+.canvas-dock .acc { background: color-mix(in srgb, var(--surface) 96%, transparent); border: 1px solid var(--border-strong); border-radius: var(--radius-lg); box-shadow: var(--shadow-2); }
+.acc-head { display: flex; align-items: center; gap: 8px; width: 100%; padding: 10px 12px; font-size: 13px; color: var(--text); }
+.acc-head svg { width: 14px; height: 14px; color: var(--text-subtle); }
+.acc-body { padding: 0 10px 10px; }
+.acc-body .card { border: none; box-shadow: none; background: transparent; padding: 4px 4px 0 !important; }
+.cols-grid { display: grid; grid-template-columns: 1fr 1fr 1fr; gap: 14px; align-items: start; }
+.chipbar { display: flex; flex-wrap: wrap; gap: 8px; padding: 12px 14px; background: var(--surface); border: 1px solid var(--border); border-radius: var(--radius-lg); }
+.defchip { display: inline-flex; align-items: center; gap: 7px; height: 32px; padding: 0 13px; border-radius: 999px; border: 1px solid var(--border-strong); background: var(--surface-2); font-size: 12.5px; font-weight: 600; color: var(--text); }
+.defchip:hover { background: var(--surface-sunk); border-color: var(--accent); }
+.defchip svg { width: 13px; height: 13px; color: var(--text-subtle); }
+.defchip.name { background: var(--accent-tint); border-color: var(--accent-tint-2); color: var(--accent-press); }
+.drawer-scrim { position: fixed; inset: 0; background: rgba(10,12,14,.35); z-index: 55; }
+.drawer { position: fixed; left: var(--sidebar-w); top: 0; bottom: 0; width: 420px; background: var(--surface); border-right: 1px solid var(--border-strong); box-shadow: var(--shadow-pop); padding: 16px; overflow-y: auto; z-index: 56; animation: drawerIn .18s var(--ease); }
+@keyframes drawerIn { from { transform: translateX(-24px); opacity: 0; } to { transform: none; opacity: 1; } }

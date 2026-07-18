@@ -32,6 +32,10 @@ const consoleErrors = [], pageErrors = [], external = [], failed = [];
     if (await page.$(".pipebar")) throw new Error("pipeline bar should be gone (F31)");
     const heads = await page.$$eval("table.tbl thead th", els => els.map(e => e.textContent.trim()));
     if (!heads.some(h => /New/.test(h)) || !heads.some(h => /Int/.test(h))) throw new Error("stage columns missing: " + heads.join("|"));
+    // F39/F41: one thought per line
+    const spans = await page.$eval(".co.oneline", e => e.querySelectorAll("span").length);
+    if (spans < 3) throw new Error("batch cell should have 3 lines, got " + spans);
+    if (!(await page.$(".lanes-cell div"))) throw new Error("lanes not one-per-line");
     await shot("02-dashboard-empty");
   });
   await step("dashboard: toggle job → zones + zoom", async () => {
@@ -58,6 +62,18 @@ const consoleErrors = [], pageErrors = [], external = [], failed = [];
     for (const selr of [".builder-grid", ".cargo-flags", ".facet-list", '[data-act="wzAddLane"]']) if (!(await page.$(selr))) throw new Error("missing " + selr + " on one page");
     await shot("04-builder-panel");
   });
+  await step("new search: 5 layout options render (F48)", async () => {
+    const sig = { 2:".canvas-dock", 3:".cols-grid", 4:".tabs", 5:".chipbar" };
+    for (const l of [2,3,4,5]) {
+      await page.evaluate(l => ACT.nsLayout({ l }), l); await wait(150);
+      if (!(await page.$(sig[l]))) throw new Error("layout " + l + " missing " + sig[l]);
+      await shot("04-layout-" + l);
+    }
+    await ev(() => { const b = document.querySelector('.chipbar .defchip'); ACT.nsDrawer({ d: "freight" }); }); await wait(120);
+    if (!(await page.$(".drawer"))) throw new Error("L5 drawer did not open");
+    await shot("04-layout-5-drawer");
+    await ev(() => { state.nsDrawer = null; ACT.nsLayout({ l: 1 }); }); await wait(120);
+  });
   await step("builder: name + lanes + facets + filters, live count", async () => {
     await page.fill("#wz-name", "SH-130 Corridor Recruitment"); await page.fill('[data-model="wizard.customer"]', "Central TX Materials");
     await click('[data-act="wzAddLane"][data-t="radius"]'); await click('[data-act="wzSaveLane"]');
@@ -79,13 +95,19 @@ const consoleErrors = [], pageErrors = [], external = [], failed = [];
     await click(".feed-bar"); await page.waitForSelector(".composer"); await shot("06-activity-open");
     await click('[data-act="toggleFeed"]');
   });
-  await step("batch: warnings own column, money format (F33/F36)", async () => {
+  await step("batch: warnings + Tags columns, money format, quick channels (F33/F36/F44/F47)", async () => {
     const heads = await page.$$eval("#wl-body thead th", els => els.map(e => e.textContent.trim()));
     if (!heads.includes("Warnings")) throw new Error("no Warnings column: " + heads.join("|"));
+    if (!heads.includes("Tags")) throw new Error("no Tags column (F44): " + heads.join("|"));
+    if (heads.includes("#")) throw new Error("# column should be replaced (F44)");
     if (!(await page.$(".wchips.stack"))) throw new Error("warnings not stacked");
     const html = await page.$eval("#wl-body", e => e.innerHTML);
-    if (!/ MM<|\ MM</.test(html) && !/MM</.test(html)) throw new Error("money MM format not found");
+    if (!/MM</.test(html)) throw new Error("money MM format not found");
     if (/\$\dM</.test(html)) throw new Error("old $xM format still present");
+    const quick = await page.$$eval("#wl-body tbody tr:first-child [data-act='logCall']", els => els.map(e => e.getAttribute("data-channel")));
+    for (const ch of ["call","text","email"]) if (!quick.includes(ch)) throw new Error("missing quick-log channel " + ch + ": " + quick.join(","));
+    const headHtml = await page.$eval(".page-head", e => e.textContent);
+    if (/Material —|Fill sand/.test(headHtml)) throw new Error("lane chip still in header (F42)");
     await shot("07-batch-table");
   });
   await step("batch: map view w/ teardrop pins + zoom", async () => {
