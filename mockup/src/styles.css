@@ -225,8 +225,7 @@ input[type=range]::-moz-range-thumb { width: 16px; height: 16px; border-radius: 
 .shell { display: flex; flex-direction: column; height: 100vh; }
 .appbar { height: var(--topbar-h); background: var(--bar); border-bottom: 1px solid var(--bar-line); display: flex; align-items: center; gap: 14px; padding: 0 16px; flex: none; color: #fff; }
 .appbar .brand { display: flex; align-items: center; gap: 10px; }
-.appbar .mark { width: 32px; height: 32px; border-radius: 50%; background: #fff; display: grid; place-items: center; flex: none; }
-.appbar .mark svg { width: 18px; height: 18px; color: var(--bar); }
+.appbar .mark { width: 34px; height: 33px; flex: none; }   /* real white badge (data URI) */
 .appbar .name { font-weight: 800; letter-spacing: -.01em; font-size: 15px; line-height: 1; color: #fff; }
 .appbar .sub { font-size: 9.5px; font-weight: 700; letter-spacing: .13em; color: rgba(255,255,255,.65); text-transform: uppercase; margin-top: 3px; }
 .appbar .spacer { flex: 1; }
@@ -384,8 +383,7 @@ td.right, th.right { text-align: right; }
 .auth-card { position: relative; z-index: 1; width: 100%; max-width: 400px; }
 .auth-brand { display: flex; align-items: center; gap: 12px; justify-content: center; margin-bottom: 22px; }
 /* black badge on light surfaces (spec: white badge lives on the navy bar) */
-.auth-brand .mark { width: 42px; height: 42px; border-radius: 50%; background: #141a21; display: grid; place-items: center; }
-.auth-brand .mark svg { width: 24px; height: 24px; color: #fff; }
+.auth-brand .mark { width: 76px; height: 74px; flex: none; }   /* real black badge (data URI) */
 .auth-brand .name { font-size: 19px; font-weight: 800; letter-spacing: -.02em; }
 .auth-brand .sub { font-size: 10px; font-weight: 700; letter-spacing: .14em; text-transform: uppercase; color: var(--text-subtle); }
 .auth-panel { background: var(--surface); border: 1px solid var(--border); border-radius: var(--radius-lg); box-shadow: var(--shadow-2); padding: 26px; }

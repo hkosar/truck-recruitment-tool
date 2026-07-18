@@ -9,7 +9,7 @@ cd "$(dirname "$0")"
 OUT="index.html"
 {
   echo '<style>'
-  cat src/_brand.css src/styles.css src/_components.css
+  cat src/_brand.css src/_logos.css src/styles.css src/_components.css
   echo '</style>'
   echo '<div id="app"></div>'
   echo '<script>'

@@ -98,7 +98,7 @@ function gsearchPop() {
 function appbar() {
   const u = cur();
   return '<header class="appbar">' +
-    '<div class="brand"><div class="mark">' + icon("nail") + '</div><div><div class="name">Twisted Nail</div><div class="sub">Recruiter</div></div></div>' +
+    '<div class="brand"><div class="mark mark-badge-white" role="img" aria-label="Twisted Nail badge"></div><div><div class="name">Twisted Nail</div><div class="sub">Recruiter</div></div></div>' +
     '<div class="gsearch">' + icon("search") + '<input class="gs-in" id="gs-in" placeholder="Search carriers, batches, USDOT…" value="' + esc(state.gsearch || "") + '" data-live="gSearch" autocomplete="off">' + gsearchPop() + "</div>" +
     '<div class="spacer"></div>' +
     '<span class="pill" title="Shared list — updates live for all users"><span class="dot"></span>Live</span>' +
@@ -141,7 +141,7 @@ function stat(k, v, cls) { return '<div class="cell ' + (cls||"") + '"><div clas
 function statStrip(cells) { return '<div class="strip">' + cells + "</div>"; }
 
 /* ------------------------------- AUTH ------------------------------- */
-function authBrand() { return '<div class="auth-brand"><div class="mark">' + icon("nail") + '</div><div><div class="name">Twisted Nail</div><div class="sub">Carrier Recruiter</div></div></div>'; }
+function authBrand() { return '<div class="auth-brand"><div class="mark mark-badge-black" role="img" aria-label="Twisted Nail badge"></div><div><div class="name">Twisted Nail</div><div class="sub">Carrier Recruiter</div></div></div>'; }
 function screenLogin() {
   return '<div class="auth"><div class="auth-card">' + authBrand() +
     '<form class="auth-panel" data-submit="signIn"><h1>Sign in</h1>' +
