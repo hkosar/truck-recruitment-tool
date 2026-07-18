@@ -118,6 +118,10 @@ The mockup (not the production app) absorbs every visual/UX feedback item first,
 
 ### M4 — Search & batches
 
+> **Round-2 note (03 F26/G11):** the New Batch *wizard* is superseded — it ships as a
+> single-page control panel (02 § Round-2 amendments #1). Read M4.2–M4.4 scopes as
+> panel sections, not steps; dashboard/map behaviors per amendments #3.
+
 - **M4.1 · MapCanvas + Google adapter** — loader, MapAdapter, numbered status pins, legend, radius/corridor/buffer overlays, multi-lane render, clustering >250, MapUnavailable fallback. Spec: 02 §2. Deps: M3.3, GCP prereq. **AC:** storybook-style dev page exercises every overlay type with fake data; zero console errors; **quota caps confirmed set before first deploy with the key**. **Verify:** dev-page screenshots + GCP console screenshot of caps.
 - **M4.2 · Wizard steps 1–2** — Details (name-first, customer combobox, job); Lanes (5 anchor kinds in F12 order — **geocode-on-enter, not Autocomplete**; pin-drop mode; corridor pickup/dropoff geocode + Routes call debounced to drag-end; lane list CRUD; live count wired to `count_carriers`). Spec: 02 §3b; reconciliation notes in 01. Deps: M4.1, M2.7 data. **AC:** create 2-radius+1-corridor draft; counts change sensibly with every edit; per-lane contribution counts correct. **Verify:** E2E wizard spec + SQL cross-check of one count.
 - **M4.3 · Wizard step 3 (freight)** — 30 flag checkboxes with scoped counts (`facet_cargo_flags`) + FacetBrowser (`facet_other_values`: search, suggested chips, virtualized list, include/exclude tri-state, summary bar). Deps: M4.2. **AC:** include/exclude semantics match 01 §4 exactly (exclude dominant); counts scoped per the SCOPE RULE. **Verify:** E2E + 3 hand-computed SQL comparisons.

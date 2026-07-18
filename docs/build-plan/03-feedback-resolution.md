@@ -79,7 +79,34 @@ production project (#13).
 - **Maps: Google Maps Platform** (over open-source stack) — accepted with the billing-account prerequisite and hard quota caps.
 - **Email module: fast-follow after launch** (over launch-blocking or unscheduled) — with subdomain/ESP warm-up starting during the main build.
 
-## Round 2 — (reserved)
+## Round 2 — 2026-07-18 (`Starting_with_the_tabs.docx`, on mockup v2)
 
-M0.4 outcomes land here: chosen profile variant, mockup-v2 amendments, M2.7 data-QA
-verdict, and any new F-items (F25+).
+New generalized principles extracted this round:
+
+| G# | Principle | From |
+|----|-----------|------|
+| G11 | **Internal-operator UX bias**: dense, single-surface control panels over multi-step wizards. Our users are employees who "pilot a complicated panel" for performance; wizards/simplified flows are reserved for external-facing experiences (owner-operators). | F26 |
+| G12 | **No generic page subtext.** Descriptive filler under titles trains the eye to skip it and wastes real estate — remove everywhere; a screen explains itself through its controls. | F28 |
+| G13 | **No unlabeled visualizations.** Every graphic needs an interpretive key, otherwise show plain numbers/columns instead. | F31 |
+| G14 | **Uniform data typography & formats**: identical font sizing within a data cell class; standardized money format `$X.X MM` / `$NNN K`; icons sit inline-left of the text they qualify. | F34–F36 |
+
+| F# | Owner's feedback (condensed) | Resolution | Lands in |
+|----|------------------------------|------------|----------|
+| F25 | Reserved tabs named "Email, Text, Mail, Enrichment" | Sidebar reserved entries renamed exactly so | Mockup v3 · 02 §3f · M3.3 |
+| F26 | New Search: the wizard was a wrong turn — "I actually quite liked the control panel dashboard design"; revert to the v1 single-page baseline and fold the round-1 feedback into it | **Wizard superseded.** New Search = one dense control panel: left column = Details (name/customer/job first, F20) + Lanes (multi-lane add/edit, custom corridor endpoints, material labels) + Freight (category checkboxes + Other facet browser) + Filters (incl. contactability); right = live map + count, always visible. All round-1 features retained, zero steps | Mockup v3 · 02 Round-2 amendment · M4.2–M4.4 re-scoped |
+| F27 | Dashboard header tiles + content centered | Stat tiles center their label+value; dashboard content sits in a centered container | Mockup v3 · 02 amendment |
+| F28 | Kill the subtext under "Dashboard" (and by principle, everywhere) | All page-title subtext removed tool-wide (G12) | Mockup v3 · every screen spec |
+| F29 | Map must be a real map — zoom, pan, click a job → zoom to it; "you may need me to link you to a google map tool" | Production is already locked on Google Maps JS (D1; M4.1) with exactly these behaviors — it renders the moment the deployed app + your GCP key exist. The self-contained mockup cannot load Google tiles (its published page blocks external requests by design), so mockup v3 adds real **zoom/pan on the built-in map + click-a-job-to-zoom** and richer map detail as the closest stand-in, clearly labeled as such | Mockup v3 (interactions) · M4.1/M4.5 (real tiles) |
+| F30 | Job bubbles all orange is indistinguishable — OR start the map empty with a legend of jobs the user toggles on/off (then orange is fine) | **Toggle design adopted** (owner's preferred alternative): dashboard map starts empty; legend lists jobs with checkboxes; toggling shows that job's zones/pins; accent orange stays | Mockup v3 · 02 amendment · M4.5 |
+| F31 | Pipeline stacked-bar graphic is uninterpretable — show stage counts as columns | Batch table: bar removed; per-stage numeric columns (New / Att / Cont / Int / NaF) with colored headers (G13) | Mockup v3 · 02 amendment |
+| F32 | Batch page: activity feed collapsible (low priority, too much real estate), placed BELOW the data headers; headers centered | Activity feed collapsed by default, moved below the (centered) stat tiles; expandable in place | Mockup v3 · 02 amendment |
+| F33 | No ad-hoc vertical stacking inside table rows. Approved 2-line cells: name+USDOT, contact, location. **Warnings move to their own column, stacked vertically** (screenshot annotation) | Warning chips leave the carrier cell; dedicated "Warnings" column renders them stacked; other cells audited against the approved patterns | Mockup v3 · 02 amendment · M5.2 |
+| F34 | Contact cell font sizes must match (email renders larger than phone) | Single font size for all contact-cell lines (G14) | Mockup v3 |
+| F35 | Last-contact cell: icon directly left of the outcome text on one line, time below; use the column space properly | Rebuilt: `[icon] Outcome` / `time (+ callback when set)` | Mockup v3 |
+| F36 | Money format: "$2M" → "**$2.0 MM**", "**$750 K**" | `fmtMoney` standardized tool-wide (badges, tiles, sheets, profile) | Mockup v3 · 02 amendment |
+| F37 | Batch map view: carrier bubbles "particularly ugly"; can't zoom close enough; no map features | Pin redesign (teardrop pins in status colors, legible numbering) + the F29 zoom/pan interactions + more basemap detail (major highways/rivers) in the mockup; real tiles in production | Mockup v3 · M4.1 |
+
+**Still open from the v2 report (not addressed in this round's doc):**
+1. Carrier-profile variant pick — Command Console / Dossier / Verification Ledger (blocks M5.6, not v3; the switcher stays until you choose).
+2. Material as a free-text per-lane label vs. a structured filterable field.
+3. CSV export on the contact sheet — kept for now; say the word to cut it.

@@ -6,6 +6,35 @@ two approved additions live in `01-architecture.md` § Contract reconciliation, 
 governs. Brand: monochrome Twisted Nail chrome + Montserrat (assets in `brand/`), one
 hi-vis orange interaction accent, semantic status colors (§1.5).
 
+## ROUND-2 AMENDMENTS (binding — override the sections below; see 03 Round 2, F25–F37)
+
+1. **§3b is superseded: New Batch is NOT a wizard.** It is a single-page **control
+   panel** (G11): left column stacks Details (batch name first, then Customer, Job —
+   F20 intact) → Lanes (multi-lane list w/ add/edit/remove, custom corridor
+   pickup/dropoff, material labels) → Freight (30 category checkboxes w/ counts +
+   Other-value facet browser) → Carrier filters (incl. contactability); right side =
+   persistent live map + match count. Every Round-1 behavior in §3b carries over;
+   only the stepper structure is deleted. M4.2–M4.4 scopes read as panel sections,
+   not steps.
+2. **No page-title subtext anywhere** (G12): delete every `desc` line under H1s.
+3. **Dashboard (§3a):** stat tiles center label+value; content in a centered
+   container; **map starts empty** with a legend listing jobs + per-job visibility
+   toggles (F30) — accent orange for all zones; click a job (legend or table row
+   hover→map) zooms/fits to its lanes (F29). **Pipeline stacked-bar column is
+   replaced by per-stage numeric columns** with colored headers (F31/G13).
+4. **Batch page (§3c):** activity feed is collapsed by default and sits BELOW the
+   centered stat tiles (F32). **Warnings become a dedicated table column, chips
+   stacked vertically** — never inline in the carrier cell (F33). Approved 2-line
+   cells only: name+USDOT · contact · location. Contact-cell lines share one font
+   size (F34). Last-contact cell = `[channel icon] Outcome` on line 1, relative time
+   (+ callback) on line 2 (F35).
+5. **Money format tool-wide (F36/G14):** `$X.X MM` for millions, `$NNN K` for
+   thousands (e.g. $2.0 MM, $750 K) — badges, tiles, sheets, profile, everywhere.
+6. **Reserved sidebar tabs (F25):** exactly "Email", "Text", "Mail", "Enrichment".
+7. **Map pins (F37):** teardrop-style pins in status colors with legible numbers
+   replace plain circles; production map behaviors per §2 unchanged (Google, zoom,
+   pan, fit-to-lanes, click-through).
+
 # Frontend Spec v2 — Twisted Nail Carrier Recruiter (production React app)
 
 Source of truth read: `docs/discovery-brief.md`, `mockup/README.md`, `mockup/src/screens.js`, `mockup/src/styles.css`, `mockup/src/ui.js`, `mockup/src/data.js`. v1 screens (login/register/forgot/guest, dashboard cards, builder, working list, profile, users) and the v1 token set are the baseline; every delta below is tagged with the feedback item (F#) or principle (G#) that drives it.
