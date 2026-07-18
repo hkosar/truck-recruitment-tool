@@ -106,7 +106,18 @@ New generalized principles extracted this round:
 | F36 | Money format: "$2M" → "**$2.0 MM**", "**$750 K**" | `fmtMoney` standardized tool-wide (badges, tiles, sheets, profile) | Mockup v3 · 02 amendment |
 | F37 | Batch map view: carrier bubbles "particularly ugly"; can't zoom close enough; no map features | Pin redesign (teardrop pins in status colors, legible numbering) + the F29 zoom/pan interactions + more basemap detail (major highways/rivers) in the mockup; real tiles in production | Mockup v3 · M4.1 |
 
-**Still open from the v2 report (not addressed in this round's doc):**
-1. Carrier-profile variant pick — Command Console / Dossier / Verification Ledger (blocks M5.6, not v3; the switcher stays until you choose).
-2. Material as a free-text per-lane label vs. a structured filterable field.
-3. CSV export on the contact sheet — kept for now; say the word to cut it.
+**Decisions since this round's doc:**
+1. **Carrier profile = COMMAND CONSOLE** (owner, in chat, 2026-07-18). The switcher is
+   removed from the mockup; M5.6 implements Command Console. Dossier/Ledger renderers
+   retained in mockup source as reference only.
+
+**Still open:**
+1. Material as a free-text per-lane label vs. a structured filterable field.
+2. CSV export on the contact sheet — kept for now; say the word to cut it.
+
+**Mockup v3 shipped** (same artifact URL): F25–F37 all applied — control-panel New
+Search, empty-start dashboard map with per-job toggles + click-to-zoom, interactive
+zoom/pan preview maps with teardrop status pins + highway context, stage-count columns,
+collapsed activity bar below centered tiles, dedicated stacked Warnings column,
+uniform contact typography, `$X.X MM / $NNN K` money format, renamed reserved tabs.
+Verified headless: 15 flows, 0 errors, 0 external requests.

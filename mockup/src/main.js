@@ -9,9 +9,19 @@ function addAct(batchId, type, payload, body) { state.overrides.activity.push({ 
 /* ---- live patches (avoid re-render mid slider) ---- */
 function patchWiz() {
   const w = state.wizard, zones = wizardZones(w), s = Object.assign({}, wizardSearch(w), { zones }), matches = searchMatches(s);
-  const map = document.getElementById("wiz-map");
-  if (map) { const pins = matches.slice(0, 400).map(c => ({ lng:c.lng, lat:c.lat, r:4, warn:warningsFor(c).length>0, title:c.legal_name })); map.innerHTML = mapCore(pins, zones) + mapCount(matches.length) + mapLegend([["var(--accent)","Matches filters"],["var(--crit)","Has a warning flag"]]); }
+  const holder = document.getElementById("wiz-map-holder");
+  if (holder) {
+    const pins = matches.slice(0, 400).map(c => ({ lng:c.lng, lat:c.lat, r:3.5, warn:warningsFor(c).length>0, title:c.legal_name }));
+    holder.innerHTML = mapBox("builder", pins, zones, mapCount(matches.length) + mapLegend([["var(--accent)","Matches filters"],["var(--crit)","Has a warning flag"]]), 430);
+    const svg = holder.querySelector("svg"); if (svg && state.mapView.builder) svg.setAttribute("viewBox", state.mapView.builder);
+  }
   const fc = document.getElementById("b-foot-count"); if (fc) fc.textContent = matches.length;
+  const gb = document.getElementById("wz-grab-n"); if (gb) gb.textContent = matches.length;
+  const cov = document.getElementById("wiz-cov");
+  if (cov) {
+    const wp = matches.filter(c => c.phone || c.cell).length, we = matches.filter(c => c.email).length, t1 = matches.filter(c => c.tier === 1).length;
+    cov.innerHTML = stat("Matches", matches.length, "accent") + stat("With phone", wp) + stat("With email", we, we ? "" : "crit") + stat("Sand & gravel", t1, "good");
+  }
 }
 function patchList() { const b = DB.batches.find(x => x.id === state.activeBatchId), el = document.getElementById("wl-body"); if (el && b) el.innerHTML = state.list.view === "map" ? workingMap(b, workingRows(b.id)) : workingTable(b, workingRows(b.id)); }
 
@@ -27,7 +37,7 @@ ACT.userMenu = (d, e, t) => { const r = t.getBoundingClientRect(); openMenu({ ty
 ACT.toast = (d) => toast(d.msg, d.ic);
 
 /* ---- batches ---- */
-ACT.newBatch = () => { state.wizard = newWizard(); state.screen = "wizard"; render(); };
+ACT.newBatch = () => { state.wizard = newWizard(); state.screen = "builder"; render(); };
 ACT.openBatch = (d) => { state.activeBatchId = d.id || d.to; state.selection = {}; state.list = LIST_DEFAULT(); state.feedOpen = false; state.screen = "workingList"; state.menu = null; render(); };
 ACT.batchMenu = (d, e, t) => { const r = t.getBoundingClientRect(); openMenu({ type:"batchMenu", id:d.id, x:Math.max(10, Math.min(r.right-190, window.innerWidth-200)), y:r.bottom+6 }); };
 ACT.renameBatch = (d) => openModal({ type:"rename", id:d.id });
@@ -46,8 +56,18 @@ ACT.toggleFeed = () => { state.feedOpen = !state.feedOpen; render(); };
 ACT.postComment = (d) => { const v = (d.v||"").trim(); if (v) { addAct(state.activeBatchId, "comment", {}, v); toast("Comment posted"); } render(); };
 ACT.postCommentBtn = () => { const el = document.getElementById("feed-comment"); const v = el ? el.value.trim() : ""; if (v) { addAct(state.activeBatchId, "comment", {}, v); toast("Comment posted"); render(); } };
 
-/* ---- wizard ---- */
-ACT.wzStep = (d) => { const t = +d.s; if (t === 2 && !state.wizard.name.trim()) { toast("Name your batch first", "alert"); return; } state.wizard.step = t; render(); };
+/* ---- maps (F29/F30) ---- */
+ACT.mapZoom = (d) => mapZoomAt(d.id, +d.f);
+ACT.mapReset = (d) => { delete state.mapView[d.id]; const el = document.querySelector('.map[data-mapid="' + d.id + '"] svg'); if (el) el.setAttribute("viewBox", "0 0 640 520"); };
+ACT.dashToggleJob = (d) => {
+  const on = !state.dashJobs[d.id];
+  if (on) state.dashJobs[d.id] = true; else delete state.dashJobs[d.id];
+  render();
+  if (on) { const b = DB.batches.find(x => x.id === d.id); if (b) { const bb = zoneBBox(b.zones); zoomToBox("dash", bb[0], bb[1], bb[2], bb[3], 40); } }
+};
+ACT.dashZoomJob = (d) => { const b = DB.batches.find(x => x.id === d.id); if (b) { state.dashJobs[d.id] = true; render(); const bb = zoneBBox(b.zones); zoomToBox("dash", bb[0], bb[1], bb[2], bb[3], 40); } };
+
+/* ---- New Search control panel ---- */
 ACT.wzAddLane = (d) => {
   const id = "lz" + (laneSeq++);
   if (d.t === "radius") { const c0 = cityOf("Austin"); state.wizard.editing = { id, type:"radius", label:"", anchorKind:"city", anchor:"Austin", anchorLng:c0.lng, anchorLat:c0.lat, radiusMi:50 }; }

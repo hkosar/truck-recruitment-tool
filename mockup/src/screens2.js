@@ -29,10 +29,10 @@ function screenWorkingList() {
   const rows = workingRows(b.id), counts = statusCounts(b.id);
   const selCount = Object.keys(state.selection).filter(d => state.selection[d]).length;
   const laneChips = b.zones.map((z, i) => '<span class="badge plain" style="height:24px">' + "ABCDEFGH"[i] + " · " + esc(z.label || (z.type==="radius"?z.anchor:z.origin+"→"+z.dest)) + "</span>").join(" ");
-  const head = '<div class="page-head"><div style="min-width:0"><div class="h1">' + esc(b.name) + '</div><div class="desc">' + esc(b.customer) + " · " + esc(b.job) + '</div><div class="row wrap gap-6 mt-8">' + laneChips + "</div></div><div class=\"spacer\"></div>" +
+  const head = '<div class="page-head"><div style="min-width:0"><div class="h1">' + esc(b.name) + '</div><div class="muted" style="font-size:13px;margin-top:2px">' + esc(b.customer) + " · " + esc(b.job) + '</div><div class="row wrap gap-6 mt-8">' + laneChips + "</div></div><div class=\"spacer\"></div>" +
     (b.new_since ? '<button class="btn" data-act="refreshBatch" data-id="' + b.id + '">' + icon("refresh") + " Refresh <span class='badge good' style='height:18px;margin-left:2px'>+" + b.new_since + "</span></button>" : '<button class="btn" data-act="refreshBatch" data-id="' + b.id + '">' + icon("refresh") + " Refresh</button>") +
     '<button class="btn icon" data-act="batchMenu" data-id="' + b.id + '">' + icon("dots") + "</button></div>";
-  const feed = activityCard(b.id);
+  const feed = activityCard(b.id);   // F32: collapsed by default, rendered BELOW the stat tiles
   const strip = statStrip(stat("Carriers", counts.total) + stat("With phone", counts.phone) + stat("With email", counts.email, counts.email ? "" : "crit") + stat("Interested", counts.interested, "good") + stat("Warnings", counts.warnings, counts.warnings ? "crit" : "") + stat("Promoted", counts.promoted, "accent"));
   const chip = (key, label, n, cls) => '<button class="badge ' + (cls||"plain") + '" style="cursor:pointer;height:28px;' + (state.list.status === key ? "outline:2px solid var(--accent);outline-offset:1px" : "opacity:.82") + '" data-act="listStatus" data-s="' + key + '">' + label + ' <b class="mono" style="margin-left:2px">' + n + "</b></button>";
   const chips = '<div class="row wrap gap-6 center">' + chip("all","All",counts.total,"info") + STATUS_ORDER.map(k => chip(k, STATUS[k].label, counts[k], k)).join("") + (counts.dnc ? chip("dnc","Do Not Call",counts.dnc,"dnc") : "") +
@@ -46,12 +46,19 @@ function screenWorkingList() {
     '<div class="seg"><button class="' + (state.list.view==="list"?"on":"") + '" data-act="listView" data-v="list">' + icon("list") + "List</button><button class=\"" + (state.list.view==="map"?"on":"") + "\" data-act=\"listView\" data-v=\"map\">" + icon("mapicon") + "Map</button></div></div>";
   const filters = '<div class="card" style="padding:12px 14px;margin:14px 0">' + chips + toolbar + "</div>";
   const body = state.list.view === "map" ? workingMap(b, rows) : workingTable(b, rows);
-  const inner = '<div class="page wide">' + head + feed + '<div class="mt-16">' + strip + "</div>" + filters + '<div id="wl-body">' + body + "</div>" + (selCount ? bulkBar(selCount) : "") + "</div>";
+  const inner = '<div class="page wide">' + head + strip + '<div class="mt-12">' + feed + "</div>" + filters + '<div id="wl-body">' + body + "</div>" + (selCount ? bulkBar(selCount) : "") + "</div>";
   return appShell(inner, crumb([{ label:"Dashboard", act:"nav", to:"dashboard" }, { label:b.name }]));
 }
 function activityCard(batchId) {
-  const items = activityForBatch(batchId), showAll = state.feedOpen;
-  const shown = showAll ? items : items.slice(0, 3);
+  const items = activityForBatch(batchId), open = state.feedOpen;
+  if (!open) {
+    const last = items[0];
+    const u = last ? DB.userById[last.actor_id] : null;
+    return '<button class="feed-bar" data-act="toggleFeed">' + icon("activity") + '<b>Activity</b><span class="badge plain" style="height:19px">' + items.length + "</span>" +
+      (last ? '<span class="subtle" style="font-size:12px;overflow:hidden;text-overflow:ellipsis;white-space:nowrap">latest: ' + esc(u ? u.name.split(" ")[0] : "") + (last.type === "comment" ? " commented" : " · " + last.type.replace(/_/g, " ")) + " · " + fmtRel(last.at) + "</span>" : "") +
+      '<span style="margin-left:auto" class="row gap-4 center subtle">Expand ' + icon("chevD") + "</span></button>";
+  }
+  const shown = items;
   const line = a => {
     const u = DB.userById[a.actor_id], nm = u ? u.name.split(" ")[0] : "System";
     if (a.type === "comment") return { ic:"comment", cls:"comment", html: "<b>" + esc(nm) + "</b> commented", body: a.body };
@@ -68,12 +75,12 @@ function activityCard(batchId) {
   const feed = shown.map(a => { const L = line(a), u = DB.userById[a.actor_id]; return '<div class="feed-item"><div class="feed-ic ' + (L.cls||"") + '">' + icon(L.ic) + '</div><div class="feed-body">' + L.html + (L.body ? '<div class="fcomment">' + esc(L.body) + "</div>" : "") + '<div class="fmeta">' + fmtRel(a.at) + "</div></div></div>"; }).join("");
   const cur_ = cur();
   const composer = '<div class="composer"><span>' + avatar(cur_, 27) + '</span><span class="input-group grow"><input class="input" placeholder="Leave an activity comment…" id="feed-comment" data-keyadd="postComment"></span><button class="btn primary sm" data-act="postCommentBtn">Post</button></div>';
-  return '<div class="card" style="padding:14px 16px"><div class="row between center" style="margin-bottom:10px"><div class="eyebrow">' + icon("activity") + ' Activity</div>' + (items.length > 3 ? '<button class="btn ghost sm" data-act="toggleFeed">' + (showAll ? "Show less" : "Show all " + items.length) + "</button>" : "") + "</div>" + composer + '<div class="feed">' + feed + "</div></div>";
+  return '<div class="card" style="padding:14px 16px"><div class="row between center" style="margin-bottom:10px"><div class="eyebrow">' + icon("activity") + ' Activity <span class="subtle">· ' + items.length + '</span></div><button class="btn ghost sm" data-act="toggleFeed">Collapse ' + icon("chevD") + "</button></div>" + composer + '<div class="feed" style="max-height:300px;overflow-y:auto">' + feed + "</div></div>";
 }
 function workingMap(b, rows) {
-  const pins = rows.map((r, i) => ({ lng:r.c.lng, lat:r.c.lat, dot:r.c.dot, from:b.id, r:8, num:i+1,
+  const pins = rows.map((r, i) => ({ lng:r.c.lng, lat:r.c.lat, dot:r.c.dot, from:b.id, r:7, num:i+1, shape:"pin",
     fill: r.dnc ? "var(--st-dnc)" : statusVar(r.status), warn: r.warns.length > 0, title: r.c.legal_name }));
-  return '<div class="map" style="height:560px">' + mapCore(pins, b.zones) + statusLegend(statusCounts(b.id)) + "</div>";
+  return mapBox("batch", pins, b.zones, statusLegend(statusCounts(b.id)), 560);
 }
 function safetyDot(c) { const w = warningsFor(c); const bad = w.some(x => ["safety_rating","high_oos","recent_crashes"].includes(x)); return bad ? '<span class="badge crit">Review</span>' : (c.safety.rating === "Satisfactory" ? '<span class="badge good">Clean</span>' : '<span class="subtle">—</span>'); }
 function workingTable(b, rows) {
@@ -84,19 +91,23 @@ function workingTable(b, rows) {
     const cb = r.dnc ? '<td></td>' : '<td onclick="event.stopPropagation()"><label class="check"><input type="checkbox" ' + (state.selection[c.dot]?"checked":"") + ' data-change="selRow" data-dot="' + c.dot + '"><span class="box">' + icon("check") + "</span></label></td>";
     const statusCell = r.dnc ? '<td>' + badge("dnc") + " " + icon("lock") + "</td>" :
       '<td onclick="event.stopPropagation()"><select class="select sm" style="width:126px;color:' + statusVar(r.status) + ';font-weight:700" data-change="rowStatus" data-dot="' + c.dot + '" data-batch="' + b.id + '">' + STATUS_ORDER.map(k => '<option value="' + k + '"' + sel(r.status,k) + ">" + STATUS[k].label + "</option>").join("") + '<option value="dnc">Do Not Call…</option></select></td>';
+    const lastCell = last
+      ? "<div class='lc-line'>" + icon(CHANNEL[last.channel||"call"].ic) + "<span>" + DISPO_LABEL[last.disposition] + "</span></div><div class='lc-sub'>" + fmtRel(last.at) + (last.callback_at ? " · callback " + fmtRel(last.callback_at) : "") + "</div>"
+      : "—";
     return '<tr class="clickable ' + (warn ? "warn-row" : "") + (r.dnc ? " dnc" : "") + (state.selection[c.dot] ? " sel" : "") + '" data-act="openCarrier" data-dot="' + c.dot + '" data-from="' + b.id + '">' +
       cb +
       '<td class="mono" style="text-align:center;color:var(--text-subtle)">' + (i+1) + "</td>" +
-      "<td><div class='co'><span class='nm'>" + esc(c.legal_name) + (c.tier===1?' <span class="badge tier1" style="height:16px">S&amp;G</span>':"") + "</span><span class='meta'>USDOT <span class='mono'>" + c.dot + "</span></span>" + (warn ? "<div style='margin-top:3px'>" + warnChips(c.dot) + "</div>" : "") + "</div></td>" +
+      "<td><div class='co'><span class='nm'>" + esc(c.legal_name) + (c.tier===1?' <span class="badge tier1" style="height:16px">S&amp;G</span>':"") + "</span><span class='meta'>USDOT <span class='mono'>" + c.dot + "</span></span></div></td>" +
       "<td>" + contactCell(c) + "</td>" +
       "<td><div class='stack'><span>" + esc(c.city) + "</span>" + (r.dist!=null?"<span class='meta subtle mono'>"+r.dist.toFixed(0)+" mi</span>":"") + "</div></td>" +
-      "<td class='mono'>" + c.power_units + "</td>" +
+      "<td class='mono right'>" + c.power_units + "</td>" +
       "<td>" + insBadge(c) + "</td>" +
+      "<td>" + (warn ? warnChips(c.dot, true) : '<span class="subtle">—</span>') + "</td>" +
       statusCell +
-      "<td class='muted' style='font-size:12px'>" + (last ? icon(CHANNEL[last.channel||"call"].ic) + " " + DISPO_LABEL[last.disposition] + "<br><span class='subtle'>" + fmtRel(last.at) + "</span>" : "—") + "</td>" +
+      "<td class='muted' style='font-size:12px'>" + lastCell + "</td>" +
       "<td class='right'>" + (r.dnc ? "" : '<button class="btn sm" data-act="logCall" data-dot="' + c.dot + '" data-batch="' + b.id + '">' + icon("phone") + "Log</button>") + "</td></tr>";
   }).join("");
-  return '<div class="tbl-wrap"><table class="tbl"><thead><tr><th><label class="check"><input type="checkbox" ' + (allSel?"checked":"") + ' data-change="selAll"><span class="box">' + icon("check") + '</span></label></th><th>#</th><th>Carrier</th><th>Contact</th><th>Location</th><th>Trucks</th><th>Insurance</th><th>Status</th><th>Last contact</th><th></th></tr></thead><tbody>' + body + "</tbody></table></div>";
+  return '<div class="tbl-wrap"><table class="tbl"><thead><tr><th><label class="check"><input type="checkbox" ' + (allSel?"checked":"") + ' data-change="selAll"><span class="box">' + icon("check") + '</span></label></th><th>#</th><th style="min-width:200px">Carrier</th><th style="min-width:170px">Contact</th><th>Location</th><th class="right">Trucks</th><th>Insurance</th><th style="min-width:150px">Warnings</th><th>Status</th><th style="min-width:130px">Last contact</th><th></th></tr></thead><tbody>' + body + "</tbody></table></div>";
 }
 function bulkBar(n) {
   return '<div style="position:fixed;left:calc(var(--sidebar-w) + 24px);right:24px;bottom:20px;background:var(--text);color:var(--bg);border-radius:12px;padding:10px 12px 10px 18px;display:flex;align-items:center;gap:12px;box-shadow:var(--shadow-pop);z-index:30"><b class="mono">' + n + "</b> selected<div class=\"spacer\" style=\"flex:1\"></div>" +
@@ -112,8 +123,9 @@ function screenProfile() {
   if (!c) { state.screen = "dashboard"; return screenDashboard(); }
   const fromBatch = state.profileFromBatch ? DB.batches.find(b => b.id === state.profileFromBatch) : null;
   const crumbs = fromBatch ? [{ label:"Dashboard", act:"nav", to:"dashboard" }, { label:fromBatch.name, act:"openBatch", to:fromBatch.id }, { label:c.legal_name }] : [{ label:"Dashboard", act:"nav", to:"dashboard" }, { label:c.legal_name }];
-  const sw = '<div class="row between center" style="margin-bottom:14px"><div class="variant-switch">' + [["console","Command Console"],["dossier","Dossier"],["ledger","Verification Ledger"]].map(v => '<button class="' + (state.profileVariant===v[0]?"on":"") + '" data-act="profVariant" data-v="' + v[0] + '">' + v[1] + "</button>").join("") + '</div><div class="subtle" style="font-size:11.5px">3 designs — pick one, we iterate (F7)</div></div>';
-  const inner = '<div class="page wide">' + (fromBatch ? '<a class="link row gap-6 center" style="margin-bottom:10px" data-act="openBatch" data-id="' + fromBatch.id + '">' + icon("chevL") + " Back to " + esc(fromBatch.name) + "</a>" : "") + sw +
+  // F7 resolved: owner picked COMMAND CONSOLE. (Dossier/Ledger renderers retained
+  // below for reference; reachable only via ACT.profVariant in dev tooling.)
+  const inner = '<div class="page wide">' + (fromBatch ? '<a class="link row gap-6 center" style="margin-bottom:10px" data-act="openBatch" data-id="' + fromBatch.id + '">' + icon("chevL") + " Back to " + esc(fromBatch.name) + "</a>" : "") +
     (state.profileVariant === "dossier" ? profDossier(c, fromBatch) : state.profileVariant === "ledger" ? profLedger(c, fromBatch) : profConsole(c, fromBatch)) + "</div>";
   return appShell(inner, crumb(crumbs));
 }
@@ -225,7 +237,7 @@ function userRow(u) { const ov = state.overrides.userStatus[u.id]; return { u, s
 function screenUsers() {
   if (cur().role !== "manager") { state.screen = "dashboard"; return screenDashboard(); }
   const all = DB.users.map(userRow), pending = all.filter(r => r.status === "pending"), active = all.filter(r => r.status !== "pending");
-  const inner = '<div class="page"><div class="page-head"><div><div class="h1">Users &amp; Access</div><div class="desc">Approve new accounts and set roles. Guests only see a landing page until you provision them.</div></div></div>' +
+  const inner = '<div class="page"><div class="page-head"><div><div class="h1">Users &amp; Access</div></div></div>' +
     (pending.length ? '<div class="card" style="padding:16px;margin-bottom:18px;border-color:var(--warn)"><div class="row gap-8 center" style="margin-bottom:12px">' + icon("clock") + '<b>Pending approval</b><span class="badge warn">' + pending.length + "</span></div>" +
       pending.map(r => '<div class="row between center wrap gap-10" style="padding:10px 0;border-top:1px solid var(--border)"><div class="row gap-10 center">' + avatar(r.u) + "<div><div style='font-weight:700'>" + esc(r.u.name) + "</div><div class='subtle' style='font-size:12px'>" + esc(r.u.email) + " · " + fmtRel(r.u.registered) + "</div></div></div><div class='row gap-8'><button class='btn sm' data-act='rejectUser' data-uid='" + r.u.id + "'>Reject</button><button class='btn primary sm' data-act='approveUser' data-uid='" + r.u.id + "'>" + icon("usercheck") + " Approve</button></div></div>").join("") + "</div>" : "") +
     '<div class="tbl-wrap"><table class="tbl"><thead><tr><th>User</th><th>Email</th><th>Role</th><th>Status</th><th></th></tr></thead><tbody>' +

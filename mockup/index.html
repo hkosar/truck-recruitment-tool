@@ -614,6 +614,53 @@ tr.warn-row:hover > td { background: color-mix(in srgb, var(--crit-tint) 82%, va
 /* dashboard batch table pipeline bar */
 .pipebar { display: flex; height: 7px; border-radius: 999px; overflow: hidden; background: var(--surface-sunk); min-width: 90px; }
 .pipebar i { height: 100%; }
+
+/* ============================ v3 additions ============================ */
+
+/* interactive map (F29) */
+.map { cursor: grab; user-select: none; }
+.map.panning { cursor: grabbing; }
+.map-tools { position: absolute; left: 10px; top: 10px; display: flex; flex-direction: column; gap: 4px; z-index: 5; }
+.map-tools button { width: 30px; height: 30px; display: grid; place-items: center; background: color-mix(in srgb, var(--surface) 92%, transparent); border: 1px solid var(--border-strong); border-radius: 7px; color: var(--text); box-shadow: var(--shadow-1); }
+.map-tools button:hover { background: var(--surface-sunk); }
+.map-tools button svg { width: 14px; height: 14px; }
+.map-note { position: absolute; right: 10px; bottom: 8px; font-size: 9.5px; letter-spacing: .04em; text-transform: uppercase; color: var(--text-subtle); background: color-mix(in srgb, var(--surface) 75%, transparent); padding: 2px 7px; border-radius: 999px; pointer-events: none; }
+.map-empty { position: absolute; inset: 0; display: grid; place-items: center; font-size: 13px; font-weight: 600; color: var(--text-subtle); pointer-events: none; }
+.map .hwy { fill: none; stroke: var(--map-line); stroke-width: 1.1; opacity: .55; }
+.map .pin.tear { stroke: #fff; stroke-width: 1.1; filter: drop-shadow(0 1px 1px rgba(0,0,0,.25)); }
+@media (prefers-color-scheme: dark) { .map .pin.tear { stroke: #1a1f26; } }
+:root[data-theme="dark"] .map .pin.tear { stroke: #1a1f26; }
+:root[data-theme="light"] .map .pin.tear { stroke: #fff; }
+
+/* dashboard job legend toggles (F30) */
+.map-legend.jobs { max-width: 250px; }
+.map-legend .jobrow { display: flex; align-items: center; gap: 7px; text-align: left; font-size: 11.5px; color: var(--text-muted); padding: 3px 2px; border-radius: 5px; width: 100%; }
+.map-legend .jobrow:hover { background: var(--surface-sunk); color: var(--text); }
+.map-legend .jobrow.on { color: var(--text); font-weight: 600; }
+.map-legend .jbox { width: 15px; height: 15px; border-radius: 4px; border: 1.5px solid var(--border-strong); background: var(--surface-2); display: grid; place-items: center; flex: none; }
+.map-legend .jobrow.on .jbox { background: var(--accent); border-color: var(--accent); color: #fff; }
+.map-legend .jbox svg { width: 11px; height: 11px; }
+
+/* centered stat tiles (F27) */
+.strip .cell { text-align: center; }
+
+/* dashboard stage columns (F31) */
+.coldot { display: inline-block; width: 8px; height: 8px; border-radius: 50%; margin-right: 4px; vertical-align: baseline; }
+
+/* collapsed activity bar (F32) */
+.feed-bar { display: flex; align-items: center; gap: 10px; width: 100%; padding: 10px 14px; background: var(--surface); border: 1px solid var(--border); border-radius: var(--radius-lg); font-size: 13px; color: var(--text); }
+.feed-bar:hover { background: var(--surface-2); }
+.feed-bar svg { width: 15px; height: 15px; color: var(--text-subtle); flex: none; }
+
+/* table cell craft (F33/F34/F35) */
+.wchips.stack { flex-direction: column; align-items: flex-start; gap: 3px; }
+.ccell, .ccell a, .ccell .mono, .ccell .miss { font-size: 12.5px; }
+.lc-line { display: flex; align-items: center; gap: 5px; color: var(--text); font-weight: 600; }
+.lc-line svg { width: 13px; height: 13px; color: var(--text-subtle); flex: none; }
+.lc-sub { color: var(--text-subtle); font-size: 11.5px; margin-top: 1px; }
+
+/* New Search control panel (F26) */
+.builder-grid { display: grid; grid-template-columns: minmax(360px, 430px) 1fr; gap: 18px; align-items: start; }
 </style>
 <div id="app"></div>
 <script>
@@ -716,6 +763,17 @@ function pointToRouteMiles(lng, lat, route) {
   }
   return min;
 }
+
+/* Decorative major-highway polylines [lng,lat] — basemap context (F37). */
+const TX_HIGHWAYS = [
+  { name:"I-35",  pts:[[-99.51,27.51],[-98.49,29.42],[-97.74,30.27],[-97.15,31.55],[-96.99,32.45],[-96.80,32.78],[-97.13,33.62]] },
+  { name:"I-10",  pts:[[-106.49,31.76],[-104.83,30.72],[-102.89,30.42],[-100.87,30.10],[-98.49,29.42],[-96.94,29.70],[-95.37,29.76],[-94.10,30.08]] },
+  { name:"I-20",  pts:[[-103.56,31.32],[-102.08,32.00],[-100.42,32.45],[-98.55,32.42],[-97.33,32.75],[-96.80,32.78],[-95.30,32.55],[-94.35,32.50]] },
+  { name:"I-45",  pts:[[-96.80,32.78],[-96.46,31.75],[-95.90,30.75],[-95.37,29.76],[-94.88,29.30]] },
+  { name:"I-37",  pts:[[-98.49,29.42],[-98.05,28.70],[-97.40,27.80]] },
+  { name:"I-27",  pts:[[-101.83,35.22],[-101.86,33.58]] },
+  { name:"US-83", pts:[[-99.51,27.51],[-98.20,26.06],[-97.37,25.87]] }
+];
 /* ============================================================================
    data.js — seeded, deterministic mock dataset v2 (stable across reloads).
    Mirrors the future Supabase schema (docs/build-plan/01-architecture.md).
@@ -1153,8 +1211,43 @@ const state = {
   modal: null,                 // { type, ...data }
   menu: null,                  // { type, x, y, ...data }
   toasts: [],
-  focus: null                  // selector to focus after render
+  focus: null,                 // selector to focus after render
+  feedOpen: false,             // batch activity feed expanded? (F32: collapsed default)
+  mapView: {},                 // mapId -> viewBox string (pan/zoom state, survives re-render)
+  dashJobs: {}                 // batchId -> true (F30: dashboard map job toggles; empty = empty map)
 };
+
+/* F29: map pan/zoom on the SVG viewBox. Base box is 0 0 640 520. */
+const MAP_BASE = { x:0, y:0, w:640, h:520 };
+function mapVB(id) {
+  const s = state.mapView[id];
+  if (!s) return { ...MAP_BASE };
+  const p = s.split(" ").map(Number);
+  return { x:p[0], y:p[1], w:p[2], h:p[3] };
+}
+function setMapVB(id, vb) {
+  const clampW = Math.max(70, Math.min(768, vb.w));
+  const k = clampW / vb.w; vb.w = clampW; vb.h = vb.h * k;
+  vb.x = Math.max(-160, Math.min(800 - vb.w * 0.2, vb.x));
+  vb.y = Math.max(-130, Math.min(650 - vb.h * 0.2, vb.y));
+  state.mapView[id] = vb.x.toFixed(1) + " " + vb.y.toFixed(1) + " " + vb.w.toFixed(1) + " " + vb.h.toFixed(1);
+  const el = document.querySelector('.map[data-mapid="' + id + '"] svg');
+  if (el) el.setAttribute("viewBox", state.mapView[id]);
+}
+function mapZoomAt(id, factor, fx, fy) {
+  const vb = mapVB(id);
+  const nw = vb.w / factor, nh = vb.h / factor;
+  setMapVB(id, { x: vb.x + (vb.w - nw) * (fx == null ? 0.5 : fx), y: vb.y + (vb.h - nh) * (fy == null ? 0.5 : fy), w: nw, h: nh });
+}
+function zoomToBox(id, x0, y0, x1, y1, pad) {
+  pad = pad == null ? 30 : pad;
+  const w = Math.max(60, (x1 - x0) + pad * 2), h = Math.max(50, (y1 - y0) + pad * 2);
+  // keep aspect of base (640x520)
+  const ar = MAP_BASE.w / MAP_BASE.h; let W = w, H = h;
+  if (W / H > ar) H = W / ar; else W = H * ar;
+  const cx = (x0 + x1) / 2, cy = (y0 + y1) / 2;
+  setMapVB(id, { x: cx - W / 2, y: cy - H / 2, w: W, h: H });
+}
 
 /* ------------------------------- icons ------------------------------- */
 const ICONS = {
@@ -1224,7 +1317,8 @@ function fmtRel(ms) {
   const dt = new Date(ms), mo = ["Jan","Feb","Mar","Apr","May","Jun","Jul","Aug","Sep","Oct","Nov","Dec"];
   return mo[dt.getUTCMonth()] + " " + dt.getUTCDate();
 }
-function fmtMoney(n) { if (!n) return "None"; if (n >= 1e6) return "$" + (n/1e6).toFixed(n % 1e6 ? 1 : 0) + "M"; if (n >= 1e3) return "$" + Math.round(n/1e3) + "K"; return "$" + n; }
+/* F36/G14: standardized money format — $X.X MM / $NNN K */
+function fmtMoney(n) { if (!n) return "None"; if (n >= 1e6) return "$" + (n/1e6).toFixed(1) + " MM"; if (n >= 1e3) return "$" + Math.round(n/1e3) + " K"; return "$" + n; }
 const STATUS = {
   new:{label:"New",cls:"new"}, attempted:{label:"Attempted",cls:"attempted"}, contacted:{label:"Contacted",cls:"contacted"},
   interested:{label:"Interested",cls:"interested"}, not_a_fit:{label:"Not a Fit",cls:"not_a_fit"}, dnc:{label:"Do Not Call",cls:"dnc"}
@@ -1300,6 +1394,11 @@ function render() {
   let html = (typeof SCREENS !== "undefined" && SCREENS[state.screen]) ? SCREENS[state.screen]() : '<div class="empty">…</div>';
   html += overlays();
   root.innerHTML = html;
+  // restore pan/zoom state on every map that survives a re-render (F29)
+  root.querySelectorAll(".map[data-mapid]").forEach(m => {
+    const id = m.getAttribute("data-mapid"), svg = m.querySelector("svg");
+    if (svg && state.mapView[id]) svg.setAttribute("viewBox", state.mapView[id]);
+  });
   if (state.focus) { const f = root.querySelector(state.focus); if (f) f.focus(); state.focus = null; }
 }
 function overlays() {
@@ -1322,6 +1421,31 @@ function mount() {
   root.addEventListener("change", onChange);
   root.addEventListener("submit", onSubmit);
   root.addEventListener("keydown", onKeydown);
+  // F29: interactive maps — wheel zoom (about cursor) + drag pan, no re-render.
+  root.addEventListener("wheel", (e) => {
+    const m = e.target.closest && e.target.closest('.map[data-mapid]');
+    if (!m) return;
+    e.preventDefault();
+    const id = m.getAttribute("data-mapid"), r = m.getBoundingClientRect();
+    mapZoomAt(id, e.deltaY < 0 ? 1.25 : 0.8, (e.clientX - r.left) / r.width, (e.clientY - r.top) / r.height);
+  }, { passive: false });
+  let drag = null;
+  root.addEventListener("mousedown", (e) => {
+    const m = e.target.closest && e.target.closest('.map[data-mapid]');
+    if (!m || e.target.closest(".map-legend, .map-count, .map-tools, .pin, [data-act]")) return;
+    const id = m.getAttribute("data-mapid"), r = m.getBoundingClientRect(), vb = mapVB(id);
+    drag = { id, sx: e.clientX, sy: e.clientY, vb, pxw: r.width };
+    m.classList.add("panning");
+    e.preventDefault();
+  });
+  document.addEventListener("mousemove", (e) => {
+    if (!drag) return;
+    const k = drag.vb.w / drag.pxw;
+    setMapVB(drag.id, { x: drag.vb.x - (e.clientX - drag.sx) * k, y: drag.vb.y - (e.clientY - drag.sy) * k, w: drag.vb.w, h: drag.vb.h });
+  });
+  document.addEventListener("mouseup", () => {
+    if (drag) { const m = document.querySelector('.map[data-mapid="' + drag.id + '"]'); if (m) m.classList.remove("panning"); drag = null; }
+  });
   document.addEventListener("keydown", (e) => {
     if (e.key === "Escape") { if (state.menu) closeMenu(); else if (state.modal) closeModal(); }
   });
@@ -1373,18 +1497,31 @@ ACT.closeMenu = () => closeMenu();
 ACT.noop = () => {};
 ACT.userMenu = (d, e) => { const r = e.currentTarget.getBoundingClientRect(); openMenu({ type:"userMenu", x: Math.max(10, r.left), y: r.top - 8 - 96 }); };
 /* ============================================================================
-   screens.js — v2 screens, multi-lane map, modals, menus.
+   screens.js — v3 screens: interactive map, dashboard, New Search control panel.
    ============================================================================ */
 
 function statusVar(s) { return "var(--st-" + ({ not_a_fit:"notfit" }[s] || s) + ")"; }
 const CITY_NAMES = CITIES.map(c => c.name);
+const PROJ = makeProjection(640, 520, 16);
 
-/* ------------------------------- map ------------------------------- */
+/* ------------------------------- map (F29/F37) ------------------------------- */
+function tearPin(x, y, r, fill, num, warn, inter, title) {
+  const rb = r;                       // bulb radius
+  const cy = y - 2.3 * rb;            // bulb center
+  const d = "M " + x + " " + y +
+    " C " + (x - rb*1.05) + " " + (y - rb*1.0) + ", " + (x - rb*1.3) + " " + (y - rb*1.55) + ", " + (x - rb*1.3) + " " + cy +
+    " A " + (rb*1.3) + " " + (rb*1.3) + " 0 1 1 " + (x + rb*1.3) + " " + cy +
+    " C " + (x + rb*1.3) + " " + (y - rb*1.55) + ", " + (x + rb*1.05) + " " + (y - rb*1.0) + ", " + x + " " + y + " Z";
+  const ring = warn ? '<circle class="pin-ring" cx="' + x + '" cy="' + cy + '" r="' + (rb*1.75) + '"/>' : "";
+  const numEl = num != null ? '<text class="pin-lbl" style="font-size:' + (rb*1.15) + 'px" x="' + x + '" y="' + cy + '">' + num + "</text>" : "";
+  return ring + '<path class="pin tear" d="' + d + '" style="fill:' + fill + '"' + (inter || "") + "><title>" + esc(title || "") + "</title></path>" + numEl;
+}
 function mapCore(pins, zones) {
-  const W = 640, H = 520, proj = makeProjection(W, H, 16);
+  const proj = PROJ;
   const land = proj.pathFor(TX_OUTLINE);
-  const anchorMark = (x, y) => '<circle class="anchor" cx="' + x.toFixed(1) + '" cy="' + y.toFixed(1) + '" r="5"/>';
-  const laneChip = (x, y, zi) => { const L = "ABCDEFGH"[zi] || "?"; return '<circle class="lane-chip-bg" cx="' + x.toFixed(1) + '" cy="' + (y-14).toFixed(1) + '" r="8"/><text class="lane-chip-tx" x="' + x.toFixed(1) + '" y="' + (y-14).toFixed(1) + '">' + L + "</text>"; };
+  const hwys = TX_HIGHWAYS.map(h => '<path class="hwy" d="' + h.pts.map((p, i) => (i ? "L" : "M") + proj.project(p[0], p[1]).map(n => n.toFixed(1)).join(" ")).join(" ") + '"/>').join("");
+  const anchorMark = (x, y) => '<circle class="anchor" cx="' + x.toFixed(1) + '" cy="' + y.toFixed(1) + '" r="4"/>';
+  const laneChip = (x, y, zi) => { const L = "ABCDEFGH"[zi] || "?"; return '<circle class="lane-chip-bg" cx="' + x.toFixed(1) + '" cy="' + (y-13).toFixed(1) + '" r="7.5"/><text class="lane-chip-tx" x="' + x.toFixed(1) + '" y="' + (y-13).toFixed(1) + '">' + L + "</text>"; };
   let overlay = "";
   (zones || []).forEach((z, zi) => {
     if (z.type === "radius") {
@@ -1397,15 +1534,23 @@ function mapCore(pins, zones) {
       overlay += '<path class="corridor-band" style="stroke-width:' + bw.toFixed(1) + 'px" d="' + d + '"/><path class="corridor-line" d="' + d + '"/>' + pts.map(p => anchorMark(p[0], p[1])).join("") + laneChip(pts[0][0], pts[0][1], zi);
     }
   });
-  const cityDots = CITIES.filter(c => c.major).map(c => { const p = proj.project(c.lng, c.lat); return '<circle class="city-dot" cx="' + p[0].toFixed(1) + '" cy="' + p[1].toFixed(1) + '" r="2"/><text class="city-lbl" x="' + (p[0]+5).toFixed(1) + '" y="' + (p[1]+3).toFixed(1) + '">' + esc(c.name) + "</text>"; }).join("");
+  const cityDots = CITIES.map(c => { const p = proj.project(c.lng, c.lat); return '<circle class="city-dot" cx="' + p[0].toFixed(1) + '" cy="' + p[1].toFixed(1) + '" r="1.8"/><text class="city-lbl" x="' + (p[0]+4.5).toFixed(1) + '" y="' + (p[1]+3).toFixed(1) + '">' + esc(c.name) + "</text>"; }).join("");
   const pinEls = pins.map(p => {
     const q = proj.project(p.lng, p.lat), fill = p.fill || "var(--accent)";
-    const inter = p.dot ? ' data-act="openCarrier" data-dot="' + p.dot + '" data-from="' + (p.from||"") + '" style="cursor:pointer;fill:' + fill + '"' : ' style="fill:' + fill + '"';
-    const ring = p.warn ? '<circle class="pin-ring" cx="' + q[0].toFixed(1) + '" cy="' + q[1].toFixed(1) + '" r="' + ((p.r||6)+2.5) + '"/>' : "";
-    const num = p.num != null ? '<text class="pin-lbl" x="' + q[0].toFixed(1) + '" y="' + q[1].toFixed(1) + '">' + p.num + "</text>" : "";
-    return ring + '<circle class="pin ' + (p.cls||"") + '" cx="' + q[0].toFixed(1) + '" cy="' + q[1].toFixed(1) + '" r="' + (p.r||6) + '"' + inter + "><title>" + esc(p.title||"") + "</title></circle>" + num;
+    const inter = p.dot ? ' data-act="openCarrier" data-dot="' + p.dot + '" data-from="' + (p.from||"") + '" style="cursor:pointer"' :
+                  p.job ? ' data-act="dashZoomJob" data-id="' + p.job + '" style="cursor:pointer"' : "";
+    if (p.shape === "pin") return tearPin(q[0], q[1], p.r || 6, fill, p.num, p.warn, inter, p.title);
+    const ring = p.warn ? '<circle class="pin-ring" cx="' + q[0].toFixed(1) + '" cy="' + q[1].toFixed(1) + '" r="' + ((p.r||4)+2) + '"/>' : "";
+    return ring + '<circle class="pin" cx="' + q[0].toFixed(1) + '" cy="' + q[1].toFixed(1) + '" r="' + (p.r||4) + '" style="fill:' + fill + '"' + inter + "><title>" + esc(p.title||"") + "</title></circle>";
   }).join("");
-  return '<svg viewBox="0 0 ' + W + " " + H + '" preserveAspectRatio="xMidYMid meet"><path class="tx-land" d="' + land + '"/>' + cityDots + overlay + pinEls + "</svg>";
+  return '<svg viewBox="0 0 640 520" preserveAspectRatio="xMidYMid meet"><path class="tx-land" d="' + land + '"/>' + hwys + cityDots + overlay + pinEls + "</svg>";
+}
+function mapTools(id) {
+  return '<div class="map-tools"><button data-act="mapZoom" data-id="' + id + '" data-f="1.35" title="Zoom in">' + icon("plus") + '</button><button data-act="mapZoom" data-id="' + id + '" data-f="0.72" title="Zoom out"><svg viewBox="0 0 24 24" fill="none" stroke="currentColor" stroke-width="2" stroke-linecap="round"><line x1="5" y1="12" x2="19" y2="12"/></svg></button><button data-act="mapReset" data-id="' + id + '" title="Reset view">' + icon("target") + "</button></div>";
+}
+function mapBox(id, pins, zones, extras, h) {
+  return '<div class="map" data-mapid="' + id + '" style="height:' + h + 'px">' + mapCore(pins, zones) + mapTools(id) + (extras || "") +
+    '<div class="map-note">Preview map — the deployed app uses Google Maps</div></div>';
 }
 function mapCount(n, label) { return '<div class="map-count"><b id="b-count">' + n + "</b><span>" + (label||"matches") + "</span></div>"; }
 function mapLegend(rows) { return '<div class="map-legend">' + rows.map(r => '<div class="lg"><span class="sw" style="background:' + r[0] + '"></span>' + r[1] + "</div>").join("") + "</div>"; }
@@ -1413,6 +1558,14 @@ function statusLegend(counts) {
   const rows = STATUS_ORDER.map(k => [statusVar(k), STATUS[k].label + (counts ? " · " + counts[k] : "")]);
   if (counts && counts.dnc) rows.push(["var(--st-dnc)", "Do Not Call · " + counts.dnc]);
   return mapLegend(rows);
+}
+function zoneBBox(zones) {
+  const proj = PROJ; let x0 = 1e9, y0 = 1e9, x1 = -1e9, y1 = -1e9;
+  zones.forEach(z => {
+    if (z.type === "radius") { const p = proj.project(z.anchorLng, z.anchorLat), r = proj.milesToPx(z.radiusMi); x0 = Math.min(x0, p[0]-r); x1 = Math.max(x1, p[0]+r); y0 = Math.min(y0, p[1]-r); y1 = Math.max(y1, p[1]+r); }
+    else if (z.route) { const b = proj.milesToPx(z.bufferMi); z.route.forEach(q => { const p = proj.project(q.lng, q.lat); x0 = Math.min(x0, p[0]-b); x1 = Math.max(x1, p[0]+b); y0 = Math.min(y0, p[1]-b); y1 = Math.max(y1, p[1]+b); }); }
+  });
+  return [x0, y0, x1, y1];
 }
 
 /* ------------------------------- shell ------------------------------- */
@@ -1426,9 +1579,9 @@ function sidebar() {
     '<nav class="nav">' +
       '<div class="nav-label eyebrow">Recruiting</div>' +
       item("nav", "dashboard", "layers", "Dashboard", DB.batches.length, ["dashboard","workingList"].includes(state.screen)) +
-      item("newBatch", null, "search", "New Search", null, state.screen === "wizard") +
+      item("newBatch", null, "search", "New Search", null, state.screen === "builder") +
       '<div class="nav-label eyebrow reserved">Outreach</div>' +
-      reserved("mail", "Email Blasts") + reserved("message", "Texting") + reserved("send", "Postcards") + reserved("building", "Enrichment") +
+      reserved("mail", "Email") + reserved("message", "Text") + reserved("send", "Mail") + reserved("building", "Enrichment") +
       (u.role === "manager" ? '<div class="nav-label eyebrow">Admin</div>' + item("nav", "users", "users", "Users", pend || null, state.screen === "users") : "") +
     "</nav>" +
     '<div class="side-foot"><button class="usercell" data-act="userMenu">' + avatar(u) + '<span class="who"><span class="nm">' + esc(u.name) + '</span><span class="rl">' + ROLE_LABEL[u.role] + "</span></span><span style=\"margin-left:auto;color:var(--text-subtle)\">" + icon("chevD") + "</span></button></div>" +
@@ -1446,7 +1599,7 @@ function cityOptions(v) { return CITY_NAMES.map(n => '<option value="' + n + '"'
 
 /* ------------------------------- shared bits ------------------------------- */
 function insBadge(c) { const v = c.ins.bipd_on_file; const cls = v >= 1000000 ? "good" : (v >= 500000 ? "warn" : "crit"); return '<span class="badge ' + cls + '">' + fmtMoney(v) + "</span>"; }
-function warnChips(dot) { const w = warnListFor(dot); if (!w.length) return ""; return '<span class="wchips">' + w.map(x => '<span class="wchip ' + x.tone + '">' + icon("alert") + esc(x.label) + "</span>").join("") + "</span>"; }
+function warnChips(dot, stacked) { const w = warnListFor(dot); if (!w.length) return ""; return '<span class="wchips' + (stacked ? " stack" : "") + '">' + w.map(x => '<span class="wchip ' + x.tone + '">' + icon("alert") + esc(x.label) + "</span>").join("") + "</span>"; }
 function contactCell(c) {
   const nm = c.contact_name ? "<div>" + esc(c.contact_name) + "</div>" : '<div class="miss">no contact name</div>';
   const ph = (c.phone || c.cell) ? '<a class="mono" href="tel:' + (c.phone||c.cell).replace(/[^0-9]/g,"") + '">' + esc(c.phone||c.cell) + "</a>" : '<span class="miss mono">no phone</span>';
@@ -1461,8 +1614,8 @@ function statStrip(cells) { return '<div class="strip">' + cells + "</div>"; }
 function authBrand() { return '<div class="auth-brand"><div class="mark">' + icon("nail") + '</div><div><div class="name">Twisted Nail</div><div class="sub">Carrier Recruiter</div></div></div>'; }
 function screenLogin() {
   return '<div class="auth"><div class="auth-card">' + authBrand() +
-    '<form class="auth-panel" data-submit="signIn"><h1>Sign in</h1><p class="lead">Recruit sand &amp; gravel carriers across Texas.</p>' +
-    '<div class="stack gap-16"><label class="field"><span class="label">Work email</span><span class="input-group">' + icon("mail") + '<input class="input" type="email" value="hunter@twistednail.com"></span></label>' +
+    '<form class="auth-panel" data-submit="signIn"><h1>Sign in</h1>' +
+    '<div class="stack gap-16 mt-16"><label class="field"><span class="label">Work email</span><span class="input-group">' + icon("mail") + '<input class="input" type="email" value="hunter@twistednail.com"></span></label>' +
     '<label class="field"><span class="label">Password</span><span class="input-group">' + icon("lock") + '<input class="input" type="password" value="demo"></span></label>' +
     '<div class="auth-row"><label class="check"><input type="checkbox" checked><span class="box">' + icon("check") + '</span><span>Remember me</span></label><a class="link" data-act="gotoAuth" data-view="forgot">Forgot password?</a></div>' +
     '<button class="btn primary lg block" type="submit">Sign in</button></div>' +
@@ -1473,8 +1626,8 @@ function screenLogin() {
 }
 function screenRegister() {
   return '<div class="auth"><div class="auth-card">' + authBrand() +
-    '<form class="auth-panel" data-submit="doRegister"><h1>Create your account</h1><p class="lead">New accounts start as a guest until a manager approves them.</p>' +
-    '<div class="stack gap-16"><label class="field"><span class="label">Full name</span><input class="input" value="Cole Ramirez"></label>' +
+    '<form class="auth-panel" data-submit="doRegister"><h1>Create your account</h1>' +
+    '<div class="stack gap-16 mt-16"><label class="field"><span class="label">Full name</span><input class="input" value="Cole Ramirez"></label>' +
     '<label class="field"><span class="label">Work email</span><input class="input" type="email" value="cole.r@gmail.com"></label>' +
     '<label class="field"><span class="label">Password</span><input class="input" type="password" value="demo"></label>' +
     '<button class="btn primary lg block" type="submit">Create account</button></div></form>' +
@@ -1482,8 +1635,8 @@ function screenRegister() {
 }
 function screenForgot() {
   return '<div class="auth"><div class="auth-card">' + authBrand() +
-    '<form class="auth-panel" data-submit="doForgot"><h1>Reset password</h1><p class="lead">We\'ll email you a reset link.</p>' +
-    '<div class="stack gap-16"><label class="field"><span class="label">Work email</span><input class="input" type="email" value="hunter@twistednail.com"></label>' +
+    '<form class="auth-panel" data-submit="doForgot"><h1>Reset password</h1>' +
+    '<div class="stack gap-16 mt-16"><label class="field"><span class="label">Work email</span><input class="input" type="email" value="hunter@twistednail.com"></label>' +
     '<button class="btn primary lg block" type="submit">Send reset link</button></div></form>' +
     '<div class="auth-foot"><a class="link" data-act="gotoAuth" data-view="login">Back to sign in</a></div></div></div>';
 }
@@ -1491,46 +1644,53 @@ function screenGuest() {
   const u = cur();
   return '<div class="auth"><div class="auth-card">' + authBrand() +
     '<div class="auth-panel" style="text-align:center"><div style="width:52px;height:52px;border-radius:50%;background:var(--warn-tint);color:var(--warn);display:grid;place-items:center;margin:4px auto 14px">' + icon("clock") + "</div>" +
-    "<h1>Account pending approval</h1><p class='lead' style='margin-bottom:18px'>Thanks, " + esc(u ? u.name.split(" ")[0] : "there") + ". A manager needs to review and provision your account before you can access the recruiting tools.</p>" +
-    '<button class="btn block mt-16" data-act="logout">' + icon("logout") + " Sign out</button></div>" +
-    '<div class="auth-foot subtle">Guests only see this page until approved — that\'s the role gate.</div></div></div>';
+    "<h1>Account pending approval</h1><p class='lead' style='margin:8px 0 18px'>Thanks, " + esc(u ? u.name.split(" ")[0] : "there") + ". A manager needs to review and provision your account before you can access the recruiting tools.</p>" +
+    '<button class="btn block mt-16" data-act="logout">' + icon("logout") + " Sign out</button></div></div></div>";
 }
 
-/* ------------------------------- DASHBOARD (F3/F4) ------------------------------- */
-function allZones() { const z = []; DB.batches.forEach((b, bi) => b.zones.forEach(zone => z.push(Object.assign({ _batch: bi }, zone)))); return z; }
+/* ------------------------------- DASHBOARD (F27/F28/F30/F31) ------------------------------- */
 function screenDashboard() {
   const totalCarriers = new Set(DB.batchCarriers.map(b => b.dot)).size;
   const interested = DB.batchCarriers.filter(b => effStatus(b.batch_id, b.dot) === "interested" && !effDnc(b.dot)).length;
   const promoted = new Set(DB.batchCarriers.filter(b => effPromoted(b.dot)).map(b => b.dot)).size;
   const withPhone = new Set(DB.batchCarriers.filter(b => { const c = DB.carrierByDot[b.dot]; return c.phone || c.cell; }).map(b => b.dot)).size;
   const strip = statStrip(stat("Active batches", DB.batches.length) + stat("Carriers in play", totalCarriers) + stat("With phone", withPhone) + stat("Interested", interested, "good") + stat("Promoted", promoted, "accent"));
-  // overview map: batch anchor pins + all zones
-  const batchPins = DB.batches.map((b, bi) => { const z = b.zones[0]; const p = z.type === "radius" ? { lng:z.anchorLng, lat:z.anchorLat } : { lng:z.originLng, lat:z.originLat }; return { lng:p.lng, lat:p.lat, num: bi+1, fill:"var(--accent)", title:b.name, r:9 }; });
-  const map = '<div class="map" style="height:340px">' + mapCore(batchPins, allZones()) + mapLegend(DB.batches.map((b, bi) => ["var(--accent)", (bi+1) + " · " + b.name])) + "</div>";
+
+  // F30: map starts EMPTY; jobs toggle on via the legend; zones stay accent orange.
+  const onJobs = DB.batches.filter(b => state.dashJobs[b.id]);
+  const zones = []; onJobs.forEach(b => b.zones.forEach(z => zones.push(z)));
+  const pins = onJobs.map(b => { const z = b.zones[0]; const p = z.type === "radius" ? { lng:z.anchorLng, lat:z.anchorLat } : { lng:z.originLng, lat:z.originLat }; const bi = DB.batches.indexOf(b); return { lng:p.lng, lat:p.lat, num: bi+1, fill:"var(--accent)", title:b.name, r:8, shape:"pin", job:b.id }; });
+  const legend = '<div class="map-legend jobs"><div class="lg" style="font-weight:700;color:var(--text)">Jobs — toggle to show</div>' +
+    DB.batches.map((b, bi) => { const on = !!state.dashJobs[b.id]; return '<button class="lg jobrow ' + (on ? "on" : "") + '" data-act="dashToggleJob" data-id="' + b.id + '"><span class="jbox">' + (on ? icon("check") : "") + '</span><span class="mono" style="color:var(--accent-press);font-weight:800">' + (bi+1) + '</span> ' + esc(b.name) + "</button>"; }).join("") +
+    (onJobs.length ? '<div class="lg subtle" style="font-size:10.5px">click a pin or name again to zoom</div>' : "") + "</div>";
+  const map = mapBox("dash", pins, zones, legend + (onJobs.length === 0 ? '<div class="map-empty">Toggle a job to plot it</div>' : ""), 360);
+
+  // F31: per-stage numeric columns instead of the stacked bar.
+  const stageHead = STATUS_ORDER.map(k => '<th class="right" title="' + STATUS[k].label + '"><span class="coldot" style="background:' + statusVar(k) + '"></span>' + ({new:"New",attempted:"Att",contacted:"Con",interested:"Int",not_a_fit:"NaF"}[k]) + "</th>").join("");
   const rows = DB.batches.map((b, bi) => {
-    const c = statusCounts(b.id), total = c.total || 1;
-    const pipe = STATUS_ORDER.map(k => c[k] ? '<i style="width:' + (c[k]/total*100) + '%;background:' + statusVar(k) + '"></i>' : "").join("") + (c.dnc ? '<i style="width:' + (c.dnc/total*100) + '%;background:var(--st-dnc)"></i>' : "");
+    const c = statusCounts(b.id);
     const la = activityForBatch(b.id)[0];
+    const stageCells = STATUS_ORDER.map(k => '<td class="right mono" style="' + (c[k] ? "" : "color:var(--text-subtle)") + '">' + c[k] + "</td>").join("");
     return '<tr class="clickable" data-act="openBatch" data-id="' + b.id + '">' +
       '<td class="mono" style="width:28px;text-align:center;color:var(--accent-press);font-weight:800">' + (bi+1) + "</td>" +
       "<td><div class='co'><span class='nm'>" + esc(b.name) + "</span><span class='meta'>" + esc(b.customer) + " · " + esc(b.job) + "</span></div></td>" +
       "<td style='font-size:11.5px;color:var(--text-muted)'>" + esc(laneSummary(b)) + "</td>" +
-      "<td class='mono'>" + c.total + "</td>" +
-      '<td><div class="pipebar">' + pipe + "</div></td>" +
-      "<td class='mono' style='color:var(--st-interested)'>" + c.interested + "</td>" +
-      "<td>" + (c.warnings ? '<span class="wchip crit">' + icon("alert") + c.warnings + "</span>" : '<span class="subtle">—</span>') + "</td>" +
+      "<td class='right mono'>" + c.total + "</td>" + stageCells +
+      "<td class='right'>" + (c.dnc ? '<span class="mono" style="color:var(--st-dnc)">' + c.dnc + "</span>" : '<span class="subtle">0</span>') + "</td>" +
+      "<td class='right'>" + (c.warnings ? '<span class="wchip crit">' + icon("alert") + c.warnings + "</span>" : '<span class="subtle">—</span>') + "</td>" +
       "<td class='muted' style='font-size:12px'>" + (la ? fmtRel(la.at) : "—") + "</td>" +
       '<td class="right"><button class="btn icon ghost sm" data-act="batchMenu" data-id="' + b.id + '">' + icon("dots") + "</button></td></tr>";
   }).join("");
-  const table = '<div class="tbl-wrap"><table class="tbl"><thead><tr><th>#</th><th>Batch</th><th>Lanes</th><th>Carriers</th><th>Pipeline</th><th>Interested</th><th>Warn</th><th>Last activity</th><th></th></tr></thead><tbody>' + rows + "</tbody></table></div>";
-  const inner = '<div class="page wide"><div class="page-head"><div><div class="h1">Dashboard</div><div class="desc">Every active recruiting batch, mapped and listed. Click a row to open its workspace.</div></div><div class="spacer"></div><button class="btn primary" data-act="newBatch">' + icon("plus") + " New Search</button></div>" +
+  const table = '<div class="tbl-wrap"><table class="tbl"><thead><tr><th>#</th><th>Batch</th><th>Lanes</th><th class="right">Carriers</th>' + stageHead + '<th class="right">DNC</th><th class="right">Warn</th><th>Last activity</th><th></th></tr></thead><tbody>' + rows + "</tbody></table></div>";
+
+  const inner = '<div class="page"><div class="page-head" style="justify-content:center;text-align:center"><div class="h1">Dashboard</div><div class="spacer"></div><button class="btn primary" data-act="newBatch">' + icon("plus") + " New Search</button></div>" +
     strip + '<div class="mt-16">' + map + "</div><div class=\"mt-16\">" + table + "</div></div>";
   return appShell(inner, crumb([{ label:"Dashboard" }]));
 }
 
-/* ------------------------------- WIZARD (F20/F21/F12/F13/F14/F15/F16) ------------------------------- */
+/* ------------------------------- NEW SEARCH — control panel (F26/G11) ------------------------------- */
 function newWizard() {
-  return { step:1, name:"", customer:"", job:"",
+  return { name:"", customer:"", job:"",
     lanes:[], editing:null,
     cargo:{ flags:SG_FLAGS.slice(), other:{ enabled:true, include:SG_OTHER_VALUES.slice(), exclude:[] }, q:"" },
     filters:{ insuranceMin:0, keepBelow:true, size:"any", forHire:true, activeOnly:true, authorizedOnly:false, interstateOnly:false, hasPhone:false, hasEmail:false } };
@@ -1543,100 +1703,93 @@ function wizardSearch(w) {
     insuranceMin:+w.filters.insuranceMin, keepBelow:w.filters.keepBelow };
 }
 function wizardZones(w) { return w.editing ? w.lanes.concat([w.editing]).filter(z => z.type) : w.lanes; }
-function screenWizard() {
-  const w = state.wizard, steps = ["Details","Lanes","Freight","Filters & Review"];
-  const stepper = '<div class="stepper">' + steps.map((s, i) => { const n = i+1; const cls = n === w.step ? "on" : (n < w.step ? "done" : ""); return (i ? '<div class="bar"></div>' : "") + '<div class="step ' + cls + '"><span class="num">' + (n < w.step ? icon("check") : n) + '</span><span class="lbl">' + s + "</span></div>"; }).join("") + "</div>";
-  let body;
-  if (w.step === 1) body = wizStep1(w);
-  else body = '<div class="wizard-grid">' + (w.step === 2 ? wizStep2(w) : w.step === 3 ? wizStep3(w) : wizStep4(w)) + wizMapPane(w) + "</div>";
-  const inner = '<div class="page wide" style="padding-bottom:88px"><div class="page-head"><div><div class="h1">New Search</div><div class="desc">Name the job, draw the lanes, dial in the freight and filters, then grab the batch.</div></div></div>' +
-    '<div style="margin-bottom:18px">' + stepper + "</div>" + body + wizFooter(w) + "</div>";
+
+function screenBuilder() {
+  const w = state.wizard;
+  const inner = '<div class="page wide" style="padding-bottom:84px"><div class="page-head"><div class="h1">New Search</div></div>' +
+    '<div class="builder-grid">' +
+      '<div class="stack gap-14">' + panelDetails(w) + panelLanes(w) + panelFreight(w) + panelFilters(w) + "</div>" +
+      builderMapPane(w) +
+    "</div>" + builderFooter(w) + "</div>";
   return appShell(inner, crumb([{ label:"Dashboard", act:"nav", to:"dashboard" }, { label:"New Search" }]));
 }
-function wizMapPane(w) {
+function builderMapPane(w) {
   const s = wizardSearch(w), zones = wizardZones(w), matches = searchMatches(Object.assign({}, s, { zones }));
-  const pins = matches.slice(0, 400).map(c => ({ lng:c.lng, lat:c.lat, r:4, warn:warningsFor(c).length > 0, title:c.legal_name }));
-  return '<div class="wizard-map"><div class="map" style="height:440px" id="wiz-map">' + mapCore(pins, zones) + mapCount(matches.length) + mapLegend([["var(--accent)","Matches filters"],["var(--crit)","Has a warning flag"]]) + "</div>" +
-    '<div class="subtle" style="font-size:11px;margin-top:6px">Coverage is the union of all lanes. Live count is approximate here; the real tool computes it server-side.</div></div>';
+  const withPhone = matches.filter(c => c.phone || c.cell).length, withEmail = matches.filter(c => c.email).length, tier1 = matches.filter(c => c.tier === 1).length;
+  const pins = matches.slice(0, 400).map(c => ({ lng:c.lng, lat:c.lat, r:3.5, warn:warningsFor(c).length > 0, title:c.legal_name }));
+  return '<div class="wizard-map"><div id="wiz-map-holder">' + mapBox("builder", pins, zones, mapCount(matches.length) + mapLegend([["var(--accent)","Matches filters"],["var(--crit)","Has a warning flag"]]), 430) + "</div>" +
+    '<div class="strip mt-12" id="wiz-cov">' + stat("Matches", matches.length, "accent") + stat("With phone", withPhone) + stat("With email", withEmail, withEmail ? "" : "crit") + stat("Sand & gravel", tier1, "good") + "</div></div>";
 }
-function wizStep1(w) {
-  return '<div class="card" style="padding:22px;max-width:620px"><div class="stack gap-16">' +
-    '<label class="field"><span class="label">Batch name</span><input class="input lg" style="font-size:16px;font-weight:600" placeholder="e.g. Belt Construction Recruitment" value="' + esc(w.name) + '" data-model="wizard.name" id="wz-name"></label>' +
-    '<div class="row gap-16"><label class="field grow"><span class="label">Customer</span><input class="input" list="wz-customers" placeholder="Who is this for?" value="' + esc(w.customer) + '" data-model="wizard.customer"><datalist id="wz-customers">' + [...new Set(DB.batches.map(b => b.customer))].map(c => '<option value="' + esc(c) + '">').join("") + "</datalist></label>" +
-    '<label class="field grow"><span class="label">Job</span><input class="input" placeholder="What job / project?" value="' + esc(w.job) + '" data-model="wizard.job"></label></div>' +
-    '<div class="subtle" style="font-size:12.5px">A batch is a recruitment session for a customer\'s job — you can add multiple material lanes next.</div></div></div>';
+function panelDetails(w) {
+  return '<div class="card" style="padding:16px"><div class="eyebrow" style="margin-bottom:10px">Details</div><div class="stack gap-12">' +
+    '<label class="field"><span class="label">Batch name</span><input class="input" style="font-weight:600" placeholder="e.g. Belt Construction Recruitment" value="' + esc(w.name) + '" data-model="wizard.name" id="wz-name"></label>' +
+    '<div class="row gap-10"><label class="field grow"><span class="label">Customer</span><input class="input" list="wz-customers" placeholder="Who is this for?" value="' + esc(w.customer) + '" data-model="wizard.customer"><datalist id="wz-customers">' + [...new Set(DB.batches.map(b => b.customer))].map(c => '<option value="' + esc(c) + '">').join("") + "</datalist></label>" +
+    '<label class="field grow"><span class="label">Job</span><input class="input" placeholder="What job / project?" value="' + esc(w.job) + '" data-model="wizard.job"></label></div></div></div>';
 }
-function wizStep2(w) {
-  const laneList = w.lanes.length ? w.lanes.map((z, i) => '<div class="lane"><div class="idx">' + "ABCDEFGH"[i] + '</div><div class="lmeta"><div class="lmat">' + esc(z.label || (z.type === "radius" ? "Radius lane" : "Corridor lane")) + '</div><div class="lgeo">' + (z.type === "radius" ? icon("target") + " " + esc(z.anchor) + " · " + z.radiusMi + " mi" : icon("route") + " " + esc(z.origin) + " → " + esc(z.dest) + " · " + z.bufferMi + " mi") + '</div></div><button class="btn icon ghost sm" data-act="wzEditLane" data-id="' + z.id + '">' + icon("edit") + '</button><button class="btn icon ghost sm" data-act="wzRmLane" data-id="' + z.id + '">' + icon("x") + "</button></div>").join("") : '<div class="subtle" style="font-size:13px;padding:8px 0">No lanes yet — add a radius or a corridor. Coverage is the union of every lane (your "asterisk").</div>';
-  return '<div class="card" style="padding:18px"><div class="eyebrow" style="margin-bottom:10px">Lanes <span class="subtle">· ' + w.lanes.length + "</span></div>" + laneList +
-    (w.editing ? wizLaneEditor(w) : '<div class="row gap-8 mt-16"><button class="btn" data-act="wzAddLane" data-t="radius">' + icon("target") + ' Add radius lane</button><button class="btn" data-act="wzAddLane" data-t="corridor">' + icon("route") + " Add corridor lane</button></div>") + "</div>";
+function panelLanes(w) {
+  const laneList = w.lanes.length ? w.lanes.map((z, i) => '<div class="lane"><div class="idx">' + "ABCDEFGH"[i] + '</div><div class="lmeta"><div class="lmat">' + esc(z.label || (z.type === "radius" ? "Radius lane" : "Corridor lane")) + '</div><div class="lgeo">' + (z.type === "radius" ? icon("target") + " " + esc(z.anchor) + " · " + z.radiusMi + " mi" : icon("route") + " " + esc(z.origin) + " → " + esc(z.dest) + " · " + z.bufferMi + " mi") + '</div></div><button class="btn icon ghost sm" data-act="wzEditLane" data-id="' + z.id + '">' + icon("edit") + '</button><button class="btn icon ghost sm" data-act="wzRmLane" data-id="' + z.id + '">' + icon("x") + "</button></div>").join("") : '<div class="subtle" style="font-size:12.5px;padding:4px 0 8px">Add a radius or a corridor — coverage is the union of every lane.</div>';
+  return '<div class="card" style="padding:16px"><div class="eyebrow" style="margin-bottom:10px">Lanes <span class="subtle">· ' + w.lanes.length + "</span></div>" + laneList +
+    (w.editing ? wizLaneEditor(w) : '<div class="row gap-8 mt-12"><button class="btn sm" data-act="wzAddLane" data-t="radius">' + icon("target") + ' Add radius</button><button class="btn sm" data-act="wzAddLane" data-t="corridor">' + icon("route") + " Add corridor</button></div>") + "</div>";
 }
 function wizLaneEditor(w) {
   const e = w.editing;
   const anchorSeg = ["pin","address","city","zip","county"].map(t => '<button type="button" class="' + (e.anchorKind === t ? "on" : "") + '" data-act="wzAnchorKind" data-t="' + t + '">' + ({pin:"Pin",address:"Address",city:"City",zip:"ZIP",county:"County"}[t]) + "</button>").join("");
   if (e.type === "radius") {
-    return '<div class="lane-editor mt-16"><div class="eyebrow" style="margin-bottom:10px">New radius lane</div><div class="stack gap-12">' +
+    return '<div class="lane-editor mt-12"><div class="eyebrow" style="margin-bottom:10px">Radius lane</div><div class="stack gap-12">' +
       '<label class="field"><span class="label">Material / lane label</span><input class="input" placeholder="e.g. Concrete sand — Austin pit" value="' + esc(e.label) + '" data-model="wizard.editing.label"></label>' +
       '<div class="field"><span class="label">Center on</span><div class="seg" style="flex-wrap:wrap;margin-bottom:8px">' + anchorSeg + "</div>" +
       '<select class="select" data-change="wzAnchorCity">' + cityOptions(e.anchor) + "</select></div>" +
       '<div class="field"><div class="row between"><span class="label">Radius</span><span class="label mono" id="wz-r-lbl">' + e.radiusMi + ' mi</span></div><input type="range" min="10" max="150" step="5" value="' + e.radiusMi + '" data-echo="wz-r-lbl" data-echo-fmt="mi" data-live="wzRadius"></div>' +
-      '<div class="row gap-8 end"><button class="btn" data-act="wzCancelLane">Cancel</button><button class="btn primary" data-act="wzSaveLane">' + icon("check") + " Add lane</button></div></div></div>";
+      '<div class="row gap-8 end"><button class="btn sm" data-act="wzCancelLane">Cancel</button><button class="btn primary sm" data-act="wzSaveLane">' + icon("check") + " Add lane</button></div></div></div>";
   }
-  return '<div class="lane-editor mt-16"><div class="eyebrow" style="margin-bottom:10px">New corridor lane <span class="subtle">· custom pickup &amp; dropoff</span></div><div class="stack gap-12">' +
+  return '<div class="lane-editor mt-12"><div class="eyebrow" style="margin-bottom:10px">Corridor lane <span class="subtle">· custom pickup &amp; dropoff</span></div><div class="stack gap-12">' +
     '<label class="field"><span class="label">Material / lane label</span><input class="input" placeholder="e.g. Crushed limestone — Dallas quarry" value="' + esc(e.label) + '" data-model="wizard.editing.label"></label>' +
-    '<div class="row gap-12"><label class="field grow"><span class="label">Pickup</span><select class="select" data-change="wzOrigin">' + cityOptions(e.origin) + "</select></label>" + icon("arrowR") + '<label class="field grow"><span class="label">Dropoff</span><select class="select" data-change="wzDest">' + cityOptions(e.dest) + "</select></label></div>" +
+    '<div class="row gap-10"><label class="field grow"><span class="label">Pickup</span><select class="select" data-change="wzOrigin">' + cityOptions(e.origin) + "</select></label>" + icon("arrowR") + '<label class="field grow"><span class="label">Dropoff</span><select class="select" data-change="wzDest">' + cityOptions(e.dest) + "</select></label></div>" +
     '<div class="field"><div class="row between"><span class="label">Within</span><span class="label mono" id="wz-b-lbl">' + e.bufferMi + ' mi</span></div><input type="range" min="10" max="80" step="5" value="' + e.bufferMi + '" data-echo="wz-b-lbl" data-echo-fmt="mi" data-live="wzBuffer"><div class="subtle" style="font-size:11px;margin-top:4px">Distance from <b>any point</b> along the run.</div></div>' +
-    '<div class="row gap-8 end"><button class="btn" data-act="wzCancelLane">Cancel</button><button class="btn primary" data-act="wzSaveLane">' + icon("check") + " Add lane</button></div></div></div>";
+    '<div class="row gap-8 end"><button class="btn sm" data-act="wzCancelLane">Cancel</button><button class="btn primary sm" data-act="wzSaveLane">' + icon("check") + " Add lane</button></div></div></div>";
 }
-function wizStep3(w) {
+function panelFreight(w) {
   const s = wizardSearch(w), zones = wizardZones(w);
-  // scoped counts: geo + non-cargo filters, cargo removed
   const scope = Object.assign({}, s, { zones, cargo: null });
   const scopeMatches = searchMatches(scope);
   const flagCount = f => scopeMatches.filter(c => c.cargoFlags.includes(f)).length;
   const flags = DB.CARGO_FLAGS.map(f => '<label class="flag-row"><input type="checkbox" class="hide" ' + (w.cargo.flags.includes(f) ? "checked" : "") + ' data-change="wzFlag" data-f="' + esc(f) + '"><span class="box" style="width:16px;height:16px;border-radius:4px;border:1.5px solid var(--border-strong);display:grid;place-items:center;flex:none;' + (w.cargo.flags.includes(f) ? "background:var(--accent);border-color:var(--accent)" : "") + '">' + (w.cargo.flags.includes(f) ? '<span style="color:#fff;display:grid">' + icon("check") + "</span>" : "") + '</span><span>' + esc(f) + '</span><span class="cnt">' + flagCount(f) + "</span></label>").join("");
-  // Other facet values scoped
   const q = (w.cargo.q || "").toLowerCase();
   const otherScope = DB.cargoOtherValues.map(v => ({ v: v.value, group: v.group, count: scopeMatches.filter(c => c.cargo_other_norm === v.value).length })).filter(v => v.count > 0 && (!q || v.v.toLowerCase().includes(q)));
   const inc = w.cargo.other.include, exc = w.cargo.other.exclude;
   const rows = otherScope.map(v => { const isI = inc.includes(v.v), isE = exc.includes(v.v); return '<div class="facet-row ' + (isI ? "inc" : isE ? "exc" : "") + '"><span class="fval">' + esc(v.v) + '</span><span class="cnt">' + v.count + '</span><span class="tri"><button class="inc' + (isI ? " on" : "") + '" data-act="wzOther" data-v="' + esc(v.v) + '" data-m="inc" title="Include">' + icon("plus") + '</button><button class="exc' + (isE ? " on" : "") + '" data-act="wzOther" data-v="' + esc(v.v) + '" data-m="exc" title="Exclude">' + icon("x") + "</button></span></div>"; }).join("");
-  // suggested groups
   const groups = {}; DB.cargoOtherValues.forEach(v => { if (v.group) groups[v.group] = (groups[v.group]||0) + scopeMatches.filter(c => c.cargo_other_norm === v.value).length; });
   const sug = Object.keys(groups).filter(g => groups[g] > 0).sort((a,b) => groups[b]-groups[a]).map(g => '<span class="chip sugbar-chip" data-act="wzSuggest" data-g="' + esc(g) + '">' + esc(g) + ' <span class="cnt">' + groups[g] + "</span></span>").join("");
-  return '<div class="stack gap-16"><div class="card" style="padding:18px"><div class="eyebrow" style="margin-bottom:10px">Cargo categories <span class="subtle">· FMCSA checkboxes</span></div><div class="cargo-flags">' + flags + "</div></div>" +
-    '<div class="card" style="padding:18px"><div class="row between center" style="margin-bottom:8px"><div class="eyebrow">"Other" cargo — the sand &amp; gravel signal</div><label class="switch"><input type="checkbox" ' + (w.cargo.other.enabled ? "checked" : "") + ' data-change="wzOtherEnabled"><span class="track"></span></label></div>' +
+  return '<div class="card" style="padding:16px"><div class="eyebrow" style="margin-bottom:10px">Freight — cargo categories</div><div class="cargo-flags">' + flags + "</div>" +
+    '<div class="row between center" style="margin:14px 0 8px"><div class="eyebrow">"Other" cargo — the sand &amp; gravel signal</div><label class="switch"><input type="checkbox" ' + (w.cargo.other.enabled ? "checked" : "") + ' data-change="wzOtherEnabled"><span class="track"></span></label></div>' +
     (w.cargo.other.enabled ? '<span class="input-group" style="max-width:100%;margin-bottom:10px">' + icon("search") + '<input class="input" id="wz-osearch" placeholder="Search Other values…" value="' + esc(w.cargo.q||"") + '" data-live="wzOtherSearch"></span>' +
-      '<div class="subtle" style="font-size:11.5px;margin-bottom:6px">Suggested — click to include a whole group:</div><div class="sugbar" style="margin-bottom:12px">' + (sug || '<span class="subtle">no matches in scope</span>') + "</div>" +
-      '<div class="facet-list" id="wz-facets">' + (rows || '<div class="facet-row"><span class="subtle">No Other values match this scope.</span></div>') + "</div>" +
+      '<div class="sugbar" style="margin-bottom:10px">' + (sug || '<span class="subtle">no matches in scope</span>') + "</div>" +
+      '<div class="facet-list" id="wz-facets" style="max-height:220px">' + (rows || '<div class="facet-row"><span class="subtle">No Other values match this scope.</span></div>') + "</div>" +
       '<div class="facet-sum mt-12">' + icon("filter") + " Including <b>" + inc.length + "</b> values · Excluding <b>" + exc.length + "</b></div>"
-      : '<div class="subtle" style="font-size:12.5px">Other-cargo matching is off. Enable it to browse the free-text values sand &amp; gravel carriers actually use.</div>') + "</div></div>";
+      : '<div class="subtle" style="font-size:12.5px">Enable to browse the free-text values sand &amp; gravel carriers actually use.</div>') + "</div>";
 }
-function wizStep4(w) {
-  const f = w.filters, s = wizardSearch(w), matches = searchMatches(s);
-  const withPhone = matches.filter(c => c.phone || c.cell).length, withEmail = matches.filter(c => c.email).length, tier1 = matches.filter(c => c.tier === 1).length;
+function panelFilters(w) {
+  const f = w.filters;
   const tog = (label, key) => '<label class="switch" style="justify-content:space-between;width:100%"><span class="label">' + label + '</span><span style="position:relative;display:inline-flex"><input type="checkbox" ' + (f[key] ? "checked" : "") + ' data-change="wzFilter" data-k="' + key + '"><span class="track"></span></span></label>';
-  return '<div class="stack gap-16"><div class="card" style="padding:18px"><div class="eyebrow" style="margin-bottom:12px">Carrier filters</div><div class="stack gap-12">' +
-    '<div class="field"><span class="label">Minimum insurance (BIPD)</span><select class="select" data-change="wzInsurance"><option value="0"' + sel(""+f.insuranceMin,"0") + '>Any</option><option value="500000"' + sel(""+f.insuranceMin,"500000") + '>$500K+</option><option value="750000"' + sel(""+f.insuranceMin,"750000") + '>$750K+</option><option value="1000000"' + sel(""+f.insuranceMin,"1000000") + '>$1MM+</option><option value="2000000"' + sel(""+f.insuranceMin,"2000000") + '>$2MM+</option></select>' +
+  return '<div class="card" style="padding:16px"><div class="eyebrow" style="margin-bottom:12px">Carrier filters</div><div class="stack gap-12">' +
+    '<div class="field"><span class="label">Minimum insurance (BIPD)</span><select class="select" data-change="wzInsurance"><option value="0"' + sel(""+f.insuranceMin,"0") + '>Any</option><option value="500000"' + sel(""+f.insuranceMin,"500000") + '>$500 K+</option><option value="750000"' + sel(""+f.insuranceMin,"750000") + '>$750 K+</option><option value="1000000"' + sel(""+f.insuranceMin,"1000000") + '>$1.0 MM+</option><option value="2000000"' + sel(""+f.insuranceMin,"2000000") + '>$2.0 MM+</option></select>' +
     '<label class="switch mt-8" style="' + (f.insuranceMin ? "" : "opacity:.45;pointer-events:none") + '"><input type="checkbox" ' + (f.keepBelow ? "checked" : "") + ' data-change="wzKeepBelow"><span class="track"></span><span class="label">Keep below-threshold carriers visible</span></label></div>' +
     '<div class="field"><span class="label">Fleet size</span><select class="select" data-change="wzSize"><option value="any"' + sel(f.size,"any") + '>Any size</option><option value="small"' + sel(f.size,"small") + '>1–5 trucks</option><option value="mid"' + sel(f.size,"mid") + '>6–20 trucks</option><option value="large"' + sel(f.size,"large") + '>21+ trucks</option></select></div>' +
     tog("For-hire only","forHire") + tog("Active registration only","activeOnly") + tog("Authorized &amp; insured only","authorizedOnly") + tog("Interstate only","interstateOnly") +
     '<div class="divider" style="margin:4px 0"></div><div class="eyebrow">Contactability</div>' + tog("Has phone on file","hasPhone") + tog("Has email on file","hasEmail") +
     '<div class="demo-note" style="margin-top:6px">' + icon("alert") + ' Safety &amp; insurance issues are never filtered out — carriers with issues are highlighted in red everywhere.</div>' +
-    "</div></div>" +
-    '<div class="card" style="padding:18px"><div class="eyebrow" style="margin-bottom:10px">Coverage</div><div class="strip">' + stat("Matches", matches.length, "accent") + stat("With phone", withPhone) + stat("With email", withEmail, withEmail ? "" : "crit") + stat("Sand & gravel", tier1, "good") + "</div>" +
-    '<div class="subtle" style="font-size:12px;margin-top:10px">' + Math.round(withEmail/Math.max(1,matches.length)*100) + '% have an email on file — FMCSA email coverage is genuinely thin, which is why calling leads.</div></div></div>';
+    "</div></div>";
 }
-function wizFooter(w) {
+function builderFooter(w) {
   const matches = searchMatches(wizardSearch(w)), n = matches.length;
-  const withPhone = matches.filter(c => c.phone || c.cell).length, withEmail = matches.filter(c => c.email).length;
-  const back = w.step > 1 ? '<button class="btn" data-act="wzStep" data-s="' + (w.step-1) + '">Back</button>' : '<button class="btn" data-act="nav" data-to="dashboard">Cancel</button>';
-  const next = w.step < 4 ? '<button class="btn primary" data-act="wzStep" data-s="' + (w.step+1) + '">Next</button>' : '<button class="btn primary lg" data-act="wzGrab">' + icon("layers") + " Grab Batch — " + n + "</button>";
-  return '<div class="wizfoot"><span class="wizcount"><b id="b-foot-count">' + n + '</b> carriers <span class="subcount"><span>' + withPhone + ' phone</span><span>' + withEmail + ' email</span></span></span><div class="spacer" style="flex:1"></div>' + back + next + "</div>";
+  return '<div class="wizfoot"><span class="wizcount"><b id="b-foot-count">' + n + '</b> carriers match</span><div class="spacer" style="flex:1"></div>' +
+    '<button class="btn" data-act="nav" data-to="dashboard">Cancel</button>' +
+    '<button class="btn primary lg" data-act="wzGrab">' + icon("layers") + ' Grab Batch — <span id="wz-grab-n">' + n + "</span></button></div>";
 }
 
 const SCREENS = {
   login: screenLogin, register: screenRegister, forgot: screenForgot, guest: screenGuest,
-  dashboard: screenDashboard, wizard: screenWizard, workingList: screenWorkingList,
+  dashboard: screenDashboard, builder: screenBuilder, workingList: screenWorkingList,
   profile: screenProfile, users: screenUsers
 };
 /* ============================================================================
@@ -1670,10 +1823,10 @@ function screenWorkingList() {
   const rows = workingRows(b.id), counts = statusCounts(b.id);
   const selCount = Object.keys(state.selection).filter(d => state.selection[d]).length;
   const laneChips = b.zones.map((z, i) => '<span class="badge plain" style="height:24px">' + "ABCDEFGH"[i] + " · " + esc(z.label || (z.type==="radius"?z.anchor:z.origin+"→"+z.dest)) + "</span>").join(" ");
-  const head = '<div class="page-head"><div style="min-width:0"><div class="h1">' + esc(b.name) + '</div><div class="desc">' + esc(b.customer) + " · " + esc(b.job) + '</div><div class="row wrap gap-6 mt-8">' + laneChips + "</div></div><div class=\"spacer\"></div>" +
+  const head = '<div class="page-head"><div style="min-width:0"><div class="h1">' + esc(b.name) + '</div><div class="muted" style="font-size:13px;margin-top:2px">' + esc(b.customer) + " · " + esc(b.job) + '</div><div class="row wrap gap-6 mt-8">' + laneChips + "</div></div><div class=\"spacer\"></div>" +
     (b.new_since ? '<button class="btn" data-act="refreshBatch" data-id="' + b.id + '">' + icon("refresh") + " Refresh <span class='badge good' style='height:18px;margin-left:2px'>+" + b.new_since + "</span></button>" : '<button class="btn" data-act="refreshBatch" data-id="' + b.id + '">' + icon("refresh") + " Refresh</button>") +
     '<button class="btn icon" data-act="batchMenu" data-id="' + b.id + '">' + icon("dots") + "</button></div>";
-  const feed = activityCard(b.id);
+  const feed = activityCard(b.id);   // F32: collapsed by default, rendered BELOW the stat tiles
   const strip = statStrip(stat("Carriers", counts.total) + stat("With phone", counts.phone) + stat("With email", counts.email, counts.email ? "" : "crit") + stat("Interested", counts.interested, "good") + stat("Warnings", counts.warnings, counts.warnings ? "crit" : "") + stat("Promoted", counts.promoted, "accent"));
   const chip = (key, label, n, cls) => '<button class="badge ' + (cls||"plain") + '" style="cursor:pointer;height:28px;' + (state.list.status === key ? "outline:2px solid var(--accent);outline-offset:1px" : "opacity:.82") + '" data-act="listStatus" data-s="' + key + '">' + label + ' <b class="mono" style="margin-left:2px">' + n + "</b></button>";
   const chips = '<div class="row wrap gap-6 center">' + chip("all","All",counts.total,"info") + STATUS_ORDER.map(k => chip(k, STATUS[k].label, counts[k], k)).join("") + (counts.dnc ? chip("dnc","Do Not Call",counts.dnc,"dnc") : "") +
@@ -1687,12 +1840,19 @@ function screenWorkingList() {
     '<div class="seg"><button class="' + (state.list.view==="list"?"on":"") + '" data-act="listView" data-v="list">' + icon("list") + "List</button><button class=\"" + (state.list.view==="map"?"on":"") + "\" data-act=\"listView\" data-v=\"map\">" + icon("mapicon") + "Map</button></div></div>";
   const filters = '<div class="card" style="padding:12px 14px;margin:14px 0">' + chips + toolbar + "</div>";
   const body = state.list.view === "map" ? workingMap(b, rows) : workingTable(b, rows);
-  const inner = '<div class="page wide">' + head + feed + '<div class="mt-16">' + strip + "</div>" + filters + '<div id="wl-body">' + body + "</div>" + (selCount ? bulkBar(selCount) : "") + "</div>";
+  const inner = '<div class="page wide">' + head + strip + '<div class="mt-12">' + feed + "</div>" + filters + '<div id="wl-body">' + body + "</div>" + (selCount ? bulkBar(selCount) : "") + "</div>";
   return appShell(inner, crumb([{ label:"Dashboard", act:"nav", to:"dashboard" }, { label:b.name }]));
 }
 function activityCard(batchId) {
-  const items = activityForBatch(batchId), showAll = state.feedOpen;
-  const shown = showAll ? items : items.slice(0, 3);
+  const items = activityForBatch(batchId), open = state.feedOpen;
+  if (!open) {
+    const last = items[0];
+    const u = last ? DB.userById[last.actor_id] : null;
+    return '<button class="feed-bar" data-act="toggleFeed">' + icon("activity") + '<b>Activity</b><span class="badge plain" style="height:19px">' + items.length + "</span>" +
+      (last ? '<span class="subtle" style="font-size:12px;overflow:hidden;text-overflow:ellipsis;white-space:nowrap">latest: ' + esc(u ? u.name.split(" ")[0] : "") + (last.type === "comment" ? " commented" : " · " + last.type.replace(/_/g, " ")) + " · " + fmtRel(last.at) + "</span>" : "") +
+      '<span style="margin-left:auto" class="row gap-4 center subtle">Expand ' + icon("chevD") + "</span></button>";
+  }
+  const shown = items;
   const line = a => {
     const u = DB.userById[a.actor_id], nm = u ? u.name.split(" ")[0] : "System";
     if (a.type === "comment") return { ic:"comment", cls:"comment", html: "<b>" + esc(nm) + "</b> commented", body: a.body };
@@ -1709,12 +1869,12 @@ function activityCard(batchId) {
   const feed = shown.map(a => { const L = line(a), u = DB.userById[a.actor_id]; return '<div class="feed-item"><div class="feed-ic ' + (L.cls||"") + '">' + icon(L.ic) + '</div><div class="feed-body">' + L.html + (L.body ? '<div class="fcomment">' + esc(L.body) + "</div>" : "") + '<div class="fmeta">' + fmtRel(a.at) + "</div></div></div>"; }).join("");
   const cur_ = cur();
   const composer = '<div class="composer"><span>' + avatar(cur_, 27) + '</span><span class="input-group grow"><input class="input" placeholder="Leave an activity comment…" id="feed-comment" data-keyadd="postComment"></span><button class="btn primary sm" data-act="postCommentBtn">Post</button></div>';
-  return '<div class="card" style="padding:14px 16px"><div class="row between center" style="margin-bottom:10px"><div class="eyebrow">' + icon("activity") + ' Activity</div>' + (items.length > 3 ? '<button class="btn ghost sm" data-act="toggleFeed">' + (showAll ? "Show less" : "Show all " + items.length) + "</button>" : "") + "</div>" + composer + '<div class="feed">' + feed + "</div></div>";
+  return '<div class="card" style="padding:14px 16px"><div class="row between center" style="margin-bottom:10px"><div class="eyebrow">' + icon("activity") + ' Activity <span class="subtle">· ' + items.length + '</span></div><button class="btn ghost sm" data-act="toggleFeed">Collapse ' + icon("chevD") + "</button></div>" + composer + '<div class="feed" style="max-height:300px;overflow-y:auto">' + feed + "</div></div>";
 }
 function workingMap(b, rows) {
-  const pins = rows.map((r, i) => ({ lng:r.c.lng, lat:r.c.lat, dot:r.c.dot, from:b.id, r:8, num:i+1,
+  const pins = rows.map((r, i) => ({ lng:r.c.lng, lat:r.c.lat, dot:r.c.dot, from:b.id, r:7, num:i+1, shape:"pin",
     fill: r.dnc ? "var(--st-dnc)" : statusVar(r.status), warn: r.warns.length > 0, title: r.c.legal_name }));
-  return '<div class="map" style="height:560px">' + mapCore(pins, b.zones) + statusLegend(statusCounts(b.id)) + "</div>";
+  return mapBox("batch", pins, b.zones, statusLegend(statusCounts(b.id)), 560);
 }
 function safetyDot(c) { const w = warningsFor(c); const bad = w.some(x => ["safety_rating","high_oos","recent_crashes"].includes(x)); return bad ? '<span class="badge crit">Review</span>' : (c.safety.rating === "Satisfactory" ? '<span class="badge good">Clean</span>' : '<span class="subtle">—</span>'); }
 function workingTable(b, rows) {
@@ -1725,19 +1885,23 @@ function workingTable(b, rows) {
     const cb = r.dnc ? '<td></td>' : '<td onclick="event.stopPropagation()"><label class="check"><input type="checkbox" ' + (state.selection[c.dot]?"checked":"") + ' data-change="selRow" data-dot="' + c.dot + '"><span class="box">' + icon("check") + "</span></label></td>";
     const statusCell = r.dnc ? '<td>' + badge("dnc") + " " + icon("lock") + "</td>" :
       '<td onclick="event.stopPropagation()"><select class="select sm" style="width:126px;color:' + statusVar(r.status) + ';font-weight:700" data-change="rowStatus" data-dot="' + c.dot + '" data-batch="' + b.id + '">' + STATUS_ORDER.map(k => '<option value="' + k + '"' + sel(r.status,k) + ">" + STATUS[k].label + "</option>").join("") + '<option value="dnc">Do Not Call…</option></select></td>';
+    const lastCell = last
+      ? "<div class='lc-line'>" + icon(CHANNEL[last.channel||"call"].ic) + "<span>" + DISPO_LABEL[last.disposition] + "</span></div><div class='lc-sub'>" + fmtRel(last.at) + (last.callback_at ? " · callback " + fmtRel(last.callback_at) : "") + "</div>"
+      : "—";
     return '<tr class="clickable ' + (warn ? "warn-row" : "") + (r.dnc ? " dnc" : "") + (state.selection[c.dot] ? " sel" : "") + '" data-act="openCarrier" data-dot="' + c.dot + '" data-from="' + b.id + '">' +
       cb +
       '<td class="mono" style="text-align:center;color:var(--text-subtle)">' + (i+1) + "</td>" +
-      "<td><div class='co'><span class='nm'>" + esc(c.legal_name) + (c.tier===1?' <span class="badge tier1" style="height:16px">S&amp;G</span>':"") + "</span><span class='meta'>USDOT <span class='mono'>" + c.dot + "</span></span>" + (warn ? "<div style='margin-top:3px'>" + warnChips(c.dot) + "</div>" : "") + "</div></td>" +
+      "<td><div class='co'><span class='nm'>" + esc(c.legal_name) + (c.tier===1?' <span class="badge tier1" style="height:16px">S&amp;G</span>':"") + "</span><span class='meta'>USDOT <span class='mono'>" + c.dot + "</span></span></div></td>" +
       "<td>" + contactCell(c) + "</td>" +
       "<td><div class='stack'><span>" + esc(c.city) + "</span>" + (r.dist!=null?"<span class='meta subtle mono'>"+r.dist.toFixed(0)+" mi</span>":"") + "</div></td>" +
-      "<td class='mono'>" + c.power_units + "</td>" +
+      "<td class='mono right'>" + c.power_units + "</td>" +
       "<td>" + insBadge(c) + "</td>" +
+      "<td>" + (warn ? warnChips(c.dot, true) : '<span class="subtle">—</span>') + "</td>" +
       statusCell +
-      "<td class='muted' style='font-size:12px'>" + (last ? icon(CHANNEL[last.channel||"call"].ic) + " " + DISPO_LABEL[last.disposition] + "<br><span class='subtle'>" + fmtRel(last.at) + "</span>" : "—") + "</td>" +
+      "<td class='muted' style='font-size:12px'>" + lastCell + "</td>" +
       "<td class='right'>" + (r.dnc ? "" : '<button class="btn sm" data-act="logCall" data-dot="' + c.dot + '" data-batch="' + b.id + '">' + icon("phone") + "Log</button>") + "</td></tr>";
   }).join("");
-  return '<div class="tbl-wrap"><table class="tbl"><thead><tr><th><label class="check"><input type="checkbox" ' + (allSel?"checked":"") + ' data-change="selAll"><span class="box">' + icon("check") + '</span></label></th><th>#</th><th>Carrier</th><th>Contact</th><th>Location</th><th>Trucks</th><th>Insurance</th><th>Status</th><th>Last contact</th><th></th></tr></thead><tbody>' + body + "</tbody></table></div>";
+  return '<div class="tbl-wrap"><table class="tbl"><thead><tr><th><label class="check"><input type="checkbox" ' + (allSel?"checked":"") + ' data-change="selAll"><span class="box">' + icon("check") + '</span></label></th><th>#</th><th style="min-width:200px">Carrier</th><th style="min-width:170px">Contact</th><th>Location</th><th class="right">Trucks</th><th>Insurance</th><th style="min-width:150px">Warnings</th><th>Status</th><th style="min-width:130px">Last contact</th><th></th></tr></thead><tbody>' + body + "</tbody></table></div>";
 }
 function bulkBar(n) {
   return '<div style="position:fixed;left:calc(var(--sidebar-w) + 24px);right:24px;bottom:20px;background:var(--text);color:var(--bg);border-radius:12px;padding:10px 12px 10px 18px;display:flex;align-items:center;gap:12px;box-shadow:var(--shadow-pop);z-index:30"><b class="mono">' + n + "</b> selected<div class=\"spacer\" style=\"flex:1\"></div>" +
@@ -1753,8 +1917,9 @@ function screenProfile() {
   if (!c) { state.screen = "dashboard"; return screenDashboard(); }
   const fromBatch = state.profileFromBatch ? DB.batches.find(b => b.id === state.profileFromBatch) : null;
   const crumbs = fromBatch ? [{ label:"Dashboard", act:"nav", to:"dashboard" }, { label:fromBatch.name, act:"openBatch", to:fromBatch.id }, { label:c.legal_name }] : [{ label:"Dashboard", act:"nav", to:"dashboard" }, { label:c.legal_name }];
-  const sw = '<div class="row between center" style="margin-bottom:14px"><div class="variant-switch">' + [["console","Command Console"],["dossier","Dossier"],["ledger","Verification Ledger"]].map(v => '<button class="' + (state.profileVariant===v[0]?"on":"") + '" data-act="profVariant" data-v="' + v[0] + '">' + v[1] + "</button>").join("") + '</div><div class="subtle" style="font-size:11.5px">3 designs — pick one, we iterate (F7)</div></div>';
-  const inner = '<div class="page wide">' + (fromBatch ? '<a class="link row gap-6 center" style="margin-bottom:10px" data-act="openBatch" data-id="' + fromBatch.id + '">' + icon("chevL") + " Back to " + esc(fromBatch.name) + "</a>" : "") + sw +
+  // F7 resolved: owner picked COMMAND CONSOLE. (Dossier/Ledger renderers retained
+  // below for reference; reachable only via ACT.profVariant in dev tooling.)
+  const inner = '<div class="page wide">' + (fromBatch ? '<a class="link row gap-6 center" style="margin-bottom:10px" data-act="openBatch" data-id="' + fromBatch.id + '">' + icon("chevL") + " Back to " + esc(fromBatch.name) + "</a>" : "") +
     (state.profileVariant === "dossier" ? profDossier(c, fromBatch) : state.profileVariant === "ledger" ? profLedger(c, fromBatch) : profConsole(c, fromBatch)) + "</div>";
   return appShell(inner, crumb(crumbs));
 }
@@ -1866,7 +2031,7 @@ function userRow(u) { const ov = state.overrides.userStatus[u.id]; return { u, s
 function screenUsers() {
   if (cur().role !== "manager") { state.screen = "dashboard"; return screenDashboard(); }
   const all = DB.users.map(userRow), pending = all.filter(r => r.status === "pending"), active = all.filter(r => r.status !== "pending");
-  const inner = '<div class="page"><div class="page-head"><div><div class="h1">Users &amp; Access</div><div class="desc">Approve new accounts and set roles. Guests only see a landing page until you provision them.</div></div></div>' +
+  const inner = '<div class="page"><div class="page-head"><div><div class="h1">Users &amp; Access</div></div></div>' +
     (pending.length ? '<div class="card" style="padding:16px;margin-bottom:18px;border-color:var(--warn)"><div class="row gap-8 center" style="margin-bottom:12px">' + icon("clock") + '<b>Pending approval</b><span class="badge warn">' + pending.length + "</span></div>" +
       pending.map(r => '<div class="row between center wrap gap-10" style="padding:10px 0;border-top:1px solid var(--border)"><div class="row gap-10 center">' + avatar(r.u) + "<div><div style='font-weight:700'>" + esc(r.u.name) + "</div><div class='subtle' style='font-size:12px'>" + esc(r.u.email) + " · " + fmtRel(r.u.registered) + "</div></div></div><div class='row gap-8'><button class='btn sm' data-act='rejectUser' data-uid='" + r.u.id + "'>Reject</button><button class='btn primary sm' data-act='approveUser' data-uid='" + r.u.id + "'>" + icon("usercheck") + " Approve</button></div></div>").join("") + "</div>" : "") +
     '<div class="tbl-wrap"><table class="tbl"><thead><tr><th>User</th><th>Email</th><th>Role</th><th>Status</th><th></th></tr></thead><tbody>' +
@@ -1927,9 +2092,19 @@ function addAct(batchId, type, payload, body) { state.overrides.activity.push({ 
 /* ---- live patches (avoid re-render mid slider) ---- */
 function patchWiz() {
   const w = state.wizard, zones = wizardZones(w), s = Object.assign({}, wizardSearch(w), { zones }), matches = searchMatches(s);
-  const map = document.getElementById("wiz-map");
-  if (map) { const pins = matches.slice(0, 400).map(c => ({ lng:c.lng, lat:c.lat, r:4, warn:warningsFor(c).length>0, title:c.legal_name })); map.innerHTML = mapCore(pins, zones) + mapCount(matches.length) + mapLegend([["var(--accent)","Matches filters"],["var(--crit)","Has a warning flag"]]); }
+  const holder = document.getElementById("wiz-map-holder");
+  if (holder) {
+    const pins = matches.slice(0, 400).map(c => ({ lng:c.lng, lat:c.lat, r:3.5, warn:warningsFor(c).length>0, title:c.legal_name }));
+    holder.innerHTML = mapBox("builder", pins, zones, mapCount(matches.length) + mapLegend([["var(--accent)","Matches filters"],["var(--crit)","Has a warning flag"]]), 430);
+    const svg = holder.querySelector("svg"); if (svg && state.mapView.builder) svg.setAttribute("viewBox", state.mapView.builder);
+  }
   const fc = document.getElementById("b-foot-count"); if (fc) fc.textContent = matches.length;
+  const gb = document.getElementById("wz-grab-n"); if (gb) gb.textContent = matches.length;
+  const cov = document.getElementById("wiz-cov");
+  if (cov) {
+    const wp = matches.filter(c => c.phone || c.cell).length, we = matches.filter(c => c.email).length, t1 = matches.filter(c => c.tier === 1).length;
+    cov.innerHTML = stat("Matches", matches.length, "accent") + stat("With phone", wp) + stat("With email", we, we ? "" : "crit") + stat("Sand & gravel", t1, "good");
+  }
 }
 function patchList() { const b = DB.batches.find(x => x.id === state.activeBatchId), el = document.getElementById("wl-body"); if (el && b) el.innerHTML = state.list.view === "map" ? workingMap(b, workingRows(b.id)) : workingTable(b, workingRows(b.id)); }
 
@@ -1945,7 +2120,7 @@ ACT.userMenu = (d, e, t) => { const r = t.getBoundingClientRect(); openMenu({ ty
 ACT.toast = (d) => toast(d.msg, d.ic);
 
 /* ---- batches ---- */
-ACT.newBatch = () => { state.wizard = newWizard(); state.screen = "wizard"; render(); };
+ACT.newBatch = () => { state.wizard = newWizard(); state.screen = "builder"; render(); };
 ACT.openBatch = (d) => { state.activeBatchId = d.id || d.to; state.selection = {}; state.list = LIST_DEFAULT(); state.feedOpen = false; state.screen = "workingList"; state.menu = null; render(); };
 ACT.batchMenu = (d, e, t) => { const r = t.getBoundingClientRect(); openMenu({ type:"batchMenu", id:d.id, x:Math.max(10, Math.min(r.right-190, window.innerWidth-200)), y:r.bottom+6 }); };
 ACT.renameBatch = (d) => openModal({ type:"rename", id:d.id });
@@ -1964,8 +2139,18 @@ ACT.toggleFeed = () => { state.feedOpen = !state.feedOpen; render(); };
 ACT.postComment = (d) => { const v = (d.v||"").trim(); if (v) { addAct(state.activeBatchId, "comment", {}, v); toast("Comment posted"); } render(); };
 ACT.postCommentBtn = () => { const el = document.getElementById("feed-comment"); const v = el ? el.value.trim() : ""; if (v) { addAct(state.activeBatchId, "comment", {}, v); toast("Comment posted"); render(); } };
 
-/* ---- wizard ---- */
-ACT.wzStep = (d) => { const t = +d.s; if (t === 2 && !state.wizard.name.trim()) { toast("Name your batch first", "alert"); return; } state.wizard.step = t; render(); };
+/* ---- maps (F29/F30) ---- */
+ACT.mapZoom = (d) => mapZoomAt(d.id, +d.f);
+ACT.mapReset = (d) => { delete state.mapView[d.id]; const el = document.querySelector('.map[data-mapid="' + d.id + '"] svg'); if (el) el.setAttribute("viewBox", "0 0 640 520"); };
+ACT.dashToggleJob = (d) => {
+  const on = !state.dashJobs[d.id];
+  if (on) state.dashJobs[d.id] = true; else delete state.dashJobs[d.id];
+  render();
+  if (on) { const b = DB.batches.find(x => x.id === d.id); if (b) { const bb = zoneBBox(b.zones); zoomToBox("dash", bb[0], bb[1], bb[2], bb[3], 40); } }
+};
+ACT.dashZoomJob = (d) => { const b = DB.batches.find(x => x.id === d.id); if (b) { state.dashJobs[d.id] = true; render(); const bb = zoneBBox(b.zones); zoomToBox("dash", bb[0], bb[1], bb[2], bb[3], 40); } };
+
+/* ---- New Search control panel ---- */
 ACT.wzAddLane = (d) => {
   const id = "lz" + (laneSeq++);
   if (d.t === "radius") { const c0 = cityOf("Austin"); state.wizard.editing = { id, type:"radius", label:"", anchorKind:"city", anchor:"Austin", anchorLng:c0.lng, anchorLat:c0.lat, radiusMi:50 }; }

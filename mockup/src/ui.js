@@ -31,8 +31,43 @@ const state = {
   modal: null,                 // { type, ...data }
   menu: null,                  // { type, x, y, ...data }
   toasts: [],
-  focus: null                  // selector to focus after render
+  focus: null,                 // selector to focus after render
+  feedOpen: false,             // batch activity feed expanded? (F32: collapsed default)
+  mapView: {},                 // mapId -> viewBox string (pan/zoom state, survives re-render)
+  dashJobs: {}                 // batchId -> true (F30: dashboard map job toggles; empty = empty map)
 };
+
+/* F29: map pan/zoom on the SVG viewBox. Base box is 0 0 640 520. */
+const MAP_BASE = { x:0, y:0, w:640, h:520 };
+function mapVB(id) {
+  const s = state.mapView[id];
+  if (!s) return { ...MAP_BASE };
+  const p = s.split(" ").map(Number);
+  return { x:p[0], y:p[1], w:p[2], h:p[3] };
+}
+function setMapVB(id, vb) {
+  const clampW = Math.max(70, Math.min(768, vb.w));
+  const k = clampW / vb.w; vb.w = clampW; vb.h = vb.h * k;
+  vb.x = Math.max(-160, Math.min(800 - vb.w * 0.2, vb.x));
+  vb.y = Math.max(-130, Math.min(650 - vb.h * 0.2, vb.y));
+  state.mapView[id] = vb.x.toFixed(1) + " " + vb.y.toFixed(1) + " " + vb.w.toFixed(1) + " " + vb.h.toFixed(1);
+  const el = document.querySelector('.map[data-mapid="' + id + '"] svg');
+  if (el) el.setAttribute("viewBox", state.mapView[id]);
+}
+function mapZoomAt(id, factor, fx, fy) {
+  const vb = mapVB(id);
+  const nw = vb.w / factor, nh = vb.h / factor;
+  setMapVB(id, { x: vb.x + (vb.w - nw) * (fx == null ? 0.5 : fx), y: vb.y + (vb.h - nh) * (fy == null ? 0.5 : fy), w: nw, h: nh });
+}
+function zoomToBox(id, x0, y0, x1, y1, pad) {
+  pad = pad == null ? 30 : pad;
+  const w = Math.max(60, (x1 - x0) + pad * 2), h = Math.max(50, (y1 - y0) + pad * 2);
+  // keep aspect of base (640x520)
+  const ar = MAP_BASE.w / MAP_BASE.h; let W = w, H = h;
+  if (W / H > ar) H = W / ar; else W = H * ar;
+  const cx = (x0 + x1) / 2, cy = (y0 + y1) / 2;
+  setMapVB(id, { x: cx - W / 2, y: cy - H / 2, w: W, h: H });
+}
 
 /* ------------------------------- icons ------------------------------- */
 const ICONS = {
@@ -102,7 +137,8 @@ function fmtRel(ms) {
   const dt = new Date(ms), mo = ["Jan","Feb","Mar","Apr","May","Jun","Jul","Aug","Sep","Oct","Nov","Dec"];
   return mo[dt.getUTCMonth()] + " " + dt.getUTCDate();
 }
-function fmtMoney(n) { if (!n) return "None"; if (n >= 1e6) return "$" + (n/1e6).toFixed(n % 1e6 ? 1 : 0) + "M"; if (n >= 1e3) return "$" + Math.round(n/1e3) + "K"; return "$" + n; }
+/* F36/G14: standardized money format — $X.X MM / $NNN K */
+function fmtMoney(n) { if (!n) return "None"; if (n >= 1e6) return "$" + (n/1e6).toFixed(1) + " MM"; if (n >= 1e3) return "$" + Math.round(n/1e3) + " K"; return "$" + n; }
 const STATUS = {
   new:{label:"New",cls:"new"}, attempted:{label:"Attempted",cls:"attempted"}, contacted:{label:"Contacted",cls:"contacted"},
   interested:{label:"Interested",cls:"interested"}, not_a_fit:{label:"Not a Fit",cls:"not_a_fit"}, dnc:{label:"Do Not Call",cls:"dnc"}
@@ -178,6 +214,11 @@ function render() {
   let html = (typeof SCREENS !== "undefined" && SCREENS[state.screen]) ? SCREENS[state.screen]() : '<div class="empty">…</div>';
   html += overlays();
   root.innerHTML = html;
+  // restore pan/zoom state on every map that survives a re-render (F29)
+  root.querySelectorAll(".map[data-mapid]").forEach(m => {
+    const id = m.getAttribute("data-mapid"), svg = m.querySelector("svg");
+    if (svg && state.mapView[id]) svg.setAttribute("viewBox", state.mapView[id]);
+  });
   if (state.focus) { const f = root.querySelector(state.focus); if (f) f.focus(); state.focus = null; }
 }
 function overlays() {
@@ -200,6 +241,31 @@ function mount() {
   root.addEventListener("change", onChange);
   root.addEventListener("submit", onSubmit);
   root.addEventListener("keydown", onKeydown);
+  // F29: interactive maps — wheel zoom (about cursor) + drag pan, no re-render.
+  root.addEventListener("wheel", (e) => {
+    const m = e.target.closest && e.target.closest('.map[data-mapid]');
+    if (!m) return;
+    e.preventDefault();
+    const id = m.getAttribute("data-mapid"), r = m.getBoundingClientRect();
+    mapZoomAt(id, e.deltaY < 0 ? 1.25 : 0.8, (e.clientX - r.left) / r.width, (e.clientY - r.top) / r.height);
+  }, { passive: false });
+  let drag = null;
+  root.addEventListener("mousedown", (e) => {
+    const m = e.target.closest && e.target.closest('.map[data-mapid]');
+    if (!m || e.target.closest(".map-legend, .map-count, .map-tools, .pin, [data-act]")) return;
+    const id = m.getAttribute("data-mapid"), r = m.getBoundingClientRect(), vb = mapVB(id);
+    drag = { id, sx: e.clientX, sy: e.clientY, vb, pxw: r.width };
+    m.classList.add("panning");
+    e.preventDefault();
+  });
+  document.addEventListener("mousemove", (e) => {
+    if (!drag) return;
+    const k = drag.vb.w / drag.pxw;
+    setMapVB(drag.id, { x: drag.vb.x - (e.clientX - drag.sx) * k, y: drag.vb.y - (e.clientY - drag.sy) * k, w: drag.vb.w, h: drag.vb.h });
+  });
+  document.addEventListener("mouseup", () => {
+    if (drag) { const m = document.querySelector('.map[data-mapid="' + drag.id + '"]'); if (m) m.classList.remove("panning"); drag = null; }
+  });
   document.addEventListener("keydown", (e) => {
     if (e.key === "Escape") { if (state.menu) closeMenu(); else if (state.modal) closeModal(); }
   });
