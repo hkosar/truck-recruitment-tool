@@ -490,8 +490,6 @@ tr.warn-row:hover > td { background: color-mix(in srgb, var(--crit-tint) 82%, va
 .stepper .step.on .lbl { color: var(--text); font-weight: 700; }
 .stepper .bar { width: 26px; height: 2px; background: var(--border-strong); border-radius: 2px; }
 
-.wizard-grid { display: grid; grid-template-columns: 1fr 1fr; gap: 18px; align-items: start; }
-.wizard-map { position: sticky; top: 16px; }
 .wizfoot { position: fixed; left: var(--sidebar-w); right: 0; bottom: 0; background: var(--surface); border-top: 1px solid var(--border); box-shadow: 0 -4px 14px rgba(0,0,0,.08); padding: 12px 24px; display: flex; align-items: center; gap: 16px; z-index: 25; }
 .wizcount { font-size: 13px; color: var(--text-muted); }
 .wizcount b { font-family: var(--font-mono); font-weight: 800; color: var(--accent-press); font-size: 18px; }
@@ -556,11 +554,6 @@ tr.warn-row:hover > td { background: color-mix(in srgb, var(--crit-tint) 82%, va
 .vtile .vname { font-size: 11px; font-weight: 700; letter-spacing: .05em; text-transform: uppercase; color: var(--text-subtle); }
 .vtile .vbig { font-size: 19px; font-weight: 800; letter-spacing: -.01em; }
 .vtile .vsub { font-size: 12px; color: var(--text-muted); margin-top: 2px; }
-
-/* ---- carrier profile variants (F7) ---- */
-.variant-switch { display: inline-flex; gap: 2px; padding: 3px; background: var(--surface-sunk); border: 1px solid var(--border); border-radius: var(--radius); }
-.variant-switch button { height: 27px; padding: 0 13px; border-radius: var(--radius-sm); font-size: 12px; font-weight: 700; color: var(--text-muted); }
-.variant-switch button.on { background: var(--accent); color: var(--accent-ink); box-shadow: var(--shadow-1); }
 
 /* dossier */
 .dossier-head { position: relative; background: var(--text); color: var(--bg); border-radius: var(--radius-lg); padding: 28px 26px 24px; overflow: hidden; }
@@ -659,9 +652,6 @@ tr.warn-row:hover > td { background: color-mix(in srgb, var(--crit-tint) 82%, va
 .lc-line svg { width: 13px; height: 13px; color: var(--text-subtle); flex: none; }
 .lc-sub { color: var(--text-subtle); font-size: 11.5px; margin-top: 1px; }
 
-/* New Search control panel (F26) */
-.builder-grid { display: grid; grid-template-columns: minmax(360px, 430px) 1fr; gap: 18px; align-items: start; }
-
 /* ============================ v4 additions (round 3) ============================ */
 
 /* G15: alignment — centered numerics; left for carrier/contact/bubble columns */
@@ -672,24 +662,11 @@ tr.warn-row:hover > td { background: color-mix(in srgb, var(--crit-tint) 82%, va
 .lanes-cell { font-size: 11.5px; color: var(--text-muted); }
 .lanes-cell div { white-space: nowrap; }
 
-/* F48: New Search layout picker + layouts */
-.ns-picker { display: flex; align-items: center; gap: 12px; margin-bottom: 14px; flex-wrap: wrap; }
-.canvas-wrap { position: relative; }
-.canvas-dock { position: absolute; left: 12px; top: 12px; bottom: 12px; width: 350px; overflow-y: auto; display: flex; flex-direction: column; gap: 8px; z-index: 6; }
-.canvas-dock .acc { background: color-mix(in srgb, var(--surface) 96%, transparent); border: 1px solid var(--border-strong); border-radius: var(--radius-lg); box-shadow: var(--shadow-2); }
-.acc-head { display: flex; align-items: center; gap: 8px; width: 100%; padding: 10px 12px; font-size: 13px; color: var(--text); }
-.acc-head svg { width: 14px; height: 14px; color: var(--text-subtle); }
-.acc-body { padding: 0 10px 10px; }
-.acc-body .card { border: none; box-shadow: none; background: transparent; padding: 4px 4px 0 !important; }
+/* New Search — Columns layout (owner-selected): three aligned columns that
+   reflow to two, then one, as the viewport narrows. */
 .cols-grid { display: grid; grid-template-columns: 1fr 1fr 1fr; gap: 14px; align-items: start; }
-.chipbar { display: flex; flex-wrap: wrap; gap: 8px; padding: 12px 14px; background: var(--surface); border: 1px solid var(--border); border-radius: var(--radius-lg); }
-.defchip { display: inline-flex; align-items: center; gap: 7px; height: 32px; padding: 0 13px; border-radius: 999px; border: 1px solid var(--border-strong); background: var(--surface-2); font-size: 12.5px; font-weight: 600; color: var(--text); }
-.defchip:hover { background: var(--surface-sunk); border-color: var(--accent); }
-.defchip svg { width: 13px; height: 13px; color: var(--text-subtle); }
-.defchip.name { background: var(--accent-tint); border-color: var(--accent-tint-2); color: var(--accent-press); }
-.drawer-scrim { position: fixed; inset: 0; background: rgba(10,12,14,.35); z-index: 55; }
-.drawer { position: fixed; left: var(--sidebar-w); top: 0; bottom: 0; width: 420px; background: var(--surface); border-right: 1px solid var(--border-strong); box-shadow: var(--shadow-pop); padding: 16px; overflow-y: auto; z-index: 56; animation: drawerIn .18s var(--ease); }
-@keyframes drawerIn { from { transform: translateX(-24px); opacity: 0; } to { transform: none; opacity: 1; } }
+@media (max-width: 1200px) { .cols-grid { grid-template-columns: 1fr 1fr; } }
+@media (max-width: 820px)  { .cols-grid { grid-template-columns: 1fr; } }
 </style>
 <div id="app"></div>
 <script>
@@ -1242,10 +1219,6 @@ const state = {
   toasts: [],
   focus: null,                 // selector to focus after render
   feedOpen: false,             // batch activity feed expanded? (F32: collapsed default)
-  nsLayout: 1,                 // F48: New Search layout option (1..5)
-  nsAcc: { details:true, lanes:true, freight:false, filters:false },   // L2 accordion
-  nsTab: "details",            // L4 active tab
-  nsDrawer: null,              // L5 open drawer
   mapView: {},                 // mapId -> viewBox string (pan/zoom state, survives re-render)
   dashJobs: {}                 // batchId -> true (F30: dashboard map job toggles; empty = empty map)
 };
@@ -1738,14 +1711,14 @@ function wizardSearch(w) {
 }
 function wizardZones(w) { return w.editing ? w.lanes.concat([w.editing]).filter(z => z.type) : w.lanes; }
 
-/* F48: five display-organization strategies for the same content, behind a picker. */
-const NS_LAYOUTS = [[1,"Split Panel"],[2,"Map Canvas"],[3,"Columns"],[4,"Tabbed"],[5,"Command Chips"]];
+/* New Search — Columns layout (owner-selected). Full-width overview map + live
+   coverage on top, then three aligned columns with every control visible. */
 function screenBuilder() {
-  const w = state.wizard, L = state.nsLayout || 1;
-  const picker = '<div class="ns-picker"><span class="eyebrow">Layout options — pick one, we iterate</span><div class="variant-switch">' +
-    NS_LAYOUTS.map(v => '<button class="' + (L === v[0] ? "on" : "") + '" data-act="nsLayout" data-l="' + v[0] + '">' + v[0] + " · " + v[1] + "</button>").join("") + "</div></div>";
-  const body = L === 2 ? nsCanvas(w) : L === 3 ? nsColumns(w) : L === 4 ? nsTabbed(w) : L === 5 ? nsChips(w) : nsSplit(w);
-  const inner = '<div class="page wide" style="padding-bottom:84px"><div class="page-head"><div class="h1">New Search</div></div>' + picker + body + builderFooter(w) + "</div>";
+  const w = state.wizard;
+  const inner = '<div class="page wide" style="padding-bottom:84px">' +
+    '<div class="page-head"><div><div class="h1">New Search</div>' +
+    '<div class="subtle" style="font-size:13px;margin-top:2px">Define the batch, tune the lanes and freight, and watch the live count — grab it when the numbers look right.</div></div></div>' +
+    builderBody(w) + builderFooter(w) + "</div>";
   return appShell(inner, crumb([{ label:"Dashboard", act:"nav", to:"dashboard" }, { label:"New Search" }]));
 }
 function builderMap(w, h, withCov, extraCls) {
@@ -1758,47 +1731,15 @@ function builderMap(w, h, withCov, extraCls) {
   }
   return '<div class="' + (extraCls || "") + '"><div id="wiz-map-holder" data-h="' + h + '">' + mapBox("builder", pins, zones, mapCount(matches.length) + mapLegend([["var(--accent)","Matches filters"],["var(--crit)","Has a warning flag"]]), h) + "</div>" + cov + "</div>";
 }
-/* L1 — Split Panel (baseline) */
-function nsSplit(w) {
-  return '<div class="builder-grid"><div class="stack gap-14">' + panelDetails(w) + panelLanes(w) + panelFreight(w) + panelFilters(w) + "</div>" + builderMap(w, 430, true, "wizard-map") + "</div>";
-}
-/* L2 — Map Canvas: full-bleed map, floating collapsible dock */
-function nsCanvas(w) {
-  const acc = state.nsAcc;
-  const sec = (key, title, inner2) => '<div class="acc"><button class="acc-head" data-act="nsAcc" data-k="' + key + '">' + (acc[key] ? icon("chevD") : icon("chevR")) + "<b>" + title + '</b></button>' + (acc[key] ? '<div class="acc-body">' + inner2 + "</div>" : "") + "</div>";
-  const dock = '<div class="canvas-dock">' +
-    sec("details", "Details", panelDetails(w)) + sec("lanes", "Lanes · " + w.lanes.length, panelLanes(w)) +
-    sec("freight", "Freight", panelFreight(w)) + sec("filters", "Filters", panelFilters(w)) + "</div>";
-  return '<div class="canvas-wrap">' + builderMap(w, 620, false, "") + dock + "</div>";
-}
-/* L3 — Columns: everything visible side by side, map on top */
-function nsColumns(w) {
-  return builderMap(w, 300, false, "") +
-    '<div class="cols-grid mt-14"><div class="stack gap-14">' + panelDetails(w) + panelLanes(w) + "</div><div>" + panelFreight(w) + "</div><div>" + panelFilters(w) + "</div></div>";
-}
-/* L4 — Tabbed Workbench: one section at a time (free navigation, not a sequence) */
-function nsTabbed(w) {
-  const t = state.nsTab || "details";
-  const tabs = [["details","Details"],["lanes","Lanes · " + w.lanes.length],["freight","Freight"],["filters","Filters"]];
-  const bar = '<div class="tabs" style="margin-bottom:12px">' + tabs.map(x => '<button class="' + (t === x[0] ? "on" : "") + '" data-act="nsTab" data-t="' + x[0] + '">' + x[1] + "</button>").join("") + "</div>";
-  const body = t === "lanes" ? panelLanes(w) : t === "freight" ? panelFreight(w) : t === "filters" ? panelFilters(w) : panelDetails(w);
-  return '<div class="builder-grid"><div>' + bar + body + "</div>" + builderMap(w, 430, true, "wizard-map") + "</div>";
-}
-/* L5 — Command Chips: definition as an editable chip bar over a full-width map */
-function nsChips(w) {
-  const laneChipsHtml = w.lanes.map((z, i) => '<button class="defchip" data-act="nsDrawer" data-d="lanes">' + "ABCDEFGH"[i] + " · " + esc(z.label || (z.type === "radius" ? z.anchor : z.origin + "→" + z.dest)) + "</button>").join("");
-  const inc = w.cargo.other.include.length, flags = w.cargo.flags.length;
-  const chipbar = '<div class="chipbar">' +
-    '<button class="defchip name" data-act="nsDrawer" data-d="details">' + icon("edit") + (w.name ? esc(w.name) : "Name this batch…") + (w.customer ? ' <span class="subtle">· ' + esc(w.customer) + "</span>" : "") + "</button>" +
-    laneChipsHtml +
-    '<button class="defchip" data-act="nsDrawer" data-d="lanes">' + icon("plus") + " Lane</button>" +
-    '<button class="defchip" data-act="nsDrawer" data-d="freight">' + icon("layers") + " Freight · " + flags + " flags · " + inc + ' incl</button>' +
-    '<button class="defchip" data-act="nsDrawer" data-d="filters">' + icon("filter") + " Filters</button>" +
+/* Columns body: full-width overview map + live coverage strip on top, then three
+   aligned columns — [Details + Lanes] · [Freight] · [Filters] — all visible at once. */
+function builderBody(w) {
+  return builderMap(w, 330, true, "ns-topmap") +
+    '<div class="cols-grid mt-14">' +
+      '<div class="stack gap-14">' + panelDetails(w) + panelLanes(w) + "</div>" +
+      "<div>" + panelFreight(w) + "</div>" +
+      "<div>" + panelFilters(w) + "</div>" +
     "</div>";
-  const drawer = state.nsDrawer ? '<div class="drawer-scrim" data-act="nsDrawerClose"><div class="drawer">' +
-    '<div class="row between center" style="margin-bottom:10px"><b>' + ({details:"Details",lanes:"Lanes",freight:"Freight",filters:"Filters"}[state.nsDrawer]) + '</b><button class="btn icon ghost sm" data-act="nsDrawerClose">' + icon("x") + "</button></div>" +
-    (state.nsDrawer === "lanes" ? panelLanes(w) : state.nsDrawer === "freight" ? panelFreight(w) : state.nsDrawer === "filters" ? panelFilters(w) : panelDetails(w)) + "</div></div>" : "";
-  return chipbar + '<div class="mt-12">' + builderMap(w, 460, true, "") + "</div>" + drawer;
 }
 function panelDetails(w) {
   return '<div class="card" style="padding:16px"><div class="eyebrow" style="margin-bottom:10px">Details</div><div class="stack gap-12">' +
@@ -2248,13 +2189,6 @@ ACT.dashToggleJob = (d) => {
   if (on) { const b = DB.batches.find(x => x.id === d.id); if (b) { const bb = zoneBBox(b.zones); zoomToBox("dash", bb[0], bb[1], bb[2], bb[3], 40); } }
 };
 ACT.dashZoomJob = (d) => { const b = DB.batches.find(x => x.id === d.id); if (b) { state.dashJobs[d.id] = true; render(); const bb = zoneBBox(b.zones); zoomToBox("dash", bb[0], bb[1], bb[2], bb[3], 40); } };
-
-/* ---- New Search layouts (F48) ---- */
-ACT.nsLayout = (d) => { state.nsLayout = +d.l; state.nsDrawer = null; render(); };
-ACT.nsAcc = (d) => { state.nsAcc[d.k] = !state.nsAcc[d.k]; render(); };
-ACT.nsTab = (d) => { state.nsTab = d.t; render(); };
-ACT.nsDrawer = (d) => { state.nsDrawer = d.d; render(); };
-ACT.nsDrawerClose = (d, e) => { if (e && e.target.closest(".drawer") && !e.target.closest('[data-act="nsDrawerClose"].btn')) return; state.nsDrawer = null; render(); };
 
 /* ---- New Search control panel ---- */
 ACT.wzAddLane = (d) => {

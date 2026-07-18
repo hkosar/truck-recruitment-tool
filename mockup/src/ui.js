@@ -33,10 +33,6 @@ const state = {
   toasts: [],
   focus: null,                 // selector to focus after render
   feedOpen: false,             // batch activity feed expanded? (F32: collapsed default)
-  nsLayout: 1,                 // F48: New Search layout option (1..5)
-  nsAcc: { details:true, lanes:true, freight:false, filters:false },   // L2 accordion
-  nsTab: "details",            // L4 active tab
-  nsDrawer: null,              // L5 open drawer
   mapView: {},                 // mapId -> viewBox string (pan/zoom state, survives re-render)
   dashJobs: {}                 // batchId -> true (F30: dashboard map job toggles; empty = empty map)
 };

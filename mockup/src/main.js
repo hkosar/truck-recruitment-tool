@@ -68,13 +68,6 @@ ACT.dashToggleJob = (d) => {
 };
 ACT.dashZoomJob = (d) => { const b = DB.batches.find(x => x.id === d.id); if (b) { state.dashJobs[d.id] = true; render(); const bb = zoneBBox(b.zones); zoomToBox("dash", bb[0], bb[1], bb[2], bb[3], 40); } };
 
-/* ---- New Search layouts (F48) ---- */
-ACT.nsLayout = (d) => { state.nsLayout = +d.l; state.nsDrawer = null; render(); };
-ACT.nsAcc = (d) => { state.nsAcc[d.k] = !state.nsAcc[d.k]; render(); };
-ACT.nsTab = (d) => { state.nsTab = d.t; render(); };
-ACT.nsDrawer = (d) => { state.nsDrawer = d.d; render(); };
-ACT.nsDrawerClose = (d, e) => { if (e && e.target.closest(".drawer") && !e.target.closest('[data-act="nsDrawerClose"].btn')) return; state.nsDrawer = null; render(); };
-
 /* ---- New Search control panel ---- */
 ACT.wzAddLane = (d) => {
   const id = "lz" + (laneSeq++);

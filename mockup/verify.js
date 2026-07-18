@@ -56,23 +56,16 @@ const consoleErrors = [], pageErrors = [], external = [], failed = [];
     const labels = await page.$$eval(".nav a.reserved span:first-of-type", els => els.map(e => e.textContent));
     for (const want of ["Email","Text","Mail","Enrichment"]) if (!labels.includes(want)) throw new Error("missing tab " + want + " in " + labels.join(","));
   });
-  await step("new search: single control panel (no stepper)", async () => {
+  await step("new search: Columns layout (map + coverage on top, 3 columns)", async () => {
     await click('[data-act="newBatch"]'); await page.waitForSelector("#wz-name");
     if (await page.$(".stepper")) throw new Error("stepper still present (F26)");
-    for (const selr of [".builder-grid", ".cargo-flags", ".facet-list", '[data-act="wzAddLane"]']) if (!(await page.$(selr))) throw new Error("missing " + selr + " on one page");
-    await shot("04-builder-panel");
-  });
-  await step("new search: 5 layout options render (F48)", async () => {
-    const sig = { 2:".canvas-dock", 3:".cols-grid", 4:".tabs", 5:".chipbar" };
-    for (const l of [2,3,4,5]) {
-      await page.evaluate(l => ACT.nsLayout({ l }), l); await wait(150);
-      if (!(await page.$(sig[l]))) throw new Error("layout " + l + " missing " + sig[l]);
-      await shot("04-layout-" + l);
-    }
-    await ev(() => { const b = document.querySelector('.chipbar .defchip'); ACT.nsDrawer({ d: "freight" }); }); await wait(120);
-    if (!(await page.$(".drawer"))) throw new Error("L5 drawer did not open");
-    await shot("04-layout-5-drawer");
-    await ev(() => { state.nsDrawer = null; ACT.nsLayout({ l: 1 }); }); await wait(120);
+    if (await page.$(".ns-picker, .variant-switch")) throw new Error("layout picker should be gone (owner chose Columns)");
+    if (!(await page.$(".cols-grid"))) throw new Error("cols-grid missing");
+    const nCols = await page.$eval(".cols-grid", el => el.children.length);
+    if (nCols !== 3) throw new Error("expected 3 columns, got " + nCols);
+    if (!(await page.$("#wiz-cov"))) throw new Error("live coverage strip missing above columns");
+    for (const selr of [".cargo-flags", ".facet-list", '[data-act="wzAddLane"]']) if (!(await page.$(selr))) throw new Error("missing " + selr + " in columns");
+    await shot("04-columns");
   });
   await step("builder: name + lanes + facets + filters, live count", async () => {
     await page.fill("#wz-name", "SH-130 Corridor Recruitment"); await page.fill('[data-model="wizard.customer"]', "Central TX Materials");
