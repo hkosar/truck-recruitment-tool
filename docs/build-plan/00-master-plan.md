@@ -55,6 +55,8 @@ plan tasks → fan out independent workers (worktree isolation when files overla
 ## 3. Owner-provisioned prerequisites (Hunter's checklist)
 
 Ordered by when they block work. The manager asks for each **once, at the milestone that needs it**.
+**→ Step-by-step, copy-paste version for the owner (exact links, settings, and where each secret
+goes): [`OWNER-SETUP.md`](./OWNER-SETUP.md).**
 
 | When | What | Blocks |
 |---|---|---|
