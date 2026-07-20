@@ -110,13 +110,15 @@ floor).
 These are flagged in-line (`TODO(live-db)`, `TODO(schema-drift)`, `⚠️R#`) throughout `src/`,
 collected here for a fast overview:
 
-1. **Schema dependencies not yet in any migration.** This pipeline writes to `pipeline_runs`
-   (runs.ts), `data_quality_reports` (dq-report.ts), `pipeline_config` (referenced in
-   facets.ts/safety.ts's threshold comments, not yet used), `zip_centroids`/`city_centroids`
-   (geocode.ts). None of these appear in `01-architecture.md` Part A's DDL or its
-   reconciliation amendment #7 — they need migrations before the corresponding step can run
-   for real. `pipeline_runs` vs Part A's existing (differently-shaped) `sync_runs` table is
-   flagged as a specific naming/shape conflict, not just a missing table.
+1. ~~**Schema dependencies not yet in any migration.**~~ **RESOLVED** (M2 task #20 /
+   reconciliation amendment #21): `supabase/migrations/20260720001400_pipeline_tables.sql`
+   adds `pipeline_runs` (runs.ts), `data_quality_reports` (dq-report.ts), `pipeline_config`
+   (seeded with cargo seed terms + OOS thresholds — code still reads its constant, wiring live
+   is a small follow-up), and `zip_centroids`/`city_centroids` (geocode.ts, one-time-loaded).
+   The `pipeline_runs` vs `sync_runs` conflict was resolved by making `pipeline_runs` the real
+   operational table and redefining the dead `sync_runs` table as a `security_invoker` view
+   over it (latest run per source, for the G10 UI footer). Still needs `supabase db reset` to
+   run in an environment with the CLI/DB to confirm end-to-end (that is the M2 provisioning step).
 2. **L&I column names are unverified.** `sources/authority.ts` (6eyk-hxee) in particular —
    see `COLUMN-VERIFICATION.md`. Its `$select`/mapping must be corrected against a live
    `$limit=1` probe before `sync-authority` can run.

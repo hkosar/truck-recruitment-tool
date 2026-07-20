@@ -1,29 +1,16 @@
 import type { PipelineContext } from './db.js';
 
 /**
- * TODO(schema-drift -- flag for the schema-owning agent, do not silently resolve):
- * Part A's DDL (docs/build-plan/01-architecture.md §2.4) only defines a `sync_runs` table
- * keyed by the `sync_source` enum ('census'|'li'|'sms_safety'|'inspections'|'geocode') with
- * columns (id, source, started_at, finished_at, rows_upserted, ok, error) -- see that file's
- * `create table public.sync_runs (...)`.
- *
- * Part B §2.5 (this file's own spec) AND the master plan's acceptance criteria (M1.3, M2.1,
- * M2.6 in 00-master-plan.md) all target a richer `pipeline_runs` table instead: keyed by
- * free-text `job`/`step` (not the sync_source enum), with a running|success|failed `status`
- * enum plus `rows_read`/`rows_changed`/`meta jsonb` columns that `sync_runs` doesn't have.
- *
- * This is NOT resolved anywhere in 01-architecture.md's reconciliation section (items 1-20)
- * -- it's a genuine gap between Part A and Part B of that same document, and this task's
- * instructions are explicit that docs/ is not this package's file to edit. This file is
- * written against `pipeline_runs` because that is the literal table name every M2.x
- * acceptance criterion checks against. Before M1.3/M2.1 ship, the schema-owning agent needs
- * to either (a) add a `pipeline_runs` migration with the columns used below, or (b) fold
- * these columns into `sync_runs` and this file gets a short rename -- flag this explicitly
- * to that agent, don't have it silently pick one.
- *
- * Every query below is written as if the table already exists; until the migration lands,
- * `startRun` will fail with a Postgres "relation \"pipeline_runs\" does not exist" error,
- * which is the correct, honest failure mode for a real-but-unmigrated dependency.
+ * `pipeline_runs`: the operational run log this file reads/writes. RESOLVED (M2 task #20,
+ * reconciliation amendment #21): the Part A ↔ Part B drift this comment used to flag is fixed
+ * in supabase/migrations/20260720001400_pipeline_tables.sql. That migration adds
+ * `pipeline_runs` with exactly the columns used below — id, job (pipeline_job), step
+ * (pipeline_step), status (run_status running|success|failed), started_at, finished_at,
+ * rows_read, rows_upserted, rows_changed, error, meta jsonb — the table every M2.x acceptance
+ * criterion targets. The shipped-but-unused `sync_runs` table was redefined there as a
+ * security_invoker VIEW over pipeline_runs (latest run per sync_source) so the G10 UI-footer
+ * freshness contract keeps one source of truth: this pipeline writes `pipeline_runs`; the app
+ * reads `sync_runs`.
  */
 const PIPELINE_RUNS_TABLE = 'pipeline_runs';
 

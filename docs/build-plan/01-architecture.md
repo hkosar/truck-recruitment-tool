@@ -120,6 +120,20 @@ differ** (00-master-plan §0.3).
     row_count)` so F11's feed records exports; E2E asserts the activity row.
 20. **Nightly pipeline runtime ceiling is 60 minutes** (Part B's own estimate is 25–45 min);
     M2.6 AC, 04 §7 rule 6, and 05 §5 all use 60. Cost impact ≈ $0 (the $1/mo cron floor).
+21. **Pipeline-owned tables added; `sync_runs` becomes a view (M2 task #20 reconciliation).**
+    Migration `20260720001400_pipeline_tables.sql` defines the five tables Part B's pipeline
+    code depends on that amendment #7 missed: **`pipeline_runs`** (operational run log —
+    `id, job(pipeline_job), step(pipeline_step), status(run_status), started_at, finished_at,
+    rows_read, rows_upserted, rows_changed, error, meta jsonb`; the table every M2.x acceptance
+    criterion targets), **`pipeline_config`** (key/value jsonb, seeded with cargo seed terms and
+    OOS thresholds — §3.2.2, R6), **`zip_centroids`** + **`city_centroids`** (Census Gazetteer
+    fallback tiers 2/3, §4.2, one-time-loaded), and **`data_quality_reports`** (`run_date` PK,
+    §5/G10). Resolves the open `sync_runs` ↔ `pipeline_runs` question `runs.ts` flagged: the
+    shipped `sync_runs` **table** (0400) had no reader or writer, so it is redefined here as a
+    `security_invoker` **view** over `pipeline_runs` (latest run per `sync_source`), preserving
+    the G10 UI-footer freshness contract with one source of truth — the pipeline writes
+    `pipeline_runs`; the app reads `sync_runs`. All five tables: RLS staff-read, service_role
+    writes (D9). `geocode_precision` mapping in amendment #7 stands.
 
 ---
 
@@ -165,6 +179,7 @@ supabase/
     20260720001100_rpc.sql              -- public RPC surface + dashboard view
     20260720001200_rls.sql              -- enable RLS + all policies + grants
     20260720001300_realtime.sql         -- publication membership
+    20260720001400_pipeline_tables.sql  -- pipeline_runs/config/centroids/dq + sync_runs view (amend #21)
   seed.sql                               -- dev-only deterministic data (see §8)
 scripts/
   seed-auth-users.ts                     -- dev auth users via admin API (see §8)

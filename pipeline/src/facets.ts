@@ -24,11 +24,11 @@ import type { PipelineContext } from './db.js';
  *      A §2.5's "the manager refines from the UI" intent literally: once `match_group` is
  *      non-null, this file leaves it alone forever, by construction of the WHERE clause below.
  *
- * Seed term list is this pipeline's own hardcoded constant, not a `pipeline_config` table --
- * Part B §3.2.2 says the seeds are "maintained in pipeline_config", but that table doesn't
- * exist in Part A's DDL or amendment #7's added-table list (the same kind of gap flagged in
- * safety.ts for the OOS thresholds). Move SEED_TERMS to a real config mechanism once that
- * table exists; until then this is the single source of truth, easy to grep-and-edit.
+ * Seed term list: `pipeline_config` now exists (migration 001400, amendment #21) and is
+ * seeded with these same terms under key 'cargo_seed_terms'. This file still reads its own
+ * SEED_TERMS constant at run time — kept deliberately in sync with that seed row — so the
+ * facet job stays deterministic and grep-able. Wiring it to read the config row live (so a
+ * manager can retune without a deploy) is a small M2.x follow-up; the table + seed are ready.
  */
 
 export interface SeedTerm {

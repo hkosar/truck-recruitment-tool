@@ -4,12 +4,11 @@ import { checkStaleness, type PipelineStep } from './runs.js';
 /**
  * dq-report: fill-rate report + staleness watchdog (Part B §5, G10 "honest coverage").
  *
- * TODO(schema-drift): `data_quality_reports (run_date PK, metrics jsonb, created_at)` --
- * exactly like `pipeline_runs` (see runs.ts's header comment), this table is specified in
- * Part B §5 but absent from Part A's DDL (§2.4) and from amendment #7's added-table list.
- * Flag for the schema agent alongside `pipeline_runs`, `pipeline_config`, `zip_centroids`,
- * `city_centroids` -- this pipeline depends on a handful of tables Part A's migrations don't
- * yet define. Written here as if it already exists.
+ * `data_quality_reports (run_date PK, metrics jsonb, created_at)` is defined in
+ * supabase/migrations/20260720001400_pipeline_tables.sql (M2 reconciliation amendment #21),
+ * alongside `pipeline_runs`, `pipeline_config`, `zip_centroids`, and `city_centroids` — the
+ * tables this pipeline depends on that Part A's original DDL did not define. writeDqReport
+ * upserts one row per run_date.
  *
  * Warning distribution deliberately does NOT reimplement `internal.warning_reasons`'s
  * threshold logic. Amendment #8 is explicit: warnings are "computed live by

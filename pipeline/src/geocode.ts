@@ -7,21 +7,17 @@ import { sleep } from './socrata.js';
  * (street-level), (2) ZCTA Gazetteer centroid, (3) Places Gazetteer city centroid.
  *
  * ============================================================================================
- * SCHEMA GAP (flag for the schema agent, not silently invented here): `zip_centroids` and
- * `city_centroids` -- the one-time-loaded Gazetteer reference tables Part B §4.2 requires for
- * tiers 2/3 -- appear NOWHERE in Part A's DDL (§2.4) or in 01-architecture.md's reconciliation
- * amendment #7's "gains Part B's..." list, even though amendment #7 otherwise enumerates every
- * other Part-B-originated table (`carrier_insurance_filings`, `carrier_qc_snapshots`). These
- * two tables need a migration before `zipCentroidFallback`/`cityCentroidFallback` below can
- * run for real. Proposed minimal shape (this pipeline's own proposal, not confirmed):
+ * REFERENCE TABLES: `zip_centroids` and `city_centroids` — the one-time-loaded Gazetteer
+ * tables Part B §4.2 requires for geocode fallback tiers 2/3 — are defined in
+ * supabase/migrations/20260720001400_pipeline_tables.sql (M2 reconciliation amendment #21),
+ * with the shape this file queries:
  *   zip_centroids  (zcta text primary key, lat double precision, lng double precision)
  *   city_centroids (state text, city text, lat double precision, lng double precision,
  *                   primary key (state, city))
- * ...loaded once from the Census 2025 Gazetteer files (census.gov gazetteer-files) via a
- * one-off script, not by this nightly/monthly pipeline -- Part B §4.2 describes them as
- * "one-time-loaded", not part of the daily job. `loadZipCentroids`/`loadCityCentroids` below
- * are therefore intentionally thin stubs: the real loader is out of scope for this nightly
- * pipeline's own runtime and belongs in a one-off backfill script once the tables exist.
+ * They are loaded ONCE from the Census 2025 Gazetteer files (census.gov gazetteer-files) via a
+ * one-off backfill script, not by this nightly/monthly pipeline -- Part B §4.2 describes them
+ * as "one-time-loaded". `loadZipCentroids`/`loadCityCentroids` below are therefore intentionally
+ * thin stubs: the real loader belongs in that separate backfill script.
  *
  * `geocode_precision` mapping (01-architecture.md reconciliation item 6): "street ->
  * (rooftop|range_interpolated|geometric_center)". The Census batch geocoder's own match-type
@@ -288,10 +284,9 @@ export async function applyCensusResults(ctx: PipelineContext, results: CensusMa
 // ------------------------------------------------------------------------------------------
 
 /**
- * TODO(schema + one-time data load): requires `zip_centroids` (does not exist yet -- see file
- * header) populated from the Census ZCTA Gazetteer file. That load is a one-off backfill
- * script's job, not this nightly/monthly pipeline's -- this function assumes the table is
- * already populated and just joins against it.
+ * Requires `zip_centroids` (defined in migration 001400 — see file header) populated from the
+ * Census ZCTA Gazetteer file. That one-time load is a backfill script's job, not this
+ * nightly/monthly pipeline's -- this function assumes the table is populated and joins it.
  */
 export async function zipCentroidFallback(ctx: PipelineContext, candidates: GeocodeCandidate[]): Promise<number> {
   if (candidates.length === 0) return 0;
@@ -315,10 +310,9 @@ export async function zipCentroidFallback(ctx: PipelineContext, candidates: Geoc
 }
 
 /**
- * TODO(schema + one-time data load): requires `city_centroids` (does not exist yet -- see
- * file header) populated from the Census Places Gazetteer file (TX places). Last-resort tier
- * -- only reached by rows that failed BOTH the street match and the ZIP centroid join (e.g. a
- * ZIP not present in the Gazetteer extract).
+ * Requires `city_centroids` (defined in migration 001400 — see file header) populated from the
+ * Census Places Gazetteer file (TX places). Last-resort tier -- only reached by rows that
+ * failed BOTH the street match and the ZIP centroid join (e.g. a ZIP not in the Gazetteer extract).
  */
 export async function cityCentroidFallback(ctx: PipelineContext, candidates: GeocodeCandidate[]): Promise<number> {
   if (candidates.length === 0) return 0;
