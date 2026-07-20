@@ -884,14 +884,14 @@ as $$
   and not exists (
     select 1 from public.contact_suppressions cs
     where cs.dot_number = p_dot
-      and cs.channel in (p_channel, 'all')
+      and cs.channel::text in (p_channel::text, 'all')
       and cs.value is null
       and (cs.expires_at is null or cs.expires_at > now())
   )
   and not exists (
     select 1 from public.contact_suppressions cs, public.carriers c
     where c.dot_number = p_dot
-      and cs.channel in (p_channel, 'all')
+      and cs.channel::text in (p_channel::text, 'all')
       and cs.value is not null
       and (cs.expires_at is null or cs.expires_at > now())
       and lower(cs.value) = lower(
