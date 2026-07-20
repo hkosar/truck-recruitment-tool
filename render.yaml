@@ -99,10 +99,12 @@ services:
         sync: false # HUNTER: prod Supabase session-pooler connection string, port 5432 (direct Postgres for COPY/staging upserts - not the PostgREST API URL)
       - key: SOCRATA_APP_TOKEN
         sync: false # HUNTER: free app token from dev.socrata.com (00-master-plan §3 prerequisite, needed before M2.1)
-      - key: RESEND_API_KEY
-        sync: false # HUNTER: sends pipeline failure + weekly DQ-report emails (Part B §2.5); reused by the M7 email module later
+      # Optional until M7 and a Resend sending domain are configured. Render's native cron
+      # failure notification remains active when these are absent; add both together later.
+      # - key: RESEND_API_KEY
+      #   sync: false # HUNTER: sends pipeline failure + weekly DQ-report emails; reused by M7
       - key: ALERT_EMAIL
-        sync: false # HUNTER: address that receives those failure/DQ emails
+        sync: false # HUNTER: optional until RESEND_API_KEY is set; address for failure/DQ emails
       - key: PIPELINE_ENV
         sync: false # HUNTER: set to "prod" for this service - it targets the production Supabase project. ("dev" is only for running the pipeline locally against the dev project, Part B §6.4.)
       # NOTE: QCMOBILE_WEBKEY is intentionally NOT here. Per config.ts + architecture

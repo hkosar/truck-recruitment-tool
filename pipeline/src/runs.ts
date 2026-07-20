@@ -117,6 +117,15 @@ export async function sendFailureEmail(
   errorMessage: string,
   totals: RunTotals = {}
 ): Promise<void> {
+  if (!ctx.config.RESEND_API_KEY || !ctx.config.ALERT_EMAIL) {
+    ctx.log.warn('run.alert_email_skipped', {
+      job: run.job,
+      step: run.step,
+      reason: 'RESEND_API_KEY and ALERT_EMAIL are not both configured; relying on Render cron failure notification',
+    });
+    return;
+  }
+
   const subject = `[Twisted Nail pipeline] ${run.job}/${run.step} FAILED`;
   const text = [
     `Job: ${run.job}`,

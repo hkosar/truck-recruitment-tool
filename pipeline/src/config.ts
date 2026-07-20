@@ -7,9 +7,10 @@ import { z } from 'zod';
  * in the first second with a legible message, not 20 minutes into a census pull because
  * SUPABASE_DB_URL had a typo (Part B §2.5's alerting philosophy applied to startup too).
  *
- * Scope note: this list is a superset of the task brief's explicit
- * `SUPABASE_URL, SUPABASE_SERVICE_ROLE_KEY, SOCRATA_APP_TOKEN, CENSUS_*, RESEND_API_KEY,
- * ALERT_EMAIL`. Two additions were necessary, not optional:
+ * Scope note: this list includes the task brief's data-source and database values plus optional
+ * Resend alerting. Resend itself is deferred until M7 / verified DNS, so its two values do not
+ * block ingestion; Render's cron-failure notification covers the launch phase. Two additions to
+ * the core data configuration were necessary, not optional:
  *   - `SUPABASE_DB_URL`: db.ts's "direct pg option" (COPY / staging tables / set-based
  *     upserts at ~150-220k-row scale) needs a real Postgres connection string; PostgREST
  *     alone can't do that (Part B §6.1).
@@ -60,8 +61,11 @@ const EnvSchema = z.object({
   CENSUS_MAX_BATCHES_PER_RUN: z.coerce.number().int().positive().default(30),
 
   // ---- Alerting (Part B §2.5: "throw -> ... email via Resend ... belt + suspenders") -
-  RESEND_API_KEY: z.string().min(1, 'RESEND_API_KEY is required for failure-email alerting'),
-  ALERT_EMAIL: z.string().email('ALERT_EMAIL must be a valid email address'),
+  // Resend is deliberately deferred until M7 / a verified sending domain exists. Render's
+  // native cron failure notification remains the launch-phase alert path; when this key is
+  // absent, runs.ts logs that email alerting was skipped instead of blocking data ingestion.
+  RESEND_API_KEY: z.string().min(1).optional(),
+  ALERT_EMAIL: z.string().email('ALERT_EMAIL must be a valid email address').optional(),
 
   // ---- Misc ---------------------------------------------------------------------------
   /** 'prod' | 'dev' -- labels pipeline_runs.meta and log lines; does NOT itself cap page/

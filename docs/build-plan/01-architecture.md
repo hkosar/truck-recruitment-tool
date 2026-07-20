@@ -1149,7 +1149,7 @@ FMCSA replaces these datasets wholesale on refresh, which makes Socrata's `:upda
 
 - `pipeline_runs` table: `(id, job, step, started_at, finished_at, status running|success|failed, rows_read, rows_upserted, rows_changed, error, meta jsonb)`. Every step logs start/end.
 - Per-request: retry 429/5xx/network with exponential backoff (5 tries, 2s→60s), honoring the 1,000/hr token budget.
-- Per-step: throw → chain stops, run row marked `failed`, **email via Resend** (`RESEND_API_KEY`, `ALERT_EMAIL`) with job/step/error/row counts; process exits non-zero so **Render's cron failure notification** fires too (belt + suspenders).
+- Per-step: throw → chain stops, run row marked `failed`, and process exits non-zero so **Render's cron failure notification** fires. Once Resend + verified sending DNS are provisioned at M7, optional `RESEND_API_KEY` + `ALERT_EMAIL` add a second email with job/step/error/row counts (belt + suspenders); their absence must never block ingestion.
 - Staleness watchdog inside `dq-report`: if `sync-census` last success > 48h → alert even if today's run "succeeded" vacuously.
 - G10 trust: the dashboard's data-health view (§5) shows last-sync timestamps per source.
 
@@ -1275,7 +1275,7 @@ pipeline/
 |---|---|
 | `SUPABASE_DB_URL` | postgres connection (session pooler) |
 | `SOCRATA_APP_TOKEN` | 1,000 req/hr budget (✅ dev.socrata.com/docs/app-tokens.html) |
-| `RESEND_API_KEY`, `ALERT_EMAIL` | failure + weekly DQ emails |
+| `RESEND_API_KEY`, `ALERT_EMAIL` | optional until M7 + verified sending DNS; adds failure + weekly DQ emails |
 | `QCMOBILE_WEBKEY` | optional, on-demand profile verification (F7) |
 | `PIPELINE_ENV` | `prod` / `dev` (dev caps pages, targets dev project) |
 
