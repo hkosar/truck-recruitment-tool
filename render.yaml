@@ -52,7 +52,7 @@ services:
       - key: VITE_GOOGLE_MAPS_MAP_ID
         sync: false # HUNTER: Map ID from the Google Cloud Console (Maps Platform -> Map Management)
       - key: VITE_MAPS_PROVIDER
-        sync: false # HUNTER: "google" at launch (decision D1); "maplibre" only if the documented fallback is ever built
+        value: google # committed decision D1; switch to "maplibre" only if the documented fallback is ever built (not a value the owner needs to supply)
 
   # ---------------------------------------------------------------------
   # 2) pipeline/ — nightly FMCSA -> Supabase ingestion, as a Render Cron Job.
@@ -88,8 +88,13 @@ services:
     envVars:
       - key: NODE_VERSION
         value: "22"
-      # Names + purpose per 01-architecture.md Part B §6.2 "Env / secrets".
+      # Names + purpose per 01-architecture.md Part B §6.2 "Env / secrets" and the
+      # zod schema in pipeline/src/config.ts (the source of truth for what's required).
       # All sync: false — set once, interactively, in the Render dashboard.
+      - key: SUPABASE_URL
+        sync: false # HUNTER: prod Supabase project's API URL, e.g. https://<ref>.supabase.co (same URL the app uses; the service-role JS client reads it)
+      - key: SUPABASE_SERVICE_ROLE_KEY
+        sync: false # HUNTER: prod Supabase service_role / secret key (sb_secret_…). Master key — bypasses RLS by design (Part A D9). NEVER the anon/publishable key.
       - key: SUPABASE_DB_URL
         sync: false # HUNTER: prod Supabase session-pooler connection string, port 5432 (direct Postgres for COPY/staging upserts - not the PostgREST API URL)
       - key: SOCRATA_APP_TOKEN
@@ -98,7 +103,9 @@ services:
         sync: false # HUNTER: sends pipeline failure + weekly DQ-report emails (Part B §2.5); reused by the M7 email module later
       - key: ALERT_EMAIL
         sync: false # HUNTER: address that receives those failure/DQ emails
-      - key: QCMOBILE_WEBKEY
-        sync: false # HUNTER: optional - powers on-demand carrier-profile verification (M5.8). Leave unset before then; the Inspections tile just shows its empty state (01-architecture.md amendment 16)
       - key: PIPELINE_ENV
         sync: false # HUNTER: set to "prod" for this service - it targets the production Supabase project. ("dev" is only for running the pipeline locally against the dev project, Part B §6.4.)
+      # NOTE: QCMOBILE_WEBKEY is intentionally NOT here. Per config.ts + architecture
+      # amendment #16, on-demand carrier inspections are served by the Supabase Edge
+      # Function `qc-fetch` (the WebKey is a Supabase secret, set later at M5.8) — the
+      # nightly pipeline never calls QCMobile, so this cron must not prompt for it.
