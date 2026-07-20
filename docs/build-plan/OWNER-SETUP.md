@@ -1,131 +1,176 @@
-# Owner setup guide — provisioning the accounts the build needs
+# Twisted Nail Recruiter — Setup Guide (no experience needed)
 
-**Audience: Hunter.** This turns the master plan's prerequisite table (`00-master-plan.md` §3)
-into do-this-now steps. Each item says exactly **where to click, what to set, and where the
-resulting secret goes.** You do not need to understand the code — just create the account, copy
-the value, and paste it where the "→ goes in" line says.
+This is your click-by-click list of the accounts I need you to create so I can build and launch
+the tool. It assumes you've never done any of this before. Nothing is skipped.
 
-**The golden rule:** never paste a secret into a chat, a commit, or a public place. The
-`SUPABASE_SERVICE_ROLE_KEY` in particular is a master key that bypasses all security — treat it
-like the keys to the building. When you have a value, put it straight into the destination named
-below (a Render/Supabase settings field or a local `.env.local` file that is git-ignored).
+**How to use this:** do the three tasks in **Part 1** first — those are the ones blocking me right
+now. Each task ends with a **"✅ When you're done, send me:"** box. Parts 2 and 3 come later; I'll
+tell you when, and we'll do them together. Work at your own pace; you can stop and come back.
 
-Legend for "→ goes in":
-- **app** = `app/.env.local` locally, and the Static Site's *Environment* tab on Render in prod.
-- **pipeline** = the Cron Job's *Environment* tab on Render (locally: `pipeline/.env.local`).
-- **Supabase secret** = Supabase dashboard → Edge Functions → Secrets.
+**One safety rule:** a couple of the values you'll copy are like master keys. I'll mark those
+**🔒 SECRET**. Don't paste a 🔒 SECRET value into our chat — I'll give you a spot to put it that
+keeps it private. Everything else is safe to paste to me directly.
 
 ---
 
-## Tier 1 — do these before the build session (they unblock the whole build)
+# PART 1 — The three accounts that unblock the build
 
-### 1. Supabase — the database + login + realtime  · blocks everything (M1.2)
-
-1. Create a free account at **https://supabase.com** (sign in with GitHub is easiest).
-2. Create **two projects** in the same org:
-   - **`twisted-nail-recruiter-prod`** — the real one. Region: **US East** (closest to TX + our
-     data sources). Save the database password in your password manager.
-   - **`twisted-nail-recruiter-dev`** — a throwaway for development. Same region.
-3. Upgrade **only the prod project** to **Pro ($25/mo)** — Settings → Billing → upgrade. This buys
-   daily backups and stops the project from auto-pausing (a shared call-tool can't lose data or
-   go to sleep). **Leave dev on the free tier.** Then flip **Settings → Billing → Spend cap = ON**
-   (overages error instead of surprise-billing).
-4. For **each** project, grab three values from **Settings → API** and **Settings → Database**:
-   - Project **URL** (e.g. `https://abcdxyz.supabase.co`) → goes in **app** (`VITE_SUPABASE_URL`,
-     prod only) and **pipeline** (`SUPABASE_URL`).
-   - **anon / public** key → goes in **app** (`VITE_SUPABASE_ANON_KEY`). Safe to expose in a browser.
-   - **service_role** key → goes in **pipeline** (`SUPABASE_SERVICE_ROLE_KEY`). **Secret. Never the
-     browser. Never committed.**
-   - Database → Connection string → **Session pooler** (port 5432) → goes in **pipeline**
-     (`SUPABASE_DB_URL`). Replace `PASSWORD` with the db password from step 2.
-
-> You can also just add me (the manager) as a member of the Supabase org and I'll create the
-> projects and read the keys directly — your call. Either way, Pro + spend-cap is your decision to click.
-
-### 2. Render — hosting for the app + the nightly data job · blocks the deploy (M1.3)
-
-1. Create a **Render** account at **https://render.com** (Hobby workspace, free) and **connect it
-   to the GitHub repo** `hkosar/truck-recruitment-tool` (Render → Account → GitHub → configure).
-2. That's all you do here — the repo already contains `render.yaml`, so once connected I wire the
-   Static Site (the app) and the one Cron Job (the nightly data sync) from that file, and paste the
-   Tier-1 secrets into their Environment tabs.
-
-### 3. Socrata app token — lifts the FMCSA data rate limit · blocks the first data pull (M2.1)
-
-1. Create a free account on the data portal at **https://data.transportation.gov** (Sign In →
-   Sign Up), confirm email, then register an **app token** at **https://dev.socrata.com/register**
-   (sign in with that same account).  *(Just the token string — you do NOT need the secret/OAuth parts.)*
-2. Copy the app token → goes in **pipeline** (`SOCRATA_APP_TOKEN`).
-
-**With Tiers 1–3 done, the data layer can go live and the build session can start in earnest.**
+Do these in order. Total time: about 30–40 minutes.
 
 ---
 
-## Tier 2 — needed a little later in the build (not day one)
+## Task 1 — Supabase (the database + logins)  ·  ~15 min
 
-### 4. Google Maps — the real maps · needed before M4 (search/batch maps)
+This is where all the trucker data and user logins live.
 
-Maps are free at our scale, **but only if you set the hard caps** — Google's "budget alerts"
-warn you, they do **not** stop spending; **only per-API quota caps hard-stop the bill.**
+### 1A. Create your account
+1. Open a web browser and go to **https://supabase.com**
+2. Click the green **"Start your project"** button (top-right).
+3. On the sign-in screen, click **"Continue with GitHub"** (you already have a GitHub account for
+   this project, so this is the simplest). A window pops up asking to authorize — click the green
+   **"Authorize supabase"** button.
+4. If it asks you to create an **organization**: in the "Name" box type `Twisted Nail`, leave the
+   plan on **Free**, and click **"Create organization"**.
 
-1. **https://console.cloud.google.com** → create a project `twisted-nail-recruiter`.
-2. **Billing → link a billing account with a card** (mandatory even though we expect $0).
-3. **APIs & Services → Enable APIs:** enable exactly **Maps JavaScript API**, **Geocoding API**,
-   and **Routes API**. (Do not enable others.)
-4. **APIs & Services → Quotas — set these hard caps (this is what protects you):**
-   - Maps JavaScript "Dynamic Maps" → **500 / day**
-   - Geocoding → **200 / day**
-   - Routes (Compute Routes) → **200 / day**
-   - *(Place Details → 50/day — only if/when we add enrichment; skip for now.)*
-5. **Billing → Budgets & alerts → create a budget** with email alerts at **$5** and **$25** to
-   your email. (Smoke detector under the hard caps.)
-6. **Credentials → Create credentials → API key** → then **restrict it**: Application restriction =
-   **HTTP referrers**, add the app's domain(s) (I'll give you the exact Render URL); API
-   restriction = the **three** APIs above only.
-7. **Maps JavaScript API → Map management → create a Map ID** (Vector) for advanced markers.
-8. Copy the **API key** → **app** (`VITE_GOOGLE_MAPS_API_KEY`); copy the **Map ID** → **app**
-   (`VITE_GOOGLE_MAPS_MAP_ID`). The browser key is referrer-locked, so it's safe in the app bundle.
+### 1B. Create the first project (the real one)
+1. You're now on the dashboard. Click **"New project"** (a green button, usually top-right).
+2. Fill in the form:
+   - **Name:** type `twisted-nail-recruiter-prod`
+   - **Database Password:** click the **"Generate a password"** link. A random password appears.
+     **Copy it now and paste it somewhere safe** (a note on your phone, a password manager) — you
+     will need it later and it is not shown again.
+   - **Region:** click the dropdown and choose **"East US (North Virginia)"** (closest to Texas).
+   - Leave everything else as-is.
+3. Click **"Create new project"** at the bottom. A loading screen appears — wait ~2 minutes for it
+   to finish setting up. When the project dashboard loads, this one is done.
 
-### 5. Resend — sending domain for pipeline alerts (and later, job-offer emails) · lead time for M7
+### 1C. Create the second project (a practice copy)
+1. Click the project name at the top-left, then **"New project"** again.
+2. **Name:** `twisted-nail-recruiter-dev` · generate + **save a new password** · same **East US**
+   region · **"Create new project"**. Wait for it to finish. (This one stays free — it's my
+   sandbox so I never test on your real data.)
 
-DNS changes take time to propagate, so start this early even though email sends are a later phase.
+### 1D. Turn on backups + a spending safety-net (on the REAL project only)
+1. Open the **`twisted-nail-recruiter-prod`** project (click its name at top-left if you're not in it).
+2. Click the **gear icon (Settings)** at the bottom of the left sidebar.
+3. Click **"Billing"**.
+4. Click **"Change plan"** (or **"Upgrade to Pro"**) → choose the **Pro — $25/month** plan → enter
+   your card details → confirm. *(This buys daily backups and keeps the tool from falling asleep —
+   both required for a real team tool. The practice project stays free.)*
+5. Still under Billing, look for a setting called **"Spend cap"** (or "Cost control") and make sure
+   it is **ON / enabled**. This means if something ever went over the plan, it stops instead of
+   charging you extra. **Leave it on.**
 
-1. Create **https://resend.com** (free to start; Pro $20/mo only when the email module ships).
-2. **Add a domain** → use a **subdomain** `offers.twistednail.com` (protects your main domain's
-   reputation) → Resend shows SPF / DKIM / DMARC records → add them at your DNS host (GoDaddy/
-   Cloudflare/wherever `twistednail.com` lives). Verify.
-3. Create an **API key** → goes in **pipeline** (`RESEND_API_KEY`). Pipeline failure alerts already
-   go to `hunter.kosar@gmail.com` (`ALERT_EMAIL`) — change that line if you want a different inbox.
+### 1E. Copy the values I need
+Do this for **BOTH** projects (prod first, then dev — just tell me which is which). For each project:
+1. Open the project → click the **gear icon (Settings)** → click **"API"** (it may be under a
+   "Configuration" or "Data API" heading).
+2. You'll see:
+   - **Project URL** — looks like `https://abcdefgh.supabase.co`. This is **safe to share.**
+   - **Project API Keys**, with two keys:
+     - **`anon` / `public`** (sometimes labeled *"publishable"*) — **safe to share.**
+     - **`service_role`** (sometimes labeled *"secret"*) — click **"Reveal"** to see it. This is
+       **🔒 SECRET** — a master key. Don't paste it in chat.
+3. Now click **Settings → "Database"**. Find **"Connection string"**, click the **"Session pooler"**
+   tab, and copy the string shown (it starts with `postgresql://`). This one is **🔒 SECRET** (it
+   has your password in it).
 
-### 6. FMCSA QCMobile WebKey — powers the on-demand inspection lookups · needed for M5.8 only
-
-- Request a **WebKey** via a Login.gov developer account (FMCSA QCMobile). Not launch-blocking —
-  the carrier profile's Inspections tile shows a graceful "no data yet" state until this exists.
-- When you have it → goes in **Supabase secret** (`QCMOBILE_WEBKEY`) — it lives server-side in the
-  `qc-fetch` Edge Function, **not** in the app or the pipeline.
+> **✅ When you're done, send me (safe values only):**
+> *"Prod URL: `https://…`, prod anon key: `…`" and the same two for dev.* Then tell me
+> **"I have the two 🔒 SECRET values ready"** and I'll give you a 30-second, private way to hand
+> those over (you'll paste them into a settings box in your own browser — they never touch our chat).
 
 ---
 
-## Tier 3 — right before launch
+## Task 2 — Render (where the tool actually runs online)  ·  ~5 min
 
-- **App domain:** a DNS record like `recruit.twistednail.com` → the Render app (I'll give you the
-  target once the site exists).
-- **The 5 real user emails** (you + team) so I can provision their accounts and roles
-  (manager / edit / view), and you approve each from the Users screen.
-- **Company physical mailing address** — legally required in the footer of any marketing email
-  (only matters once the email module ships).
+Render is the service that will host the website and run the nightly job that refreshes the data.
+
+1. Go to **https://render.com** and click **"Get Started"** (or **"Sign In"**).
+2. Click **"GitHub"** to sign in with your GitHub account → click **"Authorize Render"** in the popup.
+3. If it asks you to create a **workspace**: name it `Twisted Nail`, pick the **Hobby (Free)** option,
+   and continue.
+4. Now connect the code repository so Render can see it:
+   - Click your **account/profile icon** (top-right) → **"Account Settings"** → **"GitHub"** in the
+     left menu → click **"Configure"** (this opens GitHub).
+   - On the GitHub page, under "Repository access" choose **"Only select repositories"**, click the
+     dropdown, and pick **`hkosar/truck-recruitment-tool`** → click **"Save"** (or "Install").
+5. That's your part. You do **not** need to create any services — the code already contains the
+   recipe (a file called `render.yaml`), and I'll build the website and the nightly job from it
+   once you've connected the repo.
+
+> **✅ When you're done, send me:** *"Render is connected to the repo."* (Nothing to copy here.)
 
 ---
 
-## What you can safely ignore
+## Task 3 — Socrata data token (a free pass for the government data feed)  ·  ~5 min
 
-- **Census Bureau geocoder** — free, no key, already configured. Nothing for you to do.
-- Anything asking you to choose infrastructure regions/sizes beyond what's above — the plan
-  (`04-costs.md`) already fixed those for cost; I'll flag it if a real fork needs your call.
+The trucker data comes from a public U.S. Department of Transportation dataset. Without a free
+"token," they limit how fast we can download; with one, we can pull the whole Texas list.
 
-## Cost summary (from `04-costs.md`)
+1. Go to **https://data.transportation.gov**
+2. Top-right, click **"Sign In"**, then **"Sign Up"** (or "Create account"). Enter an email and
+   password, and confirm the verification email they send you.
+3. Once signed in, open **https://dev.socrata.com/register** in the same browser.
+4. Sign in there with the same account if asked. You'll get a short form:
+   - **Application Name:** type `Twisted Nail Recruiter`
+   - **Description:** type `Internal carrier recruiting tool`
+   - Leave the rest blank/default.
+5. Click **"Create"**. The page now shows an **"App Token"** — a string of letters and numbers.
+   Copy it. *(This one is low-risk — it's just a rate-limit pass, not a key to any of your data,
+   so it's safe to share.)*
 
-- **Launch MVP: ~$26/mo** — the only real bill is Supabase Pro ($25); everything else rides free
-  tiers with the caps above enforced. Google Maps, Socrata, Census geocoder, Render Hobby = $0.
-- **+ Email module (later): ~$46/mo** (adds Resend Pro $20).
-- Every paid line has a cap or spend-toggle so there are no surprise bills.
+> **✅ When you're done, send me:** *"Socrata token: `…`"*
+
+---
+
+### 🎉 That's Part 1. Once Tasks 1–3 are done and you've sent me those values, I can put the
+database live, pull the first batch of real Texas carriers, and start building the actual screens.
+
+---
+
+# PART 2 — Needed a bit later (don't do these yet)
+
+I'll walk you through each of these — click by click, same as above — when the build reaches the
+point that needs it. Listed here just so you can see what's coming.
+
+## Task 4 — Google Maps (for the real maps)  ·  needed before the map screens
+Google Maps is free at our size, **but only if the right spending limits are set** — I'll give you
+the exact numbers to type in. Rough shape: create a Google Cloud project, put a card on file (Google
+requires it even though we expect $0), turn on three specific map services, set daily usage caps and
+$5/$25 alert emails, and create a map "key" locked to our website. It's the fiddliest one, which is
+exactly why we'll do it together step by step when the time comes.
+
+## Task 5 — Resend (email sending), only if/when we add the job-offer email feature
+This one has DNS records (settings at wherever `twistednail.com` is registered) that take a day to
+"propagate," so we'll start it early even though email is a later phase.
+
+## Task 6 — FMCSA "WebKey" (for the deep safety-inspection details on a carrier's profile)
+A free developer key from the FMCSA. Not required to launch — the profile just shows "no data yet"
+on that one panel until it's added.
+
+---
+
+# PART 3 — Right before we go live
+
+- A web address for the tool (like `recruit.twistednail.com`) — one DNS record I'll give you.
+- The **email addresses of the 5 people** who'll use the tool, so I can set up their logins and you
+  can approve them.
+- Your **company's physical mailing address** (only needed once we turn on marketing emails — it's
+  a legal requirement in email footers).
+
+---
+
+## Quick reference — what each value is and how sensitive it is
+
+| Value | From | Safe to paste in chat? |
+|---|---|---|
+| Supabase Project URL (prod + dev) | Task 1E | ✅ Yes |
+| Supabase `anon`/public key (prod + dev) | Task 1E | ✅ Yes |
+| Supabase `service_role` key | Task 1E | 🔒 No — we'll do the private handoff |
+| Supabase database connection string | Task 1E | 🔒 No — we'll do the private handoff |
+| Socrata App Token | Task 3 | ✅ Yes |
+| Google Maps key + Map ID | Task 4 (later) | ✅ Yes (it's locked to our site) |
+
+**Total cost once running: about $26/month** — the only real bill is the Supabase Pro plan ($25).
+Everything else in Part 1 is free, and every paid service has a cap so there are no surprise charges.
