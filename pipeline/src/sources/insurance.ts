@@ -84,8 +84,7 @@ function buildStagingDdl(): string {
     .join(',\n');
   return `
 create temp table staging_insurance (
-${cols},
-  "raw" jsonb
+${cols}
 ) on commit drop;
   `.trim();
 }
@@ -101,7 +100,6 @@ ${cols},
 export function buildFilingsUpsertSql(): string {
   const cols = [
     ...INSURANCE_FIELD_MAP.map((f) => ({ column: f.column, selectExpr: castedExpr(f) })),
-    { column: 'raw', selectExpr: 'sc."raw"' },
     { column: 'synced_at', selectExpr: 'now()' },
   ];
   const columnList = cols.map((c) => `"${c.column}"`).join(', ');
@@ -178,7 +176,6 @@ function mapRowToStagingTuple(row: Record<string, unknown>, sodaFields: readonly
     const v = row[f];
     return v === undefined || v === null ? null : String(v);
   });
-  values.push(JSON.stringify(row));
   return values;
 }
 
@@ -200,7 +197,7 @@ export async function syncInsurance(
 ): Promise<InsuranceSyncResult> {
   const pageSize = options.pageSize ?? DEFAULT_PAGE_SIZE;
   const sodaFields = uniqueSodaFields();
-  const stagingColumns = [...sodaFields, 'raw'];
+  const stagingColumns = sodaFields;
 
   let rowsRead = 0;
   let pageCount = 0;
