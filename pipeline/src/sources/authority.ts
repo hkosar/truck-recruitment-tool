@@ -13,8 +13,12 @@ import { DEFAULT_PAGE_SIZE, SOCRATA_DATASETS, SocrataClient } from '../socrata.j
  * `/api/views/6eyk-hxee` metadata probe and token-authenticated sample then confirmed the exact
  * fields: `dot_number`, `common_stat`, `contract_stat`, `broker_stat`, and `min_cov_amount`.
  * Status values are compact codes (`A`, `I`, `N`, with `P` handled defensively), not words.
- * `min_cov_amount` is a zero-padded dollar string and is stored directly, without the earlier
- * unverified ×1000 transform. AUTHORITY_FIELD_MAP below is now the verified runtime contract.
+ * `min_cov_amount` is a zero-padded thousands-of-dollars string (for example, `00750` =
+ * $750,000), confirming the existing ×1000 database contract. This is genuinely an all-history
+ * dataset (1,860,604 rows vs. 1,679,121 distinct DOTs, plus 159,141 placeholder DOT 00000000
+ * rows), so staging is intentionally non-unique and SQL rolls each DOT up with status precedence
+ * active > inactive > pending > none before the carrier upsert. AUTHORITY_FIELD_MAP below is now
+ * the verified runtime contract.
  *
  * ============================================================================================
  * Division of labor with sync-insurance (deliberate, not from a single literal spec line):
@@ -81,13 +85,13 @@ const AUTHORITY_FIELD_MAP: AuthorityFieldMapping[] = [
     castExpr: authorityStatusCastExpr('%COL%'),
     verified: true,
   },
-  // Live dataset field is MIN_COV_AMOUNT. Values are zero-padded dollar amounts (for example,
-  // 00000), so store the parsed amount directly; do not apply the earlier unverified ×1000.
+  // Live dataset field is MIN_COV_AMOUNT. Observed values such as 00750 / 01000 represent
+  // thousands of dollars ($750k / $1MM), matching the existing DDL contract; ingest ×1000.
   {
     soda: 'min_cov_amount',
     column: 'bipd_required',
     sqlType: 'bigint',
-    castExpr: "nullif(%COL%, '')::numeric::bigint",
+    castExpr: "(nullif(%COL%, '')::numeric * 1000)::bigint",
     verified: true,
   },
 ];
@@ -98,6 +102,12 @@ function uniqueSodaFields(): string[] {
 
 export function buildSelectClause(): string {
   return uniqueSodaFields().join(',');
+}
+
+function buildWhereClause(): string {
+  // The history dataset contains ~159k placeholder rows with DOT 00000000, none of which can
+  // join to census carriers. Excluding them upstream cuts bandwidth and avoids invalid casts.
+  return "dot_number != '00000000'";
 }
 
 function castedExpr(f: AuthorityFieldMapping): string {
@@ -113,8 +123,7 @@ function buildStagingDdl(): string {
   return `
 create temp table staging_authority (
 ${cols},
-  "authority_raw" jsonb,
-  primary key ("dot_number")
+  "authority_raw" jsonb
 ) on commit drop;
   `.trim();
 }
@@ -146,9 +155,41 @@ export function buildUpsertSql(): string {
     .join(',\n    ');
 
   return `
+with authority_rollup as (
+  select
+    "dot_number",
+    case
+      when bool_or("common_stat" = 'A') then 'A'
+      when bool_or("common_stat" = 'I') then 'I'
+      when bool_or("common_stat" = 'P') then 'P'
+      else 'N'
+    end as "common_stat",
+    case
+      when bool_or("contract_stat" = 'A') then 'A'
+      when bool_or("contract_stat" = 'I') then 'I'
+      when bool_or("contract_stat" = 'P') then 'P'
+      else 'N'
+    end as "contract_stat",
+    case
+      when bool_or("broker_stat" = 'A') then 'A'
+      when bool_or("broker_stat" = 'I') then 'I'
+      when bool_or("broker_stat" = 'P') then 'P'
+      else 'N'
+    end as "broker_stat",
+    max(nullif("min_cov_amount", '')::numeric)::text as "min_cov_amount",
+    jsonb_build_object(
+      'source', '6eyk-hxee',
+      'history_rows', count(*),
+      'active_common_rows', count(*) filter (where "common_stat" = 'A'),
+      'active_contract_rows', count(*) filter (where "contract_stat" = 'A'),
+      'active_broker_rows', count(*) filter (where "broker_stat" = 'A')
+    ) as "authority_raw"
+  from staging_authority
+  group by "dot_number"
+)
 insert into public.carrier_insurance (${columnList})
 select ${selectList}
-from staging_authority sc
+from authority_rollup sc
 -- Part B §2.4: "filter in-worker to DOTs present in carriers" -- enforced here in SQL rather
 -- than in JS so it stays correct even if a future caller skips the JS-side filter.
 where exists (select 1 from public.carriers c where c.dot_number = sc."dot_number"::bigint)
@@ -198,7 +239,7 @@ export async function syncAuthority(
     // approach, and this dataset's identity/order column isn't confirmed yet anyway).
     for await (const page of socrata.paginateOffset<Record<string, string>>(
       SOCRATA_DATASETS.LI_CARRIER_ALL_WITH_HISTORY,
-      { $select: buildSelectClause() },
+      { $select: buildSelectClause(), $where: buildWhereClause() },
       pageSize
     )) {
       pageCount += 1;

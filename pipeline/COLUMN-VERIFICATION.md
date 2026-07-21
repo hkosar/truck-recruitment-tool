@@ -223,12 +223,13 @@ then confirmed the runtime contract:
 | Common authority | `common_stat` | compact code (`A`, `I`, `N`; `P` handled defensively) |
 | Contract authority | `contract_stat` | compact code |
 | Broker authority | `broker_stat` | compact code |
-| Required BIPD minimum | `min_cov_amount` | zero-padded dollar string, stored directly |
+| Required BIPD minimum | `min_cov_amount` | zero-padded thousands of dollars (`00750` = $750,000); ingest ×1000 |
 
 The prior guesses `common_authority_status`, `contract_authority_status`,
-`broker_authority_status`, and `bipd_required_amount` do not exist in this dataset. The prior
-unverified ×1000 conversion was also removed. `sources/authority.ts` now implements the live
-field names and code-to-enum mapping.
+`broker_authority_status`, and `bipd_required_amount` do not exist in this dataset. Live value
+frequencies (`00750`, `01000`, `00300`) confirm the DDL's thousands-of-dollars interpretation,
+so the ×1000 conversion remains. `sources/authority.ts` now implements the live field names and
+code-to-enum mapping.
 
 ### 2.3 SMS / safety datasets (`4y6x-dmck`, `sjpe-nzai`) — UNVERIFIED, dataset choice itself unresolved
 
