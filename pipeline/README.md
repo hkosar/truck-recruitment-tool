@@ -73,6 +73,7 @@ npm run typecheck                                  # tsc --noEmit
 npm run build                                       # tsc emit (CI artifact / validation; see tsconfig.json's note — Render runs tsx against source, not this output)
 npm run dev                                          # nightly, --pages=1 --batches=1
 tsx src/run.ts sync-census --pages=1                 # isolate exactly one step
+tsx src/run.ts sync-insurance --pages=1 --dry-run=true # fast, non-persistent mapping/staging validation
 tsx src/run.ts nightly --from=geocode                # resume a chain partway through
 tsx src/run.ts backfill --pages=5 --batches=5        # capped backfill smoke test
 npm run monthly                                      # sync-safety alone
@@ -81,7 +82,9 @@ npm run backfill                                     # full backfill chain, unca
 
 `--pages=N` caps every Socrata pull's page count (10,000 rows per page by default, chosen to stay
 within Render's 512 MB cron memory); `--batches=N` caps how many Census geocoder batches
-`geocode` submits in one run. Every step prints the same
+`geocode` submits in one run. `--dry-run=true` is supported for isolated `sync-insurance`
+validation: it fetches/maps/stages the capped sample and reports key quality without writing the
+permanent filings/rollup tables. Every step prints the same
 `pipeline_runs`-shaped structured JSON log lines regardless of how it was invoked.
 
 **Do not run `backfill` uncapped against a project you don't intend to fully populate** — per

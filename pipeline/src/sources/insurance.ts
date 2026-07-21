@@ -112,7 +112,20 @@ export function buildFilingsUpsertSql(): string {
   return `
 insert into public.carrier_insurance_filings (${columnList})
 select ${selectList}
-from staging_insurance sc
+from (
+  -- The upstream history export contains exact duplicate rows and 81 BIPD rows missing part of
+  -- the NOT NULL natural key. Collapse identical natural keys deterministically before ON
+  -- CONFLICT, otherwise Postgres rejects a statement that targets the same row twice.
+  select distinct on ("dot_number", "docket_number", "policy_no", "effective_date") *
+  from staging_insurance
+  where nullif("dot_number", '') is not null
+    and nullif("docket_number", '') is not null
+    and nullif("policy_no", '') is not null
+    and nullif("effective_date", '') is not null
+  order by "dot_number", "docket_number", "policy_no", "effective_date",
+           nullif("trans_date", '')::date desc nulls last,
+           nullif("cancl_effective_date", '')::date desc nulls last
+) sc
 where exists (select 1 from public.carriers c where c.dot_number = sc."dot_number"::bigint)
 on conflict (dot_number, docket_number, policy_no, effective_date) do update set
     ${setClauses};
@@ -182,6 +195,8 @@ function mapRowToStagingTuple(row: Record<string, unknown>, sodaFields: readonly
 export interface InsuranceSyncOptions {
   maxPages?: number;
   pageSize?: number;
+  /** Validate fetch/mapping/staging without mutating permanent filing or rollup tables. */
+  dryRun?: boolean;
 }
 
 export interface InsuranceSyncResult {
@@ -223,6 +238,23 @@ export async function syncInsurance(
           ctx.log.warn('sync-insurance.capped', { maxPages: options.maxPages });
           break;
         }
+      }
+
+      if (options.dryRun) {
+        const validation = await client.query(`
+          select
+            count(*)::int as staged_rows,
+            count(*) filter (
+              where nullif("dot_number", '') is null
+                 or nullif("docket_number", '') is null
+                 or nullif("policy_no", '') is null
+                 or nullif("effective_date", '') is null
+            )::int as invalid_key_rows,
+            count(distinct ("dot_number", "docket_number", "policy_no", "effective_date"))::int as distinct_natural_keys
+          from staging_insurance
+        `);
+        ctx.log.info('sync-insurance.dry_run_validated', validation.rows[0] ?? {});
+        return { filingsUpserted: 0, carriersRolledUp: 0 };
       }
 
       const filingsResult = await client.query(buildFilingsUpsertSql());

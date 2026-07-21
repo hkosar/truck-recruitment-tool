@@ -52,10 +52,11 @@ interface CliArgs {
   from?: PipelineStep;
   pages?: number;
   batches?: number;
+  dryRun?: boolean;
 }
 
 function usage(): string {
-  return 'Usage: tsx src/run.ts <nightly|monthly|backfill|STEP_NAME> [--from=step] [--pages=N] [--batches=N]';
+  return 'Usage: tsx src/run.ts <nightly|monthly|backfill|STEP_NAME> [--from=step] [--pages=N] [--batches=N] [--dry-run=true]';
 }
 
 export function parseArgs(argv: string[]): CliArgs {
@@ -83,6 +84,11 @@ export function parseArgs(argv: string[]): CliArgs {
       const n = Number(value);
       if (!Number.isFinite(n) || n <= 0) throw new Error(`--batches must be a positive number, got "${value}"`);
       args.batches = n;
+    } else if (key === 'dry-run') {
+      if (value !== 'true' && value !== 'false') {
+        throw new Error(`--dry-run must be true or false, got "${value}"`);
+      }
+      args.dryRun = value === 'true';
     } else {
       throw new Error(`Unrecognized flag "--${key}". ${usage()}`);
     }
@@ -111,7 +117,7 @@ const STEP_RUNNERS: Record<PipelineStep, StepRunner> = {
     return { rows_read: r.rowsRead, rows_upserted: r.rowsUpserted, rows_changed: r.rowsUpserted };
   },
   'sync-insurance': async (ctx, socrata, args) => {
-    const r = await syncInsurance(ctx, socrata, { maxPages: args.pages });
+    const r = await syncInsurance(ctx, socrata, { maxPages: args.pages, dryRun: args.dryRun });
     return {
       rows_read: r.rowsRead,
       rows_upserted: r.filingsUpserted,
@@ -169,7 +175,11 @@ async function runStep(
   const run = await startRun(ctx, job, step);
   try {
     const totals = await STEP_RUNNERS[step](ctx, socrata, args);
-    const meta = adhoc ? { ...totals.meta, adhoc: true } : totals.meta;
+    const meta = {
+      ...totals.meta,
+      ...(adhoc ? { adhoc: true } : {}),
+      ...(args.dryRun ? { dryRun: true } : {}),
+    };
     await finishRun(ctx, run, 'success', { ...totals, meta });
   } catch (err) {
     await finishRun(ctx, run, 'failed', { meta: adhoc ? { adhoc: true } : undefined }, err);
