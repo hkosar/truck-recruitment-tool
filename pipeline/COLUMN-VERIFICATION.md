@@ -194,22 +194,23 @@ around. See `pipeline/src/sources/safety.ts`'s header comment.
 
 ---
 
-## 2. L&I family — weaker evidence, both datasets still need their Part B §7 probes
+## 2. L&I family — live verified during the first production runs
 
-### 2.1 `qh9u-swkp` (ActPendInsur) — PARTIALLY CONFIRMED
+### 2.1 `qh9u-swkp` (ActPendInsur) — VERIFIED LIVE 2026-07-21
 
-A search-engine-indexed crawl of `qh9u-swkp`'s own CSV export header (via a cached
-`rows.csv?...&api_foundry=true` URL that could be found in an index but not fetched directly)
-surfaced `ins_type_desc`, `max_cov_amount`, and `cancl_effective_date` appearing together with
-a real example value — **`ins_type_desc = "BIPD/Primary"`** — independently corroborating three
-of Part B's cited field names and confirming `ins_type_desc` values are capitalized
-`"BIPD..."` (relevant to `pipeline/src/sources/insurance.ts`'s choice of case-sensitive `like`
-over `ilike` at the SoQL layer — see that file's comment).
+The first production request returned HTTP 400. Live `/api/views/qh9u-swkp` metadata and sample
+rows identified the cause and confirmed the actual contract:
 
-The rest of Part B's cited `qh9u-swkp` field list (`dot_number, docket_number, name_company,
-ins_form_code, ins_class_code, policy_no, min_cov_amount, underl_lim_amount, effective_date,
-trans_date`) is **CARRIED FORWARD** from Part B's own citation only — no independent
-confirmation or refutation this session.
+- Display label `ins_type_desc` has query fieldName **`mod_col_1`**. Select it as
+  `mod_col_1 as ins_type_desc`; filter `mod_col_1 like 'BIPD%'`.
+- Verified fields: `docket_number`, `dot_number`, `ins_form_code`, `name_company`, `policy_no`,
+  `trans_date`, `underl_lim_amount`, `max_cov_amount`, `effective_date`, and
+  `cancl_effective_date`.
+- Prior assumptions `ins_class_code` and `min_cov_amount` do **not** exist in this dataset.
+- Live values confirm `max_cov_amount` is thousands of dollars (`1000` = $1,000,000) and BIPD
+  types include `BIPD/Primary`, `BIPD/Excess`, `BIPD`, and rare `BIPD/Full` variants.
+
+`sources/insurance.ts` now uses the live fieldName alias and removes nonexistent fields.
 
 ### 2.2 `6eyk-hxee` (Carrier — All With History) — VERIFIED LIVE 2026-07-21 (⚠️R2 resolved)
 

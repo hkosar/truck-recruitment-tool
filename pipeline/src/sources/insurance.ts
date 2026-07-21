@@ -7,16 +7,11 @@ import { DEFAULT_PAGE_SIZE, SOCRATA_DATASETS, SocrataClient } from '../socrata.j
  * columns (Part B §2.4, `carrier_insurance_filings` table per 01-architecture.md
  * reconciliation amendment #7).
  *
- * Column-name confidence (Task 2): MODERATE, better than 6eyk-hxee's (see authority.ts's
- * ⚠️R2 header) but still not a live-row confirmation. Part B §1.2 cites production-code
- * evidence for the exact field list below. Task 2 additionally found a search-engine-indexed
- * snippet of a crawled `qh9u-swkp` CSV header showing `ins_type_desc`, `max_cov_amount`, and
- * `cancl_effective_date` appearing together with a real example value ("BIPD/Primary") --
- * independent, if indirect, corroboration of those three specifically. The rest of the list
- * (`docket_number`, `name_company`, `ins_form_code`, `ins_class_code`, `policy_no`,
- * `min_cov_amount`, `underl_lim_amount`, `effective_date`, `trans_date`) is carried from Part
- * B's citation only -- not independently re-confirmed this session. See
- * ../COLUMN-VERIFICATION.md.
+ * Column names verified against live Socrata metadata + sample rows on 2026-07-21. One portal
+ * quirk matters: the display label `ins_type_desc` has actual SODA fieldName `mod_col_1`, so
+ * queries must select `mod_col_1 as ins_type_desc` and filter `mod_col_1 like 'BIPD%'`.
+ * `ins_class_code` and `min_cov_amount` do not exist in this dataset and were removed from the
+ * pull; all other mapped fields below are live-verified. See ../COLUMN-VERIFICATION.md.
  *
  * `carrier_insurance_filings`'s full column list (beyond the amendment #7 natural key
  * `(dot_number, docket_number, policy_no, effective_date)`) is THIS FILE'S OWN PROPOSAL --
@@ -29,6 +24,8 @@ interface InsuranceFieldMapping {
   column: string;
   sqlType: string;
   castExpr?: string;
+  /** Actual Socrata fieldName when the public display label differs. */
+  selectExpr?: string;
 }
 
 const INSURANCE_FIELD_MAP: InsuranceFieldMapping[] = [
@@ -38,13 +35,13 @@ const INSURANCE_FIELD_MAP: InsuranceFieldMapping[] = [
   { soda: 'docket_number', column: 'docket_number', sqlType: 'text' },
   { soda: 'name_company', column: 'insurer_name', sqlType: 'text' },
   { soda: 'ins_form_code', column: 'ins_form_code', sqlType: 'text' },
-  { soda: 'ins_class_code', column: 'ins_class_code', sqlType: 'text' },
-  { soda: 'ins_type_desc', column: 'ins_type_desc', sqlType: 'text' },
+  // Live metadata exposes display label `ins_type_desc` under actual fieldName `mod_col_1`.
+  // Alias it back to the stable staging/application name so downstream SQL stays semantic.
+  { soda: 'ins_type_desc', selectExpr: 'mod_col_1 as ins_type_desc', column: 'ins_type_desc', sqlType: 'text' },
   { soda: 'policy_no', column: 'policy_no', sqlType: 'text' },
   // Coverage amounts arrive in THOUSANDS (Part B §1.2, "critical quirk", confirmed via
   // multiple codebases in Part B's own prior research) -- ×1000 to store real dollars.
   { soda: 'max_cov_amount', column: 'max_cov_amount_usd', sqlType: 'bigint', castExpr: "(nullif(%COL%, '')::numeric * 1000)::bigint" },
-  { soda: 'min_cov_amount', column: 'min_cov_amount_usd', sqlType: 'bigint', castExpr: "(nullif(%COL%, '')::numeric * 1000)::bigint" },
   { soda: 'underl_lim_amount', column: 'underl_lim_amount_usd', sqlType: 'bigint', castExpr: "(nullif(%COL%, '')::numeric * 1000)::bigint" },
   { soda: 'effective_date', column: 'effective_date', sqlType: 'date' },
   { soda: 'cancl_effective_date', column: 'cancl_effective_date', sqlType: 'date' },
@@ -56,13 +53,14 @@ function uniqueSodaFields(): string[] {
 }
 
 export function buildSelectClause(): string {
-  return uniqueSodaFields().join(',');
+  return INSURANCE_FIELD_MAP.map((field) => field.selectExpr ?? field.soda).join(',');
 }
 
 /**
- * Part B §2.4: "keep ins_type_desc ILIKE 'BIPD%' rows for known DOTs". Applied server-side in
- * the $where -- narrows the pull itself, not just a local filter, saving bandwidth. Uses
- * plain (case-sensitive) `like`, not `ilike`: SoQL's documented operator set includes `like`;
+ * Part B §2.4: "keep ins_type_desc ILIKE 'BIPD%' rows for known DOTs". Live metadata shows
+ * that label's actual query field is `mod_col_1`. Applied server-side in the $where -- narrows
+ * the pull itself, not just a local filter, saving bandwidth. Uses plain (case-sensitive)
+ * `like`, not `ilike`: SoQL's documented operator set includes `like`;
  * `ilike` is a PostgreSQL-ism not confirmed to exist in SoQL, and risking an unsupported
  * operator failing the whole query is worse than a case-sensitive match against a value
  * ("BIPD/Primary") that Task 2's research found consistently capitalized in the one real
@@ -71,7 +69,7 @@ export function buildSelectClause(): string {
  * from the rollup even if it does get past this SoQL-level prefilter.
  */
 export function buildWhereClause(): string {
-  return "ins_type_desc like 'BIPD%'";
+  return "mod_col_1 like 'BIPD%'";
 }
 
 function castedExpr(f: InsuranceFieldMapping): string {
