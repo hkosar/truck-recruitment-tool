@@ -41,8 +41,8 @@ const INSURANCE_FIELD_MAP: InsuranceFieldMapping[] = [
   { soda: 'policy_no', column: 'policy_no', sqlType: 'text' },
   // Coverage amounts arrive in THOUSANDS (Part B §1.2, "critical quirk", confirmed via
   // multiple codebases in Part B's own prior research) -- ×1000 to store real dollars.
-  { soda: 'max_cov_amount', column: 'max_cov_amount_usd', sqlType: 'bigint', castExpr: "(nullif(%COL%, '')::numeric * 1000)::bigint" },
-  { soda: 'underl_lim_amount', column: 'underl_lim_amount_usd', sqlType: 'bigint', castExpr: "(nullif(%COL%, '')::numeric * 1000)::bigint" },
+  { soda: 'max_cov_amount', column: 'max_cov_amount', sqlType: 'bigint', castExpr: "(nullif(%COL%, '')::numeric * 1000)::bigint" },
+  { soda: 'underl_lim_amount', column: 'underl_lim_amount', sqlType: 'bigint', castExpr: "(nullif(%COL%, '')::numeric * 1000)::bigint" },
   { soda: 'effective_date', column: 'effective_date', sqlType: 'date' },
   { soda: 'cancl_effective_date', column: 'cancl_effective_date', sqlType: 'date' },
   { soda: 'trans_date', column: 'trans_date', sqlType: 'date' },
@@ -139,7 +139,7 @@ export function buildRollupSql(): string {
   return `
 with bipd_current as (
   select distinct on (f.dot_number)
-    f.dot_number, f.max_cov_amount_usd, f.effective_date
+    f.dot_number, f.max_cov_amount, f.effective_date
   from public.carrier_insurance_filings f
   where f.ins_type_desc ilike 'BIPD%'
     and f.effective_date <= current_date
@@ -157,14 +157,14 @@ bipd_next_cancel as (
 rollup as (
   select
     coalesce(bc.dot_number, nc.dot_number) as dot_number,
-    bc.max_cov_amount_usd,
+    bc.max_cov_amount,
     bc.effective_date,
     nc.bipd_cancel_date
   from bipd_current bc
   full outer join bipd_next_cancel nc on nc.dot_number = bc.dot_number
 )
 update public.carrier_insurance ci
-set bipd_on_file = coalesce(r.max_cov_amount_usd, ci.bipd_on_file),
+set bipd_on_file = coalesce(r.max_cov_amount, ci.bipd_on_file),
     insurance_effective_date = coalesce(r.effective_date, ci.insurance_effective_date),
     bipd_cancel_date = r.bipd_cancel_date,
     last_synced_at = now()
