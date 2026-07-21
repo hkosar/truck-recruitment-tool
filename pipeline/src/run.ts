@@ -47,7 +47,7 @@ const ALL_STEPS: PipelineStep[] = [
   'dq-report',
 ];
 
-interface CliArgs {
+export interface CliArgs {
   command: string;
   from?: PipelineStep;
   pages?: number;
@@ -244,8 +244,11 @@ async function main(): Promise<void> {
   }
 }
 
-main().catch((err: unknown) => {
-  const message = err instanceof Error ? (err.stack ?? err.message) : String(err);
-  console.error(JSON.stringify({ ts: new Date().toISOString(), level: 'error', msg: 'pipeline.fatal', err: message }));
-  process.exitCode = 1;
-});
+const isDirectInvocation = process.argv[1] !== undefined && import.meta.url === new URL(process.argv[1], 'file:').href;
+if (isDirectInvocation) {
+  main().catch((err: unknown) => {
+    const message = err instanceof Error ? (err.stack ?? err.message) : String(err);
+    console.error(JSON.stringify({ ts: new Date().toISOString(), level: 'error', msg: 'pipeline.fatal', err: message }));
+    process.exitCode = 1;
+  });
+}

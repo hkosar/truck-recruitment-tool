@@ -69,8 +69,10 @@ node_modules/.bin/tsx src/run.ts nightly --pages=1`.)
 ## Local dev / smoke-testing commands
 
 ```bash
+npm run verify                                     # typecheck + deterministic pipeline smoke tests + build
 npm run typecheck                                  # tsc --noEmit
-npm run build                                       # tsc emit (CI artifact / validation; see tsconfig.json's note — Render runs tsx against source, not this output)
+npm test                                           # query/mapping/paging/CLI regression tests; no live credentials
+npm run build                                      # tsc emit (CI artifact / validation; Render runs tsx against source)
 npm run dev                                          # nightly, --pages=1 --batches=1
 tsx src/run.ts sync-census --pages=1                 # isolate exactly one step
 tsx src/run.ts sync-insurance --pages=1 --dry-run=true # fast, non-persistent mapping/staging validation
