@@ -84,8 +84,13 @@ services:
     # `npm install`, not `npm ci`, for the same not-yet-scaffolded-lockfile
     # reason as the app service above.
     buildCommand: cd pipeline && npm install && npm run build
-    startCommand: cd pipeline && npm start
+    # PIPELINE_COMMAND provides a dashboard-editable smoke/resume escape hatch without changing
+    # Render's hidden Blueprint command: default `nightly`; temporarily set to
+    # `sync-insurance --pages=1 --dry-run=true` for a cheap isolated validation, then restore.
+    startCommand: cd pipeline && npm run pipeline:render
     envVars:
+      - key: PIPELINE_COMMAND
+        value: nightly
       - key: NODE_VERSION
         value: "22"
       # Names + purpose per 01-architecture.md Part B §6.2 "Env / secrets" and the
