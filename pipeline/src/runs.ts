@@ -46,8 +46,42 @@ function errorToMessage(error: unknown): string {
   return String(error);
 }
 
+const STALE_RUNNING_MINUTES = 15;
+
+/**
+ * A process-level kill (for example, Render terminating Node after an OOM) bypasses runStep's
+ * catch/finally path and can strand a row in `running`. Before starting the next invocation,
+ * convert only old rows for this same job/step into explicit failures. The 15-minute guard avoids
+ * racing a genuinely active run; Render itself guarantees one active cron execution per service.
+ */
+async function failStaleRuns(ctx: PipelineContext, job: PipelineJob, step: PipelineStep): Promise<void> {
+  const cutoff = new Date(Date.now() - STALE_RUNNING_MINUTES * 60_000).toISOString();
+  const { data, error } = await ctx.supabase
+    .from(PIPELINE_RUNS_TABLE)
+    .update({
+      status: 'failed',
+      finished_at: new Date().toISOString(),
+      error: `Previous process ended without finalizing this run; recovered after ${STALE_RUNNING_MINUTES} minutes.`,
+      meta: { recovered_stale_run: true },
+    })
+    .eq('job', job)
+    .eq('step', step)
+    .eq('status', 'running')
+    .lt('started_at', cutoff)
+    .select('id');
+
+  if (error) {
+    throw new Error(`startRun: stale-run recovery failed: ${error.message}`);
+  }
+  if (data && data.length > 0) {
+    ctx.log.warn('run.stale_recovered', { job, step, runIds: data.map((row) => row.id) });
+  }
+}
+
 /** Insert the `running` row at step start. See the schema-drift TODO above. */
 export async function startRun(ctx: PipelineContext, job: PipelineJob, step: PipelineStep): Promise<RunRecord> {
+  await failStaleRuns(ctx, job, step);
+
   const { data, error } = await ctx.supabase
     .from(PIPELINE_RUNS_TABLE)
     .insert({ job, step, status: 'running', started_at: new Date().toISOString() })

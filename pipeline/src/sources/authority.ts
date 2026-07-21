@@ -1,5 +1,5 @@
 import { bulkInsert, withStagingConnection, type PgPoolClient, type PipelineContext } from '../db.js';
-import { SOCRATA_DATASETS, SocrataClient } from '../socrata.js';
+import { DEFAULT_PAGE_SIZE, SOCRATA_DATASETS, SocrataClient } from '../socrata.js';
 
 /**
  * sync-authority: `6eyk-hxee` ("Carrier -- All With History") -> rolled into
@@ -190,7 +190,7 @@ export async function syncAuthority(
   socrata: SocrataClient,
   options: AuthoritySyncOptions = {}
 ): Promise<AuthoritySyncResult> {
-  const pageSize = options.pageSize ?? 50_000;
+  const pageSize = options.pageSize ?? DEFAULT_PAGE_SIZE;
   const sodaFields = uniqueSodaFields();
   const stagingColumns = [...sodaFields, 'authority_raw'];
 

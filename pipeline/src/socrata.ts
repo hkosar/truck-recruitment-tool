@@ -71,6 +71,10 @@ export interface SocrataClientOptions {
 
 const DEFAULT_BASE_URL = 'https://data.transportation.gov';
 const DEFAULT_REQUESTS_PER_HOUR = 1_000;
+/** Keep each parsed JSON response comfortably below the 512 MB Render cron instance's V8 heap.
+ *  A live 50,000-row census response exhausted the heap before the first staging insert;
+ *  10,000 bounds response + mapped/raw-row copies while remaining well inside the token budget. */
+export const DEFAULT_PAGE_SIZE = 10_000;
 const MAX_ATTEMPTS = 5;
 const BASE_DELAY_MS = 2_000;
 const MAX_DELAY_MS = 60_000;
@@ -213,7 +217,7 @@ export class SocrataClient {
   async *paginateOffset<T = Record<string, unknown>>(
     dataset: string,
     params: SocrataQueryParams = {},
-    pageSize = 50_000
+    pageSize = DEFAULT_PAGE_SIZE
   ): AsyncGenerator<T[], void, unknown> {
     let offset = params.$offset ?? 0;
     for (;;) {
@@ -235,7 +239,7 @@ export class SocrataClient {
     params: SocrataQueryParams,
     opts: { keyColumn: string; pageSize?: number; startAfter?: number }
   ): AsyncGenerator<T[], void, unknown> {
-    const pageSize = opts.pageSize ?? 50_000;
+    const pageSize = opts.pageSize ?? DEFAULT_PAGE_SIZE;
     let lastKey = opts.startAfter ?? -1;
 
     for (;;) {

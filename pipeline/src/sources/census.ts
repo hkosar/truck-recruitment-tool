@@ -1,5 +1,5 @@
 import { bulkInsert, withStagingConnection, type PgPoolClient, type PipelineContext } from '../db.js';
-import { SOCRATA_DATASETS, SocrataClient } from '../socrata.js';
+import { DEFAULT_PAGE_SIZE, SOCRATA_DATASETS, SocrataClient } from '../socrata.js';
 
 /**
  * sync-census: full TX-active slice -> staging -> row-hash diff upsert (Part B §2.1-§2.3).
@@ -389,7 +389,7 @@ export async function syncCensus(
   options: CensusSyncOptions = {}
 ): Promise<CensusSyncResult> {
   const where = options.where ?? DEFAULT_WHERE;
-  const pageSize = options.pageSize ?? 50_000;
+  const pageSize = options.pageSize ?? DEFAULT_PAGE_SIZE;
   const sodaFields = uniqueSodaFields();
   const stagingColumns = [...sodaFields, 'census_raw'];
 

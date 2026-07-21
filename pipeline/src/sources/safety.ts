@@ -1,5 +1,5 @@
 import { bulkInsert, withStagingConnection, type PgPoolClient, type PipelineContext } from '../db.js';
-import { SOCRATA_DATASETS, SocrataClient } from '../socrata.js';
+import { DEFAULT_PAGE_SIZE, SOCRATA_DATASETS, SocrataClient } from '../socrata.js';
 
 /**
  * sync-safety (monthly, day 5 per Part B §2.4/§6.3): SMS census snapshot -> `carrier_safety`
@@ -185,7 +185,7 @@ export async function syncSafety(
   options: SafetySyncOptions = {}
 ): Promise<SafetySyncResult> {
   const datasetId = options.datasetId ?? SAFETY_DATASET_ID;
-  const pageSize = options.pageSize ?? 50_000;
+  const pageSize = options.pageSize ?? DEFAULT_PAGE_SIZE;
   const sodaFields = uniqueSodaFields();
   const stagingColumns = [...sodaFields, 'raw'];
 

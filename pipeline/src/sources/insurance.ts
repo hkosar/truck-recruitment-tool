@@ -1,5 +1,5 @@
 import { bulkInsert, withStagingConnection, type PgPoolClient, type PipelineContext } from '../db.js';
-import { SOCRATA_DATASETS, SocrataClient } from '../socrata.js';
+import { DEFAULT_PAGE_SIZE, SOCRATA_DATASETS, SocrataClient } from '../socrata.js';
 
 /**
  * sync-insurance: `qh9u-swkp` ("ActPendInsur -- All With History") -> append-only
@@ -200,7 +200,7 @@ export async function syncInsurance(
   socrata: SocrataClient,
   options: InsuranceSyncOptions = {}
 ): Promise<InsuranceSyncResult> {
-  const pageSize = options.pageSize ?? 50_000;
+  const pageSize = options.pageSize ?? DEFAULT_PAGE_SIZE;
   const sodaFields = uniqueSodaFields();
   const stagingColumns = [...sodaFields, 'raw'];
 

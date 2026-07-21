@@ -79,8 +79,9 @@ npm run monthly                                      # sync-safety alone
 npm run backfill                                     # full backfill chain, uncapped — PROD DATA VOLUME, see below
 ```
 
-`--pages=N` caps every Socrata pull's page count (each page is up to 50,000 rows); `--batches=N`
-caps how many Census geocoder batches `geocode` submits in one run. Every step prints the same
+`--pages=N` caps every Socrata pull's page count (10,000 rows per page by default, chosen to stay
+within Render's 512 MB cron memory); `--batches=N` caps how many Census geocoder batches
+`geocode` submits in one run. Every step prints the same
 `pipeline_runs`-shaped structured JSON log lines regardless of how it was invoked.
 
 **Do not run `backfill` uncapped against a project you don't intend to fully populate** — per
