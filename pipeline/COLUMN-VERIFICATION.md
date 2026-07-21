@@ -211,20 +211,24 @@ ins_form_code, ins_class_code, policy_no, min_cov_amount, underl_lim_amount, eff
 trans_date`) is **CARRIED FORWARD** from Part B's own citation only — no independent
 confirmation or refutation this session.
 
-### 2.2 `6eyk-hxee` (Carrier — All With History) — still UNVERIFIED (⚠️R2 remains fully open)
+### 2.2 `6eyk-hxee` (Carrier — All With History) — VERIFIED LIVE 2026-07-21 (⚠️R2 resolved)
 
-No GitHub-indexed code was found that queries this dataset by its literal SODA field names
-(unlike `az4n-8mr2` and `qh9u-swkp`, which several independent public repos ingest directly).
-Search results did corroborate the **semantics** — three authority statuses (common/contract/
-broker), each valued **Active** / **Inactive** / **None** (word-form, not letter codes) per
-FMCSA's own L&I documentation (again only reachable via search-engine synthesis) — but zero
-independent confirmation of the literal fieldNames (`common_authority_status` etc. in
-`pipeline/src/sources/authority.ts` are this pipeline's own best-effort guess, explicitly
-marked `verified: false` throughout that file).
+The first production request returned HTTP 400 because the guessed field names were wrong.
+A live Socrata metadata request to `/api/views/6eyk-hxee` and token-authenticated sample request
+then confirmed the runtime contract:
 
-**This is the weakest-evidenced part of the whole pipeline.** `sources/authority.ts` must not
-run against production before the Part B §7 R2 probe
-(`GET /resource/6eyk-hxee.json?$limit=1`) confirms real field names.
+| Meaning | Verified SODA field | Observed format |
+|---|---|---|
+| DOT | `dot_number` | 8-character zero-padded text |
+| Common authority | `common_stat` | compact code (`A`, `I`, `N`; `P` handled defensively) |
+| Contract authority | `contract_stat` | compact code |
+| Broker authority | `broker_stat` | compact code |
+| Required BIPD minimum | `min_cov_amount` | zero-padded dollar string, stored directly |
+
+The prior guesses `common_authority_status`, `contract_authority_status`,
+`broker_authority_status`, and `bipd_required_amount` do not exist in this dataset. The prior
+unverified ×1000 conversion was also removed. `sources/authority.ts` now implements the live
+field names and code-to-enum mapping.
 
 ### 2.3 SMS / safety datasets (`4y6x-dmck`, `sjpe-nzai`) — UNVERIFIED, dataset choice itself unresolved
 

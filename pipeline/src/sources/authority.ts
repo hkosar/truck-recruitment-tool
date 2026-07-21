@@ -7,26 +7,14 @@ import { DEFAULT_PAGE_SIZE, SOCRATA_DATASETS, SocrataClient } from '../socrata.j
  * #7: "Part B's carrier_authority merges INTO carrier_insurance (no separate table)").
  *
  * ============================================================================================
- * ⚠️R2 STATUS (Part B §7) -- STILL OPEN after Task 2's research pass, read before editing:
+ * ⚠️R2 STATUS -- RESOLVED against live Socrata metadata + sample rows on 2026-07-21:
  * ============================================================================================
- * 6eyk-hxee's exact SODA column names are UNVERIFIED. Task 2 tried hard to confirm them --
- * every fetch attempt against data.transportation.gov, dev.socrata.com (including the Foundry
- * schema pages), and every fmcsa.dot.gov/li-public.fmcsa.dot.gov subdomain returned HTTP 403
- * this session (WAF blocking datacenter/proxy IPs; broader than the *.fmcsa.dot.gov-only
- * blocklist Part B §1 originally documented). GitHub code search corroborated the qh9u-swkp
- * (insurance) field names reasonably well (see insurance.ts) but turned up no repo that
- * queries 6eyk-hxee by its literal SODA field names. Search-engine results DID corroborate
- * the *semantics* -- three authority statuses (common/contract/broker), each valued
- * Active/Inactive/None, per FMCSA's public L&I documentation (li-public.fmcsa.dot.gov, only
- * reachable via indexed search snippets, not a direct fetch) -- but not the literal fieldName
- * spellings. Every `soda` value below is this pipeline's best-effort guess (Part B's own
- * hedge: "expect common_authority_status-style or close variants"), marked `verified: false`.
- *
- * DO NOT run this against production before executing the R2 probe Part B §7 already
- * prescribes:  GET /resource/6eyk-hxee.json?$limit=1   (with the X-App-Token header)
- * ...then rewriting AUTHORITY_FIELD_MAP's `soda` values from the real response keys. Everything
- * else here (paging, staging/upsert shape, retry, the division of labor with sync-insurance
- * below) is real and should not need to change once the field names are corrected.
+ * The first production run proved the earlier guessed names wrong with a Socrata 400. A live
+ * `/api/views/6eyk-hxee` metadata probe and token-authenticated sample then confirmed the exact
+ * fields: `dot_number`, `common_stat`, `contract_stat`, `broker_stat`, and `min_cov_amount`.
+ * Status values are compact codes (`A`, `I`, `N`, with `P` handled defensively), not words.
+ * `min_cov_amount` is a zero-padded dollar string and is stored directly, without the earlier
+ * unverified ×1000 transform. AUTHORITY_FIELD_MAP below is now the verified runtime contract.
  *
  * ============================================================================================
  * Division of labor with sync-insurance (deliberate, not from a single literal spec line):
@@ -55,49 +43,52 @@ interface AuthorityFieldMapping {
 }
 
 function authorityStatusCastExpr(col: string): string {
-  return `(case lower(btrim(coalesce(${col}, '')))
-      when 'active' then 'active'
-      when 'inactive' then 'inactive'
-      when 'none' then 'none'
-      when 'pending' then 'pending'
+  return `(case upper(btrim(coalesce(${col}, '')))
+      when 'A' then 'active'
+      when 'ACTIVE' then 'active'
+      when 'I' then 'inactive'
+      when 'INACTIVE' then 'inactive'
+      when 'N' then 'none'
+      when 'NONE' then 'none'
+      when 'P' then 'pending'
+      when 'PENDING' then 'pending'
       else 'unknown'
     end)::authority_status`;
 }
 
 const AUTHORITY_FIELD_MAP: AuthorityFieldMapping[] = [
-  // Part B §1.2: "dot_number in the L&I datasets is 8-char zero-padded TEXT -- join by
-  // casting to int, never by string equality against census." Field NAME assumed consistent
-  // with every other FMCSA Socrata dataset (census, qh9u-swkp) -- reasonable but unverified.
-  { soda: 'dot_number', column: 'dot_number', sqlType: 'bigint', castExpr: '%COL%::bigint', verified: false },
+  // Live metadata + rows verified 2026-07-21. DOT is 8-char zero-padded TEXT; join by
+  // casting to bigint, never by string equality against census.
+  { soda: 'dot_number', column: 'dot_number', sqlType: 'bigint', castExpr: '%COL%::bigint', verified: true },
   {
-    soda: 'common_authority_status',
+    soda: 'common_stat',
     column: 'common_status',
     sqlType: 'authority_status',
     castExpr: authorityStatusCastExpr('%COL%'),
-    verified: false,
+    verified: true,
   },
   {
-    soda: 'contract_authority_status',
+    soda: 'contract_stat',
     column: 'contract_status',
     sqlType: 'authority_status',
     castExpr: authorityStatusCastExpr('%COL%'),
-    verified: false,
+    verified: true,
   },
   {
-    soda: 'broker_authority_status',
+    soda: 'broker_stat',
     column: 'broker_status',
     sqlType: 'authority_status',
     castExpr: authorityStatusCastExpr('%COL%'),
-    verified: false,
+    verified: true,
   },
-  // DOLLARS. L&I publishes THOUSANDS -> ×1000 (Part A DDL comment, carried forward; not
-  // independently re-verified against a live row this session).
+  // Live dataset field is MIN_COV_AMOUNT. Values are zero-padded dollar amounts (for example,
+  // 00000), so store the parsed amount directly; do not apply the earlier unverified ×1000.
   {
-    soda: 'bipd_required_amount',
+    soda: 'min_cov_amount',
     column: 'bipd_required',
     sqlType: 'bigint',
-    castExpr: "(nullif(%COL%, '')::numeric * 1000)::bigint",
-    verified: false,
+    castExpr: "nullif(%COL%, '')::numeric::bigint",
+    verified: true,
   },
 ];
 
@@ -194,10 +185,10 @@ export async function syncAuthority(
   const sodaFields = uniqueSodaFields();
   const stagingColumns = [...sodaFields, 'authority_raw'];
 
-  ctx.log.warn('sync-authority.unverified_columns', {
-    note: '6eyk-hxee column names are ⚠️R2 UNVERIFIED -- see this file\'s header comment',
-    columns: AUTHORITY_FIELD_MAP.map((f) => f.soda),
-  });
+  const unverified = AUTHORITY_FIELD_MAP.filter((field) => !field.verified).map((field) => field.soda);
+  if (unverified.length > 0) {
+    ctx.log.warn('sync-authority.unverified_columns', { columns: unverified });
+  }
 
   let rowsRead = 0;
   let pageCount = 0;
