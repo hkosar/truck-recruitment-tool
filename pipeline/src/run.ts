@@ -126,12 +126,17 @@ const STEP_RUNNERS: Record<PipelineStep, StepRunner> = {
     };
   },
   'sync-safety': async (ctx, socrata, args) => {
-    const r = await syncSafety(ctx, socrata, { maxPages: args.pages });
+    const r = await syncSafety(ctx, socrata, { maxPages: args.pages, dryRun: args.dryRun });
     return {
       rows_read: r.rowsRead,
       rows_upserted: r.rowsUpserted,
       rows_changed: r.rowsUpserted,
-      meta: { datasetId: r.datasetId },
+      meta: {
+        datasetId: r.datasetId,
+        ratingRowsRead: r.ratingRowsRead,
+        dryRun: r.dryRun,
+        validation: r.validation,
+      },
     };
   },
   'cargo-facets': async (ctx) => {
