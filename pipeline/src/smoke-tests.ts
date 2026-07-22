@@ -3,7 +3,7 @@ import { parseArgs } from './run.js';
 import { buildSelectClause as buildInsuranceSelectClause, buildWhereClause as buildInsuranceWhereClause, buildFilingsUpsertSql } from './sources/insurance.js';
 import { buildSelectClause as buildAuthoritySelectClause, buildUpsertSql as buildAuthorityUpsertSql } from './sources/authority.js';
 import { DEFAULT_PAGE_SIZE, SocrataClient } from './socrata.js';
-import { CensusGeocoderHttpError, isRetryableCensusError, parseCensusBatchCsv } from './geocode.js';
+import { CensusGeocoderHttpError, buildCandidateQuery, isRetryableCensusError, parseCensusBatchCsv } from './geocode.js';
 
 type Test = { name: string; run: () => void | Promise<void> };
 const tests: Test[] = [];
@@ -77,6 +77,12 @@ test('Census batch parser reads the live quoted lon,lat coordinate field', () =>
     { dotNumber: 1, matched: true, matchType: 'Exact', lng: -77.03518753691, lat: 38.89869893252 },
     { dotNumber: 2, matched: false, matchType: null, lng: null, lat: null },
   ]);
+});
+
+test('location candidate queue excludes already-attempted no-match addresses', () => {
+  const { sql } = buildCandidateQuery(100);
+  assert.match(sql, /where geocode_addr_hash is distinct from address_hash/i);
+  assert.doesNotMatch(sql, /geom is null or/i);
 });
 
 let failed = 0;

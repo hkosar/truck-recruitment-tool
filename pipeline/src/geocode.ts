@@ -70,7 +70,7 @@ export function buildCandidateQuery(limit: number): { sql: string; params: unkno
     sql: `
       select dot_number, phy_street, phy_city, phy_state, phy_zip5
       from public.carriers
-      where geom is null or geocode_addr_hash is distinct from address_hash
+      where geocode_addr_hash is distinct from address_hash
       order by dot_number
       limit $1
     `.trim(),
@@ -272,29 +272,34 @@ export function censusMatchToPrecision(matchType: 'Exact' | 'Non_Exact'): Geocod
  *  N round trips). Only touches rows that actually matched -- no-match rows fall through to
  *  the ZIP/city centroid fallback tiers. */
 export async function applyCensusResults(ctx: PipelineContext, results: CensusMatchResult[]): Promise<number> {
-  const matched = results.filter((r) => r.matched && r.lng !== null && r.lat !== null && r.matchType);
-  if (matched.length === 0) return 0;
+  if (results.length === 0) return 0;
 
   const values: unknown[] = [];
-  const tuples = matched.map((r, i) => {
-    const base = i * 4;
-    values.push(r.dotNumber, r.lng, r.lat, censusMatchToPrecision(r.matchType as 'Exact' | 'Non_Exact'));
-    return `($${base + 1}::bigint, $${base + 2}::double precision, $${base + 3}::double precision, $${base + 4}::geocode_precision)`;
+  const tuples = results.map((r, i) => {
+    const base = i * 5;
+    const precision = r.matched && r.matchType ? censusMatchToPrecision(r.matchType) : 'none';
+    values.push(r.dotNumber, r.lng, r.lat, precision, r.matched);
+    return `($${base + 1}::bigint, $${base + 2}::double precision, $${base + 3}::double precision, $${base + 4}::geocode_precision, $${base + 5}::boolean)`;
   });
 
+  // Mark every returned address as attempted for its current address_hash. Matched rows receive
+  // coordinates; no-match rows remain geom NULL but leave the queue until their address changes.
   const sql = `
     update public.carriers c
-    set geom = st_setsrid(st_makepoint(v.lng, v.lat), 4326)::geography,
+    set geom = case
+          when v.matched then st_setsrid(st_makepoint(v.lng, v.lat), 4326)::geography
+          else null
+        end,
         geocode_precision = v.precision,
-        geocode_source = 'census_batch',
+        geocode_source = case when v.matched then 'census_batch' else 'census_batch_no_match' end,
         geocode_addr_hash = c.address_hash,
         geocoded_at = now()
-    from (values ${tuples.join(', ')}) as v(dot_number, lng, lat, precision)
+    from (values ${tuples.join(', ')}) as v(dot_number, lng, lat, precision, matched)
     where v.dot_number = c.dot_number;
   `.trim();
 
-  const result = await ctx.pg.query(sql, values);
-  return result.rowCount ?? 0;
+  await ctx.pg.query(sql, values);
+  return results.filter((r) => r.matched).length;
 }
 
 // ------------------------------------------------------------------------------------------
@@ -321,6 +326,7 @@ export async function zipCentroidFallback(ctx: PipelineContext, candidates: Geoc
     from public.zip_centroids zc
     where zc.zcta = c.phy_zip5
       and c.dot_number = any($1::bigint[])
+      and c.geom is null
   `.trim();
 
   const result = await ctx.pg.query(sql, [candidates.map((c) => c.dotNumber)]);
@@ -346,6 +352,7 @@ export async function cityCentroidFallback(ctx: PipelineContext, candidates: Geo
     where cc.state = c.phy_state
       and lower(btrim(cc.city)) = lower(btrim(c.phy_city))
       and c.dot_number = any($1::bigint[])
+      and c.geom is null
   `.trim();
 
   const result = await ctx.pg.query(sql, [candidates.map((c) => c.dotNumber)]);
@@ -453,18 +460,11 @@ export async function runGeocode(ctx: PipelineContext, options: GeocodeOptions =
     if (i < batches.length - 1) await sleep(interBatchDelayMs);
   }
 
-  // Anything beyond maxBatches this run simply waits for tomorrow's/next month's pass --
-  // idx_carriers_geocode_todo means it stays queued, nothing is lost. Sliced at the ACTUAL
-  // number of rows packed into `batches`, not `batches.length * maxRecords` -- chunkCandidates
-  // can pack fewer than maxRecords rows into a chunk when the 5MB byte cap bites first, so
-  // that multiplication would over-count and silently skip rows that were never submitted.
-  const submittedCount = batches.reduce((sum, batch) => sum + batch.length, 0);
-  const skippedByBatchCap = streetEligible.slice(submittedCount);
-
-  const fallbackCandidates = [...poBoxOrRural, ...unmatchedFromStreet, ...skippedByBatchCap];
+  // Anything beyond maxBatches this run remains unattempted (`geocode_addr_hash` stays NULL),
+  // so the partial queue index picks it up on a later run. Only PO boxes/rural routes and
+  // explicit Census no-matches are eligible for centroid fallback.
+  const fallbackCandidates = [...poBoxOrRural, ...unmatchedFromStreet];
   const zipFallbackMatched = await zipCentroidFallback(ctx, fallbackCandidates);
-  // TODO(live-db): re-querying "still unmatched" from the DB (rather than tracking in JS)
-  // once zip_centroids exists, so city fallback only sees rows the ZIP tier truly missed.
   const cityFallbackMatched = await cityCentroidFallback(ctx, fallbackCandidates);
 
   const ungeocodedResult = await ctx.pg.query(buildUngeocodedCountQuery());

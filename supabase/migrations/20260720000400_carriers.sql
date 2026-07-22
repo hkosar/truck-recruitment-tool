@@ -225,7 +225,7 @@ comment on table public.carriers is
   'INSERT ... ON CONFLICT (dot_number) DO UPDATE SET <sync-owned columns only> WHERE '
   'carriers.row_hash IS DISTINCT FROM EXCLUDED.row_hash -- the SET list explicitly excludes '
   'every APP-OWNED column (D9). Then upsert cargo_other_values (§2.5), then enqueue geocoding '
-  'for rows where geom is null or geocode_addr_hash is distinct from address_hash.';
+  'for rows where geocode_addr_hash is distinct from address_hash (never attempted or address changed).';
 
 -- ----------------------------------------------------------------------------
 -- Indexes (§2.9) -- the carriers-table hot paths
@@ -238,6 +238,6 @@ create index idx_carriers_status      on public.carriers (status_code);
 create index idx_carriers_units      on public.carriers (power_units);
 create index idx_carriers_dnc        on public.carriers (dot_number) where do_not_contact;         -- fast global-DNC joins
 create index idx_carriers_geocode_todo on public.carriers (dot_number)
-  where geom is null or geocode_addr_hash is distinct from address_hash;             -- geocode worker queue
+  where geocode_addr_hash is distinct from address_hash;                             -- unattempted/current-address-changed queue
 
 create index idx_cif_dot on public.carrier_insurance_filings (dot_number);
