@@ -4,6 +4,14 @@ import { buildSelectClause as buildInsuranceSelectClause, buildWhereClause as bu
 import { buildSelectClause as buildAuthoritySelectClause, buildUpsertSql as buildAuthorityUpsertSql } from './sources/authority.js';
 import { DEFAULT_PAGE_SIZE, SocrataClient } from './socrata.js';
 import { CensusGeocoderHttpError, buildCandidateQuery, isRetryableCensusError, parseCensusBatchCsv } from './geocode.js';
+import {
+  buildRatingSelectClause,
+  buildSelectClause as buildSafetySelectClause,
+  buildUpsertSql as buildSafetyUpsertSql,
+  mapSafetyRatingCode,
+  parseFmcsaCompactDate,
+  validateSafetyRow,
+} from './sources/safety.js';
 
 type Test = { name: string; run: () => void | Promise<void> };
 const tests: Test[] = [];
@@ -58,6 +66,70 @@ test('insurance upsert targets the migrated schema and deduplicates source natur
   assert.doesNotMatch(sql, /"raw"/);
   assert.match(sql, /select distinct on \("dot_number", "docket_number", "policy_no", "effective_date"\)/i);
   assert.match(sql, /nullif\("effective_date", ''\) is not null/i);
+});
+
+test('safety source contract uses only live-verified inspection fields', () => {
+  assert.equal(
+    buildSafetySelectClause(),
+    'dot_number,insp_total,driver_insp_total,driver_oos_insp_total,vehicle_insp_total,vehicle_oos_insp_total'
+  );
+  assert.equal(buildRatingSelectClause(), 'dot_number,safety_rating,safety_rating_date');
+  assert.doesNotMatch(buildSafetySelectClause(), /crash|safety_rating/);
+});
+
+test('safety row validation rejects impossible OOS and inspection totals', () => {
+  assert.deepEqual(
+    validateSafetyRow({
+      dot_number: '100002',
+      insp_total: '23',
+      driver_insp_total: '23',
+      driver_oos_insp_total: '1',
+      vehicle_insp_total: '7',
+      vehicle_oos_insp_total: '2',
+    }),
+    {
+      dotNumber: 100002,
+      inspections: 23,
+      driverInspections: 23,
+      driverOos: 1,
+      vehicleInspections: 7,
+      vehicleOos: 2,
+    }
+  );
+  assert.throws(
+    () => validateSafetyRow({
+      dot_number: '1', insp_total: '2', driver_insp_total: '2', driver_oos_insp_total: '3',
+      vehicle_insp_total: '1', vehicle_oos_insp_total: '0',
+    }),
+    /exceeds driver_insp_total/
+  );
+  assert.throws(
+    () => validateSafetyRow({
+      dot_number: '1', insp_total: '2', driver_insp_total: '3', driver_oos_insp_total: '0',
+      vehicle_insp_total: '1', vehicle_oos_insp_total: '0',
+    }),
+    /component exceeds insp_total/
+  );
+});
+
+test('safety rating codes and compact dates map fail-closed', () => {
+  assert.equal(mapSafetyRatingCode('S'), 'Satisfactory');
+  assert.equal(mapSafetyRatingCode('C'), 'Conditional');
+  assert.equal(mapSafetyRatingCode('U'), 'Unsatisfactory');
+  assert.equal(mapSafetyRatingCode(null), null);
+  assert.throws(() => mapSafetyRatingCode('X'), /Unexpected FMCSA safety_rating code/);
+  assert.equal(parseFmcsaCompactDate('20260625'), '2026-06-25');
+  assert.equal(parseFmcsaCompactDate(''), null);
+  assert.throws(() => parseFmcsaCompactDate('20260231'), /Invalid FMCSA compact date/);
+});
+
+test('safety upsert leaves crash inputs untouched until crash event keys are verified', () => {
+  const sql = buildSafetyUpsertSql();
+  assert.doesNotMatch(sql, /crash_total_24mo|crash_fatal_24mo|crash_injury_24mo|crash_tow_24mo/);
+  assert.match(sql, /driver_oos_rate/);
+  assert.match(sql, /vehicle_oos_rate/);
+  assert.match(sql, /safety_rating = coalesce\(excluded\.safety_rating, public\.carrier_safety\.safety_rating\)/i);
+  assert.match(sql, /on conflict \(dot_number\) do update/i);
 });
 
 test('Census geocoder classifies gateway and overload responses as retryable', () => {
