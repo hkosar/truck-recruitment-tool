@@ -234,17 +234,17 @@ select
   (100 + floor(f.r_street_num * 9700)::int)::text || ' ' || f.street_word,
   f.city_name, 'TX',
   '75' || f.zip_suffix, '75' || f.zip_suffix, f.county_word,
-  '(' || f.area_code || ') ' || (200 + floor(f.r_phone_a*789)::int)::text || '-' || lpad(floor(f.r_phone_b*9999)::text,4,'0'),
+  '(202) 555-' || lpad((100 + (f.i % 100))::text, 4, '0'),
   case when f.r_cell_chance < 0.55
-       then '(' || f.area_code || ') ' || (200 + floor(f.r_phone_c*789)::int)::text || '-' || lpad(floor(f.r_phone_d*9999)::text,4,'0')
+       then '(202) 555-' || lpad((100 + ((f.i + 37) % 100))::text, 4, '0')
        else null end,
   case when f.r_email_chance < 0.22
-       then (case when f.r_email_style < 0.5 then 'dispatch@' else 'info@' end)
+       then (case when f.r_email_style < 0.5 then 'dispatch-' else 'info-' end)
             || lower(regexp_replace(f.geo_word || (case f.tier when 1 then f.sg_core_word when 2 then f.t2_core_word else f.t0_core_word end),
-                                     '[^a-zA-Z0-9]', '', 'g')) || '.com'
+                                     '[^a-zA-Z0-9]', '', 'g')) || '@carrier.example.invalid'
        else null end,
   case when f.r_fax_chance < 0.15
-       then '(' || f.area_code || ') ' || (200 + floor(f.r_phone_a*600+100)::int)::text || '-' || lpad(floor(f.r_phone_d*8888)::text,4,'0')
+       then '(202) 555-' || lpad((100 + ((f.i + 73) % 100))::text, 4, '0')
        else null end,
   f.o1_first || ' ' || f.o1_last,
   case when f.r_has_officer2 < 0.4 then f.o2_first || ' ' || f.o2_last else null end,
@@ -407,7 +407,7 @@ insert into public.carriers (
   -- falls inside both Batch A's Austin-radius zone AND Batch B's Austin-end
   -- corridor buffer (no need to "hope" the geometry lines up).
   (1400001, 'Colorado River Sand & Gravel LLC', 'CRSG Hauling', '4400 Quarry Rd', 'Austin', 'TX', '78744', '78744', 'Travis',
-   '(512) 555-0101', '(512) 555-0102', 'dispatch@crsgtrucking.com', 'Walter Odom', 'Denise Odom',
+   '(512) 555-0101', '(512) 555-0102', 'dispatch-crsg@carrier.example.invalid', 'Walter Odom', 'Denise Odom',
    14, 15, 'Authorized For Hire', 'Interstate', 'A', current_date - 200, 'Carrier',
    true, true, false, true, 'Sand and Gravel',
    now(), now(), now() - interval '260 days', md5('4400 Quarry Rd|Austin|TX|78744'), md5('1400001'), now() - interval '5 days',
@@ -420,7 +420,7 @@ insert into public.carriers (
   -- realistic path: DNC never blocks pre-existing membership, only new
   -- matches). do_not_contact set well after added_at (see batch_carriers below).
   (1400002, 'Bluebonnet Aggregate Transport Inc.', null, '900 Pit Rd', 'Austin', 'TX', '78725', '78725', 'Travis',
-   '(512) 555-0201', null, null, 'Nora Castillo', null,
+   '(512) 555-0103', null, null, 'Nora Castillo', null,
    9, 10, 'Authorized For Hire', 'Interstate', 'A', current_date - 90, 'Carrier',
    true, false, true, true, 'Aggregate Hauling',
    now(), now(), now() - interval '180 days', md5('900 Pit Rd|Austin|TX|78725'), md5('1400002'), now() - interval '2 days',
@@ -432,7 +432,7 @@ insert into public.carriers (
   -- and Batch B's definition+zones respectively, but deliberately excluded
   -- from the initial snapshot insert below (05 §3.1 refresh-candidate invariant).
   (1400003, 'Balcones Rock & Sand Co.', null, '210 Ranch Rd', 'Austin', 'TX', '78737', '78737', 'Travis',
-   '(512) 555-0301', '(512) 555-0302', 'info@balconesrockandsand.com', 'Herbert Lyons', null,
+   '(512) 555-0104', '(512) 555-0105', 'info-balcones@carrier.example.invalid', 'Herbert Lyons', null,
    6, 7, 'Authorized For Hire', 'Interstate', 'A', current_date - 150, 'Carrier',
    true, true, false, true, 'Rock & Dirt',
    now(), now(), now() - interval '90 days', md5('210 Ranch Rd|Austin|TX|78737'), md5('1400003'), now() - interval '1 days',
@@ -440,7 +440,7 @@ insert into public.carriers (
    30.15, -97.85, st_setsrid(st_makepoint(-97.85, 30.15), 4326)::geography, 'range_interpolated', 'seed', md5('210 Ranch Rd|Austin|TX|78737'), now() - interval '1 days',
    false, null, null),
   (1400004, 'Guadalupe Gravel Express', null, '77 Loop', 'San Antonio', 'TX', '78201', '78201', 'Bexar',
-   '(210) 555-0401', null, 'dispatch@guadalupegravel.com', 'Ester Vance', 'Omar Vance',
+   '(210) 555-0106', null, 'dispatch-guadalupe@carrier.example.invalid', 'Ester Vance', 'Omar Vance',
    11, 12, 'Authorized For Hire', 'Interstate', 'A', current_date - 60, 'Carrier',
    true, false, false, true, 'Gravel',
    now(), now(), now() - interval '40 days', md5('77 Loop|San Antonio|TX|78201'), md5('1400004'), now(),
@@ -450,7 +450,7 @@ insert into public.carriers (
 
   -- 1400005: carrier_inactive (status_code <> 'A')
   (1400005, 'Panhandle Freightways LLC', null, '12 Highway 90', 'Amarillo', 'TX', '79101', '79101', 'Potter',
-   '(806) 555-0501', null, null, 'Glenn Ashby', null,
+   '(806) 555-0107', null, null, 'Glenn Ashby', null,
    4, 4, 'Authorized For Hire', 'Interstate', 'I', current_date - 500, 'Carrier',
    false, false, false, false, null,
    now(), now(), now() - interval '700 days', md5('12 Highway 90|Amarillo|TX|79101'), md5('1400005'), now() - interval '400 days',
@@ -460,7 +460,7 @@ insert into public.carriers (
 
   -- 1400006: no_insurance (no carrier_insurance row at all -- inserted below WITHOUT one)
   (1400006, 'Caprock Base Material Co.', null, '55 Commerce St', 'Lubbock', 'TX', '79401', '79401', 'Lubbock',
-   '(806) 555-0601', '(806) 555-0602', null, 'Ida Wren', null,
+   '(806) 555-0108', '(806) 555-0109', null, 'Ida Wren', null,
    7, 8, 'Authorized For Hire', 'Interstate', 'A', current_date - 120, 'Carrier',
    true, false, false, true, 'Base Material',
    now(), now(), now() - interval '200 days', md5('55 Commerce St|Lubbock|TX|79401'), md5('1400006'), now() - interval '3 days',
@@ -470,7 +470,7 @@ insert into public.carriers (
 
   -- 1400007: insurance_below_standard ($500k on file, via carrier_insurance below)
   (1400007, 'Frio Stone Carriers', null, '340 Industrial Blvd', 'Laredo', 'TX', '78040', '78040', 'Webb',
-   '(956) 555-0701', null, 'ops@friostone.com', 'Ana Beltran', 'Luis Beltran',
+   '(956) 555-0110', null, 'ops-frio@carrier.example.invalid', 'Ana Beltran', 'Luis Beltran',
    10, 11, 'Authorized For Hire', 'Interstate', 'A', current_date - 80, 'Carrier',
    true, true, false, true, 'Crushed Stone',
    now(), now(), now() - interval '300 days', md5('340 Industrial Blvd|Laredo|TX|78040'), md5('1400007'), now() - interval '2 days',
@@ -480,7 +480,7 @@ insert into public.carriers (
 
   -- 1400008: insurance_expiring_30d (bipd_cancel_date = current_date+15 below)
   (1400008, 'Edwards Plateau Hauling', null, '19 County Rd', 'San Antonio', 'TX', '78245', '78245', 'Bexar',
-   '(210) 555-0801', '(210) 555-0802', 'dispatch@edwardsplateau.com', 'Wanda Klein', null,
+   '(210) 555-0111', '(210) 555-0112', 'dispatch-edwards@carrier.example.invalid', 'Wanda Klein', null,
    13, 14, 'Authorized For Hire', 'Interstate', 'A', current_date - 40, 'Carrier',
    true, false, true, true, 'Dirt & Aggregate',
    now(), now(), now() - interval '500 days', md5('19 County Rd|San Antonio|TX|78245'), md5('1400008'), now() - interval '1 days',
@@ -490,7 +490,7 @@ insert into public.carriers (
 
   -- 1400009: authority_not_active (has an insurance row, but authority inactive)
   (1400009, 'Nueces Dirt Works', null, '81 Aggregate Way', 'Corpus Christi', 'TX', '78401', '78401', 'Nueces',
-   '(361) 555-0901', null, null, 'Bruce Camacho', null,
+   '(361) 555-0113', null, null, 'Bruce Camacho', null,
    5, 6, 'Authorized For Hire', 'Interstate', 'A', current_date - 220, 'Carrier',
    true, false, false, true, 'Sand, Gravel, Rock',
    now(), now(), now() - interval '350 days', md5('81 Aggregate Way|Corpus Christi|TX|78401'), md5('1400009'), now() - interval '6 days',
@@ -500,7 +500,7 @@ insert into public.carriers (
 
   -- 1400010: safety_rating (Conditional)
   (1400010, 'Pecos Trail Aggregates', null, '1200 Business Park Dr', 'Odessa', 'TX', '79761', '79761', 'Ector',
-   '(432) 555-1001', '(432) 555-1002', 'info@pecostrail.com', 'Faye Nolan', 'Curtis Nolan',
+   '(432) 555-0114', '(432) 555-0115', 'info-pecos@carrier.example.invalid', 'Faye Nolan', 'Curtis Nolan',
    16, 17, 'Authorized For Hire', 'Interstate', 'A', current_date - 30, 'Carrier',
    true, true, true, true, 'Fill Dirt / Sand',
    now(), now(), now() - interval '600 days', md5('1200 Business Park Dr|Odessa|TX|79761'), md5('1400010'), now(),
@@ -510,7 +510,7 @@ insert into public.carriers (
 
   -- 1400011: high_oos (vehicle_oos_rate/driver_oos_rate set high below)
   (1400011, 'Llano Uplift Trucking', null, '65 Quarry Rd', 'Fort Worth', 'TX', '76102', '76102', 'Tarrant',
-   '(817) 555-1101', null, 'dispatch@llanouplift.com', 'Grant Pope', null,
+   '(817) 555-0116', null, 'dispatch-llano@carrier.example.invalid', 'Grant Pope', null,
    8, 9, 'Authorized For Hire', 'Interstate', 'A', current_date - 100, 'Carrier',
    true, false, true, true, 'S&G Hauling',
    now(), now(), now() - interval '450 days', md5('65 Quarry Rd|Fort Worth|TX|76102'), md5('1400011'), now() - interval '4 days',
@@ -520,7 +520,7 @@ insert into public.carriers (
 
   -- 1400012: recent_crashes (crash_total_24mo >= 4 below)
   (1400012, 'Trinity Bend Materials', null, '48 Old Bastrop Hwy', 'Dallas', 'TX', '75201', '75201', 'Dallas',
-   '(214) 555-1201', '(214) 555-1202', null, 'Iris Marsh', 'Todd Marsh',
+   '(214) 555-0117', '(214) 555-0118', null, 'Iris Marsh', 'Todd Marsh',
    20, 21, 'Authorized For Hire', 'Interstate', 'A', current_date - 70, 'Carrier',
    true, true, false, true, 'aggregate / dirt',
    now(), now(), now() - interval '800 days', md5('48 Old Bastrop Hwy|Dallas|TX|75201'), md5('1400012'), now() - interval '7 days',
@@ -530,7 +530,7 @@ insert into public.carriers (
 
   -- 1400013: missing_from_source (source_missing_since = current_date - 5)
   (1400013, 'Comal Springs Hauling', null, '9 Farm to Market Rd', 'San Antonio', 'TX', '78223', '78223', 'Bexar',
-   '(210) 555-1301', null, 'ops@comalsprings.com', 'Dale Osorio', null,
+   '(210) 555-0119', null, 'ops-comal@carrier.example.invalid', 'Dale Osorio', null,
    3, 3, 'Authorized For Hire', 'Interstate', 'A', current_date - 900, 'Carrier',
    true, false, false, false, null,
    now(), now() - interval '5 days', now() - interval '900 days', md5('9 Farm to Market Rd|San Antonio|TX|78223'), md5('1400013'), now() - interval '5 days',
@@ -541,7 +541,7 @@ insert into public.carriers (
   -- 1400014: MULTI-WARNING carrier (insurance_below_standard + high_oos +
   -- recent_crashes all at once) -- exercises the WarningChips multi-badge case.
   (1400014, 'Red River Chameleon Hauling', null, '3 Pit Rd', 'Dallas', 'TX', '75217', '75217', 'Dallas',
-   '(214) 555-1401', null, null, 'Otis Prather', null,
+   '(214) 555-0120', null, null, 'Otis Prather', null,
    6, 6, 'Authorized For Hire', 'Interstate', 'A', current_date - 1000, 'Carrier',
    true, false, false, true, 'Rock, Sand, Base',
    now(), now(), now() - interval '1000 days', md5('3 Pit Rd|Dallas|TX|75217'), md5('1400014'), now() - interval '10 days',
@@ -552,11 +552,11 @@ insert into public.carriers (
   -- 1400015: contact-override demonstration carrier (F18 MVP: manual research
   -- fills the app-owned override columns; contact_name/coalesce logic exercised).
   (1400015, 'Hill Country Overrides Trucking', null, '501 Ranch Rd', 'Austin', 'TX', '78652', '78652', 'Travis',
-   '(512) 555-1501', null, null, 'J. Original Officer', null,
+   '(512) 555-0121', null, null, 'J. Original Officer', null,
    12, 13, 'Authorized For Hire', 'Interstate', 'A', current_date - 45, 'Carrier',
    true, true, false, true, 'Sand and gravel hauling',
    now(), now(), now() - interval '75 days', md5('501 Ranch Rd|Austin|TX|78652'), md5('1400015'), now() - interval '1 days',
-   null, 'Patricia Overridden-Contact', '(512) 555-9999', 'realcontact@hillcountrytrucking.com',
+   null, 'Patricia Overridden-Contact', '(512) 555-0199', 'corrected-contact@carrier.example.invalid',
    30.10, -97.95, st_setsrid(st_makepoint(-97.95, 30.10), 4326)::geography, 'rooftop', 'seed', md5('501 Ranch Rd|Austin|TX|78652'), now() - interval '1 days',
    false, null, null);
 
@@ -656,7 +656,7 @@ select
   ),
   now() - interval '9 days', now() - interval '2 days', 1,
   now() - interval '9 days'
-from public.profiles p where p.email = 'hunter@twistednail.com';
+from public.profiles p where p.email = 'manager@tnbs-recruiter.example.invalid';
 
 -- Every downstream statement re-derives each batch's id by its (unique,
 -- seed-only) name rather than threading a variable through -- simplest thing
@@ -684,7 +684,7 @@ select
   ),
   now() - interval '5 days', now() - interval '5 days', 0,
   now() - interval '5 days'
-from public.profiles p where p.email = 'marisol@twistednail.com';
+from public.profiles p where p.email = 'editor@tnbs-recruiter.example.invalid';
 
 insert into public.batch_zones (batch_id, zone_type, label, params, geom, distance_miles, sort_order)
 select b.id, 'corridor'::zone_type, 'Austin -> San Antonio · 40 mi',
@@ -780,13 +780,13 @@ insert into public.batch_activity (batch_id, actor_id, activity_type, comment, c
 select b.id, p.id, 'comment', 'Belt job PM wants a status update by Friday -- prioritize the Austin-metro carriers first.',
        b.created_at + interval '6 hours'
 from public.batches b, public.profiles p
-where b.name = 'Central Texas Aggregate Recruitment' and p.email = 'dwight@twistednail.com';
+where b.name = 'Central Texas Aggregate Recruitment' and p.email = 'editor-two@tnbs-recruiter.example.invalid';
 
 insert into public.batch_activity (batch_id, actor_id, activity_type, comment, created_at)
 select b.id, p.id, 'comment', 'Corridor buffer feels a little wide -- most hits cluster right along I-35 anyway.',
        b.created_at + interval '3 hours'
 from public.batches b, public.profiles p
-where b.name = 'I-35 Corridor: Austin -> San Antonio' and p.email = 'marisol@twistednail.com';
+where b.name = 'I-35 Corridor: Austin -> San Antonio' and p.email = 'editor@tnbs-recruiter.example.invalid';
 
 -- ============================================================================
 -- 7. contact_logs (F8/G6) -- across channels; the cross-batch carrier
@@ -797,25 +797,25 @@ insert into public.contact_logs (dot_number, batch_id, user_id, channel, disposi
 select 1400001, b.id, p.id, 'call'::contact_channel, 'connected'::contact_disposition,
        'Reached dispatcher, walked through the belt job rates.', 'Send rate sheet.', null, now() - interval '30 hours'
 from public.batches b, public.profiles p
-where b.name = 'Central Texas Aggregate Recruitment' and p.email = 'hunter@twistednail.com';
+where b.name = 'Central Texas Aggregate Recruitment' and p.email = 'manager@tnbs-recruiter.example.invalid';
 
 insert into public.contact_logs (dot_number, batch_id, user_id, channel, disposition, notes, next_steps, callback_at, contacted_at)
 select 1400001, b.id, p.id, 'text'::contact_channel, 'replied'::contact_disposition,
        'Also a fit for the I-35 run -- same owner, different job.', 'Coordinate both jobs.', null, now() - interval '30 hours'
 from public.batches b, public.profiles p
-where b.name = 'I-35 Corridor: Austin -> San Antonio' and p.email = 'marisol@twistednail.com';
+where b.name = 'I-35 Corridor: Austin -> San Antonio' and p.email = 'editor@tnbs-recruiter.example.invalid';
 
 insert into public.contact_logs (dot_number, batch_id, user_id, channel, disposition, notes, next_steps, callback_at, contacted_at)
 select 1400002, b.id, p.id, 'call'::contact_channel, 'no_answer'::contact_disposition,
        'No answer, no VM set up.', 'Retry tomorrow AM.', null, now() - interval '11 days'
 from public.batches b, public.profiles p
-where b.name = 'Central Texas Aggregate Recruitment' and p.email = 'hunter@twistednail.com';
+where b.name = 'Central Texas Aggregate Recruitment' and p.email = 'manager@tnbs-recruiter.example.invalid';
 
 insert into public.contact_logs (dot_number, batch_id, user_id, channel, disposition, notes, next_steps, callback_at, contacted_at)
 select 1400015, b.id, p.id, 'email'::contact_channel, 'sent'::contact_disposition,
        'Sent the rate sheet to the corrected contact email on file.', 'Follow up in 3 days.', null, now() - interval '1 days'
 from public.batches b, public.profiles p
-where b.name = 'Central Texas Aggregate Recruitment' and p.email = 'dwight@twistednail.com'
+where b.name = 'Central Texas Aggregate Recruitment' and p.email = 'editor-two@tnbs-recruiter.example.invalid'
   and exists (select 1 from public.batch_carriers bc where bc.batch_id = b.id and bc.dot_number = 1400015);
 
 -- A spread of logs across a handful of Batch A's naturally-matched, worked
