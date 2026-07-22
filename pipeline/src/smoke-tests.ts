@@ -10,6 +10,7 @@ import {
   buildUpsertSql as buildSafetyUpsertSql,
   mapSafetyRatingCode,
   parseFmcsaCompactDate,
+  SAFETY_DATASET_IDS,
   validateSafetyRow,
 } from './sources/safety.js';
 
@@ -87,7 +88,8 @@ test('Socrata numeric keyset paging is not used for text-keyed safety DOTs', asy
   assert.doesNotMatch(urls.join('\n'), /dot_number%3E|dot_number\+%3E/);
 });
 
-test('safety source contract uses only live-verified inspection fields', () => {
+test('safety source contract uses both disjoint PassProperty populations and only verified fields', () => {
+  assert.deepEqual(SAFETY_DATASET_IDS, ['4y6x-dmck', 'h9zy-gjn8']);
   assert.equal(
     buildSafetySelectClause(),
     'dot_number,insp_total,driver_insp_total,driver_oos_insp_total,vehicle_insp_total,vehicle_oos_insp_total'
