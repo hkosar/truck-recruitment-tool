@@ -129,6 +129,13 @@ test('safety row validation rejects impossible OOS and inspection totals', () =>
     }),
     /component exceeds insp_total/
   );
+  assert.throws(
+    () => validateSafetyRow({
+      dot_number: '1', insp_total: '2', driver_insp_total: '', driver_oos_insp_total: '0',
+      vehicle_insp_total: '1', vehicle_oos_insp_total: '0',
+    }),
+    /Missing driver_insp_total value/
+  );
 });
 
 test('safety rating codes and compact dates map fail-closed', () => {
