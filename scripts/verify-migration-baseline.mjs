@@ -24,6 +24,7 @@ const expectedVersions = [
   '20260720001400',
   '20260720001500',
   '20260722042539',
+  '20260722223300',
 ];
 
 const files = readdirSync(migrationsDir)
@@ -57,4 +58,4 @@ if (JSON.stringify(actualLines) !== JSON.stringify(manifestLines)) {
 }
 for (const line of actualLines) console.log(line);
 
-console.log(`PASS ${files.length} unique, ordered, checksum-pinned migrations; live geocode version is aligned at ${expectedVersions.at(-1)}`);
+console.log(`PASS ${files.length} unique, ordered, checksum-pinned migrations; live geocode version 20260722042539 is preserved`);
