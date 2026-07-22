@@ -77,11 +77,12 @@ function firstRow<T>(rows: T[] | null, fnName: string): T {
   return row;
 }
 
-/** Generated Supabase RPC types represent optional Postgres arguments as
- * `value | undefined`; sending `undefined` omits the argument so the database
- * default (including explicit SQL NULL defaults) is applied. */
-function optional<T>(value: T | null | undefined): T | undefined {
-  return value ?? undefined;
+/** Generated Supabase RPC types omit `null` from optional defaulted arguments,
+ * even when the SQL default is NULL. Cast null at this single boundary so callers
+ * can explicitly request SQL NULL semantics instead of omitting the argument and
+ * depending on PostgREST's function-overload/default resolution. */
+function nullableRpcArg<T>(value: T | null | undefined): T {
+  return (value ?? null) as T;
 }
 
 // ---------------------------------------------------------------------------
@@ -135,7 +136,7 @@ export async function facetOtherValues(
 ): Promise<FacetOtherValueRow[]> {
   const query = supabase.rpc('facet_other_values', {
     p_definition: toJson(definition),
-    p_keyword: optional(options.keyword),
+    p_keyword: nullableRpcArg(options.keyword),
     p_limit: options.limit ?? 100,
     p_offset: options.offset ?? 0,
   });
@@ -178,9 +179,9 @@ export async function createBatch(args: {
 }): Promise<CreateBatchResult> {
   const { data, error } = await supabase.rpc('create_batch', {
     p_name: args.name,
-    p_customer: args.customer ?? '',
-    p_job: args.job ?? '',
-    p_description: args.description ?? '',
+    p_customer: nullableRpcArg(args.customer),
+    p_job: nullableRpcArg(args.job),
+    p_description: nullableRpcArg(args.description),
     p_definition: toJson(args.definition),
   });
   if (error) throw error;
@@ -212,7 +213,7 @@ export async function setDoNotContact(dot: number, on: boolean, reason?: string 
   const { error } = await supabase.rpc('set_do_not_contact', {
     p_dot: dot,
     p_on: on,
-    p_reason: optional(reason),
+    p_reason: nullableRpcArg(reason),
   });
   if (error) throw error;
 }
@@ -256,14 +257,14 @@ export async function batchMembers(
 ): Promise<{ rows: BatchMemberRow[]; total: number }> {
   const query = supabase.rpc('batch_members', {
     p_batch_id: batchId,
-    p_status: optional(options.status),
-    p_q: optional(options.q),
+    p_status: nullableRpcArg(options.status),
+    p_q: nullableRpcArg(options.q),
     p_warnings_only: options.warningsOnly ?? false,
-    p_min_insurance: optional(options.minInsurance),
-    p_size_min: optional(options.sizeMin),
-    p_size_max: optional(options.sizeMax),
-    p_has_phone: optional(options.hasPhone),
-    p_has_email: optional(options.hasEmail),
+    p_min_insurance: nullableRpcArg(options.minInsurance),
+    p_size_min: nullableRpcArg(options.sizeMin),
+    p_size_max: nullableRpcArg(options.sizeMax),
+    p_has_phone: nullableRpcArg(options.hasPhone),
+    p_has_email: nullableRpcArg(options.hasEmail),
     p_page: options.page ?? 1,
     p_page_size: options.pageSize ?? 50,
     p_sort: options.sort ?? 'status',
@@ -284,14 +285,14 @@ export async function batchMembersMap(
 ): Promise<BatchMembersMapRow[]> {
   const query = supabase.rpc('batch_members_map', {
     p_batch_id: batchId,
-    p_status: optional(options.status),
-    p_q: optional(options.q),
+    p_status: nullableRpcArg(options.status),
+    p_q: nullableRpcArg(options.q),
     p_warnings_only: options.warningsOnly ?? false,
-    p_min_insurance: optional(options.minInsurance),
-    p_size_min: optional(options.sizeMin),
-    p_size_max: optional(options.sizeMax),
-    p_has_phone: optional(options.hasPhone),
-    p_has_email: optional(options.hasEmail),
+    p_min_insurance: nullableRpcArg(options.minInsurance),
+    p_size_min: nullableRpcArg(options.sizeMin),
+    p_size_max: nullableRpcArg(options.sizeMax),
+    p_has_phone: nullableRpcArg(options.hasPhone),
+    p_has_email: nullableRpcArg(options.hasEmail),
     p_sort: options.sort ?? 'status',
     p_dir: options.dir ?? 'asc',
   });
@@ -324,7 +325,7 @@ export async function generateContactSheet(
 ): Promise<ContactSheetRow[]> {
   const { data, error } = await supabase.rpc('generate_contact_sheet', {
     p_batch_id: batchId,
-    p_dots: optional(dots),
+    p_dots: nullableRpcArg(dots),
   });
   if (error) throw error;
   return data ?? [];
