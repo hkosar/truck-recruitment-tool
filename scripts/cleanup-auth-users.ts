@@ -84,11 +84,16 @@ async function main() {
     return;
   }
 
-  // Verify workflow teardown before deleting any Auth user. This makes cleanup
-  // all-or-nothing with respect to known business-data residue: if one test left
-  // rows behind, no identities are removed and the run stays inspectable.
+  // Verify every public FK that can reference a profile before deleting any
+  // Auth user. This makes cleanup all-or-nothing: if one test left business-data
+  // residue, no identities are removed and the run stays inspectable.
+  await assertZero("profiles", "approved_by", ids);
+  await assertZero("carriers", "dnc_set_by", ids);
   await assertZero("batches", "created_by", ids);
+  await assertZero("batch_carriers", "status_changed_by", ids);
+  await assertZero("batch_carriers", "promoted_by", ids);
   await assertZero("contact_logs", "user_id", ids);
+  await assertZero("contact_suppressions", "created_by", ids);
   await assertZero("batch_activity", "actor_id", ids);
 
   for (const user of users) {
