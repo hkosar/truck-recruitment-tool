@@ -225,12 +225,12 @@ function parseCsvLine(line: string): string[] {
 }
 
 /**
- * Documented shape (unique_id, input_address, match_indicator, match_type, matched_address,
- * lon, lat, tiger_line_id, side) for a Match/Tie row; No_Match rows carry far fewer fields.
- * TODO(live-db): confirm field COUNT and ORDER against a real response -- this is written
- * from Census's published documentation, not a fetched sample (see submitCensusBatch's doc).
+ * Live-verified 2026-07-22 response shape:
+ * unique_id, input_address, match_indicator, match_type, matched_address,
+ * "lon,lat", tiger_line_id, side. Coordinates are one quoted CSV field, not two columns.
+ * No_Match rows carry fewer fields.
  */
-function parseCensusBatchCsv(text: string): CensusMatchResult[] {
+export function parseCensusBatchCsv(text: string): CensusMatchResult[] {
   const results: CensusMatchResult[] = [];
   for (const line of text.split(/\r?\n/)) {
     if (!line.trim()) continue;
@@ -249,8 +249,9 @@ function parseCensusBatchCsv(text: string): CensusMatchResult[] {
     }
 
     const matchType = fields[3] === 'Exact' ? 'Exact' : 'Non_Exact';
-    const lng = fields[5] !== undefined ? Number(fields[5]) : NaN;
-    const lat = fields[6] !== undefined ? Number(fields[6]) : NaN;
+    const [lngRaw, latRaw] = (fields[5] ?? '').split(',');
+    const lng = lngRaw !== undefined ? Number(lngRaw) : NaN;
+    const lat = latRaw !== undefined ? Number(latRaw) : NaN;
     results.push({
       dotNumber,
       matched: Number.isFinite(lng) && Number.isFinite(lat),

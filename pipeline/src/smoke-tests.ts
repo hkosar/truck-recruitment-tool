@@ -3,7 +3,7 @@ import { parseArgs } from './run.js';
 import { buildSelectClause as buildInsuranceSelectClause, buildWhereClause as buildInsuranceWhereClause, buildFilingsUpsertSql } from './sources/insurance.js';
 import { buildSelectClause as buildAuthoritySelectClause, buildUpsertSql as buildAuthorityUpsertSql } from './sources/authority.js';
 import { DEFAULT_PAGE_SIZE, SocrataClient } from './socrata.js';
-import { CensusGeocoderHttpError, isRetryableCensusError } from './geocode.js';
+import { CensusGeocoderHttpError, isRetryableCensusError, parseCensusBatchCsv } from './geocode.js';
 
 type Test = { name: string; run: () => void | Promise<void> };
 const tests: Test[] = [];
@@ -66,6 +66,17 @@ test('Census geocoder classifies gateway and overload responses as retryable', (
   }
   assert.equal(isRetryableCensusError(new CensusGeocoderHttpError(400, 'bad request', '')), false);
   assert.equal(isRetryableCensusError(new TypeError('fetch failed')), true);
+});
+
+test('Census batch parser reads the live quoted lon,lat coordinate field', () => {
+  const csv = [
+    '"1","1600 Pennsylvania Ave NW, Washington, DC, 20500","Match","Exact","1600 PENNSYLVANIA AVE NW, WASHINGTON, DC, 20500","-77.03518753691,38.89869893252","76225813","L"',
+    '"2","PO BOX 10, AUSTIN, TX, 78701","No_Match"',
+  ].join('\n');
+  assert.deepEqual(parseCensusBatchCsv(csv), [
+    { dotNumber: 1, matched: true, matchType: 'Exact', lng: -77.03518753691, lat: 38.89869893252 },
+    { dotNumber: 2, matched: false, matchType: null, lng: null, lat: null },
+  ]);
 });
 
 let failed = 0;
