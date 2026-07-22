@@ -1,4 +1,5 @@
 #!/usr/bin/env bash
 set -euo pipefail
-node scripts/verify-migration-baseline.mjs
-node scripts/check-hosted-fixtures.mjs
+repository_root="$(cd "$(dirname "${BASH_SOURCE[0]}")/../.." && pwd)"
+node "$repository_root/scripts/verify-migration-baseline.mjs"
+node "$repository_root/scripts/check-hosted-fixtures.mjs"
