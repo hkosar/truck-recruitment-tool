@@ -8,10 +8,10 @@
     "node": ">=22"
   },
   "scripts": {
-    "build": "tsc -p tsconfig.json",
+    "build": "npm test && tsc -p tsconfig.json",
     "typecheck": "tsc --noEmit",
     "test": "tsx src/smoke-tests.ts",
-    "verify": "npm run typecheck && npm test && npm run build",
+    "verify": "npm run typecheck && npm run build",
     "start": "tsx src/run.ts nightly",
     "pipeline:render": "tsx src/run.ts ${PIPELINE_COMMAND:-nightly}",
     "monthly": "tsx src/run.ts monthly",
