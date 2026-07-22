@@ -132,8 +132,9 @@ collected here for a fast overview:
    `sources/authority.ts` and `sources/insurance.ts` now use the verified fields documented in
    `COLUMN-VERIFICATION.md`.
 3. ~~**Safety dataset and fields are unresolved.**~~ **PARTIALLY RESOLVED 2026-07-22:**
-   `4y6x-dmck` is the official row-queryable SMS AB PassProperty table and supplies the five
-   verified inspection/OOS totals. `az4n-8mr2` supplies compact S/C/U safety ratings and dates.
+   `4y6x-dmck` (SMS AB PassProperty) and `h9zy-gjn8` (SMS C PassProperty) are the
+   official row-queryable, disjoint carrier populations and jointly supply the five verified
+   inspection/OOS totals. `az4n-8mr2` supplies compact S/C/U safety ratings and dates.
    The old guessed crash/rating columns were removed from the SMS query. Crash totals remain an
    explicit gap until `4wxs-vbns` event deduplication is reviewed and tested. Use the capped
    `sync-safety --pages=1 --dry-run=true` path before any permanent safety write.
