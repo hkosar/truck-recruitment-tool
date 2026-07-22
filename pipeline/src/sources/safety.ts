@@ -6,8 +6,10 @@ import { DEFAULT_PAGE_SIZE, SOCRATA_DATASETS, SocrataClient } from '../socrata.j
  *
  * Live source contracts were verified on 2026-07-22 against official DOT DataHub metadata
  * and samples:
- * - 4y6x-dmck (SMS AB PassProperty) is a real SODA table with one row per carrier and exactly
- *   the five 24-month inspection/OOS totals used below. It does NOT contain crash totals or
+ * - 4y6x-dmck (SMS AB PassProperty) covers active interstate and intrastate Hazmat carriers;
+ *   h9zy-gjn8 (SMS C PassProperty) covers active intrastate non-Hazmat carriers. They have the
+ *   same 21-column contract, are individually unique by DOT, and are disjoint populations.
+ *   Both are required for complete Texas safety coverage. Neither contains crash totals or
  *   safety-rating columns.
  * - az4n-8mr2 (Company Census File) contains safety_rating using compact S/C/U codes and
  *   safety_rating_date as YYYYMMDD text.
@@ -21,6 +23,10 @@ import { DEFAULT_PAGE_SIZE, SOCRATA_DATASETS, SocrataClient } from '../socrata.j
  * source can extend this snapshot after deterministic event-key tests.
  */
 
+export const SAFETY_DATASET_IDS = [
+  SOCRATA_DATASETS.SMS_AB_PASSPROPERTY,
+  SOCRATA_DATASETS.SMS_C_PASSPROPERTY,
+] as const;
 export const SAFETY_DATASET_ID = SOCRATA_DATASETS.SMS_AB_PASSPROPERTY;
 export const SAFETY_RATING_DATASET_ID = SOCRATA_DATASETS.COMPANY_CENSUS;
 
@@ -203,7 +209,7 @@ function stats(values: number[]): { min: number | null; max: number | null; avg:
 }
 
 export interface SafetyProbeResult {
-  datasetId: string;
+  datasetIds: readonly string[];
   sampleRows: number;
   uniqueDots: number;
   inspectionStats: ReturnType<typeof stats>;
@@ -217,14 +223,18 @@ export async function probeSafetySources(
   options: { sampleLimit?: number } = {}
 ): Promise<SafetyProbeResult> {
   const sampleLimit = options.sampleLimit ?? 1_000;
-  const rawSafety = await socrata.fetchPage<Record<string, unknown>>(SAFETY_DATASET_ID, {
-    $select: buildSelectClause(),
-    $limit: sampleLimit,
-  });
-  const safety = rawSafety.map(validateSafetyRow);
+  const safety: ValidatedSafetyRow[] = [];
+  for (const datasetId of SAFETY_DATASET_IDS) {
+    const rawSafety = await socrata.fetchPage<Record<string, unknown>>(datasetId, {
+      $select: buildSelectClause(),
+      $order: 'dot_number',
+      $limit: sampleLimit,
+    });
+    safety.push(...rawSafety.map(validateSafetyRow));
+  }
   const uniqueDots = new Set(safety.map((row) => row.dotNumber));
   if (uniqueDots.size !== safety.length) {
-    throw new Error(`Safety probe found duplicate DOTs: ${safety.length} rows / ${uniqueDots.size} unique`);
+    throw new Error(`Safety probe found cross-source duplicate DOTs: ${safety.length} rows / ${uniqueDots.size} unique`);
   }
 
   const rawRatings = await socrata.fetchPage<Record<string, unknown>>(SAFETY_RATING_DATASET_ID, {
@@ -248,7 +258,7 @@ export async function probeSafetySources(
     .map((row) => Number(((row.vehicleOos / row.vehicleInspections) * 100).toFixed(2)));
 
   return {
-    datasetId: SAFETY_DATASET_ID,
+    datasetIds: SAFETY_DATASET_IDS,
     sampleRows: safety.length,
     uniqueDots: uniqueDots.size,
     inspectionStats: stats(safety.map((row) => row.inspections)),
@@ -266,7 +276,7 @@ export interface SafetySyncOptions {
 }
 
 export interface SafetySyncResult {
-  datasetId: string;
+  datasetIds: readonly string[];
   rowsRead: number;
   rowsUpserted: number;
   ratingRowsRead: number;
@@ -285,53 +295,63 @@ export async function syncSafety(
   let ratingRowsRead = 0;
   let pageCount = 0;
 
-  const totalSourceRows = await socrata.count(SAFETY_DATASET_ID);
-  if (totalSourceRows < 100_000 || totalSourceRows > 1_500_000) {
-    throw new Error(`Safety source row count ${totalSourceRows} is outside the expected 100k-1.5M range`);
+  const sourceRowCounts = new Map<string, number>();
+  for (const datasetId of SAFETY_DATASET_IDS) {
+    const count = await socrata.count(datasetId);
+    if (count < 100_000 || count > 2_000_000) {
+      throw new Error(`Safety source ${datasetId} row count ${count} is outside the expected 100k-2M range`);
+    }
+    sourceRowCounts.set(datasetId, count);
   }
+  const totalSourceRows = Array.from(sourceRowCounts.values()).reduce((sum, count) => sum + count, 0);
 
   const result = await withStagingConnection(ctx.pg, buildStagingDdl(), async (client: PgPoolClient) => {
-    // dot_number is TEXT in this dataset. Use stable ordered offset paging; the generic
+    // dot_number is TEXT in both datasets. Use stable ordered offset paging; the generic
     // numeric-keyset helper would emit `dot_number > 123` and Socrata correctly rejects that
-    // type mismatch. Offset depth is acceptable for this monthly ~695k-row source.
-    for await (const page of socrata.paginateOffset<Record<string, unknown>>(
-      SAFETY_DATASET_ID,
-      { $select: buildSelectClause(), $order: 'dot_number' },
-      pageSize
-    )) {
-      pageCount += 1;
-      rowsRead += page.length;
-      const rows = page.map((raw) => {
-        const row = validateSafetyRow(raw);
-        return [
-          row.dotNumber,
-          row.inspections,
-          row.driverInspections,
-          row.driverOos,
-          row.vehicleInspections,
-          row.vehicleOos,
-          null,
-          null,
-        ];
-      });
-      await bulkInsert(
-        client,
-        'staging_safety',
-        [
-          'dot_number',
-          'inspections_24mo',
-          'driver_insp_24mo',
-          'driver_oos_24mo',
-          'vehicle_insp_24mo',
-          'vehicle_oos_24mo',
-          'safety_rating',
-          'safety_rating_date',
-        ],
-        rows,
-        1_000
-      );
-      ctx.log.info('sync-safety.page', { page: pageCount, pageRows: page.length, rowsRead });
-      if (options.maxPages && pageCount >= options.maxPages) break;
+    // type mismatch. The two source populations are disjoint; the staging PK fails closed if
+    // that official contract ever changes.
+    for (const datasetId of SAFETY_DATASET_IDS) {
+      let datasetPages = 0;
+      for await (const page of socrata.paginateOffset<Record<string, unknown>>(
+        datasetId,
+        { $select: buildSelectClause(), $order: 'dot_number' },
+        pageSize
+      )) {
+        datasetPages += 1;
+        pageCount += 1;
+        rowsRead += page.length;
+        const rows = page.map((raw) => {
+          const row = validateSafetyRow(raw);
+          return [
+            row.dotNumber,
+            row.inspections,
+            row.driverInspections,
+            row.driverOos,
+            row.vehicleInspections,
+            row.vehicleOos,
+            null,
+            null,
+          ];
+        });
+        await bulkInsert(
+          client,
+          'staging_safety',
+          [
+            'dot_number',
+            'inspections_24mo',
+            'driver_insp_24mo',
+            'driver_oos_24mo',
+            'vehicle_insp_24mo',
+            'vehicle_oos_24mo',
+            'safety_rating',
+            'safety_rating_date',
+          ],
+          rows,
+          1_000
+        );
+        ctx.log.info('sync-safety.page', { datasetId, page: datasetPages, pageRows: page.length, rowsRead });
+        if (options.maxPages && datasetPages >= options.maxPages) break;
+      }
     }
 
     // Ratings are live-verified on the Census dataset, but querying them for every safety DOT
@@ -363,17 +383,20 @@ export async function syncSafety(
       }
     }
 
-    const expectedRows = options.maxPages
-      ? Math.min(totalSourceRows, options.maxPages * pageSize)
-      : totalSourceRows;
+    const expectedRows = Array.from(sourceRowCounts.values()).reduce(
+      (sum, count) => sum + (options.maxPages ? Math.min(count, options.maxPages * pageSize) : count),
+      0
+    );
     if (rowsRead !== expectedRows) {
       throw new Error(`Safety paging completeness failed: read ${rowsRead} rows, expected ${expectedRows}`);
     }
-    const finalSourceRows = await socrata.count(SAFETY_DATASET_ID);
-    if (finalSourceRows !== totalSourceRows) {
-      throw new Error(
-        `Safety source changed during the pull (${totalSourceRows} -> ${finalSourceRows}); retry next run`
-      );
+    for (const [datasetId, initialCount] of sourceRowCounts) {
+      const finalCount = await socrata.count(datasetId);
+      if (finalCount !== initialCount) {
+        throw new Error(
+          `Safety source ${datasetId} changed during the pull (${initialCount} -> ${finalCount}); retry next run`
+        );
+      }
     }
 
     const validationResult = await client.query(`
@@ -404,20 +427,30 @@ export async function syncSafety(
   });
 
   ctx.log.info(options.dryRun ? 'sync-safety.dry_run_validated' : 'sync-safety.done', {
-    datasetId: SAFETY_DATASET_ID,
+    datasetIds: SAFETY_DATASET_IDS,
     rowsRead,
     ratingRowsRead,
     rowsUpserted: result.rowsUpserted,
     pages: pageCount,
-    validation: { ...result.validation, totalSourceRows, includeRatings },
+    validation: {
+      ...result.validation,
+      totalSourceRows,
+      sourceRowCounts: Object.fromEntries(sourceRowCounts),
+      includeRatings,
+    },
   });
 
   return {
-    datasetId: SAFETY_DATASET_ID,
+    datasetIds: SAFETY_DATASET_IDS,
     rowsRead,
     rowsUpserted: result.rowsUpserted,
     ratingRowsRead,
     dryRun: options.dryRun ?? false,
-    validation: { ...result.validation, totalSourceRows, includeRatings },
+    validation: {
+      ...result.validation,
+      totalSourceRows,
+      sourceRowCounts: Object.fromEntries(sourceRowCounts),
+      includeRatings,
+    },
   };
 }
