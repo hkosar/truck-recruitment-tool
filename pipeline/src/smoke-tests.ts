@@ -68,6 +68,25 @@ test('insurance upsert targets the migrated schema and deduplicates source natur
   assert.match(sql, /nullif\("effective_date", ''\) is not null/i);
 });
 
+test('Socrata numeric keyset paging is not used for text-keyed safety DOTs', async () => {
+  const urls: string[] = [];
+  const fetchImpl: typeof fetch = async (input) => {
+    urls.push(String(input));
+    const body = urls.length === 1
+      ? JSON.stringify([{ dot_number: '10000' }])
+      : '[]';
+    return new Response(body, { status: 200, headers: { 'content-type': 'application/json' } });
+  };
+  const client = new SocrataClient({ appToken: 'test-token', fetchImpl });
+  for await (const _page of client.paginateOffset('4y6x-dmck', { $order: 'dot_number' }, 1)) {
+    // Consume both pages.
+  }
+  assert.equal(urls.length, 2);
+  assert.match(urls[0] ?? '', /%24offset=0/);
+  assert.match(urls[1] ?? '', /%24offset=1/);
+  assert.doesNotMatch(urls.join('\n'), /dot_number%3E|dot_number\+%3E/);
+});
+
 test('safety source contract uses only live-verified inspection fields', () => {
   assert.equal(
     buildSafetySelectClause(),
