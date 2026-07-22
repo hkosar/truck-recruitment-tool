@@ -236,11 +236,13 @@ code-to-enum mapping.
 
 Direct official DOT DataHub metadata and sample queries resolved the core R3 question:
 
-- `4y6x-dmck` is **SMS AB PassProperty**, a public SODA-tabular dataset with 695,142 rows and
-  one carrier per row. It is the correct bulk source for 24-month inspection/OOS totals.
-- Its exact 21-column schema includes `dot_number`, `insp_total`, `driver_insp_total`,
+- `4y6x-dmck` is **SMS AB PassProperty**, covering active interstate and intrastate Hazmat
+  carriers. `h9zy-gjn8` is **SMS C PassProperty**, covering active intrastate non-Hazmat
+  carriers. Both are public SODA-tabular datasets, have one carrier per row, use the same
+  21-column contract, and are disjoint. Both are required for complete Texas coverage.
+- Their exact 21-column schema includes `dot_number`, `insp_total`, `driver_insp_total`,
   `driver_oos_insp_total`, `vehicle_insp_total`, `vehicle_oos_insp_total`, and BASIC measure /
-  Acute-Critical fields. It contains **no crash totals and no safety-rating columns**.
+  Acute-Critical fields. They contain **no crash totals and no safety-rating columns**.
 - `sjpe-nzai` is only an href/catalog entry pointing to the separate SMS raw-data download
   site, not a row-queryable SODA table. It is not a usable fallback for this pipeline.
 - `az4n-8mr2` directly exposes `safety_rating` and `safety_rating_date`. Live values use compact
