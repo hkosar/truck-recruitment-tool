@@ -148,6 +148,11 @@ create temp table staging_safety (
   safety_rating text,
   safety_rating_date date
 ) on commit drop;
+create temp table staging_safety_ratings (
+  dot_number bigint primary key,
+  safety_rating text not null,
+  safety_rating_date date not null
+) on commit drop;
   `.trim();
 }
 
@@ -272,7 +277,6 @@ export interface SafetySyncOptions {
   maxPages?: number;
   pageSize?: number;
   dryRun?: boolean;
-  includeRatings?: boolean;
 }
 
 export interface SafetySyncResult {
@@ -290,7 +294,6 @@ export async function syncSafety(
   options: SafetySyncOptions = {}
 ): Promise<SafetySyncResult> {
   const pageSize = options.pageSize ?? DEFAULT_PAGE_SIZE;
-  const includeRatings = options.includeRatings ?? false;
   let rowsRead = 0;
   let ratingRowsRead = 0;
   let pageCount = 0;
@@ -354,34 +357,40 @@ export async function syncSafety(
       }
     }
 
-    // Ratings are live-verified on the Census dataset, but querying them for every safety DOT
-    // would add thousands of requests to a 695k-row monthly pull. Keep bulk rating import behind
-    // an explicit option until the census pipeline promotes these two fields directly. The
-    // read-only probe still validates the source contract on every diagnostic run.
-    if (includeRatings) {
-      const stagedDots = await client.query<{ dot_number: string }>('select dot_number::text from staging_safety order by dot_number');
-      const dots = stagedDots.rows.map((row) => row.dot_number);
-      const ratingChunkSize = 100;
-      for (let i = 0; i < dots.length; i += ratingChunkSize) {
-        const chunk = dots.slice(i, i + ratingChunkSize);
-        if (chunk.length === 0) continue;
-        const rows = await socrata.fetchPage<Record<string, unknown>>(SAFETY_RATING_DATASET_ID, {
-          $select: buildRatingSelectClause(),
-          $where: `dot_number in (${chunk.join(',')})`,
-          $limit: chunk.length,
-        });
-        ratingRowsRead += rows.length;
-        for (const row of rows) {
-          const dot = parseNonNegativeInteger(row.dot_number, 'dot_number');
-          const rating = mapSafetyRatingCode(row.safety_rating);
-          const ratingDate = parseFmcsaCompactDate(row.safety_rating_date);
-          await client.query(
-            'update staging_safety set safety_rating = $2, safety_rating_date = $3::date where dot_number = $1',
-            [dot, rating, ratingDate]
-          );
-        }
+    // Ratings are sparse (~3.7k active Texas carriers), so one filtered Census query is both
+    // complete and far cheaper than issuing per-DOT requests. Stage and validate the entire set,
+    // then join it onto safety rows. Rated carriers without an AB/C SMS row remain honestly absent
+    // from carrier_safety rather than creating an inspection snapshot with invented zero totals.
+    const ratingRows = await socrata.fetchPage<Record<string, unknown>>(SAFETY_RATING_DATASET_ID, {
+      $select: buildRatingSelectClause(),
+      $where: "phy_state='TX' AND status_code='A' AND safety_rating is not null",
+      $order: 'dot_number',
+      $limit: 10_000,
+    });
+    ratingRowsRead = ratingRows.length;
+    const validatedRatings = ratingRows.map((row) => {
+      const dotNumber = parseNonNegativeInteger(row.dot_number, 'dot_number');
+      const safetyRating = mapSafetyRatingCode(row.safety_rating);
+      const safetyRatingDate = parseFmcsaCompactDate(row.safety_rating_date);
+      if (safetyRating === null || safetyRatingDate === null) {
+        throw new Error(`Incomplete safety rating for DOT ${dotNumber}`);
       }
-    }
+      return [dotNumber, safetyRating, safetyRatingDate];
+    });
+    await bulkInsert(
+      client,
+      'staging_safety_ratings',
+      ['dot_number', 'safety_rating', 'safety_rating_date'],
+      validatedRatings,
+      2_000
+    );
+    await client.query(`
+      update staging_safety s
+      set safety_rating = r.safety_rating,
+          safety_rating_date = r.safety_rating_date
+      from staging_safety_ratings r
+      where r.dot_number = s.dot_number
+    `);
 
     const expectedRows = Array.from(sourceRowCounts.values()).reduce(
       (sum, count) => sum + (options.maxPages ? Math.min(count, options.maxPages * pageSize) : count),
@@ -408,7 +417,8 @@ export async function syncSafety(
         count(*) filter (where driver_insp_24mo > inspections_24mo or vehicle_insp_24mo > inspections_24mo)::int as invalid_inspection_totals,
         min(inspections_24mo)::int as min_inspections,
         max(inspections_24mo)::int as max_inspections,
-        count(*) filter (where safety_rating is not null)::int as rated_rows
+        count(*) filter (where safety_rating is not null)::int as rated_rows,
+        (select count(*)::int from staging_safety_ratings) as source_rating_rows
       from staging_safety
     `);
     const validation = validationResult.rows[0] ?? {};
@@ -416,7 +426,8 @@ export async function syncSafety(
       Number(validation.invalid_driver_oos) > 0 ||
       Number(validation.invalid_vehicle_oos) > 0 ||
       Number(validation.invalid_inspection_totals) > 0 ||
-      Number(validation.staged_rows) !== Number(validation.unique_dots)
+      Number(validation.staged_rows) !== Number(validation.unique_dots) ||
+      Number(validation.source_rating_rows) !== ratingRowsRead
     ) {
       throw new Error(`Safety staging validation failed: ${JSON.stringify(validation)}`);
     }
@@ -436,7 +447,6 @@ export async function syncSafety(
       ...result.validation,
       totalSourceRows,
       sourceRowCounts: Object.fromEntries(sourceRowCounts),
-      includeRatings,
     },
   });
 
@@ -450,7 +460,6 @@ export async function syncSafety(
       ...result.validation,
       totalSourceRows,
       sourceRowCounts: Object.fromEntries(sourceRowCounts),
-      includeRatings,
     },
   };
 }
