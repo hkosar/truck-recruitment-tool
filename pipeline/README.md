@@ -76,6 +76,7 @@ npm run build                                      # tsc emit (CI artifact / val
 npm run dev                                          # nightly, --pages=1 --batches=1
 tsx src/run.ts sync-census --pages=1                 # isolate exactly one step
 tsx src/run.ts sync-insurance --pages=1 --dry-run=true # fast, non-persistent mapping/staging validation
+npm run smoke:safety                                   # verified safety contract; 1-page staging validation, no permanent writes
 tsx src/run.ts nightly --from=geocode                # resume a chain partway through
 tsx src/run.ts backfill --pages=5 --batches=5        # capped backfill smoke test
 npm run monthly                                      # sync-safety alone
@@ -84,9 +85,11 @@ npm run backfill                                     # full backfill chain, unca
 
 `--pages=N` caps every Socrata pull's page count (10,000 rows per page by default, chosen to stay
 within Render's 512 MB cron memory); `--batches=N` caps how many Census geocoder batches
-`geocode` submits in one run. `--dry-run=true` is supported for isolated `sync-insurance`
-validation: it fetches/maps/stages the capped sample and reports key quality without writing the
-permanent filings/rollup tables. Every step prints the same
+`geocode` submits in one run. `--dry-run=true` is supported for isolated `sync-insurance` and
+`sync-safety` validation: each fetches, maps, stages, and reports quality without writing its
+permanent destination tables. Safety crash totals intentionally remain unset until the separate
+crash-event source has a reviewed deduplication key; inspection/OOS totals and Census safety
+ratings are the only live-verified inputs enabled now. Every step prints the same
 `pipeline_runs`-shaped structured JSON log lines regardless of how it was invoked.
 
 **Do not run `backfill` uncapped against a project you don't intend to fully populate** — per
@@ -125,13 +128,17 @@ collected here for a fast overview:
    operational table and redefining the dead `sync_runs` table as a `security_invoker` view
    over it (latest run per source, for the G10 UI footer). Still needs `supabase db reset` to
    run in an environment with the CLI/DB to confirm end-to-end (that is the M2 provisioning step).
-2. **L&I column names are unverified.** `sources/authority.ts` (6eyk-hxee) in particular —
-   see `COLUMN-VERIFICATION.md`. Its `$select`/mapping must be corrected against a live
-   `$limit=1` probe before `sync-authority` can run.
-3. **`sources/safety.ts`'s dataset choice itself is unresolved** (⚠️R3 — `4y6x-dmck` vs
-   `sjpe-nzai`), and its column map (especially crash totals) is a best-guess.
-4. **Census batch geocoder response parsing** (`geocode.ts`) is written from documentation,
-   not a fetched real response sample — validate on day 1.
+2. ~~**L&I column names are unverified.**~~ **RESOLVED in live production validation:**
+   `sources/authority.ts` and `sources/insurance.ts` now use the verified fields documented in
+   `COLUMN-VERIFICATION.md`.
+3. ~~**Safety dataset and fields are unresolved.**~~ **PARTIALLY RESOLVED 2026-07-22:**
+   `4y6x-dmck` is the official row-queryable SMS AB PassProperty table and supplies the five
+   verified inspection/OOS totals. `az4n-8mr2` supplies compact S/C/U safety ratings and dates.
+   The old guessed crash/rating columns were removed from the SMS query. Crash totals remain an
+   explicit gap until `4wxs-vbns` event deduplication is reviewed and tested. Use the capped
+   `sync-safety --pages=1 --dry-run=true` path before any permanent safety write.
+4. ~~**Census batch geocoder response parsing is unverified.**~~ **RESOLVED** against a live
+   quoted `lon,lat` response fixture with regression coverage.
 5. **`crgo_cargoothr_desc` boolean-flag `'X'` encoding** and a couple of Y/N flag encodings
    are carried forward from the architecture doc's own prior research, not independently
    re-verified this session (see `COLUMN-VERIFICATION.md`'s CONFIRMED/UNVERIFIED split).
