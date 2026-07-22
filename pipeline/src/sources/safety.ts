@@ -288,10 +288,13 @@ export async function syncSafety(
   }
 
   const result = await withStagingConnection(ctx.pg, buildStagingDdl(), async (client: PgPoolClient) => {
-    for await (const page of socrata.paginateKeyset<Record<string, unknown>>(
+    // dot_number is TEXT in this dataset. Use stable ordered offset paging; the generic
+    // numeric-keyset helper would emit `dot_number > 123` and Socrata correctly rejects that
+    // type mismatch. Offset depth is acceptable for this monthly ~695k-row source.
+    for await (const page of socrata.paginateOffset<Record<string, unknown>>(
       SAFETY_DATASET_ID,
-      { $select: buildSelectClause() },
-      { keyColumn: 'dot_number', pageSize }
+      { $select: buildSelectClause(), $order: 'dot_number' },
+      pageSize
     )) {
       pageCount += 1;
       rowsRead += page.length;
