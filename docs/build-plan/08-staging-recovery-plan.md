@@ -93,7 +93,7 @@ Requirements:
 - Emails use a reserved `example.invalid` namespace for admin-created, auto-confirmed role tests, so no message can reach a real mailbox.
 - User metadata contains `test_only=true`, a run ID, creation time, and expiry time.
 - Passwords and secret keys never appear in chat, repository files, logs, screenshots, or test reports.
-- Provisioning is idempotent by run ID and refuses a production project URL/ref.
+- Provisioning is deterministic and collision-safe by run ID: an existing run ID fails closed rather than mutating pre-existing users; cleanup can be rerun safely and refuses a production project URL/ref.
 - Cleanup deletes all run-created sessions/users and verifies no profiles, batches, zones, members, contact logs, activities, or suppressions remain for the run.
 
 Use a separate mail-sink environment only for registration-confirmation and password-reset delivery tests. Do not use real employee inboxes or plus-address aliases until final owner-approved production onboarding. If a hosted branch/project cannot provide a non-delivering mail sink safely, keep those two delivery tests local/CI and test hosted Auth roles with auto-confirmed admin-created users.
