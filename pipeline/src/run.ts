@@ -132,7 +132,7 @@ const STEP_RUNNERS: Record<PipelineStep, StepRunner> = {
       rows_upserted: r.rowsUpserted,
       rows_changed: r.rowsUpserted,
       meta: {
-        datasetId: r.datasetId,
+        datasetIds: r.datasetIds,
         ratingRowsRead: r.ratingRowsRead,
         dryRun: r.dryRun,
         validation: r.validation,
