@@ -77,6 +77,13 @@ function firstRow<T>(rows: T[] | null, fnName: string): T {
   return row;
 }
 
+/** Generated Supabase RPC types represent optional Postgres arguments as
+ * `value | undefined`; sending `undefined` omits the argument so the database
+ * default (including explicit SQL NULL defaults) is applied. */
+function optional<T>(value: T | null | undefined): T | undefined {
+  return value ?? undefined;
+}
+
 // ---------------------------------------------------------------------------
 // 01 §5.1 — paged results (search builder + pre-batch review)
 // ---------------------------------------------------------------------------
@@ -128,7 +135,7 @@ export async function facetOtherValues(
 ): Promise<FacetOtherValueRow[]> {
   const query = supabase.rpc('facet_other_values', {
     p_definition: toJson(definition),
-    p_keyword: options.keyword ?? null,
+    p_keyword: optional(options.keyword),
     p_limit: options.limit ?? 100,
     p_offset: options.offset ?? 0,
   });
@@ -171,9 +178,9 @@ export async function createBatch(args: {
 }): Promise<CreateBatchResult> {
   const { data, error } = await supabase.rpc('create_batch', {
     p_name: args.name,
-    p_customer: args.customer ?? null,
-    p_job: args.job ?? null,
-    p_description: args.description ?? null,
+    p_customer: args.customer ?? '',
+    p_job: args.job ?? '',
+    p_description: args.description ?? '',
     p_definition: toJson(args.definition),
   });
   if (error) throw error;
@@ -205,7 +212,7 @@ export async function setDoNotContact(dot: number, on: boolean, reason?: string 
   const { error } = await supabase.rpc('set_do_not_contact', {
     p_dot: dot,
     p_on: on,
-    p_reason: reason ?? null,
+    p_reason: optional(reason),
   });
   if (error) throw error;
 }
@@ -249,14 +256,14 @@ export async function batchMembers(
 ): Promise<{ rows: BatchMemberRow[]; total: number }> {
   const query = supabase.rpc('batch_members', {
     p_batch_id: batchId,
-    p_status: options.status ?? null,
-    p_q: options.q ?? null,
+    p_status: optional(options.status),
+    p_q: optional(options.q),
     p_warnings_only: options.warningsOnly ?? false,
-    p_min_insurance: options.minInsurance ?? null,
-    p_size_min: options.sizeMin ?? null,
-    p_size_max: options.sizeMax ?? null,
-    p_has_phone: options.hasPhone ?? null,
-    p_has_email: options.hasEmail ?? null,
+    p_min_insurance: optional(options.minInsurance),
+    p_size_min: optional(options.sizeMin),
+    p_size_max: optional(options.sizeMax),
+    p_has_phone: optional(options.hasPhone),
+    p_has_email: optional(options.hasEmail),
     p_page: options.page ?? 1,
     p_page_size: options.pageSize ?? 50,
     p_sort: options.sort ?? 'status',
@@ -277,14 +284,14 @@ export async function batchMembersMap(
 ): Promise<BatchMembersMapRow[]> {
   const query = supabase.rpc('batch_members_map', {
     p_batch_id: batchId,
-    p_status: options.status ?? null,
-    p_q: options.q ?? null,
+    p_status: optional(options.status),
+    p_q: optional(options.q),
     p_warnings_only: options.warningsOnly ?? false,
-    p_min_insurance: options.minInsurance ?? null,
-    p_size_min: options.sizeMin ?? null,
-    p_size_max: options.sizeMax ?? null,
-    p_has_phone: options.hasPhone ?? null,
-    p_has_email: options.hasEmail ?? null,
+    p_min_insurance: optional(options.minInsurance),
+    p_size_min: optional(options.sizeMin),
+    p_size_max: optional(options.sizeMax),
+    p_has_phone: optional(options.hasPhone),
+    p_has_email: optional(options.hasEmail),
     p_sort: options.sort ?? 'status',
     p_dir: options.dir ?? 'asc',
   });
@@ -315,7 +322,10 @@ export async function generateContactSheet(
   batchId: string,
   dots: number[] | null = null,
 ): Promise<ContactSheetRow[]> {
-  const { data, error } = await supabase.rpc('generate_contact_sheet', { p_batch_id: batchId, p_dots: dots });
+  const { data, error } = await supabase.rpc('generate_contact_sheet', {
+    p_batch_id: batchId,
+    p_dots: optional(dots),
+  });
   if (error) throw error;
   return data ?? [];
 }
@@ -340,7 +350,7 @@ export async function batchStatusCounts(batchId: string, signal?: AbortSignal): 
 /** Dashboard StatStrip (F24): active batches / distinct carriers in play /
  * with phone / interested / promoted. */
 export async function dashboardTotals(signal?: AbortSignal): Promise<DashboardTotals> {
-  const query = supabase.rpc('dashboard_totals', {});
+  const query = supabase.rpc('dashboard_totals');
   const { data, error } = signal ? await query.abortSignal(signal) : await query;
   if (error) throw error;
   return firstRow(data, 'dashboard_totals');
