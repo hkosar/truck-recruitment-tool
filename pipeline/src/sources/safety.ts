@@ -74,7 +74,10 @@ export function parseFmcsaCompactDate(value: unknown): string | null {
 }
 
 function parseNonNegativeInteger(value: unknown, field: string): number {
-  const raw = value === undefined || value === null || String(value).trim() === '' ? '0' : String(value).trim();
+  if (value === undefined || value === null || String(value).trim() === '') {
+    throw new Error(`Missing ${field} value`);
+  }
+  const raw = String(value).trim();
   if (!/^\d+$/.test(raw)) throw new Error(`Unexpected ${field} value "${raw}"`);
   const n = Number(raw);
   if (!Number.isSafeInteger(n) || n < 0) throw new Error(`Out-of-range ${field} value "${raw}"`);
@@ -358,6 +361,19 @@ export async function syncSafety(
           );
         }
       }
+    }
+
+    const expectedRows = options.maxPages
+      ? Math.min(totalSourceRows, options.maxPages * pageSize)
+      : totalSourceRows;
+    if (rowsRead !== expectedRows) {
+      throw new Error(`Safety paging completeness failed: read ${rowsRead} rows, expected ${expectedRows}`);
+    }
+    const finalSourceRows = await socrata.count(SAFETY_DATASET_ID);
+    if (finalSourceRows !== totalSourceRows) {
+      throw new Error(
+        `Safety source changed during the pull (${totalSourceRows} -> ${finalSourceRows}); retry next run`
+      );
     }
 
     const validationResult = await client.query(`
