@@ -3,6 +3,7 @@ import { parseArgs } from './run.js';
 import { buildSelectClause as buildInsuranceSelectClause, buildWhereClause as buildInsuranceWhereClause, buildFilingsUpsertSql } from './sources/insurance.js';
 import { buildSelectClause as buildAuthoritySelectClause, buildUpsertSql as buildAuthorityUpsertSql } from './sources/authority.js';
 import { DEFAULT_PAGE_SIZE, SocrataClient } from './socrata.js';
+import { CensusGeocoderHttpError, isRetryableCensusError } from './geocode.js';
 
 type Test = { name: string; run: () => void | Promise<void> };
 const tests: Test[] = [];
@@ -57,6 +58,14 @@ test('insurance upsert targets the migrated schema and deduplicates source natur
   assert.doesNotMatch(sql, /"raw"/);
   assert.match(sql, /select distinct on \("dot_number", "docket_number", "policy_no", "effective_date"\)/i);
   assert.match(sql, /nullif\("effective_date", ''\) is not null/i);
+});
+
+test('Census geocoder classifies gateway and overload responses as retryable', () => {
+  for (const status of [429, 502, 503, 504]) {
+    assert.equal(isRetryableCensusError(new CensusGeocoderHttpError(status, 'temporary', '')), true);
+  }
+  assert.equal(isRetryableCensusError(new CensusGeocoderHttpError(400, 'bad request', '')), false);
+  assert.equal(isRetryableCensusError(new TypeError('fetch failed')), true);
 });
 
 let failed = 0;

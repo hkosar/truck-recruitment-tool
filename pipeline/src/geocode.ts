@@ -154,6 +154,23 @@ export function chunkCandidates(
  * fetched real sample (data.transportation.gov-adjacent hosts aside, geocoding.geo.census.gov
  * itself was not probed this session either) -- validate against one real response on day 1.
  */
+export class CensusGeocoderHttpError extends Error {
+  constructor(
+    readonly status: number,
+    readonly statusText: string,
+    readonly responseBody: string
+  ) {
+    super(`Census batch geocoder returned ${status}: ${statusText} ${responseBody}`);
+    this.name = 'CensusGeocoderHttpError';
+  }
+}
+
+export function isRetryableCensusError(error: unknown): boolean {
+  return error instanceof CensusGeocoderHttpError
+    ? error.status === 429 || error.status === 502 || error.status === 503 || error.status === 504
+    : error instanceof TypeError;
+}
+
 export async function submitCensusBatch(
   ctx: PipelineContext,
   rows: GeocodeCandidate[],
@@ -168,7 +185,7 @@ export async function submitCensusBatch(
   const res = await fetchImpl(url, { method: 'POST', body: form });
   if (!res.ok) {
     const body = await res.text().catch(() => '');
-    throw new Error(`Census batch geocoder returned ${res.status}: ${res.statusText} ${body}`);
+    throw new CensusGeocoderHttpError(res.status, res.statusText, body);
   }
   const text = await res.text();
   return parseCensusBatchCsv(text);
@@ -357,6 +374,9 @@ export interface GeocodeOptions {
    *  in flight)") -- a good-citizen pause, not rate-limit-driven (Census's batch endpoint has
    *  no documented per-hour cap the way Socrata does). */
   interBatchDelayMs?: number;
+  /** Transient Census gateway failures are retried with exponential backoff. */
+  maxBatchAttempts?: number;
+  retryBaseDelayMs?: number;
 }
 
 export interface GeocodeResult {
@@ -373,6 +393,8 @@ export async function runGeocode(ctx: PipelineContext, options: GeocodeOptions =
   const maxRecords = ctx.config.CENSUS_BATCH_MAX_RECORDS;
   const candidateLimit = options.candidateLimit ?? maxBatches * maxRecords;
   const interBatchDelayMs = options.interBatchDelayMs ?? 1_000;
+  const maxBatchAttempts = options.maxBatchAttempts ?? 4;
+  const retryBaseDelayMs = options.retryBaseDelayMs ?? 5_000;
 
   const { sql, params } = buildCandidateQuery(candidateLimit);
   const candidateRows = await ctx.pg.query(sql, params);
@@ -399,8 +421,26 @@ export async function runGeocode(ctx: PipelineContext, options: GeocodeOptions =
 
   for (let i = 0; i < batches.length; i++) {
     const batch = batches[i] as GeocodeCandidate[];
-    ctx.log.info('geocode.batch_submit', { batch: i + 1, of: batches.length, rows: batch.length });
-    const results = await submitCensusBatch(ctx, batch);
+    let results: CensusMatchResult[] | undefined;
+    for (let attempt = 1; attempt <= maxBatchAttempts; attempt++) {
+      ctx.log.info('geocode.batch_submit', { batch: i + 1, of: batches.length, rows: batch.length, attempt });
+      try {
+        results = await submitCensusBatch(ctx, batch);
+        break;
+      } catch (error) {
+        if (!isRetryableCensusError(error) || attempt === maxBatchAttempts) throw error;
+        const delayMs = retryBaseDelayMs * 2 ** (attempt - 1);
+        ctx.log.warn('geocode.batch_retry', {
+          batch: i + 1,
+          attempt,
+          nextAttempt: attempt + 1,
+          delayMs,
+          reason: error instanceof Error ? error.message.slice(0, 300) : String(error),
+        });
+        await sleep(delayMs);
+      }
+    }
+    if (!results) throw new Error(`Census batch ${i + 1} produced no result after ${maxBatchAttempts} attempts`);
     streetMatched += await applyCensusResults(ctx, results);
 
     for (const r of results) {
