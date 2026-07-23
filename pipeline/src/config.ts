@@ -14,8 +14,9 @@ import { z } from 'zod';
  *   - `SUPABASE_DB_URL`: db.ts's "direct pg option" (COPY / staging tables / set-based
  *     upserts at ~150-220k-row scale) needs a real Postgres connection string; PostgREST
  *     alone can't do that (Part B §6.1).
- *   - `PIPELINE_ENV`: labels `pipeline_runs.meta` / log lines ('prod'|'dev'); per-run row
- *     caps themselves are CLI flags (--pages/--batches/--from), not env, per Part B §6.4.
+ *   - `PIPELINE_ENV` + `PIPELINE_ALLOWED_DEV_REFS`: fail closed on the exact Supabase
+ *     project before any client opens, and label `pipeline_runs.meta` / log lines. Per-run
+ *     row caps themselves are CLI flags (--pages/--batches/--from), not env, per Part B §6.4.
  *
  * Deliberately ABSENT: `QCMOBILE_WEBKEY`. Per docs/build-plan/01-architecture.md
  * reconciliation amendment #16, QCMobile per-carrier inspection lookups are served by a
@@ -68,11 +69,16 @@ const EnvSchema = z.object({
   ALERT_EMAIL: z.string().email('ALERT_EMAIL must be a valid email address').optional(),
 
   // ---- Misc ---------------------------------------------------------------------------
-  /** 'prod' | 'dev' -- labels pipeline_runs.meta and log lines; does NOT itself cap page/
-   *  batch counts (those are CLI flags so `npm run dev` and a manual Render "Run Job" can
-   *  differ per invocation, not just per environment). Defaults to 'dev' so a bare
-   *  `tsx src/run.ts ...` run without PIPELINE_ENV set never silently mislabels itself prod. */
+  /** 'prod' | 'dev' -- selects the exact-ref target guard and labels pipeline_runs.meta
+   *  and log lines; does NOT itself cap page/batch counts. Defaults to 'dev' so a bare
+   *  invocation can never silently target the production project. */
   PIPELINE_ENV: z.enum(['prod', 'dev']).default('dev'),
+  /** Comma-separated explicit allowlist for dev/staging project refs. Required
+   * when PIPELINE_ENV=dev; production can never appear in it as a substitute. */
+  PIPELINE_ALLOWED_DEV_REFS: z
+    .string()
+    .default('yhyoxhtguyturgdhwywc')
+    .transform((value) => value.split(',').map((ref) => ref.trim()).filter(Boolean)),
 });
 
 export type Config = z.infer<typeof EnvSchema>;

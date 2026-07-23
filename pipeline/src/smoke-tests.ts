@@ -13,6 +13,7 @@ import {
   SAFETY_DATASET_IDS,
   validateSafetyRow,
 } from './sources/safety.js';
+import { RECORDED_PROJECT_REFS, verifyPipelineTarget } from './target-guard.js';
 
 type Test = { name: string; run: () => void | Promise<void> };
 const tests: Test[] = [];
@@ -25,6 +26,47 @@ test('parseArgs supports isolated capped dry-runs', () => {
     dryRun: true,
   });
   assert.throws(() => parseArgs(['sync-insurance', '--dry-run=yes']), /must be true or false/);
+});
+
+test('pipeline target guard requires exact production and allowlisted development refs', () => {
+  assert.deepEqual(
+    verifyPipelineTarget({
+      environment: 'prod',
+      supabaseUrl: `https://${RECORDED_PROJECT_REFS.production}.supabase.co`,
+    }),
+    { projectRef: RECORDED_PROJECT_REFS.production, environment: 'prod' }
+  );
+  assert.deepEqual(
+    verifyPipelineTarget({
+      environment: 'dev',
+      supabaseUrl: `https://${RECORDED_PROJECT_REFS.staging}.supabase.co`,
+      allowedDevRefs: [RECORDED_PROJECT_REFS.staging],
+    }),
+    { projectRef: RECORDED_PROJECT_REFS.staging, environment: 'dev' }
+  );
+  assert.throws(
+    () => verifyPipelineTarget({
+      environment: 'dev',
+      supabaseUrl: `https://${RECORDED_PROJECT_REFS.production}.supabase.co`,
+      allowedDevRefs: [RECORDED_PROJECT_REFS.production],
+    }),
+    /refuses the production/
+  );
+  assert.throws(
+    () => verifyPipelineTarget({
+      environment: 'prod',
+      supabaseUrl: `https://${RECORDED_PROJECT_REFS.staging}.supabase.co`,
+    }),
+    /requires the production Carrier Recruiter ref/
+  );
+  assert.throws(
+    () => verifyPipelineTarget({
+      environment: 'dev',
+      supabaseUrl: 'https://fwmsyfndwgmvmbxaagzu.supabase.co',
+      allowedDevRefs: [RECORDED_PROJECT_REFS.staging],
+    }),
+    /not in PIPELINE_ALLOWED_DEV_REFS/
+  );
 });
 
 test('Socrata defaults to memory-safe 10k pages', async () => {
