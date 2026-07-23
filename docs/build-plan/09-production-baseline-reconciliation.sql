@@ -3,6 +3,14 @@
 -- Purpose: adopt the fifteen already-present pre-ledger migrations into the
 -- Supabase migration ledger without replaying their DDL on production.
 --
+-- IMPORTANT: repository migrations added after the live geocode row are not
+-- part of this metadata adoption. As of 2026-07-23 those are:
+--   20260722223300_security_hardening
+--   20260723004500_profile_service_bootstrap
+--   20260723010400_dnc_activity_enum_cast
+-- They remain ordinary unapplied migrations and require their own reviewed,
+-- staging-proven production application after this ledger repair.
+--
 -- Preconditions (must be freshly proved immediately before use):
 --   1. current_database() belongs to project ejrfobddnojbijzrjbii;
 --   2. production schema/object/policy/grant inventory still reconciles to the
@@ -10,7 +18,11 @@
 --   3. the only existing ledger row is
 --      20260722042539_geocode_attempt_queue;
 --   4. a current backup is visible and the recovery path is accepted;
---   5. repository checksums match docs/build-plan/migration-checksums.sha256.
+--   5. repository checksums match docs/build-plan/migration-checksums.sha256;
+--   6. the three post-geocode migrations listed above are absent from the live
+--      ledger and their effects are absent from production;
+--   7. the latest Pro daily backup is visible and a restore-to-new-project
+--      rehearsal has passed under 11-recovery-rehearsal-runbook.md.
 --
 -- This script changes migration metadata only. It must affect exactly 15 rows.
 -- A timeout is an unknown state: reread before retrying.
@@ -37,6 +49,14 @@ begin
   if existing_count <> 1 or not expected_live then
     raise exception
       'Migration ledger precondition failed: expected only 20260722042539_geocode_attempt_queue';
+  end if;
+
+  if exists (
+    select 1
+    from supabase_migrations.schema_migrations
+    where version in ('20260722223300', '20260723004500', '20260723010400')
+  ) then
+    raise exception 'Post-geocode migration precondition failed: a later migration is already registered';
   end if;
 
   -- Coarse production identity guard. This does not replace the required
@@ -88,7 +108,8 @@ begin
 end $$;
 
 -- The caller must independently reread all 16 ordered version/name pairs after
--- COMMIT. Until execution is specifically authorized, keep this script as a
--- reviewed proposal only.
+-- COMMIT and verify that the three later repository versions remain absent.
+-- Until execution is specifically authorized, keep this script as a reviewed
+-- proposal only. Do not chain the later migrations into the same approval.
 
 commit;
