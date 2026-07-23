@@ -3,6 +3,7 @@ import type { Database } from '../types/database';
 
 const supabaseUrl = import.meta.env.VITE_SUPABASE_URL;
 const supabaseAnonKey = import.meta.env.VITE_SUPABASE_ANON_KEY;
+const expectedSupabaseRef = import.meta.env.VITE_EXPECTED_SUPABASE_REF;
 
 if (!supabaseUrl || !supabaseAnonKey) {
   throw new Error(
@@ -10,6 +11,23 @@ if (!supabaseUrl || !supabaseAnonKey) {
       'your Supabase project credentials.',
   );
 }
+
+let actualSupabaseRef: string;
+try {
+  actualSupabaseRef = new URL(supabaseUrl).hostname.split('.')[0];
+} catch {
+  throw new Error('VITE_SUPABASE_URL must be a valid URL.');
+}
+
+if (expectedSupabaseRef && actualSupabaseRef !== expectedSupabaseRef) {
+  throw new Error(
+    `Supabase target mismatch: expected ${expectedSupabaseRef}, received ${actualSupabaseRef}. Refusing to start.`,
+  );
+}
+
+export const appEnvironment = (import.meta.env.VITE_APP_ENV || 'development').toLowerCase();
+export const isStaging = appEnvironment === 'staging';
+export const connectedSupabaseRef = actualSupabaseRef;
 
 /**
  * "Remember me" storage switch — docs/build-plan/02-frontend-spec.md §1.4:

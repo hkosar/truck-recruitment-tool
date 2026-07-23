@@ -43,13 +43,13 @@ export function Topbar() {
       </nav>
 
       <div className="ml-auto flex items-center gap-3">
-        <Link
-          to="/dashboard"
-          aria-label="Search carriers and batches"
-          className="hidden w-64 border border-white/25 bg-white/10 px-3 py-2 text-xs text-white/75 hover:bg-white/15 xl:block"
+        <span
+          aria-label="Global search is deferred for this staging handoff"
+          title="Global search is not included in this staging handoff"
+          className="hidden w-64 cursor-not-allowed border border-white/15 bg-white/5 px-3 py-2 text-xs text-white/45 xl:block"
         >
-          Search carriers, batches, USDOT
-        </Link>
+          Global search · coming later
+        </span>
         <LiveBadge />
       </div>
     </header>
