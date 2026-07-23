@@ -72,8 +72,16 @@ insert into _results
 select 'disabled','select profiles','1 own row',count(*)::text,count(*)=1 and bool_and(id='71000000-0000-4000-8000-000000000007') from public.profiles;
 insert into _results
 select 'disabled','select carriers','0 rows',count(*)::text,count(*)=0 from public.carriers;
+select pg_temp.record_denied('disabled','execute create_batch',
+  $$select public.create_batch('AUTHZ PROBE',null,null,null,'{}'::jsonb)$$);
+select pg_temp.record_denied('disabled','execute refresh_batch',
+  $$select public.refresh_batch((select id from public.batches limit 1))$$);
+select pg_temp.record_denied('disabled','execute bulk_set_status',
+  $$select public.bulk_set_status((select id from public.batches limit 1),array[1400001]::bigint[],'contacted')$$);
 select pg_temp.record_denied('disabled','execute set_do_not_contact',
   $$select public.set_do_not_contact(1400001,true,'AUTHZ PROBE')$$);
+select pg_temp.record_denied('disabled','execute log_export',
+  $$select public.log_export((select id from public.batches limit 1),'csv',1)$$);
 
 -- viewer: reads work, every CRM mutation is denied.
 select pg_temp.set_actor('71000000-0000-4000-8000-000000000004');
@@ -127,6 +135,52 @@ begin
   insert into _results values ('editor','execute set_do_not_contact','allowed',v_during::text,v_during=not v_before);
 end $$;
 rollback to editor_dnc;
+
+savepoint editor_create_batch;
+do $$
+declare v_before int; v_after int;
+begin
+  select count(*) into v_before from public.batches;
+  perform * from public.create_batch('AUTHZ PROBE CREATE',null,null,null,'{}'::jsonb);
+  select count(*) into v_after from public.batches;
+  insert into _results values ('editor','execute create_batch','allowed',(v_after-v_before)::text,v_after=v_before+1);
+end $$;
+rollback to editor_create_batch;
+
+savepoint editor_refresh;
+do $$
+declare v_before int; v_after int; v_batch uuid;
+begin
+  select id,refresh_count into v_batch,v_before from public.batches order by created_at limit 1;
+  perform * from public.refresh_batch(v_batch);
+  select refresh_count into v_after from public.batches where id=v_batch;
+  insert into _results values ('editor','execute refresh_batch','allowed',(v_after-v_before)::text,v_after=v_before+1);
+end $$;
+rollback to editor_refresh;
+
+savepoint editor_bulk;
+do $$
+declare v_batch uuid; v_dot bigint; v_before batch_carrier_status; v_target batch_carrier_status; v_during batch_carrier_status;
+begin
+  select batch_id,dot_number,status into v_batch,v_dot,v_before from public.batch_carriers order by batch_id,dot_number limit 1;
+  v_target := case when v_before='contacted' then 'attempted'::batch_carrier_status else 'contacted'::batch_carrier_status end;
+  perform public.bulk_set_status(v_batch,array[v_dot],v_target);
+  select status into v_during from public.batch_carriers where batch_id=v_batch and dot_number=v_dot;
+  insert into _results values ('editor','execute bulk_set_status','allowed',v_during::text,v_during=v_target);
+end $$;
+rollback to editor_bulk;
+
+savepoint editor_export;
+do $$
+declare v_batch uuid; v_before int; v_after int;
+begin
+  select id into v_batch from public.batches order by created_at limit 1;
+  select count(*) into v_before from public.batch_activity where activity_type='export';
+  perform public.log_export(v_batch,'csv',1);
+  select count(*) into v_after from public.batch_activity where activity_type='export';
+  insert into _results values ('editor','execute log_export','allowed',(v_after-v_before)::text,v_after=v_before+1);
+end $$;
+rollback to editor_export;
 
 -- manager: intended admin curation allowed; column boundaries still apply.
 select pg_temp.set_actor('71000000-0000-4000-8000-000000000001');
