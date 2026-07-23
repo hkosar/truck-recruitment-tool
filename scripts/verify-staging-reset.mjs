@@ -23,6 +23,8 @@ for (const required of [
   "email = 'hunter@twistednail.com'",
   "v_fixture_profiles <> 7",
   "v_warning_codes <> 9",
+  "drop trigger trg_bc_delete on public.batch_carriers",
+  "create trigger trg_bc_delete before delete on public.batch_carriers",
 ]) {
   if (!reset.includes(required)) failures.push(`reset is missing required guard or assertion: ${required}`);
 }
@@ -31,7 +33,10 @@ if (reset.includes(PRODUCTION_REF)) failures.push('reset contains the production
 if (/delete\s+from\s+auth\.users/i.test(reset)) failures.push('reset must preserve auth.users');
 if (/delete\s+from\s+public\.profiles/i.test(reset)) failures.push('reset must preserve profiles');
 if (/drop\s+(?:table|schema|database)|alter\s+table|truncate/gi.test(reset)) {
-  failures.push('reset must not drop, alter, or truncate database objects');
+  failures.push('reset must not drop, alter, or truncate tables, schemas, or databases');
+}
+if ((reset.match(/drop trigger trg_bc_delete/gi) ?? []).length !== 1 || (reset.match(/create trigger trg_bc_delete/gi) ?? []).length !== 1) {
+  failures.push('reset must remove and restore the batch-carrier delete audit trigger exactly once');
 }
 
 const beginIndex = reset.indexOf('begin;');

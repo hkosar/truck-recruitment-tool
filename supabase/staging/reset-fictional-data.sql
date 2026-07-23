@@ -49,8 +49,10 @@ $$;
 -- Preserve auth.users and profiles. Delete only application/pipeline data in FK order.
 delete from public.contact_logs;
 delete from public.contact_suppressions;
-delete from public.batch_activity;
+-- Drop only the staging reset's delete trigger; schema and function definitions remain unchanged.
+drop trigger trg_bc_delete on public.batch_carriers;
 delete from public.batch_carriers;
+delete from public.batch_activity;
 delete from public.batch_zones;
 delete from public.batches;
 delete from public.cargo_other_values;
@@ -883,6 +885,10 @@ where bc.status <> 'new'
   and bc.dot_number between 1200000 and 1307999
 order by bc.batch_id, bc.dot_number
 limit 40;
+
+-- Restore the ordinary delete audit trigger before validating and committing.
+create trigger trg_bc_delete before delete on public.batch_carriers
+  for each row execute function internal.log_bc_delete();
 
 -- Fail the entire transaction if the reset did not reproduce the fictional contract.
 do $$
