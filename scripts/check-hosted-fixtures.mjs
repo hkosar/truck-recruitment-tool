@@ -63,8 +63,8 @@ for (const file of targets.flatMap(listFiles)) {
 if (findings.length > 0) {
   console.error('Hosted fixture safety check failed:');
   for (const finding of [...new Set(findings)].sort()) console.error(`- ${finding}`);
-  console.error('\nUse only fictional identities, example.invalid email addresses, and no hard-coded passwords in hosted seed data.');
+  console.error('\nUse only fictional identities, reserved example.invalid contact data in SQL, runtime-provided approved Auth domains, and no hard-coded passwords.');
   process.exit(1);
 }
 
-console.log('PASS hosted seed contains only reserved contact data, no real TNBS identities, and no hard-coded passwords');
+console.log('PASS hosted seed contains only reserved contact data, runtime-only Auth domains, no real TNBS identities, and no hard-coded passwords');

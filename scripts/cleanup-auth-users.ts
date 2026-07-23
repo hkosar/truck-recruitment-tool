@@ -20,12 +20,13 @@ const allowedRefs = new Set(
 );
 const url = process.env.SUPABASE_URL;
 const key = process.env.SUPABASE_SERVICE_ROLE_KEY;
+const fixtureDomain = process.env.TEST_AUTH_DOMAIN;
 
 const validationError = (() => {
-  if (!url || !key || !runId || !targetRef || environment !== "staging") {
+  if (!url || !key || !runId || !targetRef || !fixtureDomain || environment !== "staging") {
     return (
       "Set TEST_ENVIRONMENT=staging, TEST_RUN_ID, TEST_TARGET_PROJECT_REF, " +
-      "TEST_ALLOWED_PROJECT_REFS, SUPABASE_URL, and SUPABASE_SERVICE_ROLE_KEY"
+      "TEST_ALLOWED_PROJECT_REFS, TEST_AUTH_DOMAIN, SUPABASE_URL, and SUPABASE_SERVICE_ROLE_KEY"
     );
   }
   if (!/^[a-z0-9-]{6,48}$/.test(runId)) {
@@ -56,7 +57,7 @@ async function listRunUsers() {
         (user) =>
           user.user_metadata?.test_only === true &&
           user.user_metadata?.test_run_id === runId &&
-          user.email?.endsWith("@example.invalid")
+          user.email?.endsWith(`@${fixtureDomain}`)
       )
     );
     if (response.data.users.length < 200) break;

@@ -7,6 +7,7 @@
  *   TEST_ENVIRONMENT=staging
  *   TEST_RUN_ID=<unique lowercase run id>
  *   TEST_TARGET_PROJECT_REF=<allowlisted nonproduction ref>
+ *   TEST_AUTH_DOMAIN=<owner-approved valid test domain; no messages are sent>
  *   SUPABASE_URL=https://<same ref>.supabase.co
  *   SUPABASE_SERVICE_ROLE_KEY=<secret, never log>
  *
@@ -31,12 +32,13 @@ const allowedRefs = new Set(
 );
 const url = process.env.SUPABASE_URL;
 const key = process.env.SUPABASE_SERVICE_ROLE_KEY;
+const fixtureDomain = process.env.TEST_AUTH_DOMAIN;
 
 const validationError = (() => {
-  if (!url || !key || !runId || !targetRef || environment !== "staging") {
+  if (!url || !key || !runId || !targetRef || !fixtureDomain || environment !== "staging") {
     return (
       "Set TEST_ENVIRONMENT=staging, TEST_RUN_ID, TEST_TARGET_PROJECT_REF, " +
-      "TEST_ALLOWED_PROJECT_REFS, SUPABASE_URL, and SUPABASE_SERVICE_ROLE_KEY"
+      "TEST_ALLOWED_PROJECT_REFS, TEST_AUTH_DOMAIN, SUPABASE_URL, and SUPABASE_SERVICE_ROLE_KEY"
     );
   }
   if (!/^[a-z0-9-]{6,48}$/.test(runId)) {
@@ -84,7 +86,7 @@ async function main() {
   });
 
   for (const user of USERS) {
-    const email = `${user.label}-${runId}@example.invalid`;
+    const email = `${user.label}-${runId}@${fixtureDomain}`;
     const created = await admin.auth.admin.createUser({
       email,
       password,
