@@ -2,12 +2,11 @@ import { StrictMode } from 'react';
 import { createRoot } from 'react-dom/client';
 import { QueryClient, QueryClientProvider } from '@tanstack/react-query';
 import { RouterProvider } from 'react-router-dom';
-import { ThemeProvider } from './theme/ThemeProvider';
 import { router } from './app/router';
 import './theme/app.css';
 
-// docs/build-plan/02-frontend-spec.md §1.1: providers are
-// QueryClientProvider + Router + ThemeProvider.
+// TNBS Design System v1.0 is deliberately light-only, so the runtime provider
+// stack is QueryClientProvider + Router with no theme state or toggle.
 const queryClient = new QueryClient({
   defaultOptions: {
     queries: {
@@ -28,9 +27,7 @@ if (!rootElement) {
 createRoot(rootElement).render(
   <StrictMode>
     <QueryClientProvider client={queryClient}>
-      <ThemeProvider>
-        <RouterProvider router={router} />
-      </ThemeProvider>
+      <RouterProvider router={router} />
     </QueryClientProvider>
   </StrictMode>,
 );

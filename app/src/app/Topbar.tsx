@@ -1,9 +1,8 @@
-import { useLocation } from 'react-router-dom';
+import { Link, useLocation } from 'react-router-dom';
 
 /**
- * Topbar — breadcrumbs + Live badge (docs/build-plan/02-frontend-spec.md
- * §3 shared shell). Theme toggle + user menu live in Sidebar's footer
- * instead (see the note there) to avoid duplicating sign-out controls.
+ * TNBS navy app bar: approved badge/wordmark, breadcrumbs, global-search
+ * affordance, and truthful connection state. The system is light-only.
  */
 
 const SEGMENT_LABELS: Record<string, string> = {
@@ -25,20 +24,34 @@ export function Topbar() {
 
   return (
     <header
-      className="flex shrink-0 items-center justify-between border-b border-border bg-surface px-6"
+      className="flex shrink-0 items-center gap-5 border-b border-bar-line bg-bar px-4 text-bar-ink"
       style={{ height: 'var(--topbar-h)' }}
     >
-      <nav aria-label="Breadcrumb" className="flex items-center gap-1.5 text-sm text-text-muted">
-        <span className="font-medium text-text">Home</span>
+      <Link to="/dashboard" className="flex shrink-0 items-center gap-2.5" aria-label="Twisted Nail Carrier Recruiter dashboard">
+        <img src="/brand/badge-white.png" alt="" className="h-8 w-8 object-contain" />
+        <img src="/brand/primary-white.png" alt="Twisted Nail" className="h-7 w-auto object-contain" />
+      </Link>
+
+      <nav aria-label="Breadcrumb" className="hidden min-w-0 items-center gap-1.5 text-xs text-white/70 lg:flex">
+        <span className="font-semibold text-white">Carrier Recruiter</span>
         {segments.map((segment, index) => (
-          <span key={`${segment}-${index}`} className="flex items-center gap-1.5">
-            <span className="text-text-subtle">/</span>
-            <span className={index === segments.length - 1 ? 'font-medium text-text' : ''}>{labelFor(segment)}</span>
+          <span key={`${segment}-${index}`} className="flex min-w-0 items-center gap-1.5">
+            <span className="text-white/35">/</span>
+            <span className={index === segments.length - 1 ? 'truncate font-semibold text-white' : 'truncate'}>{labelFor(segment)}</span>
           </span>
         ))}
       </nav>
 
-      <LiveBadge />
+      <div className="ml-auto flex items-center gap-3">
+        <Link
+          to="/dashboard"
+          aria-label="Search carriers and batches"
+          className="hidden w-64 border border-white/25 bg-white/10 px-3 py-2 text-xs text-white/75 hover:bg-white/15 xl:block"
+        >
+          Search carriers, batches, USDOT
+        </Link>
+        <LiveBadge />
+      </div>
     </header>
   );
 }
@@ -48,8 +61,8 @@ function LiveBadge() {
   // reconnecting -> amber) once that module exists (02 §1.4/§3). Neutral
   // "Idle" here rather than faking a connected state.
   return (
-    <div className="flex items-center gap-1.5 rounded-full border border-border px-2.5 py-1 text-xs text-text-subtle">
-      <span className="h-1.5 w-1.5 rounded-full bg-text-subtle" />
+    <div className="flex items-center gap-1.5 rounded-full border border-white/25 bg-white/10 px-2.5 py-1 text-xs font-semibold text-white/75">
+      <span className="h-1.5 w-1.5 rounded-full bg-white/55" />
       Idle
     </div>
   );
