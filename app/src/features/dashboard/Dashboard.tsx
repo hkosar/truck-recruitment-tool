@@ -45,8 +45,7 @@ async function loadDashboard(): Promise<{ totals: DashboardTotals; batches: Batc
       .order('last_activity_at', { ascending: false, nullsFirst: false }),
   ]);
   if (batchesResult.error) throw batchesResult.error;
-  const batches = Array.isArray(batchesResult.data) ? batchesResult.data : [];
-  return { totals: totals ?? EMPTY_TOTALS, batches };
+  return { totals: totals ?? EMPTY_TOTALS, batches: batchesResult.data ?? [] };
 }
 
 function StatStrip({ totals }: { totals: DashboardTotals }) {
@@ -103,7 +102,7 @@ export default function Dashboard() {
   }
 
   const totals = query.data?.totals ?? EMPTY_TOTALS;
-  const batches = Array.isArray(query.data?.batches) ? query.data.batches : [];
+  const batches = query.data?.batches ?? [];
 
   return (
     <div className="mx-auto max-w-[1500px] space-y-5">

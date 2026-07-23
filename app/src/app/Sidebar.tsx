@@ -37,13 +37,13 @@ export function Sidebar() {
   const profile = useProfile();
 
   const totalsQuery = useQuery({
-    queryKey: queryKeys.dashboard(),
+    queryKey: queryKeys.dashboardTotals(),
     queryFn: ({ signal }) => dashboardTotals(signal),
     staleTime: 30_000,
   });
 
   const pendingCountQuery = useQuery({
-    queryKey: queryKeys.users(),
+    queryKey: queryKeys.pendingUsersCount(),
     queryFn: async () => {
       const { count, error } = await supabase
         .from('profiles')
