@@ -17,7 +17,7 @@ The application is hosted as the isolated Cloudflare Worker tnbs-carrier-recruit
 
 Use the approved staging identity for hunter@twistednail.com. The user is a confirmed staging manager and exists only in the staging project. The password is not stored in this repository or this handoff document.
 
-If the password is unknown or should be rotated, use Forgot password on the staging login screen. Do not create or reuse a production login for this review.
+The staging password is currently the temporary credential delivered in the handoff chat. Self-service Forgot password is not yet usable: hosted Supabase rejects recovery delivery to this domain in the current project configuration. If the credential is lost or should be rotated, have the staging operator set a new temporary credential through the supported Auth administration path. Do not create or reuse a production login for this review.
 
 ## Five-minute review script
 
@@ -34,7 +34,7 @@ If the password is unknown or should be rotated, use Forgot password on the stag
 
 ## What currently works
 
-- Email/password sign-in, registration gate, pending gate, password-reset request, roles, and manager user administration.
+- Email/password sign-in, registration gate, pending gate, roles, and manager user administration.
 - Dashboard totals and fictional active-batch table.
 - Radius-pin batch builder with live PostGIS matching, freight facets, insurance, fleet-size, contactability, authority, and operating-status filters.
 - Named batch creation and stable fictional sample batches.
@@ -104,6 +104,7 @@ Repository verification passed:
 - The inactive Pages shell named tnbs-carrier-recruiter-staging has no deployment and is not the review URL.
 - Refreshing a deployment may require a cache-busting query while a browser tab still holds the prior immutable asset graph. New sessions receive the current build.
 - Test actions intentionally change fictional staging rows until the operator runs the reset.
+- Self-service password recovery currently returns an Auth email-address validation error for hunter@twistednail.com; use the known temporary credential or request an operator rotation.
 - The reset preserves Hunter's staging login but invalidates batch IDs because the deterministic baseline batches are recreated with new UUIDs.
 
 ## Feedback template
