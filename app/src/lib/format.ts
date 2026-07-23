@@ -11,22 +11,17 @@ export const EMPTY_VALUE = '—';
  * table cells (§1.5). */
 export const TABULAR_NUMS_CLASS = 'tabular-nums';
 
-const currencyCompactFormatter = new Intl.NumberFormat('en-US', {
-  style: 'currency',
-  currency: 'USD',
-  notation: 'compact',
-  maximumFractionDigits: 1,
-});
-
 /**
- * Insurance/BIPD figures are stored in whole DOLLARS (01 §2.4: the L&I
- * ingest already multiplies the source's thousands by 1000). Renders
- * compact ("$1M", "$500K") to match the insurance-threshold selects and
- * badges (F15).
+ * Insurance/BIPD figures are whole dollars. The binding Round-2 contract is
+ * `$X.X MM` for millions and `$NNN K` for thousands everywhere (F36/G14).
  */
 export function fmtMoney(dollars: number | null | undefined): string {
   if (dollars === null || dollars === undefined || Number.isNaN(dollars)) return EMPTY_VALUE;
-  return currencyCompactFormatter.format(dollars);
+  const absolute = Math.abs(dollars);
+  const sign = dollars < 0 ? '-' : '';
+  if (absolute >= 1_000_000) return `${sign}$${(absolute / 1_000_000).toFixed(1)} MM`;
+  if (absolute >= 1_000) return `${sign}$${Math.round(absolute / 1_000).toLocaleString('en-US')} K`;
+  return `${sign}$${Math.round(absolute).toLocaleString('en-US')}`;
 }
 
 const RELATIVE_UNITS: { unit: Intl.RelativeTimeFormatUnit; ms: number }[] = [
