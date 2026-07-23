@@ -1,17 +1,77 @@
-/**
- * Stub — docs/build-plan/02-frontend-spec.md §3b. Real screen: 4-step
- * stepper (Details / Lanes / Freight / Filters & Review) with a persistent
- * right-hand live map and a fixed footer (live count via countCarriers(),
- * Back/Next, "Grab Batch"). Route already gated to manager|edit.
- */
+import { useMutation, useQuery } from '@tanstack/react-query';
+import { useMemo, useState } from 'react';
+import { useNavigate } from 'react-router-dom';
+import { countCarriers, createBatch, facetCargoFlags, facetOtherValues } from '../../lib/rpc';
+import type { CargoFlagName, SearchDefinition, SearchDefinitionZone } from '../../types/domain';
+
+const CARGO_FLAGS: { value: CargoFlagName; label: string }[] = [
+  ['crgo_genfreight', 'General Freight'], ['crgo_household', 'Household Goods'], ['crgo_metalsheet', 'Metal Sheets / Coils'], ['crgo_motoveh', 'Motor Vehicles'], ['crgo_drivetow', 'Drive / Tow Away'], ['crgo_logpole', 'Logs / Poles'], ['crgo_bldgmat', 'Building Materials'], ['crgo_mobilehome', 'Mobile Homes'], ['crgo_machlrg', 'Large Machinery'], ['crgo_produce', 'Fresh Produce'], ['crgo_liqgas', 'Liquids / Gases'], ['crgo_intermodal', 'Intermodal'], ['crgo_passengers', 'Passengers'], ['crgo_oilfield', 'Oilfield Equipment'], ['crgo_livestock', 'Livestock'], ['crgo_grainfeed', 'Grain / Feed'], ['crgo_coalcoke', 'Coal / Coke'], ['crgo_meat', 'Meat'], ['crgo_garbage', 'Garbage'], ['crgo_usmail', 'US Mail'], ['crgo_chem', 'Chemicals'], ['crgo_drybulk', 'Dry Bulk'], ['crgo_coldfood', 'Refrigerated Food'], ['crgo_beverages', 'Beverages'], ['crgo_paperprod', 'Paper Products'], ['crgo_utility', 'Utility'], ['crgo_farmsupp', 'Farm Supplies'], ['crgo_construct', 'Construction'], ['crgo_waterwell', 'Water Well'], ['crgo_cargoothr', 'Other Cargo'],
+].map(([value, label]) => ({ value: value as CargoFlagName, label }));
+
+interface RadiusDraft { id: string; label: string; anchorLabel: string; lat: string; lng: string; radius: string }
+const newRadius = (): RadiusDraft => ({ id: crypto.randomUUID(), label: '', anchorLabel: '', lat: '', lng: '', radius: '50' });
+
 export default function Wizard() {
+  const navigate = useNavigate();
+  const [name, setName] = useState('');
+  const [customer, setCustomer] = useState('');
+  const [job, setJob] = useState('');
+  const [lanes, setLanes] = useState<RadiusDraft[]>([newRadius()]);
+  const [flags, setFlags] = useState<CargoFlagName[]>([]);
+  const [otherEnabled, setOtherEnabled] = useState(true);
+  const [otherQuery, setOtherQuery] = useState('');
+  const [includes, setIncludes] = useState<string[]>([]);
+  const [excludes, setExcludes] = useState<string[]>([]);
+  const [minInsurance, setMinInsurance] = useState<number | null>(null);
+  const [enforceInsurance, setEnforceInsurance] = useState(false);
+  const [powerMin, setPowerMin] = useState<number | null>(null);
+  const [powerMax, setPowerMax] = useState<number | null>(null);
+  const [hasPhone, setHasPhone] = useState(false);
+  const [hasEmail, setHasEmail] = useState(false);
+  const [forHire, setForHire] = useState(true);
+  const [authorized, setAuthorized] = useState(false);
+  const [interstate, setInterstate] = useState(false);
+  const [message, setMessage] = useState<string | null>(null);
+
+  const zones = useMemo<SearchDefinitionZone[]>(() => lanes.flatMap((lane) => {
+    const lat = Number(lane.lat), lng = Number(lane.lng), radius = Number(lane.radius);
+    if (!lane.anchorLabel.trim() || !Number.isFinite(lat) || !Number.isFinite(lng) || !Number.isFinite(radius) || radius <= 0) return [];
+    return [{ zone_type: 'radius' as const, label: lane.label.trim() || `${lane.anchorLabel.trim()} · ${radius} mi`, sort_order: 0, params: { anchor_kind: 'pin' as const, anchor_label: lane.anchorLabel.trim(), lat, lng, radius_miles: radius } } as SearchDefinitionZone & { label: string; sort_order: number }];
+  }), [lanes]);
+
+  const definition = useMemo<SearchDefinition>(() => ({ zones, cargo: { flags, other: { enabled: otherEnabled, include: includes, exclude: excludes } }, contactability: { has_phone: hasPhone, has_email: hasEmail }, insurance: { min_bipd: minInsurance, enforce: enforceInsurance, require_insured: authorized }, power_units: { min: powerMin, max: powerMax }, status: { active_only: true, authorized_only: authorized, for_hire_only: forHire, interstate_only: interstate }, exclude_dnc: true }), [zones, flags, otherEnabled, includes, excludes, hasPhone, hasEmail, minInsurance, enforceInsurance, authorized, powerMin, powerMax, forHire, interstate]);
+  const definitionHash = JSON.stringify(definition);
+  const scopeDefinition = useMemo<SearchDefinition>(() => ({ ...definition, cargo: undefined }), [definition]);
+
+  const countQuery = useQuery({ queryKey: ['new-batch', 'count', definitionHash], queryFn: ({ signal }) => countCarriers(definition, signal), enabled: zones.length > 0, staleTime: 15_000 });
+  const cargoQuery = useQuery({ queryKey: ['new-batch', 'cargo', JSON.stringify(scopeDefinition)], queryFn: ({ signal }) => facetCargoFlags(scopeDefinition, signal), enabled: zones.length > 0, staleTime: 15_000 });
+  const otherValuesQuery = useQuery({ queryKey: ['new-batch', 'other', JSON.stringify(scopeDefinition), otherQuery], queryFn: ({ signal }) => facetOtherValues(scopeDefinition, { keyword: otherQuery || null, limit: 25, signal }), enabled: zones.length > 0 && otherEnabled, staleTime: 15_000 });
+  const counts = new Map(cargoQuery.data?.map((row) => [row.flag, row.carrier_count]) ?? []);
+
+  const createMutation = useMutation({
+    mutationFn: () => createBatch({ name: name.trim(), customer: customer.trim() || null, job: job.trim() || null, definition }),
+    onSuccess: (result) => navigate(`/batches/${result.batch_id}`),
+    onError: (error) => setMessage(error instanceof Error ? error.message : 'Batch creation failed.'),
+  });
+
+  const toggleRule = (value: string, mode: 'include' | 'exclude') => {
+    if (mode === 'include') { setIncludes((current) => current.includes(value) ? current.filter((item) => item !== value) : [...current, value]); setExcludes((current) => current.filter((item) => item !== value)); }
+    else { setExcludes((current) => current.includes(value) ? current.filter((item) => item !== value) : [...current, value]); setIncludes((current) => current.filter((item) => item !== value)); }
+  };
+
   return (
-    <div className="rounded-lg border border-border bg-surface p-8">
-      <h1 className="font-ui text-2xl font-extrabold text-text">New Batch</h1>
-      <p className="mt-2 max-w-2xl text-sm text-text-muted">
-        Stub screen. Steps 1-4 (Details, Lanes, Freight, Filters & Review), the live map, and
-        the live-count footer land here.
-      </p>
-    </div>
+    <div className="mx-auto max-w-[1600px] space-y-4"><header><h1 className="text-xl font-extrabold tracking-[-0.02em]">New Batch</h1></header>{message ? <div className="border border-crit bg-crit-tint p-3 text-sm text-crit">{message}</div> : null}<div className="grid items-start gap-4 xl:grid-cols-[minmax(0,680px)_minmax(420px,1fr)]">
+      <div className="space-y-4">
+        <section className="border border-border bg-surface p-4"><h2 className="text-[11px] font-extrabold uppercase tracking-[0.08em] text-text-muted">Details</h2><div className="mt-3 grid gap-3 md:grid-cols-2"><label className="md:col-span-2 text-xs font-bold">Batch name<input value={name} onChange={(event) => setName(event.target.value)} className="mt-1 w-full border border-border-strong px-3 py-2.5 text-sm" required /></label><label className="text-xs font-bold">Customer<input value={customer} onChange={(event) => setCustomer(event.target.value)} className="mt-1 w-full border border-border-strong px-3 py-2" /></label><label className="text-xs font-bold">Job<input value={job} onChange={(event) => setJob(event.target.value)} className="mt-1 w-full border border-border-strong px-3 py-2" /></label></div></section>
+
+        <section className="border border-border bg-surface p-4"><div className="flex items-center justify-between"><h2 className="text-[11px] font-extrabold uppercase tracking-[0.08em] text-text-muted">Lanes</h2><button type="button" onClick={() => setLanes((current) => [...current, newRadius()])} className="border border-border-strong px-3 py-1.5 text-xs font-bold">Add radius lane</button></div><div className="mt-3 space-y-3">{lanes.map((lane, index) => <div key={lane.id} className="grid gap-2 border border-border bg-surface-2 p-3 md:grid-cols-6"><div className="flex h-7 w-7 items-center justify-center rounded-full bg-accent text-xs font-bold text-accent-ink">{String.fromCharCode(65 + index)}</div><input aria-label="Material or lane label" placeholder="Material / lane label" value={lane.label} onChange={(event) => setLanes((current) => current.map((item) => item.id === lane.id ? { ...item, label: event.target.value } : item))} className="border border-border-strong px-2 py-1.5 text-xs md:col-span-2" /><input aria-label="Anchor label" placeholder="Anchor (Austin, TX)" value={lane.anchorLabel} onChange={(event) => setLanes((current) => current.map((item) => item.id === lane.id ? { ...item, anchorLabel: event.target.value } : item))} className="border border-border-strong px-2 py-1.5 text-xs md:col-span-2" /><button type="button" disabled={lanes.length === 1} onClick={() => setLanes((current) => current.filter((item) => item.id !== lane.id))} className="text-xs font-bold text-crit disabled:opacity-30">Remove</button><input aria-label="Latitude" placeholder="Latitude" value={lane.lat} onChange={(event) => setLanes((current) => current.map((item) => item.id === lane.id ? { ...item, lat: event.target.value } : item))} className="border border-border-strong px-2 py-1.5 text-xs md:col-start-2" /><input aria-label="Longitude" placeholder="Longitude" value={lane.lng} onChange={(event) => setLanes((current) => current.map((item) => item.id === lane.id ? { ...item, lng: event.target.value } : item))} className="border border-border-strong px-2 py-1.5 text-xs" /><label className="flex items-center gap-2 text-xs md:col-span-2">Radius<input type="range" min="5" max="150" value={lane.radius} onChange={(event) => setLanes((current) => current.map((item) => item.id === lane.id ? { ...item, radius: event.target.value } : item))} /><span className="font-mono">{lane.radius} mi</span></label></div>)}</div><div className="mt-3 border border-info bg-info-tint p-3 text-xs text-info">Use a pin coordinate for now. Address/city/ZIP/county geocoding and corridor routing activate after restricted Google credentials are provisioned.</div></section>
+
+        <section className="border border-border bg-surface p-4"><h2 className="text-[11px] font-extrabold uppercase tracking-[0.08em] text-text-muted">Freight</h2><div className="mt-3 grid max-h-64 grid-cols-2 gap-1 overflow-y-auto">{CARGO_FLAGS.map((flag) => <label key={flag.value} className="flex items-center justify-between gap-2 border border-transparent px-2 py-1.5 text-xs hover:border-border hover:bg-row-hover"><span><input type="checkbox" checked={flags.includes(flag.value)} onChange={() => setFlags((current) => current.includes(flag.value) ? current.filter((value) => value !== flag.value) : [...current, flag.value])} className="mr-2" />{flag.label}</span><span className="font-mono text-text-subtle">{counts.get(flag.value) ?? '—'}</span></label>)}</div><label className="mt-4 flex items-center gap-2 text-xs font-bold"><input type="checkbox" checked={otherEnabled} onChange={(event) => setOtherEnabled(event.target.checked)} />Other cargo descriptions</label>{otherEnabled ? <><input value={otherQuery} onChange={(event) => setOtherQuery(event.target.value)} placeholder="Search other cargo values" className="mt-2 w-full border border-border-strong px-3 py-2 text-xs" /><div className="mt-2 max-h-56 overflow-y-auto border border-border">{otherValuesQuery.data?.map((row) => <div key={row.value} className="flex items-center gap-2 border-b border-border px-2 py-2 text-xs"><span className="min-w-0 flex-1 truncate">{row.value}</span><span className="font-mono text-text-subtle">{row.carrier_count}</span><button type="button" onClick={() => toggleRule(row.value, 'include')} className={`px-2 py-1 font-bold ${includes.includes(row.value) ? 'bg-good-tint text-good' : 'border border-border'}`}>Include</button><button type="button" onClick={() => toggleRule(row.value, 'exclude')} className={`px-2 py-1 font-bold ${excludes.includes(row.value) ? 'bg-crit-tint text-crit' : 'border border-border'}`}>Exclude</button></div>)}</div><div className="mt-2 text-[10px] text-text-subtle">Including {includes.length} values · Excluding {excludes.length}</div></> : null}</section>
+
+        <section className="border border-border bg-surface p-4"><h2 className="text-[11px] font-extrabold uppercase tracking-[0.08em] text-text-muted">Carrier filters</h2><div className="mt-3 grid gap-3 sm:grid-cols-2"><label className="text-xs font-bold">Minimum insurance<select value={minInsurance ?? ''} onChange={(event) => setMinInsurance(event.target.value ? Number(event.target.value) : null)} className="mt-1 w-full border border-border-strong bg-surface px-3 py-2"><option value="">Any</option><option value="500000">$500 K+</option><option value="750000">$750 K+</option><option value="1000000">$1.0 MM+</option><option value="2000000">$2.0 MM+</option></select></label><label className="flex items-end gap-2 pb-2 text-xs font-bold"><input type="checkbox" checked={enforceInsurance} onChange={(event) => setEnforceInsurance(event.target.checked)} />Enforce minimum (off = highlight only)</label><label className="text-xs font-bold">Minimum trucks<input type="number" min="0" value={powerMin ?? ''} onChange={(event) => setPowerMin(event.target.value ? Number(event.target.value) : null)} className="mt-1 w-full border border-border-strong px-3 py-2" /></label><label className="text-xs font-bold">Maximum trucks<input type="number" min="0" value={powerMax ?? ''} onChange={(event) => setPowerMax(event.target.value ? Number(event.target.value) : null)} className="mt-1 w-full border border-border-strong px-3 py-2" /></label></div><div className="mt-3 grid gap-2 text-xs sm:grid-cols-2"><label><input className="mr-2" type="checkbox" checked={hasPhone} onChange={(event) => setHasPhone(event.target.checked)} />Has phone</label><label><input className="mr-2" type="checkbox" checked={hasEmail} onChange={(event) => setHasEmail(event.target.checked)} />Has email</label><label><input className="mr-2" type="checkbox" checked={forHire} onChange={(event) => setForHire(event.target.checked)} />For-hire only</label><label><input className="mr-2" type="checkbox" checked={authorized} onChange={(event) => setAuthorized(event.target.checked)} />Authorized and insured</label><label><input className="mr-2" type="checkbox" checked={interstate} onChange={(event) => setInterstate(event.target.checked)} />Interstate only</label></div><div className="mt-3 border border-border bg-surface-2 p-3 text-xs text-text-muted">Safety and authority issues are never silently hidden. Matching carriers with concerns remain visible with warning treatment.</div></section>
+      </div>
+
+      <aside className="sticky top-0 space-y-4"><section className="flex min-h-[430px] items-center justify-center border border-border bg-surface-2 p-8 text-center"><div><div className="text-[10px] font-extrabold uppercase tracking-[0.09em] text-text-subtle">Live coverage map</div><div className="mt-3 text-lg font-bold">{zones.length ? `${zones.length} valid lane${zones.length === 1 ? '' : 's'}` : 'Enter a valid lane'}</div><div className="mt-2 text-xs text-text-muted">Restricted Google Maps credentials are not stored in the repository. Live matching below is already using PostGIS.</div></div></section><section className="border border-border bg-surface p-5"><div className="text-[10px] font-extrabold uppercase tracking-[0.08em] text-text-subtle">Live matches</div>{countQuery.isError ? <div className="mt-2 text-sm font-bold text-crit">Count unavailable — retry</div> : <div className="mt-2 text-3xl font-extrabold tabular-nums">{countQuery.data?.match_count.toLocaleString('en-US') ?? '—'}</div>}<div className="mt-2 grid grid-cols-3 gap-2 text-center text-[10px] text-text-muted"><div><strong className="block text-sm text-text">{countQuery.data?.with_phone.toLocaleString('en-US') ?? '—'}</strong>with phone</div><div><strong className="block text-sm text-text">{countQuery.data?.with_email.toLocaleString('en-US') ?? '—'}</strong>with email</div><div><strong className="block text-sm text-text">{countQuery.data?.tier1_count.toLocaleString('en-US') ?? '—'}</strong>tier 1</div></div><button type="button" disabled={!name.trim() || zones.length === 0 || createMutation.isPending} onClick={() => createMutation.mutate()} className="mt-5 w-full bg-accent px-4 py-3 text-xs font-bold text-accent-ink disabled:cursor-not-allowed disabled:opacity-40">{createMutation.isPending ? 'Creating batch…' : `Grab Batch${countQuery.data ? ` — ${countQuery.data.match_count.toLocaleString('en-US')} carriers` : ''}`}</button></section></aside>
+    </div></div>
   );
 }
