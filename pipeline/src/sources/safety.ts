@@ -2,181 +2,290 @@ import { bulkInsert, withStagingConnection, type PgPoolClient, type PipelineCont
 import { DEFAULT_PAGE_SIZE, SOCRATA_DATASETS, SocrataClient } from '../socrata.js';
 
 /**
- * sync-safety (monthly, day 5 per Part B §2.4/§6.3): SMS census snapshot -> `carrier_safety`
- * (PK `dot_number` + `snapshot_month`, amendment #7).
+ * Monthly carrier-safety snapshot.
  *
- * ============================================================================================
- * ⚠️R3 STATUS -- dataset choice itself is unresolved, not just column names:
- * ============================================================================================
- * Part B §1.3 picks `4y6x-dmck` ("SMS AB PassProperty") as primary with `sjpe-nzai`
- * ("CSMS/SMS Raw Data") as fallback, explicitly flagged ⚠️R3: "probe both once; keep
- * whichever is row-queryable by dot_number with the standard SMS carrier columns." Task 2
- * could not resolve this -- every data.transportation.gov/dev.socrata.com fetch attempt
- * returned HTTP 403 this session, and no GitHub-indexed ingest code was found that queries
- * either `4y6x-dmck` or `sjpe-nzai` by name (unlike az4n-8mr2/qh9u-swkp, which several public
- * repos ingest directly). `SAFETY_DATASET_ID` below defaults to `4y6x-dmck` per Part B's own
- * pick; `syncSafety`'s `options.datasetId` exists specifically so the R3 probe can be re-run
- * with `sjpe-nzai` without touching this file's logic.
+ * Live source contracts were verified on 2026-07-22 against official DOT DataHub metadata
+ * and samples:
+ * - 4y6x-dmck (SMS AB PassProperty) covers active interstate and intrastate Hazmat carriers;
+ *   h9zy-gjn8 (SMS C PassProperty) covers active intrastate non-Hazmat carriers. They have the
+ *   same 21-column contract, are individually unique by DOT, and are disjoint populations.
+ *   Both are required for complete Texas safety coverage. Neither contains crash totals or
+ *   safety-rating columns.
+ * - az4n-8mr2 (Company Census File) contains safety_rating using compact S/C/U codes and
+ *   safety_rating_date as YYYYMMDD text.
+ * - 4wxs-vbns (SMS Input - Crash) is the separate crash-event source. Crash aggregation is
+ *   deliberately not enabled here yet: its report identifiers are not globally reliable
+ *   enough to deduplicate without a reviewed event-key contract, and enabling an incorrect
+ *   total would immediately feed the recent_crashes warning.
  *
- * ============================================================================================
- * NOTEWORTHY Task 2 finding -- safety_rating may not need this dataset at all:
- * ============================================================================================
- * kshivam4781/FMCSA-SOI-Data's actual census (az4n-8mr2) field list -- the same source Task 2
- * used to confirm the crgo_* spellings and mailing-address columns -- ALSO lists
- * `safety_rating`, `safety_rating_date`, `review_id`, `review_type`, `review_date` as CENSUS
- * fields, not SMS-dataset fields. If that holds up on a live probe, `carrier_safety.
- * safety_rating`/`safety_rating_date` could be sourced straight from the DAILY census pull
- * (sync-census, fresher than this monthly job) instead of, or in addition to, whatever this
- * SMS dataset carries. This file still writes safety_rating from the SMS pull (matching Part
- * B's original design and carrier_safety's monthly cadence) rather than silently
- * redesigning sync-census around an unconfirmed finding -- but this is a real simplification
- * opportunity worth a deliberate decision once R3 is probed for real, not busywork. See
- * ../COLUMN-VERIFICATION.md.
- *
- * Every SODA field name below is UNVERIFIED -- carried from Part B §1.3's own citation
- * ("Standard SMS carrier-file columns (confirmed across several ingesting codebases):
- * insp_total, driver_insp_total, driver_oos_insp_total, vehicle_insp_total,
- * vehicle_oos_insp_total, unsafe_driv_insp_w_viol, ... plus crash totals"), not
- * independently re-confirmed this session. Crash-total field names specifically were never
- * spelled out anywhere Task 2 could find -- CRASH_FIELD_MAP's names below are this pipeline's
- * best-guess pattern-matching off the confirmed inspection-field naming convention.
+ * This implementation therefore ships a fail-closed, read-only probe plus an inspection-only
+ * sync. Crash totals remain NULL and must not be interpreted as zero. A later reviewed crash
+ * source can extend this snapshot after deterministic event-key tests.
  */
 
+export const SAFETY_DATASET_IDS = [
+  SOCRATA_DATASETS.SMS_AB_PASSPROPERTY,
+  SOCRATA_DATASETS.SMS_C_PASSPROPERTY,
+] as const;
 export const SAFETY_DATASET_ID = SOCRATA_DATASETS.SMS_AB_PASSPROPERTY;
-export const SAFETY_DATASET_FALLBACK_ID = SOCRATA_DATASETS.SMS_RAW_FALLBACK;
+export const SAFETY_RATING_DATASET_ID = SOCRATA_DATASETS.COMPANY_CENSUS;
 
-interface SafetyFieldMapping {
-  soda: string;
-  column: string;
-  sqlType: string;
-  castExpr?: string;
-  verified: boolean;
-}
+const SAFETY_SELECT_FIELDS = [
+  'dot_number',
+  'insp_total',
+  'driver_insp_total',
+  'driver_oos_insp_total',
+  'vehicle_insp_total',
+  'vehicle_oos_insp_total',
+] as const;
 
-const SAFETY_FIELD_MAP: SafetyFieldMapping[] = [
-  { soda: 'dot_number', column: 'dot_number', sqlType: 'bigint', castExpr: '%COL%::bigint', verified: false },
-  { soda: 'insp_total', column: 'inspections_24mo', sqlType: 'int', verified: true },
-  { soda: 'driver_insp_total', column: 'driver_insp_24mo', sqlType: 'int', verified: true },
-  { soda: 'driver_oos_insp_total', column: 'driver_oos_24mo', sqlType: 'int', verified: true },
-  { soda: 'vehicle_insp_total', column: 'vehicle_insp_24mo', sqlType: 'int', verified: true },
-  { soda: 'vehicle_oos_insp_total', column: 'vehicle_oos_24mo', sqlType: 'int', verified: true },
-  // Guessed by analogy to the confirmed inspection-field naming convention -- not cited
-  // anywhere Task 2 could find. Confirm against a live row before trusting these specifically.
-  { soda: 'crash_total', column: 'crash_total_24mo', sqlType: 'int', verified: false },
-  { soda: 'crash_fatal', column: 'crash_fatal_24mo', sqlType: 'int', verified: false },
-  { soda: 'crash_injury', column: 'crash_injury_24mo', sqlType: 'int', verified: false },
-  { soda: 'crash_tow', column: 'crash_tow_24mo', sqlType: 'int', verified: false },
-  // See the "NOTEWORTHY Task 2 finding" header note -- may end up sourced from census instead.
-  { soda: 'safety_rating', column: 'safety_rating', sqlType: 'text', verified: false },
-  { soda: 'safety_rating_date', column: 'safety_rating_date', sqlType: 'date', verified: false },
-];
-
-function uniqueSodaFields(): string[] {
-  return Array.from(new Set(SAFETY_FIELD_MAP.map((f) => f.soda)));
-}
+const SAFETY_RATING_FIELDS = ['dot_number', 'safety_rating', 'safety_rating_date'] as const;
+const ALLOWED_SOURCE_RATING_CODES = new Set(['', 'S', 'C', 'U']);
 
 export function buildSelectClause(): string {
-  return uniqueSodaFields().join(',');
+  return SAFETY_SELECT_FIELDS.join(',');
 }
 
-function castedExpr(f: SafetyFieldMapping): string {
-  const col = `sc."${f.soda}"`;
-  if (f.castExpr) return f.castExpr.replaceAll('%COL%', col);
-  return `nullif(${col}, '')::${f.sqlType}`;
+export function buildRatingSelectClause(): string {
+  return SAFETY_RATING_FIELDS.join(',');
+}
+
+export function mapSafetyRatingCode(value: unknown): string | null {
+  const code = value === undefined || value === null ? '' : String(value).trim().toUpperCase();
+  if (!ALLOWED_SOURCE_RATING_CODES.has(code)) {
+    throw new Error(`Unexpected FMCSA safety_rating code "${code}"`);
+  }
+  if (code === '') return null;
+  if (code === 'S') return 'Satisfactory';
+  if (code === 'C') return 'Conditional';
+  return 'Unsatisfactory';
+}
+
+export function parseFmcsaCompactDate(value: unknown): string | null {
+  if (value === undefined || value === null || String(value).trim() === '') return null;
+  const raw = String(value).trim();
+  if (!/^\d{8}$/.test(raw)) throw new Error(`Unexpected FMCSA compact date "${raw}"`);
+  const year = Number(raw.slice(0, 4));
+  const month = Number(raw.slice(4, 6));
+  const day = Number(raw.slice(6, 8));
+  const d = new Date(Date.UTC(year, month - 1, day));
+  if (
+    d.getUTCFullYear() !== year ||
+    d.getUTCMonth() !== month - 1 ||
+    d.getUTCDate() !== day
+  ) {
+    throw new Error(`Invalid FMCSA compact date "${raw}"`);
+  }
+  return `${raw.slice(0, 4)}-${raw.slice(4, 6)}-${raw.slice(6, 8)}`;
+}
+
+function parseNonNegativeInteger(value: unknown, field: string): number {
+  if (value === undefined || value === null || String(value).trim() === '') {
+    throw new Error(`Missing ${field} value`);
+  }
+  const raw = String(value).trim();
+  if (!/^\d+$/.test(raw)) throw new Error(`Unexpected ${field} value "${raw}"`);
+  const n = Number(raw);
+  if (!Number.isSafeInteger(n) || n < 0) throw new Error(`Out-of-range ${field} value "${raw}"`);
+  return n;
+}
+
+export interface SafetySourceRow {
+  dot_number: string;
+  insp_total: string;
+  driver_insp_total: string;
+  driver_oos_insp_total: string;
+  vehicle_insp_total: string;
+  vehicle_oos_insp_total: string;
+}
+
+export interface SafetyRatingSourceRow {
+  dot_number: string;
+  safety_rating?: string;
+  safety_rating_date?: string;
+}
+
+export interface ValidatedSafetyRow {
+  dotNumber: number;
+  inspections: number;
+  driverInspections: number;
+  driverOos: number;
+  vehicleInspections: number;
+  vehicleOos: number;
+}
+
+export function validateSafetyRow(row: Record<string, unknown>): ValidatedSafetyRow {
+  const dotNumber = parseNonNegativeInteger(row.dot_number, 'dot_number');
+  if (dotNumber <= 0) throw new Error(`Invalid dot_number "${String(row.dot_number)}"`);
+  const inspections = parseNonNegativeInteger(row.insp_total, 'insp_total');
+  const driverInspections = parseNonNegativeInteger(row.driver_insp_total, 'driver_insp_total');
+  const driverOos = parseNonNegativeInteger(row.driver_oos_insp_total, 'driver_oos_insp_total');
+  const vehicleInspections = parseNonNegativeInteger(row.vehicle_insp_total, 'vehicle_insp_total');
+  const vehicleOos = parseNonNegativeInteger(row.vehicle_oos_insp_total, 'vehicle_oos_insp_total');
+
+  if (driverOos > driverInspections) {
+    throw new Error(`driver_oos_insp_total exceeds driver_insp_total for DOT ${dotNumber}`);
+  }
+  if (vehicleOos > vehicleInspections) {
+    throw new Error(`vehicle_oos_insp_total exceeds vehicle_insp_total for DOT ${dotNumber}`);
+  }
+  if (driverInspections > inspections || vehicleInspections > inspections) {
+    throw new Error(`inspection component exceeds insp_total for DOT ${dotNumber}`);
+  }
+
+  return { dotNumber, inspections, driverInspections, driverOos, vehicleInspections, vehicleOos };
 }
 
 function buildStagingDdl(): string {
-  const cols = uniqueSodaFields()
-    .map((f) => `  "${f}" text`)
-    .join(',\n');
   return `
 create temp table staging_safety (
-${cols},
-  "raw" jsonb
+  dot_number bigint primary key,
+  inspections_24mo int not null,
+  driver_insp_24mo int not null,
+  driver_oos_24mo int not null,
+  vehicle_insp_24mo int not null,
+  vehicle_oos_24mo int not null,
+  safety_rating text,
+  safety_rating_date date
+) on commit drop;
+create temp table staging_safety_ratings (
+  dot_number bigint primary key,
+  safety_rating text not null,
+  safety_rating_date date not null
 ) on commit drop;
   `.trim();
 }
 
-/**
- * OOS rates computed in SQL from the just-cast totals (not trusted from any source field --
- * Part B §2.4: "we compute driver_oos_rate = driver_oos/driver_insp, vehicle_oos_rate =
- * vehicle_oos/vehicle_insp"), stored as a percent 0-100 to match Part A's
- * `numeric(5,2)` columns and the warning thresholds' own "> 34" / "> 10" percent-point form
- * (01-architecture.md §3, `internal.warning_reasons`).
- */
-function oosRateExpr(oosCol: string, totalCol: string): string {
-  return `(case when nullif(${totalCol}, 0) is null then null
-      else round((${oosCol}::numeric / ${totalCol}::numeric) * 100, 2)
-    end)`;
-}
-
-/**
- * TODO(live-db): assumes `carrier_safety` (Part A §2.4 + amendment #7's `snapshot_month`
- * column) already has the exact column names used below. `snapshot_month` is set to the
- * first-of-month for the run date, matching amendment #7's "latest snapshot only" contract
- * (this upsert always overwrites the prior snapshot, it doesn't append history).
- */
 export function buildUpsertSql(): string {
-  const castCols = SAFETY_FIELD_MAP.filter((f) => f.column !== 'dot_number').map((f) => ({
-    column: f.column,
-    selectExpr: castedExpr(f),
-  }));
-
-  const driverOos = castCols.find((c) => c.column === 'driver_oos_24mo');
-  const driverInsp = castCols.find((c) => c.column === 'driver_insp_24mo');
-  const vehicleOos = castCols.find((c) => c.column === 'vehicle_oos_24mo');
-  const vehicleInsp = castCols.find((c) => c.column === 'vehicle_insp_24mo');
-  if (!driverOos || !driverInsp || !vehicleOos || !vehicleInsp) {
-    // Guards the hand-maintained SAFETY_FIELD_MAP against a future rename silently breaking
-    // the rate computation below instead of failing loudly at SQL-build time.
-    throw new Error('buildUpsertSql: SAFETY_FIELD_MAP is missing an OOS/inspection column the rate formulas depend on');
-  }
-
-  const cols = [
-    { column: 'dot_number', selectExpr: 'sc."dot_number"::bigint' },
-    ...castCols,
-    { column: 'driver_oos_rate', selectExpr: oosRateExpr(`(${driverOos.selectExpr})`, `(${driverInsp.selectExpr})`) },
-    { column: 'vehicle_oos_rate', selectExpr: oosRateExpr(`(${vehicleOos.selectExpr})`, `(${vehicleInsp.selectExpr})`) },
-    { column: 'snapshot_month', selectExpr: "date_trunc('month', current_date)::date" },
-    { column: 'last_synced_at', selectExpr: 'now()' },
-  ];
-  const columnList = cols.map((c) => `"${c.column}"`).join(', ');
-  const selectList = cols.map((c) => c.selectExpr).join(',\n       ');
-  const setClauses = cols
-    .filter((c) => c.column !== 'dot_number')
-    .map((c) => `"${c.column}" = excluded."${c.column}"`)
-    .join(',\n    ');
-
   return `
-insert into public.carrier_safety (${columnList})
-select ${selectList}
+insert into public.carrier_safety (
+  dot_number,
+  snapshot_month,
+  inspections_24mo,
+  driver_insp_24mo,
+  driver_oos_24mo,
+  vehicle_insp_24mo,
+  vehicle_oos_24mo,
+  driver_oos_rate,
+  vehicle_oos_rate,
+  safety_rating,
+  safety_rating_date,
+  last_synced_at
+)
+select
+  sc.dot_number,
+  date_trunc('month', current_date)::date,
+  sc.inspections_24mo,
+  sc.driver_insp_24mo,
+  sc.driver_oos_24mo,
+  sc.vehicle_insp_24mo,
+  sc.vehicle_oos_24mo,
+  case when sc.driver_insp_24mo = 0 then null
+       else round((sc.driver_oos_24mo::numeric / sc.driver_insp_24mo::numeric) * 100, 2) end,
+  case when sc.vehicle_insp_24mo = 0 then null
+       else round((sc.vehicle_oos_24mo::numeric / sc.vehicle_insp_24mo::numeric) * 100, 2) end,
+  sc.safety_rating,
+  sc.safety_rating_date,
+  now()
 from staging_safety sc
-where exists (select 1 from public.carriers c where c.dot_number = sc."dot_number"::bigint)
+where exists (select 1 from public.carriers c where c.dot_number = sc.dot_number)
 on conflict (dot_number) do update set
-    ${setClauses};
+  snapshot_month = excluded.snapshot_month,
+  inspections_24mo = excluded.inspections_24mo,
+  driver_insp_24mo = excluded.driver_insp_24mo,
+  driver_oos_24mo = excluded.driver_oos_24mo,
+  vehicle_insp_24mo = excluded.vehicle_insp_24mo,
+  vehicle_oos_24mo = excluded.vehicle_oos_24mo,
+  driver_oos_rate = excluded.driver_oos_rate,
+  vehicle_oos_rate = excluded.vehicle_oos_rate,
+  safety_rating = coalesce(excluded.safety_rating, public.carrier_safety.safety_rating),
+  safety_rating_date = coalesce(excluded.safety_rating_date, public.carrier_safety.safety_rating_date),
+  last_synced_at = excluded.last_synced_at;
   `.trim();
 }
 
-function mapRowToStagingTuple(row: Record<string, unknown>, sodaFields: readonly string[]): unknown[] {
-  const values: unknown[] = sodaFields.map((f) => {
-    const v = row[f];
-    return v === undefined || v === null ? null : String(v);
+function stats(values: number[]): { min: number | null; max: number | null; avg: number | null } {
+  if (values.length === 0) return { min: null, max: null, avg: null };
+  return {
+    min: Math.min(...values),
+    max: Math.max(...values),
+    avg: Number((values.reduce((a, b) => a + b, 0) / values.length).toFixed(2)),
+  };
+}
+
+export interface SafetyProbeResult {
+  datasetIds: readonly string[];
+  sampleRows: number;
+  uniqueDots: number;
+  inspectionStats: ReturnType<typeof stats>;
+  driverOosRates: ReturnType<typeof stats>;
+  vehicleOosRates: ReturnType<typeof stats>;
+  ratingCounts: Record<string, number>;
+}
+
+export async function probeSafetySources(
+  socrata: SocrataClient,
+  options: { sampleLimit?: number } = {}
+): Promise<SafetyProbeResult> {
+  const sampleLimit = options.sampleLimit ?? 1_000;
+  const safety: ValidatedSafetyRow[] = [];
+  for (const datasetId of SAFETY_DATASET_IDS) {
+    const rawSafety = await socrata.fetchPage<Record<string, unknown>>(datasetId, {
+      $select: buildSelectClause(),
+      $order: 'dot_number',
+      $limit: sampleLimit,
+    });
+    safety.push(...rawSafety.map(validateSafetyRow));
+  }
+  const uniqueDots = new Set(safety.map((row) => row.dotNumber));
+  if (uniqueDots.size !== safety.length) {
+    throw new Error(`Safety probe found cross-source duplicate DOTs: ${safety.length} rows / ${uniqueDots.size} unique`);
+  }
+
+  const rawRatings = await socrata.fetchPage<Record<string, unknown>>(SAFETY_RATING_DATASET_ID, {
+    $select: buildRatingSelectClause(),
+    $where: "phy_state='TX' AND status_code='A' AND safety_rating is not null",
+    $order: 'dot_number',
+    $limit: sampleLimit,
   });
-  values.push(JSON.stringify(row));
-  return values;
+  const ratingCounts: Record<string, number> = { Satisfactory: 0, Conditional: 0, Unsatisfactory: 0, Unrated: 0 };
+  for (const row of rawRatings) {
+    const rating = mapSafetyRatingCode(row.safety_rating);
+    if (row.safety_rating_date) parseFmcsaCompactDate(row.safety_rating_date);
+    ratingCounts[rating ?? 'Unrated'] += 1;
+  }
+
+  const driverRates = safety
+    .filter((row) => row.driverInspections > 0)
+    .map((row) => Number(((row.driverOos / row.driverInspections) * 100).toFixed(2)));
+  const vehicleRates = safety
+    .filter((row) => row.vehicleInspections > 0)
+    .map((row) => Number(((row.vehicleOos / row.vehicleInspections) * 100).toFixed(2)));
+
+  return {
+    datasetIds: SAFETY_DATASET_IDS,
+    sampleRows: safety.length,
+    uniqueDots: uniqueDots.size,
+    inspectionStats: stats(safety.map((row) => row.inspections)),
+    driverOosRates: stats(driverRates),
+    vehicleOosRates: stats(vehicleRates),
+    ratingCounts,
+  };
 }
 
 export interface SafetySyncOptions {
-  /** Override for the ⚠️R3 probe -- pass SAFETY_DATASET_FALLBACK_ID to try sjpe-nzai instead. */
-  datasetId?: string;
   maxPages?: number;
   pageSize?: number;
+  dryRun?: boolean;
 }
 
 export interface SafetySyncResult {
-  datasetId: string;
+  datasetIds: readonly string[];
   rowsRead: number;
   rowsUpserted: number;
+  ratingRowsRead: number;
+  dryRun: boolean;
+  validation: Record<string, unknown>;
 }
 
 export async function syncSafety(
@@ -184,45 +293,173 @@ export async function syncSafety(
   socrata: SocrataClient,
   options: SafetySyncOptions = {}
 ): Promise<SafetySyncResult> {
-  const datasetId = options.datasetId ?? SAFETY_DATASET_ID;
   const pageSize = options.pageSize ?? DEFAULT_PAGE_SIZE;
-  const sodaFields = uniqueSodaFields();
-  const stagingColumns = [...sodaFields, 'raw'];
-
-  const unverified = SAFETY_FIELD_MAP.filter((f) => !f.verified).map((f) => f.column);
-  ctx.log.warn('sync-safety.unverified_columns', {
-    note: 'entire SMS field map is UNVERIFIED (⚠️R3) -- see this file\'s header comment',
-    datasetId,
-    columns: unverified,
-  });
-
   let rowsRead = 0;
+  let ratingRowsRead = 0;
   let pageCount = 0;
 
-  const { rowsUpserted } = await withStagingConnection(ctx.pg, buildStagingDdl(), async (client: PgPoolClient) => {
-    for await (const page of socrata.paginateOffset<Record<string, string>>(
-      datasetId,
-      { $select: buildSelectClause() },
-      pageSize
-    )) {
-      pageCount += 1;
-      rowsRead += page.length;
+  const sourceRowCounts = new Map<string, number>();
+  for (const datasetId of SAFETY_DATASET_IDS) {
+    const count = await socrata.count(datasetId);
+    if (count < 100_000 || count > 2_000_000) {
+      throw new Error(`Safety source ${datasetId} row count ${count} is outside the expected 100k-2M range`);
+    }
+    sourceRowCounts.set(datasetId, count);
+  }
+  const totalSourceRows = Array.from(sourceRowCounts.values()).reduce((sum, count) => sum + count, 0);
 
-      const rows = page.map((row) => mapRowToStagingTuple(row, sodaFields));
-      await bulkInsert(client, 'staging_safety', stagingColumns, rows, 2000);
-
-      ctx.log.info('sync-safety.page', { page: pageCount, pageRows: page.length, rowsRead });
-
-      if (options.maxPages && pageCount >= options.maxPages) {
-        ctx.log.warn('sync-safety.capped', { maxPages: options.maxPages });
-        break;
+  const result = await withStagingConnection(ctx.pg, buildStagingDdl(), async (client: PgPoolClient) => {
+    // dot_number is TEXT in both datasets. Use stable ordered offset paging; the generic
+    // numeric-keyset helper would emit `dot_number > 123` and Socrata correctly rejects that
+    // type mismatch. The two source populations are disjoint; the staging PK fails closed if
+    // that official contract ever changes.
+    for (const datasetId of SAFETY_DATASET_IDS) {
+      let datasetPages = 0;
+      for await (const page of socrata.paginateOffset<Record<string, unknown>>(
+        datasetId,
+        { $select: buildSelectClause(), $order: 'dot_number' },
+        pageSize
+      )) {
+        datasetPages += 1;
+        pageCount += 1;
+        rowsRead += page.length;
+        const rows = page.map((raw) => {
+          const row = validateSafetyRow(raw);
+          return [
+            row.dotNumber,
+            row.inspections,
+            row.driverInspections,
+            row.driverOos,
+            row.vehicleInspections,
+            row.vehicleOos,
+            null,
+            null,
+          ];
+        });
+        await bulkInsert(
+          client,
+          'staging_safety',
+          [
+            'dot_number',
+            'inspections_24mo',
+            'driver_insp_24mo',
+            'driver_oos_24mo',
+            'vehicle_insp_24mo',
+            'vehicle_oos_24mo',
+            'safety_rating',
+            'safety_rating_date',
+          ],
+          rows,
+          1_000
+        );
+        ctx.log.info('sync-safety.page', { datasetId, page: datasetPages, pageRows: page.length, rowsRead });
+        if (options.maxPages && datasetPages >= options.maxPages) break;
       }
     }
 
-    const result = await client.query(buildUpsertSql());
-    return { rowsUpserted: result.rowCount ?? 0 };
+    // Ratings are sparse (~3.7k active Texas carriers), so one filtered Census query is both
+    // complete and far cheaper than issuing per-DOT requests. Stage and validate the entire set,
+    // then join it onto safety rows. Rated carriers without an AB/C SMS row remain honestly absent
+    // from carrier_safety rather than creating an inspection snapshot with invented zero totals.
+    const ratingRows = await socrata.fetchPage<Record<string, unknown>>(SAFETY_RATING_DATASET_ID, {
+      $select: buildRatingSelectClause(),
+      $where: "phy_state='TX' AND status_code='A' AND safety_rating is not null",
+      $order: 'dot_number',
+      $limit: 10_000,
+    });
+    ratingRowsRead = ratingRows.length;
+    const validatedRatings = ratingRows.map((row) => {
+      const dotNumber = parseNonNegativeInteger(row.dot_number, 'dot_number');
+      const safetyRating = mapSafetyRatingCode(row.safety_rating);
+      const safetyRatingDate = parseFmcsaCompactDate(row.safety_rating_date);
+      if (safetyRating === null || safetyRatingDate === null) {
+        throw new Error(`Incomplete safety rating for DOT ${dotNumber}`);
+      }
+      return [dotNumber, safetyRating, safetyRatingDate];
+    });
+    await bulkInsert(
+      client,
+      'staging_safety_ratings',
+      ['dot_number', 'safety_rating', 'safety_rating_date'],
+      validatedRatings,
+      2_000
+    );
+    await client.query(`
+      update staging_safety s
+      set safety_rating = r.safety_rating,
+          safety_rating_date = r.safety_rating_date
+      from staging_safety_ratings r
+      where r.dot_number = s.dot_number
+    `);
+
+    const expectedRows = Array.from(sourceRowCounts.values()).reduce(
+      (sum, count) => sum + (options.maxPages ? Math.min(count, options.maxPages * pageSize) : count),
+      0
+    );
+    if (rowsRead !== expectedRows) {
+      throw new Error(`Safety paging completeness failed: read ${rowsRead} rows, expected ${expectedRows}`);
+    }
+    for (const [datasetId, initialCount] of sourceRowCounts) {
+      const finalCount = await socrata.count(datasetId);
+      if (finalCount !== initialCount) {
+        throw new Error(
+          `Safety source ${datasetId} changed during the pull (${initialCount} -> ${finalCount}); retry next run`
+        );
+      }
+    }
+
+    const validationResult = await client.query(`
+      select
+        count(*)::int as staged_rows,
+        count(distinct dot_number)::int as unique_dots,
+        count(*) filter (where driver_oos_24mo > driver_insp_24mo)::int as invalid_driver_oos,
+        count(*) filter (where vehicle_oos_24mo > vehicle_insp_24mo)::int as invalid_vehicle_oos,
+        count(*) filter (where driver_insp_24mo > inspections_24mo or vehicle_insp_24mo > inspections_24mo)::int as invalid_inspection_totals,
+        min(inspections_24mo)::int as min_inspections,
+        max(inspections_24mo)::int as max_inspections,
+        count(*) filter (where safety_rating is not null)::int as rated_rows,
+        (select count(*)::int from staging_safety_ratings) as source_rating_rows
+      from staging_safety
+    `);
+    const validation = validationResult.rows[0] ?? {};
+    if (
+      Number(validation.invalid_driver_oos) > 0 ||
+      Number(validation.invalid_vehicle_oos) > 0 ||
+      Number(validation.invalid_inspection_totals) > 0 ||
+      Number(validation.staged_rows) !== Number(validation.unique_dots) ||
+      Number(validation.source_rating_rows) !== ratingRowsRead
+    ) {
+      throw new Error(`Safety staging validation failed: ${JSON.stringify(validation)}`);
+    }
+
+    if (options.dryRun) return { rowsUpserted: 0, validation };
+    const upsert = await client.query(buildUpsertSql());
+    return { rowsUpserted: upsert.rowCount ?? 0, validation };
   });
 
-  ctx.log.info('sync-safety.done', { datasetId, rowsRead, rowsUpserted, pages: pageCount });
-  return { datasetId, rowsRead, rowsUpserted };
+  ctx.log.info(options.dryRun ? 'sync-safety.dry_run_validated' : 'sync-safety.done', {
+    datasetIds: SAFETY_DATASET_IDS,
+    rowsRead,
+    ratingRowsRead,
+    rowsUpserted: result.rowsUpserted,
+    pages: pageCount,
+    validation: {
+      ...result.validation,
+      totalSourceRows,
+      sourceRowCounts: Object.fromEntries(sourceRowCounts),
+    },
+  });
+
+  return {
+    datasetIds: SAFETY_DATASET_IDS,
+    rowsRead,
+    rowsUpserted: result.rowsUpserted,
+    ratingRowsRead,
+    dryRun: options.dryRun ?? false,
+    validation: {
+      ...result.validation,
+      totalSourceRows,
+      sourceRowCounts: Object.fromEntries(sourceRowCounts),
+    },
+  };
 }

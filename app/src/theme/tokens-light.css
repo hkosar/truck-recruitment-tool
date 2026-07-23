@@ -1,0 +1,57 @@
+/* TNBS Design System v1.0 — locked light-only navy foundation. */
+:root {
+  --bg: #eef1f5;
+  --surface: #ffffff;
+  --surface-2: #f6f9fc;
+  --surface-sunk: #e8edf3;
+  --border: #dde3ea;
+  --border-strong: #c4ccd6;
+  --text: #1c2530;
+  --text-muted: #52606e;
+  --text-subtle: #86909e;
+
+  --accent: #1e3a6e;
+  --accent-hover: #172f5b;
+  --accent-press: #102545;
+  --accent-ink: #ffffff;
+  --accent-tint: #e6ecf7;
+  --accent-tint-2: #d7e1f3;
+  --accent-ring: rgba(30, 58, 110, 0.34);
+
+  --bar: #1a3560;
+  --bar-line: #14294c;
+  --bar-ink: #ffffff;
+  --zebra: #f6f9fc;
+  --row-hover: #eef3f9;
+  --selected: #e6eefb;
+  --th-bg: #eef2f7;
+
+  --st-new: #64748b;
+  --st-new-tint: #e7eaef;
+  --st-attempted: #b45c0c;
+  --st-attempted-tint: #f7eeda;
+  --st-contacted: #1e3a6e;
+  --st-contacted-tint: #e6ecf7;
+  --st-interested: #15803d;
+  --st-interested-tint: #e6f1ea;
+  --st-notfit: #7a8490;
+  --st-notfit-tint: #eceff2;
+  --st-dnc: #a4262c;
+  --st-dnc-tint: #f6e7e8;
+
+  --good: #15803d;
+  --warn: #b45c0c;
+  --crit: #a4262c;
+  --info: #1e3a6e;
+  --good-tint: #e6f1ea;
+  --warn-tint: #f7eeda;
+  --crit-tint: #f6e7e8;
+  --info-tint: #e6ecf7;
+  --row-warning: #f6e7e8;
+
+  --sidebar-w: 216px;
+  --topbar-h: 56px;
+  --shadow-1: 0 1px 2px rgba(28, 37, 48, 0.06);
+  --shadow-2: 0 1px 3px rgba(28, 37, 48, 0.08);
+  --shadow-pop: 0 8px 24px rgba(28, 37, 48, 0.16);
+}

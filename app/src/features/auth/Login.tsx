@@ -1,7 +1,7 @@
 import { useState } from 'react';
 import type { FormEvent } from 'react';
 import { Link, useLocation, useNavigate } from 'react-router-dom';
-import { setRememberMe, supabase } from '../../lib/supabase';
+import { connectedSupabaseRef, isStaging, setRememberMe, supabase } from '../../lib/supabase';
 
 /** docs/build-plan/02-frontend-spec.md §3f: "Login (email, password,
  * Remember me, Forgot link)" — v1 shape kept, minus the demo-role buttons. */
@@ -42,16 +42,18 @@ export default function Login() {
   return (
     <div className="flex min-h-dvh w-full items-center justify-center bg-bg px-4">
       <div className="w-full max-w-sm rounded-lg border border-border bg-surface p-8 shadow-elev-2">
+        {isStaging ? (
+          <div className="mb-5 border border-warn bg-warn-tint px-3 py-2 text-center text-[10px] font-extrabold uppercase tracking-[0.09em] text-warn">
+            Staging · fictional data · not production
+            <span className="mt-1 block font-mono normal-case tracking-normal text-text-subtle">{connectedSupabaseRef}</span>
+          </div>
+        ) : null}
         <div className="mb-8 flex flex-col items-center gap-2 text-center">
-          {/* Text wordmark placeholder — swap for public/brand/wordmark.svg
-              once the real asset lands there (§1.5). */}
-          <div className="flex h-10 w-10 items-center justify-center rounded-md bg-text font-ui text-base font-black text-surface">
-            TN
+          <div className="flex items-center gap-3 bg-bar px-4 py-3">
+            <img src="/brand/badge-white.png" alt="" className="h-9 w-9 object-contain" />
+            <img src="/brand/primary-white.png" alt="Twisted Nail" className="h-7 w-auto object-contain" />
           </div>
-          <div>
-            <div className="font-ui text-lg font-extrabold tracking-wide text-text">TWISTED NAIL</div>
-            <div className="text-xs font-medium uppercase tracking-wider text-text-subtle">Carrier Recruiter</div>
-          </div>
+          <div className="text-xs font-medium uppercase tracking-wider text-text-subtle">Carrier Recruiter</div>
         </div>
 
         <form onSubmit={handleSubmit} className="space-y-4">

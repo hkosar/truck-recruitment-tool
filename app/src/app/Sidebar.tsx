@@ -4,7 +4,6 @@ import { usePermissions, useProfile } from './guards';
 import { queryKeys } from '../lib/queryKeys';
 import { dashboardTotals } from '../lib/rpc';
 import { supabase } from '../lib/supabase';
-import { useTheme } from '../theme/ThemeProvider';
 
 /**
  * Sidebar nav — docs/build-plan/02-frontend-spec.md §3f.
@@ -15,16 +14,14 @@ import { useTheme } from '../theme/ThemeProvider';
  *  - "Outreach — coming soon" (F2): visible-but-disabled reserved tabs, no
  *    routes exist for them yet.
  *  - "Admin" (manager only): Users, pending-count badge.
- *  - Footer: user cell + theme toggle + sign out (§3f "user cell menu").
- *    Topbar also gets "theme toggle, user menu" per §3's shared-shell line;
- *    this scaffold consolidates both into this one footer to avoid two
- *    sign-out buttons — Topbar owns breadcrumbs + the Live badge instead.
+ *  - Footer: user identity + sign out. The locked TNBS system is light-only,
+ *    so there is intentionally no theme state or toggle.
  */
 
 const OUTREACH_ITEMS: { label: string }[] = [
-  { label: 'Email Blasts' },
-  { label: 'Texting' },
-  { label: 'Postcards' },
+  { label: 'Email' },
+  { label: 'Text' },
+  { label: 'Mail' },
   { label: 'Enrichment' },
 ];
 
@@ -38,16 +35,15 @@ function navLinkClass({ isActive }: { isActive: boolean }): string {
 export function Sidebar() {
   const { canEdit, isManager } = usePermissions();
   const profile = useProfile();
-  const { resolved, setPreference } = useTheme();
 
   const totalsQuery = useQuery({
-    queryKey: queryKeys.dashboard(),
+    queryKey: queryKeys.dashboardTotals(),
     queryFn: ({ signal }) => dashboardTotals(signal),
     staleTime: 30_000,
   });
 
   const pendingCountQuery = useQuery({
-    queryKey: queryKeys.users(),
+    queryKey: queryKeys.pendingUsersCount(),
     queryFn: async () => {
       const { count, error } = await supabase
         .from('profiles')
@@ -64,17 +60,8 @@ export function Sidebar() {
 
   return (
     <aside className="flex h-full shrink-0 flex-col border-r border-border bg-surface" style={{ width: 'var(--sidebar-w)' }}>
-      {/* Brand block — text wordmark placeholder. Swap for
-          public/brand/wordmark.svg once the real asset lands there
-          (app/public/brand/.gitkeep only ships in this scaffold). */}
-      <div className="flex items-center gap-2 border-b border-border px-4" style={{ height: 'var(--topbar-h)' }}>
-        <div className="flex h-8 w-8 items-center justify-center rounded-md bg-text font-ui text-sm font-black text-surface">
-          TN
-        </div>
-        <div className="leading-tight">
-          <div className="font-ui text-sm font-extrabold tracking-wide text-text">TWISTED NAIL</div>
-          <div className="text-[11px] font-medium uppercase tracking-wider text-text-subtle">Carrier Recruiter</div>
-        </div>
+      <div className="border-b border-border px-4 py-3 text-[10px] font-extrabold uppercase tracking-[0.12em] text-text-subtle">
+        Recruiting workspace
       </div>
 
       <nav className="flex-1 space-y-6 overflow-y-auto px-3 py-4">
@@ -149,22 +136,13 @@ export function Sidebar() {
             <div className="truncate text-xs text-text-subtle">{profile?.email}</div>
           </div>
         </div>
-        <div className="mt-2 flex gap-2">
-          <button
-            type="button"
-            onClick={() => setPreference(resolved === 'dark' ? 'light' : 'dark')}
-            className="flex-1 rounded-md border border-border-strong px-2 py-1.5 text-xs font-medium text-text-muted hover:bg-surface-2"
-          >
-            {resolved === 'dark' ? 'Light mode' : 'Dark mode'}
-          </button>
-          <button
-            type="button"
-            onClick={() => void supabase.auth.signOut()}
-            className="flex-1 rounded-md border border-border-strong px-2 py-1.5 text-xs font-medium text-text-muted hover:bg-surface-2"
-          >
-            Sign out
-          </button>
-        </div>
+        <button
+          type="button"
+          onClick={() => void supabase.auth.signOut()}
+          className="mt-2 w-full rounded-md border border-border-strong px-2 py-2 text-xs font-bold text-text-muted hover:bg-surface-2"
+        >
+          Sign out
+        </button>
       </div>
     </aside>
   );

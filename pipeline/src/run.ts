@@ -9,6 +9,7 @@ import { syncSafety } from './sources/safety.js';
 import { runGeocode } from './geocode.js';
 import { runFacets } from './facets.js';
 import { runDqReport } from './dq-report.js';
+import { verifyPipelineTarget } from './target-guard.js';
 
 /**
  * Entry point: `tsx src/run.ts <nightly|monthly|backfill|STEP_NAME> [--from=step] [--pages=N]
@@ -126,12 +127,17 @@ const STEP_RUNNERS: Record<PipelineStep, StepRunner> = {
     };
   },
   'sync-safety': async (ctx, socrata, args) => {
-    const r = await syncSafety(ctx, socrata, { maxPages: args.pages });
+    const r = await syncSafety(ctx, socrata, { maxPages: args.pages, dryRun: args.dryRun });
     return {
       rows_read: r.rowsRead,
       rows_upserted: r.rowsUpserted,
       rows_changed: r.rowsUpserted,
-      meta: { datasetId: r.datasetId },
+      meta: {
+        datasetIds: r.datasetIds,
+        ratingRowsRead: r.ratingRowsRead,
+        dryRun: r.dryRun,
+        validation: r.validation,
+      },
     };
   },
   'cargo-facets': async (ctx) => {
@@ -213,6 +219,11 @@ async function runChain(
 async function main(): Promise<void> {
   const args = parseArgs(process.argv.slice(2));
   const config = loadConfig();
+  verifyPipelineTarget({
+    environment: config.PIPELINE_ENV,
+    supabaseUrl: config.SUPABASE_URL,
+    allowedDevRefs: config.PIPELINE_ALLOWED_DEV_REFS,
+  });
   const ctx = createPipelineContext(config, args.command);
   const socrata = new SocrataClient({ appToken: config.SOCRATA_APP_TOKEN, log: ctx.log });
 

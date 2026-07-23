@@ -8,16 +8,17 @@
     "node": ">=22"
   },
   "scripts": {
-    "build": "tsc -p tsconfig.json",
+    "build": "npm test && tsc -p tsconfig.json",
     "typecheck": "tsc --noEmit",
     "test": "tsx src/smoke-tests.ts",
-    "verify": "npm run typecheck && npm test && npm run build",
+    "verify": "npm run typecheck && npm run build",
     "start": "tsx src/run.ts nightly",
     "pipeline:render": "tsx src/run.ts ${PIPELINE_COMMAND:-nightly}",
     "monthly": "tsx src/run.ts monthly",
     "backfill": "tsx src/run.ts backfill",
     "dev": "tsx src/run.ts nightly --pages=1 --batches=1",
-    "smoke:insurance": "tsx src/run.ts sync-insurance --pages=1 --dry-run=true"
+    "smoke:insurance": "tsx src/run.ts sync-insurance --pages=1 --dry-run=true",
+    "smoke:safety": "tsx src/run.ts sync-safety --pages=1 --dry-run=true"
   },
   "dependencies": {
     "@supabase/supabase-js": "^2.45.4",

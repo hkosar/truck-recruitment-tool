@@ -1,16 +1,12 @@
 /* Tailwind v4 entry point — CSS-first `@theme`, no tailwind.config.js.
    docs/build-plan/02-frontend-spec.md §1.5 "Tailwind wiring". */
 @import 'tailwindcss';
-@import './tokens.css';
+@import './tokens-light.css';
 @import './fonts.css';
 
-/* `@theme inline` maps our swappable CSS custom properties (tokens.css,
-   which change value under :root[data-theme]) onto Tailwind's utility
-   namespaces. `inline` (vs. plain `@theme`) keeps the generated utilities
-   referencing var(--token) at runtime instead of baking in a resolved
-   value at build time — required for the tokens to actually swap with the
-   theme attribute. One line per token; component code should never author
-   a raw hex outside tokens.css (§1.5 rule). */
+/* `@theme inline` maps the locked light-only TNBS tokens onto Tailwind's
+   utility namespaces. Component code should never author a brand hex outside
+   tokens-light.css. */
 @theme inline {
   --color-bg: var(--bg);
   --color-surface: var(--surface);
@@ -52,14 +48,21 @@
   --color-crit-tint: var(--crit-tint);
   --color-info-tint: var(--info-tint);
   --color-row-warning: var(--row-warning);
+  --color-bar: var(--bar);
+  --color-bar-line: var(--bar-line);
+  --color-bar-ink: var(--bar-ink);
+  --color-zebra: var(--zebra);
+  --color-row-hover: var(--row-hover);
+  --color-selected: var(--selected);
+  --color-th-bg: var(--th-bg);
 
   --font-ui: var(--font-ui);
   --font-mono: var(--font-mono);
 
-  /* F22/§1.5: 4/6/10px radius scale -> rounded-sm/md/lg */
-  --radius-sm: 4px;
-  --radius-md: 6px;
-  --radius-lg: 10px;
+  /* TNBS Blueprint geometry: tight, technical. */
+  --radius-sm: 3px;
+  --radius-md: 3px;
+  --radius-lg: 5px;
 
   --shadow-elev-1: var(--shadow-1);
   --shadow-elev-2: var(--shadow-2);
@@ -77,8 +80,16 @@
     background: var(--bg);
     color: var(--text);
     font-family: var(--font-ui);
+    font-size: 14px;
     -webkit-font-smoothing: antialiased;
     text-rendering: optimizeLegibility;
+  }
+
+  button,
+  input,
+  select,
+  textarea {
+    font: inherit;
   }
 
   /* All numeric table cells: money, counts, USDOT, phone (§1.5). */

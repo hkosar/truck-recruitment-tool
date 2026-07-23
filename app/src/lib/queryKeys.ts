@@ -9,6 +9,7 @@
 
 export const queryKeys = {
   dashboard: () => ['dashboard'] as const,
+  dashboardTotals: () => ['dashboard', 'totals'] as const,
 
   batch: (batchId: string) => ['batch', batchId] as const,
   batchCounts: (batchId: string) => ['batch', batchId, 'counts'] as const,
@@ -35,6 +36,7 @@ export const queryKeys = {
   facetCargo: (scopeHash: string) => ['facet', 'cargo', scopeHash] as const,
 
   users: () => ['users'] as const,
+  pendingUsersCount: () => ['users', 'pending-count'] as const,
   /** current signed-in profile (app/guards.tsx useSession()). */
   me: () => ['me'] as const,
 };

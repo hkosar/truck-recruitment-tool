@@ -14,6 +14,10 @@ build/
 # matched by these exact-filename rules and stay committed on purpose.
 .env
 .env.local
+.env.*.local
+
+# Local deployment-tool state
+.wrangler/
 
 # Logs
 *.log
