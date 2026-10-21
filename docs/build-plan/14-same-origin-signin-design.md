@@ -24,6 +24,24 @@ Source labels: **[QQ]** = Quote-Queue `origin/main` f1167dc, read with `git show
 **[repo]** = this repository at 9fc3425; **[CF]** / **[SB]** = Cloudflare / Supabase docs read
 2026-10-21 (URLs in §12); **[assume]** = not yet verified, with the test that will verify it.
 
+
+> **Coordinator decision, 2026-10-21 (authoritative over anything below that conflicts):**
+> - The QQ-style **plain Node server** (doc 15) is the selected **local implementation
+>   direction**. The Vite UI, the existing Supabase Postgres data and the database-enforced
+>   permissions are kept. The Cloudflare Worker, Hyperdrive, `waitUntil`, `wrangler` and
+>   `@cloudflare/workers-types` parts of doc 14 are **superseded**. Approval A2 is `pg` +
+>   `@types/pg` only.
+> - **Not approved by that decision:** buying or provisioning Render, any paid database
+>   add-on, dependency installation, live settings, a schema migration or cutover, account
+>   changes.
+> - **Unapproved proposals (not plan facts):** dropping the `profiles.id → auth.users` link
+>   (D8, "M2"), and freezing email edits and new-user adds during a backout window (D10).
+>   RLS re-keying and legacy Auth retirement (L1) remain **reviewed migration gates**. Every
+>   gate preserves all user data.
+> - Post-response, shutdown, body-limit and client-IP behaviour are **properties to prove
+>   with explicit tests** (T-SHUTDOWN, T-BODY, T-IP, T-TIME), not guarantees inferred from
+>   Quote-Queue or from a platform.
+
 ---
 
 ## 1 · Plain-language summary (for Hunter)
@@ -338,14 +356,38 @@ Mirrors [QQ] `:263-303`, `:360-436`.
   precision, and it is never longer than the window. Nothing in the touch path reads a
   constant 30 days. Tests in T-REC: recovery expiry after navigation, mutation, activity ping
   and background polling (the last must **not** extend it).
-- **Deliberate use only.** The Worker calls the touch **only** for:
-  (a) a document navigation (`Sec-Fetch-Mode: navigate` + `Sec-Fetch-Dest: document`), (b) any
-  `POST /api/*` mutation, and (c) `POST /api/session/activity`, which the SPA sends on an
-  in-app route change. This is the SPA equivalent of a full navigation; the SPA has no full
-  navigation between screens. Background `GET /api/*` reads (React Query refetch, polling)
-  never touch. A forged "activity" call can only keep the caller's own session alive, so it is
-  not a privilege. This is the equivalent of [QQ]'s `{renew:false}` for auto-refresh (M3
-  ruling 5, `session.ts:151-180`).
+- **Deliberate use only.** The server calls the touch **only** for:
+  (a) a document navigation (`Sec-Fetch-Mode: navigate` + `Sec-Fetch-Dest: document`) with no
+  `Sec-Purpose`/`Purpose: prefetch` header; (b) a **submitted** mutation (`POST /api/*`
+  other than the ping itself); (c) `POST /api/session/activity`, the SPA activity ping.
+- **The activity ping** (revised 2026-10-21, coordinator item 3):
+  - **When the SPA sends it:** only for actual deliberate use, i.e. an in-app navigation the
+    person caused (a router transition triggered by a click, a keypress, or browser
+    back/forward). A submitted mutation already renews server-side, so no ping is needed for
+    it. It is **never** sent from timers or intervals, route prefetch or hover preloading,
+    window focus or visibility changes, React Query background refetch or retries, or on
+    app start-up. In code, the ping lives in one module (`lib/activity.ts`) called only from
+    the router's user-navigation handler. A unit test and a lint check forbid importing it
+    anywhere else.
+  - **How the server checks it:** valid session (link or recovery); strict `Origin` equal to
+    `APP_ORIGIN`; `X-CSRF-Token` equal to the session's CSRF token; method `POST` with an
+    empty body; refused when a `Sec-Purpose` or `Purpose` prefetch header is present.
+    Refused pings are `403` and do not touch.
+  - **Throttle:** the server counts **at most one ping per session per 60 seconds**. Extra
+    pings get `204` and do nothing. The database renewal behind it is further limited to
+    once per 5 minutes (link) or once per minute (recovery), and never extends past the
+    absolute cap.
+  - **Limits of the guarantee:** the server cannot tell a ping sent by our navigation code
+    from one sent by other script on the same page. That script could only keep **its own
+    page's** session alive, and CSP blocks third-party script. So the guarantee is enforced by
+    the SPA code and its tests, and bounded by the throttle.
+  - **Tests (T-W and SPA unit tests):** a `setInterval`/`setTimeout`, a prefetch, a focus or
+    visibility change, and a background refetch do **not** send a ping and do not extend
+    `expires_at`; a user navigation does. A ping with no CSRF token, a wrong token, a
+    foreign or missing `Origin`, or a prefetch header is refused (`403`, no touch). 100 pings
+    in 60 s touch at most once. Background `GET /api/*` reads never touch. This is the
+    equivalent of [QQ]'s `{renew:false}` for auto-refresh (M3 ruling 5,
+    `session.ts:151-180`).
 - `GET /api/session` returns `{ user: {id, name, email, role}, sessionKind, csrfToken }`.
   `csrfToken` = `hmac(KEY_SESSIONS, __Host-tr_app_csrf)`. It is readable only by same-origin
   script (JSON, no CORS headers). Every `POST /api/*` requires header `X-CSRF-Token` equal to
@@ -539,7 +581,8 @@ self-deactivation; the last active manager is protected under `internal.roster_l
   migration M2 drops that FK (existing ids and rows untouched; also removes the cascade-delete
   hazard). It is a schema decision (**D8**). M2 is applied only after the backout window
   closes (§11.5). Until then the cutover migration M1 keeps the FK, and **Add** is disabled by
-  the Worker flag `TEAM_ADD_ENABLED=false`. **Email changes are paused too**
+  the Worker flag `TEAM_ADD_ENABLED=false` (**UNAPPROVED PROPOSAL, D8/D10**). **Email changes
+  are paused too** (proposal)
   (`TEAM_EMAIL_EDIT_ENABLED=false`, enforced in the Team route **and** by an M1 trigger that
   refuses `profiles.email` updates while `internal.backout_window.open = true`). Otherwise
   `profiles.email` and the old `auth.users.email` would drift, and a backout would bring back
@@ -791,9 +834,9 @@ only: no keys, tokens, URLs or project refs.
 - **A1 — restore existing locked packages** (`npm ci` in `app/` and in `pipeline/` inside this
   worktree only). Purpose: run project checks and unit tests. Downloads the packages already
   pinned in the lockfiles; nothing new.
-- **A2 — add dependencies to `app/`:** `pg` (runtime, the same library the pipeline uses),
-  `@types/pg`, `wrangler`, `@cloudflare/workers-types` (dev). Purpose: Worker DB access, local
-  Worker runs, types.
+- **A2 — add dependencies:** `pg` and `@types/pg` **only** (revised 2026-10-21; `wrangler` and
+  `@cloudflare/workers-types` are withdrawn, superseded by the Node server in doc 15).
+  Purpose: server DB access and types.
 - **A3 — throwaway Postgres cluster** (no service, not the system data directory):
   - folder: `C:\Users\hunte\.bb\thread-storage\thr_pn5gr4mx94\pg-auth-test\` (data + log)
   - create: `"C:\Program Files\PostgreSQL\16\bin\initdb.exe" -D <folder>\data -U tr_test_admin
@@ -803,7 +846,8 @@ only: no keys, tokens, URLs or project refs.
     -o "-p 55432 -c listen_addresses=127.0.0.1" start`
   - stop and delete: `pg_ctl … stop -m fast`, then remove the folder.
   - Purpose: T-SQL, T-CONC, T-INT, T-TIME, T-REC. Port 55432, loopback only.
-- **A4 — local Worker:** `npx wrangler dev --ip 127.0.0.1 --port 8788 --local` in `app/`, with
+- **A4 — local server** (revised: the local Node server on 127.0.0.1:8788, doc 15 §7; the
+  original Worker command below is withdrawn): ~~`npx wrangler dev --ip 127.0.0.1 --port 8788 --local`~~ in `app/`, with
   `.dev.vars` holding throwaway test keys (in thread storage, not committed) and the DB pointed
   at A3. Purpose: T-WRANGLER, T-VIS.
 - **A5a — stateless staging probes** (later): class A of §8.1. Public anon key only, no login,
@@ -845,9 +889,9 @@ only: no keys, tokens, URLs or project refs.
 | D5 | Workers plan if Free CPU is insufficient (spend) | Hunter | S8 |
 | D6 | DB connection path on hosted (Hyperdrive direct vs pooler; IPv4 add-on if required, which is spend) | manager / Hunter after A5 | S8 |
 | D7 | Fate of legacy pending/guest rows | Hunter, after O1 | nothing in the build; production cleanup only |
-| D8 | Drop the `profiles.id → auth.users` FK (schema change), in **M2 after the backout window** | review + manager / Hunter | S5 Team "add" only (disabled until M2); M1 and the rest are not blocked |
+| D8 | **UNAPPROVED PROPOSAL.** Drop the `profiles.id → auth.users` FK (schema change), proposed as **M2 after the backout window** | review + manager / Hunter | S5 Team "add" only; M1 and the rest are not blocked |
 | D9 | Design-system version for the sign-in surfaces (v1.0 vs [QQ] v1.1) | coordinator | S4 final visual sign-off only |
-| D10 | Length of the backout window, and who declares it closed (email edits and Team "add" stay paused until then) | Hunter via manager | M2 timing; production rollout plan |
+| D10 | **UNAPPROVED PROPOSAL.** Whether there is a backout window that pauses email edits and Team "add"; its length; who declares it closed | Hunter via manager | M2 timing; production rollout plan |
 
 Build slices: S1 DB migration + SQL tests · S2 Worker auth core · S3 data API + SPA port ·
 S4 sign-in pages · S5 Team page · S6 recovery codes · S7 mail adapter + webhook · S8 rollout.
@@ -866,6 +910,10 @@ S4 sign-in pages · S5 Team page · S6 recovery codes · S7 mail adapter + webho
 - O6 Optionally set Realtime to private channels only.
 
 ### 11.5 Backout and forward-fix (review finding 5)
+
+> The backout **window** and its pauses (email edits, Team "add") and the M2 FK drop are
+> **unapproved proposals** (D8, D10). The backout scripts and their rehearsal are reviewed
+> gates that apply whatever D8/D10 decide; all user data is preserved.
 
 **Why it works.** During the window the database still has everything the old app needs. M1
 keeps the `profiles → auth.users` FK and Team "add" is off, so every profile still has its

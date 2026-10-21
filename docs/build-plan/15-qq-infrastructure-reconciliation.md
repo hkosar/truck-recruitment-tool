@@ -30,6 +30,24 @@ threat model, gap findings and tests. This document replaces only **its hosting 
 Cloudflare Worker, Hyperdrive, `waitUntil`, `CF-Connecting-IP`); everything else in doc 14 carries
 forward unless a row below says otherwise.
 
+
+> **Coordinator decision, 2026-10-21 (authoritative over anything below that conflicts):**
+> - The QQ-style **plain Node server** (doc 15) is the selected **local implementation
+>   direction**. The Vite UI, the existing Supabase Postgres data and the database-enforced
+>   permissions are kept. The Cloudflare Worker, Hyperdrive, `waitUntil`, `wrangler` and
+>   `@cloudflare/workers-types` parts of doc 14 are **superseded**. Approval A2 is `pg` +
+>   `@types/pg` only.
+> - **Not approved by that decision:** buying or provisioning Render, any paid database
+>   add-on, dependency installation, live settings, a schema migration or cutover, account
+>   changes.
+> - **Unapproved proposals (not plan facts):** dropping the `profiles.id → auth.users` link
+>   (D8, "M2"), and freezing email edits and new-user adds during a backout window (D10).
+>   RLS re-keying and legacy Auth retirement (L1) remain **reviewed migration gates**. Every
+>   gate preserves all user data.
+> - Post-response, shutdown, body-limit and client-IP behaviour are **properties to prove
+>   with explicit tests** (T-SHUTDOWN, T-BODY, T-IP, T-TIME), not guarantees inferred from
+>   Quote-Queue or from a platform.
+
 ---
 
 ## 1 · Plain-language summary (for Hunter)
@@ -61,6 +79,9 @@ badge.
    stay off until the cross-app policy is decided.
 
 **What it costs and what you'd need to do (later, nothing now):**
+- **Not yet verified, and required before any hosting approval:** current official Render
+  pricing and the minimal staging and production cost. The figure below is from this
+  project's July 2026 notes only.
 - A Render **paid** web service (Starter, about $7 a month according to this project's July
   2026 cost notes; not re-checked today). The free tier "spins down" after 15 minutes idle and
   takes about a minute to wake, and Render says not to use it for production.
@@ -105,7 +126,7 @@ same design, a small stated change; **New** = no Quote-Queue counterpart.
 | C4 | CSRF, Origin, headers | `lib/csrf.ts`, `middleware.ts` | **Reuse**; strict Origin (required) for recovery and `/api/*` mutations (doc 14 finding 1); SPA mutations carry the token in a header instead of a form field | Node server | Header token for `fetch()` mutations |
 | C5 | SendGrid send | `lib/sendgrid.ts`, the canonical request in `app/auth/request/route.ts:390-430` | **Reuse** | Node server | Its own API key, restricted to Mail Send; `from` = the sender Hunter picks; `custom_args` `tr_source`/`tr_local_id`. **Each sign-in send is one-shot.** The custom key header (if kept) is diagnostic only; SendGrid does not deduplicate on it. An uncertain outcome (5xx, timeout, network error after transmission) is recorded as `unknown` and is **never** replayed automatically. Only the person's own new request mints a new link and a new send, under the normal ceilings. A 429 is recorded as not sent (QQ's `retryable_rejection`) and is likewise not auto-retried in the sign-in path |
 | C6 | SendGrid signed webhook + delivery ladder | `app/webhooks/sendgrid/route.ts`, migrations 0006/0007 | **Reuse** | Node server `/webhooks/sendgrid`; lattice trigger in Supabase | A **separate** Event Webhook in the same SendGrid account, pointing at this app with its own verification key. SendGrid has supported multiple Event Webhooks per account since May 2023; the per-plan cap (`max_allowed`) is **unverified** for TNBS's plan (owner check). Events whose `tr_source` is missing are ignored |
-| C7 | Post-response work | `after()` + `maxDuration = 60` | **Adapt** (departure D7) | Node server process | Plain Node with an explicit graceful-shutdown contract (§4.1) that tracks every accepted request **and** its continuation. Same honesty as QQ: best effort plus human retry; a lost send leaves the link `pending` or `unknown` |
+| C7 | Post-response work | `after()` + `maxDuration = 60` | **Adapt** (departure D7) | Node server process | Plain Node with an explicit graceful-shutdown contract (§4.1) that tracks every accepted request **and** its continuation. The bounded response, the continuation and the shutdown drain are **proven by T-SHUTDOWN and T-TIME**, not assumed from QQ's `after()` or from Render. Same honesty as QQ: best effort plus human retry; a lost send leaves the link `pending` or `unknown` |
 | C8 | Client IP | `lib/request-ip.ts` | **Adapt after verification**: QQ's own header comment says the result depends on the specific proxy chain, including any extra CDN in front. That this app's chain matches QQ's is **unverified** | Render | Use QQ's extraction only after hosted test T-IP (§4.2) passes for this service's exact chain (custom domain, any CDN or proxy in front). Until then the 20/IP limit is **not** accepted as protection. If the chain differs, the extraction is pinned to the verified trusted hop |
 | C9 | Config validated at boot | `lib/env.ts`, `instrumentation.ts` | **Reuse** | Render env vars | Names in §6 |
 | C10 | Migrations + roles | `scripts/migrate.ts`, Pre-Deploy Command, `qq_app`/`qq_migration` | **Adapt** | Supabase Postgres | This repo already has its own migration discipline (`supabase/migrations` + pinned checksum manifest, `scripts/verify-migration-baseline.mjs`). The new runtime login role `recruiter_app` is the `qq_app` equivalent. Migrations stay operator-applied per environment, with owner approval, as today; there is **no** automatic Pre-Deploy migration until Hunter decides otherwise |
@@ -139,7 +160,9 @@ Browser ──HTTPS──▶ Render web service "recruiter-web" (Node 22, plain 
   own IPv4 page lists Render as IPv4-only. The shared pooler is IPv4 on every plan. This repo's
   pipeline on Render already uses the session pooler (`render.yaml`, `SUPABASE_DB_URL` comment).
   Whether the pooler accepts a **custom** login role (user `recruiter_app.<project-ref>`) is
-  **unverified**. If it doesn't, the alternative is Supabase's paid IPv4 add-on (Pro plan), which
+  **unverified**. It must be verified from Supabase's documentation first (no live probe
+  without authorization) **before** anyone claims the add-on is needed. Only if custom roles
+  are not supported is the alternative Supabase's paid IPv4 add-on (Pro plan), which
   is a spending decision.
 - **Data path (unchanged from doc 14 §4, now concrete for Node):**
   - The new migration (pending, not executed) replaces every `auth.uid()` use (22 sites in 4
@@ -209,6 +232,10 @@ Also: the pool has zero open connections at exit (checked from the test DB's
 `pg_stat_activity`), and the process exits before the configured delay.
 
 ### 4.2 Client-IP trust test (T-IP; review edit 1)
+
+Render's forwarding chain is **not** treated as trusted because QQ uses it. Trust in any
+client-IP header is accepted only after this explicit hosted test passes for this
+service's exact chain.
 
 Hosted, on the staging web service only, under a separately approved probe run (part of A5a:
 no login, no data):
@@ -322,7 +349,8 @@ the operator out of band.
    staging option, D5). Cost per this repo's July 2026 notes: Starter $7/mo, not re-checked.
 2. **SendGrid (Quote-Queue's account):** at rollout, create a Mail-Send-only API key and a
    second Event Webhook for this app, and confirm the plan allows another webhook
-   (`max_allowed`). Choose the sender address.
+   (`max_allowed`). Choose the sender address. SendGrid capacity and configuration remain
+   **unverified and later-gated**.
 3. **Supabase:** at rollout, set the `recruiter_app` password, check that the session pooler
    accepts it, and do the doc 14 switches (providers off, L1), each with its own "go".
 
@@ -983,3 +1011,14 @@ Each case runs in both arrival orders and asserts the **final state** and each s
 | 1 | Member INSERT can set attribution | Column `INSERT` limited to `(batch_id, dot_number)` and a trigger forcing attribution null and status `'new'`; denial tests for both fields | §17.2, §17.4 |
 | 2 | Direct contact-log INSERT locks before identity | The guard validates the app caller's identity first (then the batch, then the carrier); trusted service-role/fixture path unchanged; general rule and inventory for lock-taking `BEFORE` triggers; direct-insert tests | §17.2, §17.4 |
 | 3 | Frozen-set test missing the "requested but absent, then inserted" case | Added | §17.4 |
+
+## 21 · Coordinator decision edits (2026-10-21)
+
+| # | Item | Change |
+|---|---|---|
+| 1 | `wrangler` and `@cloudflare/workers-types` withdrawn | A2 = `pg` + `@types/pg` only (status block in both docs; doc 14 A2/A4 revised) |
+| 2 | Plain-Node response, continuation, shutdown and client IP are tests, not guarantees | Status block; C7 row; §4.2 preface |
+| 3 | SPA activity ping | Doc 14 §3.5: deliberate navigation only; never timers, prefetch, focus or refetch; session + strict Origin + CSRF; throttle 1 per session per 60 s (DB renewal 5 min link / 1 min recovery); tests |
+| 4 | D8 and D10 are unapproved proposals; RLS re-keying and L1 stay reviewed gates; data preserved | Status block; doc 14 D8/D10 rows, §5.4, §11.5 |
+| 5 | Costs and connectivity | Render pricing and minimal costs to verify before any hosting approval; pooler custom-role support to verify from docs before claiming the add-on; SendGrid unverified and later-gated (§1, §4, §8) |
+| 6 | QQ 8111f3c C7/D9 and full-set lock order | Confirmed reflected at `de3486e`: one global class order with identity first and business classes (§17.2); lock sets taken before validation; validation under locks (§14.2); frozen sets (§17.2); bounded, uniformly fail-closed pre-response work (§14.4, §17.3) |
