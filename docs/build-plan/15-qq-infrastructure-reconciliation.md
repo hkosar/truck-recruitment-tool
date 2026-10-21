@@ -2,6 +2,9 @@
 
 Revision 2 (2026-10-21 UTC): review edits on IP trust, shutdown contract and SendGrid
 one-shot sends (§10).
+Revision 3 (2026-10-21 UTC): checked against Quote-Queue's infrastructure map
+(`1f7cce2:docs/handoff/SIGNIN-2026-10-21-infra-map.md`). Adds the reuse table (§11) and the
+data-access and permission migration boundary inventory (§12).
 
 Status: **proposal for the coordinator (thr_z77w8egnyw). Nothing built, deployed, installed or
 configured.** Written 2026-10-21 UTC on local branch `auth/same-origin-signin` by the sign-in
@@ -303,3 +306,127 @@ the operator out of band.
 | 1 | Render IP trust assumed from "same host" | Marked unverified; hosted T-IP with forged headers and two independent clients; the per-IP limit is not accepted until it passes | §3 C8, §4.2 |
 | 2 | Post-response replacement lacked a full shutdown contract | Tracks accepted requests and continuations (registered before the response); stop admission → drain both → close the pool within the deadline; T-SHUTDOWN at each phase replaces T-WRANGLER; recorded as departure D7 with its justification | §3 C7, §4.1, §5 D7, §7 |
 | 3 | "Idempotency key" overstated SendGrid protection | Sends are one-shot; the custom header is diagnostic only; uncertain outcomes are never auto-replayed | §2 Mail row, §3 C5 |
+
+---
+
+## 11 · Reuse table against the Quote-Queue map (`1f7cce2`, infra-map §1–§6)
+
+Line numbers are the map's, confirmed by symbol search at f1167dc where noted. One correction:
+the map gives `app/auth/signout/route.ts:598-634` and `:599`. The file's handler is
+`export async function POST` at lines 49-85, with the unguarded `request.formData()` at line
+50 (confirmed by `git show`). f1167dc is the local remote-tracking revision, not a guarantee
+of what GitHub or the live service runs. Quote-Queue's own fixes are under review and are
+**not** treated as done.
+
+| QQ component | QQ file / symbol | Verdict | This app's location (proposed) |
+|---|---|---|---|
+| Roster | `users` (0001:61-96) | **Not used**: the roster is `public.profiles` (existing rows, ids and roles kept) | `public.profiles` |
+| Link ledger | `auth_tokens` (0001:286-322; 0002 split ids) | **Adapt**: same columns and CHECKs; app prefix | `internal.signin_links` (pending M1) |
+| Sessions | `sessions` (0001:350-361) | **Adapt**: plus `kind`, `idle_window`, `absolute_expires_at`, `email_at_issue`, `revoked_reason` (doc 14 §3.5) | `internal.app_sessions` |
+| Flood buckets | `auth_request_buckets` (0001:369-379), `lib/rate.ts` `incrementAuthRequestBuckets` :252, ceilings :212-213 | **Copy logic**; dimensions add `recovery_ip`/`recovery_email` only if recovery is enabled. Fixed 15-minute windows (2× burst at the edge) kept, for parity with QQ | `internal.auth_request_buckets` |
+| Email events | `email_events` (0001:627-646; 0003) | **Copy** | `internal.email_events` |
+| Block list | `blocked_email_addresses` (0001:654-697), `applyBlock` (webhook :1197) | **Adapt**. Doc 14 had no block list; adopted here. Blocks are **never** cleared automatically or for a retry, only by a manager action that is audited | `internal.blocked_email_addresses` |
+| Audit | `admin_events` (0001:730-743), `lib/audit.ts` | **Adapt** | `internal.auth_events` |
+| Send-status lattice | trigger `auth_tokens_send_status_monotonic_trg` (0001:340; function per 0007:45) | **Copy as-is** | trigger on `internal.signin_links` |
+| Role split | `qq_app` / `qq_maintenance` / migration role; app has no DELETE on auth tables (0001:859-947) | **Adapt**: `recruiter_api` (NOLOGIN privileges) + `recruiter_app` (LOGIN, runtime) + `recruiter_maintenance` (retention, DELETE on auth ledgers only). Migrations stay operator-applied (C10). The app role reaches the auth ledgers through definer functions, not table grants | Supabase roles |
+| request route | `app/auth/request/route.ts` POST :568-623; identity work :252-505; ceilings :304-366 | **Copy pattern**; `after()` → §4.1 contract | `server/routes/request.ts` |
+| verify route | `app/auth/verify/route.ts` :81-113 | **Copy** | `server/routes/verify.ts` |
+| confirm route | `app/auth/confirm/route.ts` (GET/POST; map :313-549, file lines differ) | **Copy** | `server/routes/confirm.ts` |
+| sign-out | `app/auth/signout/route.ts` POST :49-85 | **Adapt**: guarded body parse (QQ defect D2) | `server/routes/signout.ts` |
+| Session helpers | `lib/auth/session.ts` `createSession` :99-112, `validateAndRenewSession` :182-225 | **Copy logic**; kind-dependent windows | `server/auth/session.ts` |
+| Revocation | `lib/auth/revoke.ts` `revokeAllForUser`, `revokeSession` | **Adapt**: also done by a **DB trigger** on profile email/role/status (QQ defect D1 fixed) | trigger + `server/auth/revoke.ts` |
+| Mask, cookies, CSRF, keys | `lib/auth/mask.ts`, `lib/cookies.ts` :52-71, `lib/csrf.ts` :56/:90, `lib/keys.ts` | **Copy**; cookie names `__Host-tr_*`; strict Origin for `/api/*` mutations and recovery | `server/auth/*` |
+| Client IP | `lib/request-ip.ts` `getClientIp` :44 | **Adapt after T-IP** (§4.2) | `server/http/ip.ts` |
+| Security headers | `middleware.ts` :53-165 | **Adapt**: every redirect is built from `APP_BASE_URL`, never from the request URL (QQ defect D4) | `server/http/headers.ts` |
+| SendGrid seam + mock | `lib/sendgrid.ts` `sendCanonical` :226-227, `getEmailAdapter` :561; `lib/sendgrid.mock.ts` | **Copy**: tracking-off guard kept; one-shot; the diagnostic header is not idempotency; uncertain → `unknown`, never replayed. Config errors never echo values or parse text (QQ defect D3) | `server/mail/*` |
+| Webhook | `app/webhooks/sendgrid/route.ts`: signature :356-420, cap :383, mapping :681-705, `applyAuthSendEvidence` :973-1027, recipient re-check :869-905 | **Copy logic**; own key; `tr_source` required. Before reuse, re-validate: the meaning of negative events (`bounce` blocked vs hard, `dropped` reasons, `spamreport`, `unsubscribe`), recipient correlation, and replay via the unique `sg_event_id`. No freshness window, as in QQ (flagged unconfirmed there) | `server/routes/webhook.ts` |
+| Retention | `scripts/retention.ts` (buckets 48 h; tokens/sessions 30 days past end; events 180 days) | **Copy logic**; runs as `recruiter_maintenance`. Host: one nightly step. Where it runs (a step in the existing Render cron, or its own cron at the $1/mo floor, 04-costs §7 rule 6) is an owner choice | `server/scripts/retention.ts` |
+| Sign-in/confirm look | `app/signin/page.tsx`, `signin.css`, confirm page CSS | **Copy** (decisions 19/35): "CARRIER RECRUITER"; badge is byte-identical (doc 14 E11) | server-rendered pages |
+| Timing test | `tests/auth-request.test.ts:433-434` allows 850–3000 ms (QQ defect D5) | **Not copied**: the acceptance band is 900–1100 ms | T-TIME |
+| `/auth/verify` log handling | unverified live (QQ defect D6) | **Release gate** T-HYG | — |
+| Handoff prose | `docs/BUILDER_HANDOFF.md` (Resend, three-role text stale; QQ defect D7) | **Not used** as a source without checking the code | — |
+| `recover:prod` | record-repair CLI | **Not used** as a sign-in fallback | — |
+| Recovery codes | none in QQ | **New** (doc 14 §7), off by flag, policy centralized | — |
+| Keys, DB, sender, webhook key, API key, origin | per app | **Per app only**, never shared | Render env (names in §6) |
+
+**Minimal justified deviations** (details in §5): D1 the database stays Supabase; D2 permission
+rules stay in the database and are re-keyed (double check with the server); D3 SPA + JSON API
+with a header CSRF token and an activity ping; D4 Supabase identities need a backout window;
+D5 staging host choice; D6 recovery codes (new); D7 plain Node shutdown contract instead of
+`after()`. Plus the QQ defect fixes D1–D6 above, which are not deviations in behaviour.
+
+---
+
+## 12 · Data-access and permission migration boundary inventory (evidence at 9fc3425)
+
+The map's list of unavoidable differences does not cover this app's own integration work. This
+section is that work. Every item is either **moves**, **re-keyed** or **unchanged**.
+
+### 12.1 App → database calls (all move behind the server)
+
+Measured with `grep` over `app/src` (tests excluded). Each call becomes a named server route
+executed as `recruiter_app` with `app.session_hash` set, so the same RLS and RPC rules apply.
+
+| File:line | Call | Kind | Server route (proposed) |
+|---|---|---|---|
+| `app/guards.tsx:29` | `from('profiles')` own row | read | `GET /api/session` (from the session row; no profile read for recovery) |
+| `app/guards.tsx:43, 49, 143` | `auth.getSession`, `onAuthStateChange`, `signOut` | auth | `GET /api/session`; 401 → full navigation; sign-out form |
+| `app/Sidebar.tsx:49` | `from('profiles')` pending count | read | `GET /api/team/pending-count` (manager) — or removed with the pending badge |
+| `app/Sidebar.tsx:141` | `auth.signOut` | auth | `POST /auth/signout` form |
+| `features/auth/Login.tsx:31`, `Register.tsx:21`, `Forgot.tsx:18`, `Reset.tsx:24, 43`, `Pending.tsx:15` | `signInWithPassword`, `signUp`, `resetPasswordForEmail`, `getSession`, `updateUser`, `signOut` | auth | **removed** (server-rendered `/signin` replaces them) |
+| `features/batch/BatchPage.tsx:33` | update `batch_carriers.status` | write | `POST /api/batch-carriers/status` |
+| `features/batch/BatchPage.tsx:60` | `batches` + `batch_zones` | read | `GET /api/batches/:id` |
+| `features/batch/BatchPage.tsx:79` | `batch_activity` + `profiles(full_name)` | read | `GET /api/batches/:id/activity` |
+| `features/batch/BatchPage.tsx:92` | insert `batch_activity` comment | write | `POST /api/batches/:id/comments` (actor from the session) |
+| `features/batch/BatchPage.tsx:103` | insert `contact_logs` | write | `POST /api/contact-logs` (user from the session) |
+| `features/batch/sheet/ContactSheet.tsx:31` | `batches` header | read | `GET /api/batches/:id/sheet-header` |
+| `features/batch/sheet/ContactSheet.tsx:32, 38` | `auth.getSession` + own `profiles` name/email | auth/read | from `GET /api/session` |
+| `features/carrier/CarrierProfile.tsx:18-25` | `carriers`, `carrier_insurance`, `carrier_safety`, `carrier_inspections`, `carrier_warnings`, `contact_logs`(+profiles, batches), `batch_carriers`(+batches), `contact_suppressions` | read ×8 | `GET /api/carriers/:dot/profile` (one transaction) |
+| `features/carrier/CarrierProfile.tsx:68` | update `batch_carriers.promoted_at` | write | `POST /api/batch-carriers/promote` |
+| `features/carrier/CarrierProfile.tsx:79` | insert `contact_logs` | write | `POST /api/contact-logs` |
+| `features/dashboard/Dashboard.tsx:42` | `batch_dashboard` view | read | `GET /api/dashboard` |
+| `features/users/UsersAdmin.tsx:10, 24` | list / update `profiles` | read/write | Team routes `GET /api/team`, `POST /api/team/{edit,deactivate,reactivate}` (definer functions with B10 checks) |
+| `lib/dnc.ts:8, 9` | `carriers.do_not_contact`, `contact_suppressions` | read | `POST /api/dnc/lookup` |
+| `lib/rpc.ts:103-364` | 17 RPCs: `search_carriers`, `count_carriers`, `facet_other_values`, `facet_suggested_keywords`, `facet_cargo_flags`, `create_batch`, `refresh_batch`, `bulk_set_status`, `set_do_not_contact`, `log_export`, `batch_members`, `batch_members_map`, `search_carriers_map` (:310), `generate_contact_sheet`, `batch_status_counts`, `dashboard_totals`, `is_contactable` | rpc | `POST /api/rpc/:name`, allow-list = exactly these 17 (= the grants in `20260722223300_security_hardening.sql:39-57`); `rpc.ts` keeps its exported signatures |
+
+No `.storage`, `.channel` or Realtime use in the app (`Topbar.tsx:60` TODO). `lib/supabase.ts`
+and the `VITE_SUPABASE_*` variables leave the bundle.
+
+### 12.2 Database permission dependencies
+
+| Dependency | Evidence | Change |
+|---|---|---|
+| `auth.uid()` in trigger functions `log_bc_change` (4 uses), `log_bc_delete` (1) | `20260720000800_activity.sql:25, 27, 31, 33, 44` | **re-keyed** → `internal.current_staff_id()` (bodies otherwise identical); the comment at :53 updated |
+| `auth.uid()` in definer RPCs `create_batch` (3), `refresh_batch` (1), `bulk_set_status` (2), `log_export` (1) | `20260720001100_rpc.sql:400, 424, 426, 485, 512, 522, 599` | **re-keyed** |
+| `auth.uid()` in `set_do_not_contact` | original `20260720001100_rpc.sql:541`; current body `20260723010400_dnc_activity_enum_cast.sql:17` | **re-keyed** (from the latest body) |
+| `auth.uid()` in `current_app_role()` | `20260720001200_rls.sql:43` | **re-keyed** to the session ledger, `kind='link'` only; `is_staff`/`can_edit`/`is_manager` (:45-50) follow unchanged |
+| `auth.uid()` in policies `profiles_select`, `profiles_update_self`, `batches_write`, `logs_insert`, `act_comment` | `20260720001200_rls.sql:78, 80, 118, 143, 153` | `profiles_select` → staff (link session) only; `profiles_update_self` dropped; `profiles_update_mgr` (:82) dropped (Team routes use definer functions); the other three re-keyed |
+| All other policies (`is_staff`/`can_edit`/`is_manager` only) | `20260720001200_rls.sql:91-163`; `20260720001400_pipeline_tables.sql:115-119` | **unchanged** text; behaviour follows the re-keyed helpers |
+| Views `carrier_warnings`, `batch_dashboard`, `sync_runs` (security_invoker) | `20260720000900_warnings.sql:50`; `20260720001100_rpc.sql:790`; `20260720001400_pipeline_tables.sql:128` | **unchanged**; their grants move from `authenticated` to `recruiter_api` (`rls.sql:170-171`, `pipeline_tables.sql:154`) |
+| Column-limited update grants | `20260720001200_rls.sql:94-97` (`carriers`), `:111-112` (`cargo_other_values`) | **mirrored** to `recruiter_api`; revoked from `authenticated` |
+| Function grants to `authenticated` | `rls.sql:176-196`; `security_hardening.sql:35-74`; `dnc_activity_enum_cast.sql` last 2 lines | **moved** to `recruiter_api`; `anon`/`authenticated` lose all |
+| Table/sequence privileges of `anon`/`authenticated` (Supabase default privileges) | `rls.sql:9-13` comment | **revoked**; default privileges revoked for objects the migration role creates (objects created by other platform roles: **[assume]**, probed by A5a) |
+| `guard_profile_update()` uses `auth.role()` for the service-role bypass and `is_manager()` | `20260723004500_profile_service_bootstrap.sql:10-23` | **unchanged** (manager path now session-based) |
+| `handle_new_user` trigger on `auth.users` | `20260720000300_profiles.sql:29-37` | **unchanged**; signups off, so it no longer fires in practice |
+| `profiles.id → auth.users(id) on delete cascade` | `20260720000300_profiles.sql:13` | **unchanged in M1**; dropped in M2 only after the backout window (D8) |
+| Realtime publication (6 tables) | `20260720001300_realtime.sql:9-11` | removed in M1 (reversible in backout); not used by the app |
+| DNC guard trigger on `contact_logs` | `20260723020000_contact_logs_dnc_guard.sql` | **unchanged** (no `auth.*` use) |
+| Staging role matrix uses `request.jwt.claims` + `set local role authenticated` | `supabase/staging/verify-role-matrix.sql:15, 46, 53` | **updated** to session fixtures + `recruiter_api` |
+
+### 12.3 Pipeline, service-role and operator paths (unchanged)
+
+| Path | Evidence | Effect of the change |
+|---|---|---|
+| Pipeline supabase-js with the service-role key (PostgREST): `pipeline_runs`, `data_quality_reports` | `pipeline/src/db.ts:65`; `runs.ts:60, 86, 118, 214`; `dq-report.ts:192` | none: `service_role` keeps its grants (`20260720001500_service_role_pipeline_grants.sql`); PostgREST stays enabled for it |
+| Pipeline direct `pg` (`SUPABASE_DB_URL`): inserts into `carriers`, `carrier_insurance`, `carrier_insurance_filings`, `carrier_safety`, `cargo_other_values` | `pipeline/src/db.ts:74`; `pipeline/src/**` insert statements | none: no `auth.uid()` on those tables; no `app.session_hash`, so `current_staff_id()` is null exactly as `auth.uid()` is today |
+| Pipeline never touches `batch_carriers`, `batch_activity`, `profiles` | `grep` over `pipeline/src`: no match | the re-keyed triggers are not on its path |
+| Staging fixture scripts (Admin API createUser/deleteUser) | `scripts/seed-auth-users.ts:90, 121`; `scripts/cleanup-auth-users.ts:53, 101` | **updated later**: fixtures need profiles and app sessions, not Supabase Auth logins; left as-is until the staging slice |
+| Staging SQL runner and marker | `pipeline/src/staging-sql-runner.ts`; `supabase/staging/*` | unchanged except the role matrix (§12.2) |
+
+### 12.4 What stays unchanged
+
+Business tables and all rows; profile ids, emails, roles (manager/edit/view → Manager/Editor/
+Viewer) and statuses, including legacy pending/guest; every policy predicate apart from the
+5 `auth.uid()` policies; every RPC body apart from the `auth.uid()` swap; the matcher, PostGIS
+and warnings; the pipeline and its schedule; the SPA screens (only the data layer changes);
+Google Maps.
