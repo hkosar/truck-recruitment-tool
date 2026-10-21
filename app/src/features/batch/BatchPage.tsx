@@ -4,6 +4,7 @@ import { Link, useParams, useSearchParams } from 'react-router-dom';
 import { usePermissions, useSession } from '../../app/guards';
 import { LogContactPanel } from '../../components/LogContactPanel';
 import type { ContactLogInput } from '../../components/LogContactPanel';
+import { DNC_BLOCKED_MESSAGE, isGloballyDnc } from '../../lib/contactability';
 import { fmtInt, fmtPhone, fmtRel } from '../../lib/format';
 import { queryKeys } from '../../lib/queryKeys';
 import { batchMembers, batchStatusCounts, refreshBatch } from '../../lib/rpc';
@@ -91,6 +92,10 @@ export default function BatchPage() {
   const contactMutation = useMutation({
     mutationFn: async (input: ContactLogInput) => {
       if (!userId || !loggingCarrier) throw new Error('Choose a carrier while signed in.');
+      // Re-check at submission: the panel may have been open while DNC was set elsewhere.
+      const fresh = await supabase.from('carriers').select('do_not_contact').eq('dot_number', loggingCarrier.dot_number).single();
+      if (fresh.error) throw fresh.error;
+      if (isGloballyDnc(fresh.data)) throw new Error(DNC_BLOCKED_MESSAGE);
       const { error } = await supabase.from('contact_logs').insert({
         dot_number: loggingCarrier.dot_number,
         batch_id: batchId as string,
@@ -110,7 +115,11 @@ export default function BatchPage() {
         queryClient.invalidateQueries({ queryKey: queryKeys.batchActivity(batchId as string) }),
       ]);
     },
-    onError: (error) => setMessage(error instanceof Error ? error.message : 'Outreach could not be logged.'),
+    onError: async (error) => {
+      setMessage(error instanceof Error ? error.message : 'Outreach could not be logged.');
+      if (error instanceof Error && error.message === DNC_BLOCKED_MESSAGE) setLoggingCarrier(null);
+      await queryClient.invalidateQueries({ queryKey: queryKeys.batch(batchId as string) });
+    },
   });
 
   const updateParam = (key: string, value: string | null) => {
@@ -134,7 +143,7 @@ export default function BatchPage() {
   return (
     <div className="mx-auto max-w-[1600px] space-y-4">
       {message ? <div className="border border-info bg-info-tint px-4 py-3 text-sm text-info">{message}</div> : null}
-      {loggingCarrier ? <LogContactPanel carrierName={loggingCarrier.legal_name} submitting={contactMutation.isPending} onCancel={() => setLoggingCarrier(null)} onSubmit={(input) => contactMutation.mutate(input)} /> : null}
+      {loggingCarrier && !members.rows.some((row) => row.dot_number === loggingCarrier.dot_number && isGloballyDnc(row)) ? <LogContactPanel carrierName={loggingCarrier.legal_name} submitting={contactMutation.isPending} onCancel={() => setLoggingCarrier(null)} onSubmit={(input) => contactMutation.mutate(input)} /> : null}
       <header className="flex flex-wrap items-start justify-between gap-4"><div><h1 className="text-xl font-extrabold tracking-[-0.02em]">{batch.name}</h1><div className="mt-1 text-xs text-text-muted">{batch.customer || 'No customer'}{batch.job ? ` · ${batch.job}` : ''}</div><div className="mt-2 flex flex-wrap gap-1.5">{batch.batch_zones.map((zone, index) => <span key={zone.id} className="border border-border bg-surface px-2 py-1 text-[10px] font-bold text-text-muted">{String.fromCharCode(65 + index)} · {zone.label}</span>)}</div></div>{canEdit ? <button type="button" disabled={refreshMutation.isPending} onClick={() => refreshMutation.mutate()} className="bg-accent px-4 py-2.5 text-xs font-bold text-accent-ink disabled:opacity-50">{refreshMutation.isPending ? 'Refreshing…' : 'Refresh batch'}</button> : null}</header>
 
       <section className="grid border border-border bg-surface sm:grid-cols-3 lg:grid-cols-6">{[['Carriers', total], ['With phone', counts.with_phone], ['With email', counts.with_email], ['Interested', counts.interested_count], ['Warnings', counts.warnings_count], ['DNC', counts.dnc_count]].map(([label, value], index) => <div key={String(label)} className={`px-4 py-3 text-center ${index ? 'border-l border-border' : ''}`}><div className="text-[10px] font-extrabold uppercase tracking-[0.08em] text-text-subtle">{label}</div><div className={`mt-1 text-xl font-extrabold tabular-nums ${label === 'Warnings' || label === 'DNC' ? 'text-crit' : ''}`}>{fmtInt(Number(value))}</div></div>)}</section>
