@@ -4,7 +4,8 @@ import { Link, useParams, useSearchParams } from 'react-router-dom';
 import { usePermissions, useSession } from '../../app/guards';
 import { LogContactPanel } from '../../components/LogContactPanel';
 import type { ContactLogInput } from '../../components/LogContactPanel';
-import { DNC_BLOCKED_MESSAGE, isGloballyDnc } from '../../lib/contactability';
+import { DNC_BLOCKED_MESSAGE } from '../../lib/contactability';
+import { loadGlobalDncDots } from '../../lib/dnc';
 import { fmtInt, fmtPhone, fmtRel } from '../../lib/format';
 import { queryKeys } from '../../lib/queryKeys';
 import { batchMembers, batchStatusCounts, refreshBatch } from '../../lib/rpc';
@@ -68,6 +69,8 @@ export default function BatchPage() {
     queryFn: ({ signal }) => batchMembers(batchId as string, { page, pageSize: 50, q: q || null, status: status ? [status] : null, warningsOnly, signal }),
     enabled: Boolean(batchId),
   });
+  const pageDots = membersQuery.data?.rows.map((row) => row.dot_number) ?? [];
+  const dncQuery = useQuery({ queryKey: [...queryKeys.batchMembers(batchId || '', filterKey), 'global-dnc'], queryFn: () => loadGlobalDncDots(pageDots), enabled: Boolean(batchId) && pageDots.length > 0 });
   const activityQuery = useQuery({
     queryKey: queryKeys.batchActivity(batchId || ''),
     queryFn: async () => {
@@ -93,9 +96,7 @@ export default function BatchPage() {
     mutationFn: async (input: ContactLogInput) => {
       if (!userId || !loggingCarrier) throw new Error('Choose a carrier while signed in.');
       // Re-check at submission: the panel may have been open while DNC was set elsewhere.
-      const fresh = await supabase.from('carriers').select('do_not_contact').eq('dot_number', loggingCarrier.dot_number).single();
-      if (fresh.error) throw fresh.error;
-      if (isGloballyDnc(fresh.data)) throw new Error(DNC_BLOCKED_MESSAGE);
+      if ((await loadGlobalDncDots([loggingCarrier.dot_number])).has(loggingCarrier.dot_number)) throw new Error(DNC_BLOCKED_MESSAGE);
       const { error } = await supabase.from('contact_logs').insert({
         dot_number: loggingCarrier.dot_number,
         batch_id: batchId as string,
@@ -137,13 +138,15 @@ export default function BatchPage() {
   const batch = batchQuery.data;
   const counts = countsQuery.data;
   const members = membersQuery.data;
+  const dncDots = dncQuery.data ?? new Set<number>();
+  const rows = members.rows.map((row) => (row.do_not_contact || !dncDots.has(row.dot_number) ? row : { ...row, do_not_contact: true }));
   const totalPages = Math.max(1, Math.ceil(members.total / 50));
   const total = STATUS_OPTIONS.reduce((sum, item) => sum + counts[item.countKey], 0);
 
   return (
     <div className="mx-auto max-w-[1600px] space-y-4">
       {message ? <div className="border border-info bg-info-tint px-4 py-3 text-sm text-info">{message}</div> : null}
-      {loggingCarrier && !members.rows.some((row) => row.dot_number === loggingCarrier.dot_number && isGloballyDnc(row)) ? <LogContactPanel carrierName={loggingCarrier.legal_name} submitting={contactMutation.isPending} onCancel={() => setLoggingCarrier(null)} onSubmit={(input) => contactMutation.mutate(input)} /> : null}
+      {loggingCarrier && !rows.some((row) => row.dot_number === loggingCarrier.dot_number && row.do_not_contact) ? <LogContactPanel carrierName={loggingCarrier.legal_name} submitting={contactMutation.isPending} onCancel={() => setLoggingCarrier(null)} onSubmit={(input) => contactMutation.mutate(input)} /> : null}
       <header className="flex flex-wrap items-start justify-between gap-4"><div><h1 className="text-xl font-extrabold tracking-[-0.02em]">{batch.name}</h1><div className="mt-1 text-xs text-text-muted">{batch.customer || 'No customer'}{batch.job ? ` · ${batch.job}` : ''}</div><div className="mt-2 flex flex-wrap gap-1.5">{batch.batch_zones.map((zone, index) => <span key={zone.id} className="border border-border bg-surface px-2 py-1 text-[10px] font-bold text-text-muted">{String.fromCharCode(65 + index)} · {zone.label}</span>)}</div></div>{canEdit ? <button type="button" disabled={refreshMutation.isPending} onClick={() => refreshMutation.mutate()} className="bg-accent px-4 py-2.5 text-xs font-bold text-accent-ink disabled:opacity-50">{refreshMutation.isPending ? 'Refreshing…' : 'Refresh batch'}</button> : null}</header>
 
       <section className="grid border border-border bg-surface sm:grid-cols-3 lg:grid-cols-6">{[['Carriers', total], ['With phone', counts.with_phone], ['With email', counts.with_email], ['Interested', counts.interested_count], ['Warnings', counts.warnings_count], ['DNC', counts.dnc_count]].map(([label, value], index) => <div key={String(label)} className={`px-4 py-3 text-center ${index ? 'border-l border-border' : ''}`}><div className="text-[10px] font-extrabold uppercase tracking-[0.08em] text-text-subtle">{label}</div><div className={`mt-1 text-xl font-extrabold tabular-nums ${label === 'Warnings' || label === 'DNC' ? 'text-crit' : ''}`}>{fmtInt(Number(value))}</div></div>)}</section>
@@ -154,7 +157,7 @@ export default function BatchPage() {
 
       <div className="flex flex-wrap items-center gap-2 border border-border bg-surface p-3"><input value={q} onChange={(event) => updateParam('q', event.target.value || null)} placeholder="Search name, USDOT, or city" className="min-w-64 flex-1 border border-border-strong bg-surface px-3 py-2 text-xs" /><span className="text-xs text-text-subtle">{fmtInt(members.total)} results</span><Link to={`/batches/${batchId}/sheet`} target="_blank" rel="noopener noreferrer" className="border border-border-strong px-3 py-2 text-xs font-bold text-accent">Print contact sheet</Link></div>
 
-      <section className="overflow-x-auto border border-border bg-surface"><table className="w-full min-w-[1200px] border-collapse text-[12px]"><thead className="bg-th-bg text-left text-[10px] font-extrabold uppercase tracking-[0.07em] text-text-muted"><tr><th className="px-3 py-2.5">Carrier</th><th className="px-3 py-2.5">Contact</th><th className="px-3 py-2.5">Location</th><th className="px-3 py-2.5 text-right">Trucks</th><th className="px-3 py-2.5">Warnings</th><th className="px-3 py-2.5">Status</th><th className="px-3 py-2.5">Last contact</th><th className="px-3 py-2.5">Action</th></tr></thead><tbody>{members.rows.map((row) => <tr key={row.dot_number} className={`border-t border-border align-top ${row.has_warnings ? 'bg-row-warning' : 'odd:bg-surface even:bg-zebra'} ${row.do_not_contact ? 'opacity-60' : ''}`}><td className="px-3 py-2.5"><Link to={`/carriers/${row.dot_number}?batch=${batchId}`} className="font-bold text-accent">{row.legal_name}</Link><div className="font-mono text-[10px] text-text-subtle">USDOT {row.dot_number}</div></td><td className="px-3 py-2.5"><div>{row.contact_name || '—'}</div><div className="font-mono">{fmtPhone(row.phone)}</div><div className="truncate text-[10px] text-text-subtle">{row.email || '—'}</div></td><td className="px-3 py-2.5">{row.phy_city || '—'}, TX</td><td className="px-3 py-2.5 text-right font-mono tabular-nums">{fmtInt(row.power_units)}</td><td className="px-3 py-2.5"><div className="flex max-w-48 flex-col items-start gap-1">{row.warning_reasons.map((reason) => <span key={reason} className="rounded-full bg-crit-tint px-2 py-0.5 text-[9px] font-bold text-crit">{warningLabel(reason)}</span>)}</div></td><td className="px-3 py-2.5"><StatusControl row={row} batchId={batchId} /></td><td className="px-3 py-2.5"><div className="font-bold">{row.last_contact_channel?.replaceAll('_', ' ') || 'No contact'}</div><div className="text-[10px] text-text-subtle">{fmtRel(row.last_contact_at)}</div></td><td className="px-3 py-2.5">{canEdit && !row.do_not_contact ? <button type="button" onClick={() => { setMessage(null); setLoggingCarrier(row); }} className="border border-border-strong px-2 py-1.5 text-[10px] font-bold text-accent hover:bg-accent-tint">Log outreach</button> : <span className="text-[10px] text-text-subtle">—</span>}</td></tr>)}</tbody></table>{members.rows.length === 0 ? <div className="py-14 text-center text-sm text-text-subtle">No carriers match these filters.</div> : null}</section>
+      <section className="overflow-x-auto border border-border bg-surface"><table className="w-full min-w-[1200px] border-collapse text-[12px]"><thead className="bg-th-bg text-left text-[10px] font-extrabold uppercase tracking-[0.07em] text-text-muted"><tr><th className="px-3 py-2.5">Carrier</th><th className="px-3 py-2.5">Contact</th><th className="px-3 py-2.5">Location</th><th className="px-3 py-2.5 text-right">Trucks</th><th className="px-3 py-2.5">Warnings</th><th className="px-3 py-2.5">Status</th><th className="px-3 py-2.5">Last contact</th><th className="px-3 py-2.5">Action</th></tr></thead><tbody>{rows.map((row) => <tr key={row.dot_number} className={`border-t border-border align-top ${row.has_warnings ? 'bg-row-warning' : 'odd:bg-surface even:bg-zebra'} ${row.do_not_contact ? 'opacity-60' : ''}`}><td className="px-3 py-2.5"><Link to={`/carriers/${row.dot_number}?batch=${batchId}`} className="font-bold text-accent">{row.legal_name}</Link><div className="font-mono text-[10px] text-text-subtle">USDOT {row.dot_number}</div></td><td className="px-3 py-2.5"><div>{row.contact_name || '—'}</div><div className="font-mono">{fmtPhone(row.phone)}</div><div className="truncate text-[10px] text-text-subtle">{row.email || '—'}</div></td><td className="px-3 py-2.5">{row.phy_city || '—'}, TX</td><td className="px-3 py-2.5 text-right font-mono tabular-nums">{fmtInt(row.power_units)}</td><td className="px-3 py-2.5"><div className="flex max-w-48 flex-col items-start gap-1">{row.warning_reasons.map((reason) => <span key={reason} className="rounded-full bg-crit-tint px-2 py-0.5 text-[9px] font-bold text-crit">{warningLabel(reason)}</span>)}</div></td><td className="px-3 py-2.5"><StatusControl row={row} batchId={batchId} /></td><td className="px-3 py-2.5"><div className="font-bold">{row.last_contact_channel?.replaceAll('_', ' ') || 'No contact'}</div><div className="text-[10px] text-text-subtle">{fmtRel(row.last_contact_at)}</div></td><td className="px-3 py-2.5">{canEdit && !row.do_not_contact ? <button type="button" onClick={() => { setMessage(null); setLoggingCarrier(row); }} className="border border-border-strong px-2 py-1.5 text-[10px] font-bold text-accent hover:bg-accent-tint">Log outreach</button> : <span className="text-[10px] text-text-subtle">—</span>}</td></tr>)}</tbody></table>{members.rows.length === 0 ? <div className="py-14 text-center text-sm text-text-subtle">No carriers match these filters.</div> : null}</section>
 
       <footer className="flex items-center justify-between"><button type="button" disabled={page <= 1} onClick={() => updateParam('page', String(page - 1))} className="border border-border-strong px-3 py-2 text-xs font-bold disabled:opacity-40">Previous</button><span className="text-xs text-text-subtle">Page {page} of {totalPages}</span><button type="button" disabled={page >= totalPages} onClick={() => updateParam('page', String(page + 1))} className="border border-border-strong px-3 py-2 text-xs font-bold disabled:opacity-40">Next</button></footer>
     </div>

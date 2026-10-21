@@ -3,6 +3,7 @@ import { useState } from 'react';
 import { Link, useParams, useSearchParams } from 'react-router-dom';
 import { usePermissions, useSession } from '../../app/guards';
 import { DNC_BLOCKED_MESSAGE, isGloballyDnc } from '../../lib/contactability';
+import { loadGlobalDncDots } from '../../lib/dnc';
 import { fmtInt, fmtMoney, fmtPhone, fmtRel } from '../../lib/format';
 import { queryKeys } from '../../lib/queryKeys';
 import { safetyVerdict } from '../../lib/safety';
@@ -13,7 +14,7 @@ import { DISPOSITIONS_BY_CHANNEL } from '../../types/domain';
 import type { Channel, ContactDisposition, WarningCode } from '../../types/domain';
 
 async function loadCarrier(dot: number) {
-  const [carrier, insurance, safety, inspections, warning, logs, memberships] = await Promise.all([
+  const [carrier, insurance, safety, inspections, warning, logs, memberships, suppressions] = await Promise.all([
     supabase.from('carriers').select('*').eq('dot_number', dot).single(),
     supabase.from('carrier_insurance').select('*').eq('dot_number', dot).maybeSingle(),
     supabase.from('carrier_safety').select('*').eq('dot_number', dot).maybeSingle(),
@@ -21,8 +22,9 @@ async function loadCarrier(dot: number) {
     supabase.from('carrier_warnings').select('*').eq('dot_number', dot).maybeSingle(),
     supabase.from('contact_logs').select('*, profiles(full_name), batches(name)').eq('dot_number', dot).order('contacted_at', { ascending: false }).limit(100),
     supabase.from('batch_carriers').select('*, batches(name, customer, job)').eq('dot_number', dot).order('added_at', { ascending: false }),
+    supabase.from('contact_suppressions').select('channel, value, expires_at').eq('dot_number', dot).eq('channel', 'all').is('value', null),
   ]);
-  for (const result of [carrier, insurance, safety, inspections, warning, logs, memberships]) {
+  for (const result of [carrier, insurance, safety, inspections, warning, logs, memberships, suppressions]) {
     if (result.error) throw result.error;
   }
   if (!carrier.data) throw new Error(`Carrier USDOT ${dot} not found`);
@@ -34,6 +36,7 @@ async function loadCarrier(dot: number) {
     warningReasons: warning.data?.warning_reasons ?? [],
     logs: logs.data ?? [],
     memberships: memberships.data ?? [],
+    suppressions: suppressions.data ?? [],
   };
 }
 
@@ -55,7 +58,7 @@ export default function CarrierProfile() {
 
   const query = useQuery({ queryKey: queryKeys.carrier(dot), queryFn: () => loadCarrier(dot), enabled: Number.isSafeInteger(dot) && dot > 0 });
   const dncMutation = useMutation({
-    mutationFn: async () => setDoNotContact(dot, !query.data?.carrier.do_not_contact, query.data?.carrier.do_not_contact ? null : 'Set from carrier profile'),
+    mutationFn: async () => { const on = isGloballyDnc(query.data?.carrier, query.data?.suppressions); return setDoNotContact(dot, !on, on ? null : 'Set from carrier profile'); },
     onSuccess: async () => { setMessage('Contact preference updated.'); await queryClient.invalidateQueries({ queryKey: queryKeys.carrier(dot) }); },
     onError: (error) => setMessage(error instanceof Error ? error.message : 'DNC update failed.'),
   });
@@ -72,9 +75,7 @@ export default function CarrierProfile() {
     mutationFn: async ({ disposition, notes, nextSteps }: { disposition: ContactDisposition; notes: string; nextSteps: string }) => {
       if (!userId) throw new Error('No signed-in user.');
       // Re-check at submission: DNC may have been set after this page loaded.
-      const fresh = await supabase.from('carriers').select('do_not_contact').eq('dot_number', dot).single();
-      if (fresh.error) throw fresh.error;
-      if (isGloballyDnc(fresh.data)) throw new Error(DNC_BLOCKED_MESSAGE);
+      if ((await loadGlobalDncDots([dot])).has(dot)) throw new Error(DNC_BLOCKED_MESSAGE);
       const { error } = await supabase.from('contact_logs').insert({ dot_number: dot, batch_id: batchId, user_id: userId, channel, disposition, notes: notes || null, next_steps: nextSteps || null });
       if (error) throw error;
     },
@@ -86,20 +87,20 @@ export default function CarrierProfile() {
   if (query.isPending) return <div className="h-96 animate-pulse border border-border bg-surface" />;
   if (query.isError) return <section className="border border-crit bg-crit-tint p-5"><h1 className="text-xl font-extrabold">Carrier unavailable</h1><button type="button" onClick={() => void query.refetch()} className="mt-3 border border-crit px-4 py-2 text-xs font-bold text-crit">Retry</button></section>;
 
-  const { carrier, insurance, safety, inspections, warningReasons, logs, memberships } = query.data;
+  const { carrier, insurance, safety, inspections, warningReasons, logs, memberships, suppressions } = query.data;
   const contactName = carrier.contact_name_override || carrier.contact_name || carrier.company_officer_1 || carrier.company_officer_2;
   const phone = carrier.contact_phone_override || carrier.phone || carrier.cell_phone;
   const email = carrier.contact_email_override || carrier.email_address;
   const currentMembership = memberships.find((membership) => membership.batch_id === batchId);
   const encodedName = encodeURIComponent(`"${carrier.legal_name}" ${carrier.phy_city || ''} TX trucking`);
   const insuranceVerdict = !insurance?.bipd_on_file ? 'bad' : insurance.bipd_on_file >= 1_000_000 ? 'good' : 'warn';
-  const dnc = isGloballyDnc(carrier);
+  const dnc = isGloballyDnc(carrier, suppressions);
   const safetyTone = safetyVerdict(safety);
 
   return (
     <div className="mx-auto max-w-[1500px] space-y-4">
       {message ? <div className="border border-info bg-info-tint px-4 py-3 text-sm text-info">{message}</div> : null}
-      <header className={`border border-border bg-surface p-5 ${warningReasons.length ? 'bg-row-warning' : ''}`}><div className="flex flex-wrap items-start justify-between gap-5"><div><div className="flex flex-wrap items-center gap-2"><h1 className="text-2xl font-extrabold tracking-[-0.02em]">{carrier.legal_name}</h1>{carrier.status_code === 'A' ? <span className="rounded-full bg-good-tint px-2 py-1 text-[10px] font-bold text-good">Active</span> : <span className="rounded-full bg-crit-tint px-2 py-1 text-[10px] font-bold text-crit">Inactive</span>}{carrier.do_not_contact ? <span className="rounded-full bg-st-dnc-tint px-2 py-1 text-[10px] font-bold text-st-dnc">Do not contact</span> : null}</div>{carrier.dba_name ? <div className="mt-1 text-sm font-semibold text-text-muted">DBA {carrier.dba_name}</div> : null}<div className="mt-2 font-mono text-sm">USDOT {carrier.dot_number}</div><div className="mt-2 text-xs text-text-muted">{carrier.entity_type || 'Entity type unavailable'} · {carrier.classdef || 'Classification unavailable'} · {carrier.carrier_operation || 'Operation unavailable'} · {fmtInt(carrier.power_units)} power units · {fmtInt(carrier.total_drivers)} drivers</div><div className="mt-1 text-xs text-text-muted">{[carrier.phy_street, carrier.phy_city, carrier.phy_state, carrier.phy_zip].filter(Boolean).join(', ') || 'Physical address unavailable'}</div></div>{canEdit ? <div className="flex flex-wrap gap-2">{batchId && !currentMembership?.promoted_at ? <button type="button" disabled={promoteMutation.isPending} onClick={() => promoteMutation.mutate()} className="bg-accent px-3 py-2 text-xs font-bold text-accent-ink">Mark as Promoted</button> : currentMembership?.promoted_at ? <span className="bg-good-tint px-3 py-2 text-xs font-bold text-good">Promoted</span> : null}<button type="button" disabled={dncMutation.isPending} onClick={() => dncMutation.mutate()} className={`border px-3 py-2 text-xs font-bold ${carrier.do_not_contact ? 'border-good text-good' : 'border-crit text-crit'}`}>{carrier.do_not_contact ? 'Restore contact' : 'Set global DNC'}</button></div> : null}</div>{warningReasons.length ? <div className="mt-4 flex flex-wrap gap-1.5">{warningReasons.map((reason) => <span key={reason} className="rounded-full bg-crit-tint px-2 py-1 text-[10px] font-bold text-crit">{WARNING_META[reason as WarningCode]?.label ?? reason}</span>)}</div> : null}</header>
+      <header className={`border border-border bg-surface p-5 ${warningReasons.length ? 'bg-row-warning' : ''}`}><div className="flex flex-wrap items-start justify-between gap-5"><div><div className="flex flex-wrap items-center gap-2"><h1 className="text-2xl font-extrabold tracking-[-0.02em]">{carrier.legal_name}</h1>{carrier.status_code === 'A' ? <span className="rounded-full bg-good-tint px-2 py-1 text-[10px] font-bold text-good">Active</span> : <span className="rounded-full bg-crit-tint px-2 py-1 text-[10px] font-bold text-crit">Inactive</span>}{dnc ? <span className="rounded-full bg-st-dnc-tint px-2 py-1 text-[10px] font-bold text-st-dnc">Do not contact</span> : null}</div>{carrier.dba_name ? <div className="mt-1 text-sm font-semibold text-text-muted">DBA {carrier.dba_name}</div> : null}<div className="mt-2 font-mono text-sm">USDOT {carrier.dot_number}</div><div className="mt-2 text-xs text-text-muted">{carrier.entity_type || 'Entity type unavailable'} · {carrier.classdef || 'Classification unavailable'} · {carrier.carrier_operation || 'Operation unavailable'} · {fmtInt(carrier.power_units)} power units · {fmtInt(carrier.total_drivers)} drivers</div><div className="mt-1 text-xs text-text-muted">{[carrier.phy_street, carrier.phy_city, carrier.phy_state, carrier.phy_zip].filter(Boolean).join(', ') || 'Physical address unavailable'}</div></div>{canEdit ? <div className="flex flex-wrap gap-2">{batchId && !currentMembership?.promoted_at ? <button type="button" disabled={promoteMutation.isPending} onClick={() => promoteMutation.mutate()} className="bg-accent px-3 py-2 text-xs font-bold text-accent-ink">Mark as Promoted</button> : currentMembership?.promoted_at ? <span className="bg-good-tint px-3 py-2 text-xs font-bold text-good">Promoted</span> : null}<button type="button" disabled={dncMutation.isPending} onClick={() => dncMutation.mutate()} className={`border px-3 py-2 text-xs font-bold ${dnc ? 'border-good text-good' : 'border-crit text-crit'}`}>{dnc ? 'Restore contact' : 'Set global DNC'}</button></div> : null}</div>{warningReasons.length ? <div className="mt-4 flex flex-wrap gap-1.5">{warningReasons.map((reason) => <span key={reason} className="rounded-full bg-crit-tint px-2 py-1 text-[10px] font-bold text-crit">{WARNING_META[reason as WarningCode]?.label ?? reason}</span>)}</div> : null}</header>
 
       <div className="grid gap-4 lg:grid-cols-[340px_minmax(0,1fr)]">
         <aside className="space-y-4">
