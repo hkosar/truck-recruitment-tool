@@ -14,7 +14,8 @@ import {
   SAFETY_DATASET_IDS,
   validateSafetyRow,
 } from './sources/safety.js';
-import { RECORDED_PROJECT_REFS, verifyPipelineTarget } from './target-guard.js';
+import { parse as parsePgConnectionString } from 'pg-connection-string';
+import { RECORDED_PROJECT_REFS, parseSupabaseDbTarget, verifyPipelineTarget } from './target-guard.js';
 
 type Test = { name: string; run: () => void | Promise<void> };
 const tests: Test[] = [];
@@ -128,6 +129,47 @@ test('pipeline target guard binds SUPABASE_DB_URL to the same approved project a
     verifyPipelineTarget({ environment: 'dev', supabaseUrl: apiUrl(staging), supabaseDbUrl: poolerUrl(production), allowedDevRefs: [staging] });
   } catch (error) {
     assert.doesNotMatch(String(error), /redacted/);
+  }
+});
+
+test('pipeline target guard refuses driver-level host/user overrides in SUPABASE_DB_URL query parameters', () => {
+  const { production, staging } = RECORDED_PROJECT_REFS;
+  const apiUrl = `https://${staging}.supabase.co`;
+  // pg-connection-string lets ?host= and ?user= override the URL hostname/username, so the
+  // driver would connect to production while the URL "looks" like staging (Codex round 2).
+  const bypasses = [
+    `postgresql://postgres.${staging}:redacted@aws-0-us-east-2.pooler.supabase.com:5432/postgres?user=postgres.${production}`,
+    `postgresql://postgres:redacted@db.${staging}.supabase.co:5432/postgres?host=db.${production}.supabase.co`,
+    `postgresql://postgres:redacted@db.${staging}.supabase.co:5432/postgres?port=6543`,
+    `postgresql://postgres:redacted@db.${staging}.supabase.co:5432/postgres?options=-c%20search_path%3Dx`,
+    `postgresql://postgres:redacted@db.${staging}.supabase.co:5432/postgres#host=x`,
+    `socket://postgres:redacted@db.${staging}.supabase.co/postgres`,
+  ];
+  for (const dbUrl of bypasses) {
+    assert.throws(
+      () => verifyPipelineTarget({ environment: 'dev', supabaseUrl: apiUrl, supabaseDbUrl: dbUrl, allowedDevRefs: [staging] }),
+      /SUPABASE_DB_URL/,
+      `must refuse ${dbUrl.replace(/:redacted@/, ':***@')}`
+    );
+  }
+  // Sanity: the driver's own parser really would have been redirected by the first two.
+  assert.equal(parsePgConnectionString(bypasses[0] ?? '').user, `postgres.${production}`);
+  assert.equal(parsePgConnectionString(bypasses[1] ?? '').host, `db.${production}.supabase.co`);
+
+  // For accepted strings, the explicit target the pool is built from equals what pg itself
+  // would derive, so the guard checks exactly what the driver uses.
+  for (const dbUrl of [
+    `postgresql://postgres.${staging}:redacted@aws-0-us-east-2.pooler.supabase.com:5432/postgres`,
+    `postgresql://postgres:redacted@db.${staging}.supabase.co:5432/postgres`,
+  ]) {
+    const target = parseSupabaseDbTarget(dbUrl);
+    const driver = parsePgConnectionString(dbUrl);
+    assert.equal(target.projectRef, staging);
+    assert.equal(target.host, driver.host);
+    assert.equal(String(target.port), String(driver.port));
+    assert.equal(target.user, driver.user);
+    assert.equal(target.database, driver.database);
+    assert.equal(target.password, driver.password);
   }
 });
 

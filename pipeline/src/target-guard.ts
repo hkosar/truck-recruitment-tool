@@ -30,14 +30,30 @@ function projectRefFromUrl(rawUrl: string): string {
 
 const PROJECT_REF_PATTERN = /^[a-z]{20}$/;
 
+/** The exact connection target the Postgres pool is built from (never a connection string). */
+export interface SupabaseDbTarget {
+  projectRef: string;
+  host: string;
+  port: number;
+  user: string;
+  password: string;
+  database: string;
+}
+
 /**
- * Resolve the Supabase project ref a Postgres connection string points at, without ever
- * echoing the string (it carries the database password). Supported shapes:
+ * Parse SUPABASE_DB_URL into explicit connection fields and resolve the Supabase project
+ * ref they point at, without ever echoing the string (it carries the database password).
+ * Supported shapes:
  *   - direct / dedicated pooler: host db.<ref>.supabase.co
  *   - shared Supavisor pooler:   host *.pooler.supabase.com, user <role>.<ref>
  * If both the host and the user name a ref they must agree. Anything else is refused.
+ *
+ * Query parameters and fragments are refused outright: pg's connection-string parser lets
+ * ?host=, ?user=, ?port= (and friends) override the URL's own fields, so a staging-looking
+ * URL could otherwise send the driver to another project. createPgPool() builds the pool
+ * from the returned fields, not from the raw string, so what is checked is what is used.
  */
-function projectRefFromDbUrl(rawDbUrl: string): string {
+export function parseSupabaseDbTarget(rawDbUrl: string): SupabaseDbTarget {
   let url: URL;
   try {
     url = new URL(rawDbUrl);
@@ -47,8 +63,23 @@ function projectRefFromDbUrl(rawDbUrl: string): string {
   if (url.protocol !== 'postgres:' && url.protocol !== 'postgresql:') {
     throw new Error('SUPABASE_DB_URL must be a postgres:// connection string');
   }
+  if (url.search !== '' || url.hash !== '') {
+    throw new Error('SUPABASE_DB_URL must not contain query parameters or a fragment (they can override the connection target)');
+  }
   const host = url.hostname.toLowerCase();
+  if (!/^[a-z0-9.-]+$/.test(host)) {
+    throw new Error('SUPABASE_DB_URL host contains unexpected characters');
+  }
   const user = decodeURIComponent(url.username);
+  const password = decodeURIComponent(url.password);
+  const port = url.port === '' ? 5432 : Number(url.port);
+  const database = url.pathname.length > 1 ? decodeURIComponent(url.pathname.slice(1)) : 'postgres';
+  if (!user || !password) {
+    throw new Error('SUPABASE_DB_URL must include a user name and password');
+  }
+  if (!/^[A-Za-z0-9_]+$/.test(database)) {
+    throw new Error('SUPABASE_DB_URL database name contains unexpected characters');
+  }
 
   let hostRef: string | null = null;
   const directMatch = /^db\.([a-z0-9]+)\.supabase\.co$/.exec(host);
@@ -71,7 +102,7 @@ function projectRefFromDbUrl(rawDbUrl: string): string {
   if (!PROJECT_REF_PATTERN.test(projectRef)) {
     throw new Error('SUPABASE_DB_URL contains an invalid project ref');
   }
-  return projectRef;
+  return { projectRef, host, port, user, password, database };
 }
 
 /**
@@ -84,7 +115,7 @@ function projectRefFromDbUrl(rawDbUrl: string): string {
  */
 export function verifyPipelineTarget(input: TargetGuardInput): VerifiedTarget {
   const projectRef = projectRefFromUrl(input.supabaseUrl);
-  const dbProjectRef = projectRefFromDbUrl(input.supabaseDbUrl);
+  const dbProjectRef = parseSupabaseDbTarget(input.supabaseDbUrl).projectRef;
   if (dbProjectRef !== projectRef) {
     throw new Error(
       `SUPABASE_DB_URL project ${dbProjectRef} does not match SUPABASE_URL project ${projectRef}; refusing to open either client`
