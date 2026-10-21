@@ -19,3 +19,17 @@ export function isGloballyDnc(
 }
 
 export const DNC_BLOCKED_MESSAGE = 'This carrier is on the global do-not-contact list. Outreach cannot be logged.';
+
+export type DncLookupStatus = 'ready' | 'pending' | 'failed';
+
+/** Outreach must stay disabled until the supplementary suppression lookup has answered for this page. */
+export function dncLookupStatus(dotCount: number, query: { isError: boolean; hasData: boolean }): DncLookupStatus {
+  if (dotCount === 0) return 'ready';
+  if (query.isError) return 'failed';
+  return query.hasData ? 'ready' : 'pending';
+}
+
+/** Cache key that changes whenever the set of carriers on the page changes. */
+export function dncQueryKey(batchId: string, dots: readonly number[]) {
+  return ['batch', batchId, 'global-dnc', [...dots].sort((a, b) => a - b).join(',')] as const;
+}

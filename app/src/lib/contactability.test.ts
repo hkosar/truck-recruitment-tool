@@ -22,3 +22,25 @@ describe('isGloballyDnc', () => {
     expect(isGloballyDnc(null, [], now)).toBe(false);
   });
 });
+
+import { dncLookupStatus, dncQueryKey } from './contactability';
+
+describe('dncLookupStatus', () => {
+  it('blocks outreach while pending and when failed', () => {
+    expect(dncLookupStatus(5, { isError: false, hasData: false })).toBe('pending');
+    expect(dncLookupStatus(5, { isError: true, hasData: false })).toBe('failed');
+    expect(dncLookupStatus(5, { isError: true, hasData: true })).toBe('failed');
+  });
+  it('is ready with data, or when the page has no carriers', () => {
+    expect(dncLookupStatus(5, { isError: false, hasData: true })).toBe('ready');
+    expect(dncLookupStatus(0, { isError: false, hasData: false })).toBe('ready');
+  });
+});
+
+describe('dncQueryKey', () => {
+  it('includes the DOT list so a different page does not reuse cached results', () => {
+    expect(dncQueryKey('b1', [3, 1, 2])).toEqual(dncQueryKey('b1', [1, 2, 3]));
+    expect(dncQueryKey('b1', [1, 2, 3])).not.toEqual(dncQueryKey('b1', [1, 2, 4]));
+    expect(dncQueryKey('b1', [1])).not.toEqual(dncQueryKey('b2', [1]));
+  });
+});
