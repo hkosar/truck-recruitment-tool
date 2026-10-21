@@ -62,16 +62,33 @@ The repository contains supabase/staging/reset-fictional-data.sql and scripts/ve
 
 The reset:
 
-- requires the exact staging ref yhyoxhtguyturgdhwywc;
-- requires the confirmation phrase RESET FICTIONAL TNBS RECRUITER DATA;
-- refuses any other ref before deleting rows;
+- requires the staging identity marker (below) inside the database it is connected to, so it is bound to the actual database rather than to text the operator types;
+- also requires the exact staging ref yhyoxhtguyturgdhwywc and the confirmation phrase RESET FICTIONAL TNBS RECRUITER DATA as additional checks;
+- refuses before deleting anything if the database holds a profile other than the seven fixture identities and Hunter's staging login, or a carrier outside the fictional DOT ranges (1200000-1307999 and 1400001-1400099);
 - contains no production ref;
 - preserves auth.users and public.profiles, including Hunter's staging login;
 - deletes only staging application and pipeline data;
+- restarts ID sequences inside the same transaction, so a failed reset leaves both rows and sequences exactly as they were;
 - restores the deterministic 800-carrier, two-batch fictional baseline in one transaction;
 - rolls back unless identity, carrier, batch, cross-batch, DNC, and warning assertions pass.
 
+supabase/staging/cleanup-fixtures.sql (removes the seven fixture identities) has the same marker gate, its own confirmation phrase CLEAN UP TNBS RECRUITER FIXTURES, the same refusal of non-fictional data, and deletes only fictional carrier rows and batches owned by fixture identities or Hunter's staging login.
+
 The reset is an operator-run maintenance action, not a browser button. That avoids exposing a destructive database-wide action to ordinary application sessions. Run it only through an authenticated staging maintenance channel after independently confirming the selected project is truck-recruitment-tool-staging.
+
+### One-time step before the new reset or cleanup will run
+
+The staging identity marker is a one-row table, staging_identity.marker, that exists only in the staging database. It is not a migration and must never be created in production. Until it exists, the reset and cleanup refuse to run. An approved operator does this once:
+
+1. Get Hunter's approval for this staging change in chat.
+2. Open the Supabase dashboard and select the project named truck-recruitment-tool-staging. Confirm the name and the ref shown in Project Settings match the Environment section above.
+3. Open the SQL editor in that project.
+4. Paste and run, in one run: `select set_config('app.staging_marker_install_confirmation', 'INSTALL TNBS STAGING IDENTITY MARKER', true);` followed by the full contents of supabase/staging/install-staging-identity-marker.sql.
+5. Expect success. The installer refuses if the marker already exists, or if the database does not match the fictional fixture set (exactly seven fixture profiles, no other profile except Hunter's staging login, no carrier outside the fictional DOT ranges). If it refuses, stop and report the message; do not edit the file to force it.
+
+### Running the reset afterwards
+
+In the staging SQL editor, in one run: set `app.staging_project_ref` to the staging ref and `app.staging_reset_confirmation` to RESET FICTIONAL TNBS RECRUITER DATA with `set_config(..., true)`, then the full contents of supabase/staging/reset-fictional-data.sql. A refusal message names the gate that failed; nothing has been changed when it refuses.
 
 ## Acceptance evidence
 
