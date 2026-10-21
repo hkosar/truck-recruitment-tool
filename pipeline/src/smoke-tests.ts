@@ -1,3 +1,4 @@
+import { existsSync } from 'node:fs';
 import assert from 'node:assert/strict';
 import { parseArgs } from './run.js';
 import { buildSelectClause as buildInsuranceSelectClause, buildWhereClause as buildInsuranceWhereClause, buildFilingsUpsertSql } from './sources/insurance.js';
@@ -15,6 +16,7 @@ import {
   validateSafetyRow,
 } from './sources/safety.js';
 import { parse as parsePgConnectionString } from 'pg-connection-string';
+import { STAGING_SQL_ACTIONS, planStagingSqlRun } from './staging-sql-runner.js';
 import { RECORDED_PROJECT_REFS, parseSupabaseDbTarget, verifyPipelineTarget } from './target-guard.js';
 
 type Test = { name: string; run: () => void | Promise<void> };
@@ -171,6 +173,39 @@ test('pipeline target guard refuses driver-level host/user overrides in SUPABASE
     assert.equal(target.database, driver.database);
     assert.equal(target.password, driver.password);
   }
+});
+
+test('staging SQL runner verifies the staging project offline before any connection', () => {
+  const { production, staging } = RECORDED_PROJECT_REFS;
+  const pooler = (ref: string, port = 5432) => `postgresql://postgres.${ref}:redacted@aws-0-us-east-2.pooler.supabase.com:${port}/postgres`;
+  const reset = STAGING_SQL_ACTIONS.reset;
+
+  const plan = planStagingSqlRun({ action: 'reset', dbUrl: pooler(staging), confirm: reset.confirmation });
+  assert.equal(plan.target.projectRef, staging);
+  assert.match(plan.file, /supabase[\\/]staging[\\/]reset-fictional-data\.sql$/);
+  assert.deepEqual(plan.settings, [
+    ['app.staging_runner_verified_ref', staging],
+    ['app.staging_project_ref', staging],
+    ['app.staging_reset_confirmation', reset.confirmation],
+  ]);
+  for (const action of Object.keys(STAGING_SQL_ACTIONS) as Array<keyof typeof STAGING_SQL_ACTIONS>) {
+    const spec = STAGING_SQL_ACTIONS[action];
+    assert.ok(existsSync(planStagingSqlRun({ action, dbUrl: pooler(staging), confirm: spec.confirmation }).file));
+  }
+
+  const refuse = (input: Parameters<typeof planStagingSqlRun>[0], pattern: RegExp) =>
+    assert.throws(() => planStagingSqlRun(input), pattern);
+  refuse({ action: 'reset', dbUrl: pooler(production), confirm: reset.confirmation }, /refuses the production/);
+  refuse({ action: 'install-marker', dbUrl: `postgresql://postgres:redacted@db.${production}.supabase.co:5432/postgres`, confirm: STAGING_SQL_ACTIONS['install-marker'].confirmation }, /refuses the production/);
+  refuse({ action: 'reset', dbUrl: pooler('fwmsyfndwgmvmbxaagzu'), confirm: reset.confirmation }, /only targets the recorded staging project/);
+  // The same query-parameter overrides that bypassed the pipeline guard.
+  refuse({ action: 'reset', dbUrl: `${pooler(staging)}?user=postgres.${production}`, confirm: reset.confirmation }, /query parameters/);
+  refuse({ action: 'reset', dbUrl: `postgresql://postgres:redacted@db.${staging}.supabase.co:5432/postgres?host=db.${production}.supabase.co`, confirm: reset.confirmation }, /query parameters/);
+  refuse({ action: 'reset', dbUrl: pooler(staging, 6543), confirm: reset.confirmation }, /port 5432/);
+  refuse({ action: 'reset', dbUrl: pooler(staging), confirm: 'yes' }, /--confirm=/);
+  refuse({ action: 'cleanup', dbUrl: pooler(staging), confirm: reset.confirmation }, /--confirm=/);
+  refuse({ action: 'reset', dbUrl: undefined, confirm: reset.confirmation }, /STAGING_DB_URL is required/);
+  refuse({ action: 'drop-everything', dbUrl: pooler(staging), confirm: reset.confirmation }, /Unknown staging SQL action/);
 });
 
 test('Socrata defaults to memory-safe 10k pages', async () => {

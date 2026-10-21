@@ -1,17 +1,19 @@
 -- Staging-only cleanup for the deterministic database fixture set (fixture run stg-db-20260723-0042).
--- Removes the seven no-password fixture identities and the fictional business rows that
--- reference them or the fictional carriers. It never deletes unscoped tables.
+-- Removes the seven no-password fixture identities and the business rows explicitly
+-- registered as fixture-owned in staging_identity.fixture_rows. It never deletes by table,
+-- by number range, or by who created a row.
+--
+-- Run ONLY through the staging SQL runner:
+--   npm --prefix pipeline run staging:sql -- --action=cleanup --confirm="CLEAN UP TNBS RECRUITER FIXTURES" --execute
+-- Staging project: truck-recruitment-tool-staging, ref yhyoxhtguyturgdhwywc.
 --
 -- Gates, all checked before any row is deleted:
---   1. The connected database carries the staging identity marker created once by
---      supabase/staging/install-staging-identity-marker.sql (never present in production).
---      Staging project: truck-recruitment-tool-staging, ref yhyoxhtguyturgdhwywc.
---   2. The operator sets the confirmation in the same run:
---        select set_config('app.staging_cleanup_confirmation', 'CLEAN UP TNBS RECRUITER FIXTURES', true);
---   3. The database holds only fictional data: every profile is a fixture identity or the
---      staging owner, every carrier is in a fictional DOT range (1200000-1307999 bulk,
---      1400001-1400099 hand-authored), and no value-only suppression exists. Anything else
---      is treated as real business data and the whole transaction is refused.
+--   1. app.staging_runner_verified_ref equals the staging ref (set only by the runner after it
+--      has verified the connection target and refused production).
+--   2. The connected database carries the staging identity marker for that same project.
+--   3. The confirmation phrase app.staging_cleanup_confirmation.
+-- After the scoped deletes, the transaction is refused if anything not fixture-owned still
+-- references a fixture identity.
 
 begin;
 
@@ -19,71 +21,87 @@ do $$
 declare
   v_marker_rows bigint;
   v_marker_ok boolean;
-  v_other_profiles bigint;
-  v_real_range_carriers bigint;
-  v_value_suppressions bigint;
 begin
-  if to_regclass('staging_identity.marker') is null then
-    raise exception 'staging cleanup refused: this database has no staging identity marker (run install-staging-identity-marker.sql once on staging only)';
+  if current_setting('app.staging_runner_verified_ref', true) is distinct from 'yhyoxhtguyturgdhwywc' then
+    raise exception 'staging cleanup refused: run through the staging SQL runner, which verifies the staging project first';
   end if;
-  execute 'select count(*), bool_and(environment = ''staging'' and marker_id = ''a8512f81-fe47-485d-95cd-092c46e4920b''::uuid) from staging_identity.marker'
+  if to_regclass('staging_identity.marker') is null or to_regclass('staging_identity.fixture_rows') is null then
+    raise exception 'staging cleanup refused: this database has no staging identity marker (install it once on staging via the runner)';
+  end if;
+  execute format(
+    'select count(*), bool_and(environment = ''staging'' and marker_id = ''a8512f81-fe47-485d-95cd-092c46e4920b''::uuid and project_ref = %L) from staging_identity.marker',
+    current_setting('app.staging_runner_verified_ref'))
     into v_marker_rows, v_marker_ok;
   if v_marker_rows <> 1 or v_marker_ok is not true then
-    raise exception 'staging cleanup refused: staging identity marker is missing or does not match';
+    raise exception 'staging cleanup refused: staging identity marker is missing or names a different project';
   end if;
   if current_setting('app.staging_cleanup_confirmation', true) is distinct from 'CLEAN UP TNBS RECRUITER FIXTURES' then
     raise exception 'staging cleanup refused: confirmation phrase is missing';
   end if;
-
-  select count(*) into v_other_profiles
-  from public.profiles
-  where not (id::text like '71000000-0000-4000-8000-00000000000%' and email like '%@tnbs-recruiter.example.invalid')
-    and email is distinct from 'hunter@twistednail.com';
-  select count(*) into v_real_range_carriers
-  from public.carriers
-  where not (dot_number between 1200000 and 1307999 or dot_number between 1400001 and 1400099);
-  select count(*) into v_value_suppressions
-  from public.contact_suppressions
-  where dot_number is null;
-  if v_other_profiles <> 0 or v_real_range_carriers <> 0 or v_value_suppressions <> 0 then
-    raise exception 'staging cleanup refused: unexpected non-fictional data (other profiles %, carriers outside fictional DOT ranges %, value-only suppressions %)',
-      v_other_profiles, v_real_range_carriers, v_value_suppressions;
-  end if;
 end
 $$;
 
--- Fictional business rows, in dependency order. Every delete is scoped to fictional DOT
--- ranges or to batches created by fixture identities / the staging owner.
+-- Explicit fixture ownership: registered rows and metadata-tagged fixture identities.
+create temporary table tmp_cleanup_carriers on commit drop as
+select row_key::bigint as dot_number from staging_identity.fixture_rows where table_name = 'carriers';
+create temporary table tmp_cleanup_batches on commit drop as
+select row_key::uuid as id from staging_identity.fixture_rows where table_name = 'batches';
 create temporary table tmp_cleanup_users on commit drop as
-select id from public.profiles
-where (id::text like '71000000-0000-4000-8000-00000000000%' and email like '%@tnbs-recruiter.example.invalid')
-   or email = 'hunter@twistednail.com';
-
-delete from public.contact_logs
-where dot_number between 1200000 and 1307999 or dot_number between 1400001 and 1400099;
-delete from public.contact_suppressions
-where dot_number between 1200000 and 1307999 or dot_number between 1400001 and 1400099;
--- Members go first while their batches still exist: the member-delete audit trigger writes a
--- batch_activity row that must reference a live batch. Deleting the batch then cascades to
--- its zones and all activity, including those audit rows.
-delete from public.batch_carriers
-where batch_id in (select id from public.batches where created_by in (select id from tmp_cleanup_users));
-delete from public.batches
-where created_by in (select id from tmp_cleanup_users);
-delete from public.carriers
-where dot_number between 1200000 and 1307999 or dot_number between 1400001 and 1400099;
-
--- Clear remaining nullable references to fixture identities so they can be removed.
-update public.profiles set approved_by = null
-where approved_by in (
-  select id from public.profiles
-  where id::text like '71000000-0000-4000-8000-00000000000%' and email like '%@tnbs-recruiter.example.invalid'
-);
-
-delete from auth.users
+select id from auth.users
 where raw_user_meta_data->>'test_run_id' = 'stg-db-20260723-0042'
   and raw_user_meta_data->>'test_only' = 'true'
   and email like '%@tnbs-recruiter.example.invalid'
   and encrypted_password is null;
+
+delete from public.contact_logs
+where dot_number in (select dot_number from tmp_cleanup_carriers);
+-- Members go first while their batches still exist: the member-delete audit trigger writes a
+-- batch_activity row that must reference a live batch. Deleting a registered batch then
+-- cascades to its zones and all its activity, including those audit rows.
+delete from public.batch_carriers
+where dot_number in (select dot_number from tmp_cleanup_carriers)
+   or batch_id in (select id from tmp_cleanup_batches);
+delete from public.batches
+where id in (select id from tmp_cleanup_batches);
+delete from public.cargo_other_values
+where value in (select row_key from staging_identity.fixture_rows where table_name = 'cargo_other_values');
+-- Insurance, filings, safety, inspections, QC snapshots, and carrier-scoped suppressions cascade.
+delete from public.carriers
+where dot_number in (select dot_number from tmp_cleanup_carriers);
+delete from staging_identity.fixture_rows
+where table_name in ('carriers', 'batches', 'cargo_other_values');
+
+-- Approval references to fixture identities must be cleared before those identities go.
+-- internal.guard_profile_update() only lets a manager or the trusted service role change
+-- approval columns, so this one statement runs under the service-role claim, which is set
+-- transaction-locally after every gate above has passed and cleared immediately afterwards.
+select set_config('request.jwt.claims', '{"role":"service_role"}', true);
+update public.profiles
+set approved_by = null
+where approved_by in (select id from tmp_cleanup_users);
+select set_config('request.jwt.claims', '{}', true);
+
+-- Refuse if anything that is not fixture-owned still points at a fixture identity.
+do $$
+declare
+  v_refs bigint;
+begin
+  select
+    (select count(*) from public.batches where created_by in (select id from tmp_cleanup_users))
+  + (select count(*) from public.contact_logs where user_id in (select id from tmp_cleanup_users))
+  + (select count(*) from public.batch_activity where actor_id in (select id from tmp_cleanup_users))
+  + (select count(*) from public.batch_carriers where status_changed_by in (select id from tmp_cleanup_users)
+                                                  or promoted_by in (select id from tmp_cleanup_users))
+  + (select count(*) from public.carriers where dnc_set_by in (select id from tmp_cleanup_users))
+  + (select count(*) from public.contact_suppressions where created_by in (select id from tmp_cleanup_users))
+  into v_refs;
+  if v_refs <> 0 then
+    raise exception 'staging cleanup refused: % row(s) that are not registered fixtures still reference fixture identities', v_refs;
+  end if;
+end
+$$;
+
+delete from auth.users
+where id in (select id from tmp_cleanup_users);
 
 commit;

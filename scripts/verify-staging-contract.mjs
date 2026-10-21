@@ -36,30 +36,41 @@ if (!roleMatrix.includes("'failures'") || !roleMatrix.includes('rollback;')) {
   failures.push('role matrix must report failures and roll back every probe');
 }
 
-// ---- Staging identity marker (Codex findings 1 and 3) ---------------------------------
+// ---- Staging identity marker + fixture registry (Codex findings 1/3, round 2) -----------
+const RUNNER_GATE = "current_setting('app.staging_runner_verified_ref', true) is distinct from 'yhyoxhtguyturgdhwywc'";
+const runnerPath = resolve(repositoryRoot, 'pipeline/src/staging-sql-runner.ts');
+const runner = existsSync(runnerPath) ? readFileSync(runnerPath, 'utf8') : '';
+const deleteStatements = (sql) => [...sql.matchAll(/delete\s+from\s+[\s\S]*?;/gi)].map((match) => match[0]);
 const markerIdMatch = /insert into staging_identity\.marker[\s\S]*?'staging',\s*'([0-9a-f-]{36})'/i.exec(installer);
 const markerId = markerIdMatch?.[1];
+if (!runner.includes('parseSupabaseDbTarget') || !runner.includes('refuses the production')
+  || !runner.includes("'app.staging_runner_verified_ref'") || !runner.includes('RECORDED_PROJECT_REFS.staging')) {
+  failures.push('staging SQL runner must reuse the pipeline target parser, refuse production, require the staging ref, and set the verified-ref session value');
+}
 if (!installer) {
   failures.push('install-staging-identity-marker.sql is missing');
 } else {
   if (!markerId) failures.push('marker installer must insert one fixed marker UUID');
   for (const required of [
-    "app.staging_marker_install_confirmation",
+    RUNNER_GATE,
+    'app.staging_marker_install_confirmation',
     "check (environment = 'staging')",
-    'v_fixture_profiles <> 7',
+    "check (project_ref = 'yhyoxhtguyturgdhwywc')",
+    'create table staging_identity.fixture_rows',
     'v_other_profiles <> 0',
-    'v_real_range_carriers <> 0',
   ]) {
     if (!installer.includes(required)) failures.push(`marker installer is missing required guard: ${required}`);
   }
   for (const role of ['anon', 'authenticated', 'service_role']) {
     if (!installer.includes(`'${role}'`)) failures.push(`marker installer must revoke access from ${role}`);
   }
-  const installerGuard = installer.indexOf('v_real_range_carriers <> 0');
+  const installerGuard = installer.indexOf(RUNNER_GATE);
+  const profileGuard = installer.indexOf('v_other_profiles <> 0');
   const createSchema = installer.indexOf('create schema staging_identity');
-  if (!(installerGuard >= 0 && createSchema > installerGuard)) {
-    failures.push('marker installer must refuse a non-fixture database before creating the marker');
+  if (!(installerGuard >= 0 && profileGuard > installerGuard && createSchema > profileGuard)) {
+    failures.push('marker installer must require the runner-verified project and refuse real users before creating the marker');
   }
+  if (deleteStatements(installer).length) failures.push('marker installer must not delete anything');
 }
 for (const migration of existsSync(migrationsDir) ? readdirSync(migrationsDir) : []) {
   if (readFileSync(resolve(migrationsDir, migration), 'utf8').includes('staging_identity')) {
@@ -67,20 +78,35 @@ for (const migration of existsSync(migrationsDir) ? readdirSync(migrationsDir) :
   }
 }
 
-// ---- Cleanup must be identity-gated and scoped (Codex finding 1) ---------------------
+// ---- Cleanup: runner + marker gated, scoped by explicit fixture ownership ---------------
+const runnerGate = cleanup.indexOf(RUNNER_GATE);
 const markerGate = cleanup.indexOf(`to_regclass('${MARKER_TABLE}')`);
 const firstDelete = cleanup.search(/delete\s+from\s/i);
+if (runnerGate < 0) failures.push('cleanup must require the runner-verified staging project');
 if (markerGate < 0) failures.push('cleanup must check the staging identity marker in the connected database');
 if (!markerId || !cleanup.includes(markerId)) failures.push('cleanup must require the exact installed marker UUID');
-if (!cleanup.includes("app.staging_cleanup_confirmation")) failures.push('cleanup must require its confirmation phrase');
-if (!cleanup.includes('v_real_range_carriers <> 0') || !cleanup.includes('v_other_profiles <> 0')) {
-  failures.push('cleanup must refuse unexpected non-fictional business data');
-}
-if (!(markerGate >= 0 && firstDelete > markerGate)) {
+if (!cleanup.includes('project_ref = %L')) failures.push('cleanup must check the marker names the runner-verified project');
+if (!cleanup.includes('app.staging_cleanup_confirmation')) failures.push('cleanup must require its confirmation phrase');
+if (!(runnerGate >= 0 && markerGate > runnerGate && firstDelete > markerGate)) {
   failures.push('cleanup must establish database identity before its first delete');
 }
-for (const match of cleanup.matchAll(/delete\s+from\s+([\w.]+)\s*;/gi)) {
-  failures.push(`cleanup contains an unscoped delete: ${match[0]}`);
+for (const statement of deleteStatements(cleanup)) {
+  if (!/\bwhere\b/i.test(statement)) failures.push(`cleanup contains an unscoped delete: ${statement.split('\n')[0]}`);
+  else if (!/tmp_cleanup_|staging_identity\.fixture_rows/.test(statement)) {
+    failures.push(`cleanup delete is not scoped by explicit fixture ownership: ${statement.split('\n')[0]}`);
+  }
+}
+if (/between\s+1[24]00/i.test(cleanup)) failures.push('cleanup must not scope by DOT-number ranges');
+if (/hunter@twistednail\.com/i.test(cleanup)) failures.push('cleanup must not scope by owner identity');
+if (!cleanup.includes("raw_user_meta_data->>'test_only' = 'true'")) failures.push('cleanup must select fixture identities by explicit metadata');
+// Round 2 item 4: approval references are cleared under a narrowly scoped service-role claim.
+const claimOn = cleanup.indexOf(`set_config('request.jwt.claims', '{"role":"service_role"}', true)`);
+const approvalUpdate = cleanup.indexOf('set approved_by = null');
+const claimOff = cleanup.indexOf(`set_config('request.jwt.claims', '{}', true)`);
+if (!(claimOn > markerGate && markerGate >= 0 && approvalUpdate > claimOn && claimOff > approvalUpdate)) {
+  failures.push('cleanup must clear approval references only under a transaction-local service-role claim set after the gates and cleared right after');
+} else if (/\b(?:update|delete|insert)\b/i.test(cleanup.slice(cleanup.indexOf(';', approvalUpdate) + 1, claimOff))) {
+  failures.push('the service-role claim in cleanup must cover only the approval update');
 }
 if (/truncate|drop\s+(?:table|schema|database)/i.test(cleanup)) {
   failures.push('cleanup must not truncate or drop database objects');
@@ -90,4 +116,4 @@ if (failures.length > 0) {
   for (const failure of failures) console.error(`FAIL ${failure}`);
   process.exit(1);
 }
-console.log('PASS staging fixture, marker installer, identity-gated scoped cleanup, and rollback-only role matrix are paired, non-login, and exact-ref safe');
+console.log('PASS staging fixture, runner-gated marker installer, ownership-scoped cleanup, and rollback-only role matrix are paired, non-login, and exact-ref safe');

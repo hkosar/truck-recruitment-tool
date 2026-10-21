@@ -18,16 +18,22 @@ const STAGING_REF = 'yhyoxhtguyturgdhwywc';
 const PRODUCTION_REF = 'ejrfobddnojbijzrjbii';
 const CONFIRMATION = 'RESET FICTIONAL TNBS RECRUITER DATA';
 const MARKER_GATE = "to_regclass('staging_identity.marker')";
+const RUNNER_GATE = "current_setting('app.staging_runner_verified_ref', true) is distinct from 'yhyoxhtguyturgdhwywc'";
 const failures = [];
 
 for (const required of [
+  RUNNER_GATE,
   MARKER_GATE,
+  "project_ref = %L",
   "current_setting('app.staging_project_ref', true)",
   STAGING_REF,
   "current_setting('app.staging_reset_confirmation', true)",
   CONFIRMATION,
   "v_other_profiles <> 0",
-  "v_real_range_carriers <> 0",
+  "v_unregistered_carriers <> 0",
+  "v_unregistered_cargo <> 0",
+  "v_unowned_batches <> 0",
+  "insert into staging_identity.fixture_rows",
   "alter sequence %s restart with 1",
   "select setseed(0.42)",
   "v_carriers <> 800",
@@ -56,8 +62,17 @@ if (/delete\s+from\s+public\.profiles/i.test(reset)) failures.push('reset must p
 if (/drop\s+(?:table|schema|database)|alter\s+table|truncate/gi.test(reset)) {
   failures.push('reset must not drop, alter, or truncate tables, schemas, or databases');
 }
-if (/staging_identity/i.test(reset.replace(/to_regclass\('staging_identity\.marker'\)|from staging_identity\.marker/g, ''))) {
+// The reset may read the marker and maintain the fixture registry, but never change the marker.
+if (/(?:insert\s+into|update|delete\s+from)\s+staging_identity\.marker|drop\s+schema|alter\s+table\s+staging_identity/i.test(reset)) {
   failures.push('reset may only read the staging identity marker, never change it');
+}
+const FIRST_LINE = /\r?\n/;
+// Every delete is scoped by explicit fixture ownership (round 2), never by DOT range or owner.
+for (const statement of [...reset.matchAll(/delete\s+from\s+[\s\S]*?;/gi)].map((match) => match[0])) {
+  if (!/\bwhere\b/i.test(statement)) failures.push(`reset contains an unscoped delete: ${statement.split(FIRST_LINE)[0]}`);
+  else if (!/tmp_reset_|staging_identity\.fixture_rows/.test(statement)) {
+    failures.push(`reset delete is not scoped by explicit fixture ownership: ${statement.split(FIRST_LINE)[0]}`);
+  }
 }
 if ((reset.match(/drop trigger trg_bc_delete/gi) ?? []).length !== 1 || (reset.match(/create trigger trg_bc_delete/gi) ?? []).length !== 1) {
   failures.push('reset must remove and restore the batch-carrier delete audit trigger exactly once');
@@ -65,14 +80,16 @@ if ((reset.match(/drop trigger trg_bc_delete/gi) ?? []).length !== 1 || (reset.m
 
 const beginIndex = reset.indexOf('begin;');
 const commitIndex = reset.lastIndexOf('commit;');
+const runnerIndex = reset.indexOf(RUNNER_GATE);
 const guardIndex = reset.indexOf(MARKER_GATE);
-const scopeIndex = reset.indexOf('v_real_range_carriers <> 0');
+const scopeIndex = reset.indexOf('v_unowned_batches <> 0');
+const registerIndex = reset.indexOf('insert into staging_identity.fixture_rows');
 const firstDeleteIndex = reset.indexOf('delete from public.');
 const sequenceIndex = reset.indexOf('alter sequence %s restart with 1');
 const assertionIndex = reset.indexOf('staging reset verification failed');
-if (!(beginIndex >= 0 && guardIndex > beginIndex && scopeIndex > guardIndex && firstDeleteIndex > scopeIndex
-  && sequenceIndex > firstDeleteIndex && assertionIndex > sequenceIndex && commitIndex > assertionIndex)) {
-  failures.push('marker gate, data-scope check, deletes, sequence restarts, assertions, and commit are not in fail-closed transaction order');
+if (!(beginIndex >= 0 && runnerIndex > beginIndex && guardIndex > runnerIndex && scopeIndex > guardIndex && firstDeleteIndex > scopeIndex
+  && sequenceIndex > firstDeleteIndex && registerIndex > sequenceIndex && assertionIndex > registerIndex && commitIndex > assertionIndex)) {
+  failures.push('runner gate, marker gate, ownership check, deletes, sequence restarts, registration, assertions, and commit are not in fail-closed transaction order');
 }
 
 // contact_logs_dnc_guard rejects contact logs for carriers that are DNC at insert time.
@@ -100,4 +117,4 @@ if (failures.length) {
   process.exit(1);
 }
 
-console.log('PASS staging reset is database-marker gated, confirmation gated, real-data refusing, transactional (no setval), identity preserving, production-ref free, and contract asserting');
+console.log('PASS staging reset is runner and database-marker gated, ownership scoped, confirmation gated, real-data refusing, transactional (no setval), identity preserving, production-ref free, and contract asserting');

@@ -30,31 +30,41 @@
 
 begin;
 
--- Invocation contract (all three gates must pass before any row is deleted):
---   1. The connected database must carry the staging identity marker created once by
---      supabase/staging/install-staging-identity-marker.sql. The marker is never part of
---      supabase/migrations, so production does not have it. This binds the reset to the
---      database it is actually connected to, not to text the caller supplies.
---   2. Transaction-local settings, set in the same run, as additional operator checks:
---        select set_config('app.staging_project_ref', 'yhyoxhtguyturgdhwywc', true);
---        select set_config('app.staging_reset_confirmation', 'RESET FICTIONAL TNBS RECRUITER DATA', true);
---   3. The database must hold only fictional data: no profiles other than the seven
---      fixture identities and the staging owner, and no carriers outside the fictional
---      DOT ranges. Anything else is treated as real business data and the reset stops.
+-- Invocation contract. Run ONLY through the staging SQL runner:
+--   npm --prefix pipeline run staging:sql -- --action=reset --confirm="RESET FICTIONAL TNBS RECRUITER DATA" --execute
+-- The runner verifies STAGING_DB_URL points at the staging project (and refuses production
+-- and connection-target overrides) before it connects, then sets the session values checked
+-- below. All gates must pass before any row is deleted:
+--   1. app.staging_runner_verified_ref equals the staging ref (set only by the runner).
+--   2. The connected database carries the staging identity marker for that same project
+--      (created once by install-staging-identity-marker.sql, never by a migration).
+--   3. app.staging_project_ref and the confirmation phrase, as additional checks.
+--   4. Every carrier, cargo value, and batch is fixture-owned: registered in
+--      staging_identity.fixture_rows, or (batches only) a batch whose members are all
+--      registered carriers. No profile other than fixture identities (explicit auth
+--      metadata) and the staging owner login. Anything else is refused as real data.
+-- Deletes are scoped to registered fixture rows only.
 do $$
 declare
   v_marker_rows bigint;
   v_marker_ok boolean;
   v_other_profiles bigint;
-  v_real_range_carriers bigint;
+  v_unregistered_carriers bigint;
+  v_unregistered_cargo bigint;
+  v_unowned_batches bigint;
 begin
-  if to_regclass('staging_identity.marker') is null then
-    raise exception 'staging reset refused: this database has no staging identity marker (run install-staging-identity-marker.sql once on staging only)';
+  if current_setting('app.staging_runner_verified_ref', true) is distinct from 'yhyoxhtguyturgdhwywc' then
+    raise exception 'staging reset refused: run through the staging SQL runner, which verifies the staging project first';
   end if;
-  execute 'select count(*), bool_and(environment = ''staging'' and marker_id = ''a8512f81-fe47-485d-95cd-092c46e4920b''::uuid) from staging_identity.marker'
+  if to_regclass('staging_identity.marker') is null or to_regclass('staging_identity.fixture_rows') is null then
+    raise exception 'staging reset refused: this database has no staging identity marker (install it once on staging via the runner)';
+  end if;
+  execute format(
+    'select count(*), bool_and(environment = ''staging'' and marker_id = ''a8512f81-fe47-485d-95cd-092c46e4920b''::uuid and project_ref = %L) from staging_identity.marker',
+    current_setting('app.staging_runner_verified_ref'))
     into v_marker_rows, v_marker_ok;
   if v_marker_rows <> 1 or v_marker_ok is not true then
-    raise exception 'staging reset refused: staging identity marker is missing or does not match';
+    raise exception 'staging reset refused: staging identity marker is missing or names a different project';
   end if;
   if current_setting('app.staging_project_ref', true) is distinct from 'yhyoxhtguyturgdhwywc' then
     raise exception 'staging reset refused: app.staging_project_ref must equal yhyoxhtguyturgdhwywc';
@@ -62,56 +72,92 @@ begin
   if current_setting('app.staging_reset_confirmation', true) is distinct from 'RESET FICTIONAL TNBS RECRUITER DATA' then
     raise exception 'staging reset refused: confirmation phrase is missing';
   end if;
+
   select count(*) into v_other_profiles
-  from public.profiles
-  where not (id::text like '71000000-0000-4000-8000-00000000000%' and email like '%@tnbs-recruiter.example.invalid')
-    and email is distinct from 'hunter@twistednail.com';
-  select count(*) into v_real_range_carriers
-  from public.carriers
-  where not (dot_number between 1200000 and 1307999 or dot_number between 1400001 and 1400099);
-  if v_other_profiles <> 0 or v_real_range_carriers <> 0 then
-    raise exception 'staging reset refused: unexpected non-fictional data (other profiles %, carriers outside fictional DOT ranges %)',
-      v_other_profiles, v_real_range_carriers;
+  from public.profiles p
+  where not exists (
+      select 1 from auth.users u
+      where u.id = p.id
+        and u.raw_user_meta_data->>'test_only' = 'true'
+        and u.raw_user_meta_data->>'test_run_id' = 'stg-db-20260723-0042'
+        and u.encrypted_password is null
+    )
+    and p.email is distinct from 'hunter@twistednail.com';
+  select count(*) into v_unregistered_carriers
+  from public.carriers c
+  where not exists (select 1 from staging_identity.fixture_rows f where f.table_name = 'carriers' and f.row_key = c.dot_number::text);
+  select count(*) into v_unregistered_cargo
+  from public.cargo_other_values v
+  where not exists (select 1 from staging_identity.fixture_rows f where f.table_name = 'cargo_other_values' and f.row_key = v.value);
+  select count(*) into v_unowned_batches
+  from public.batches b
+  where not exists (select 1 from staging_identity.fixture_rows f where f.table_name = 'batches' and f.row_key = b.id::text)
+    and not (
+      exists (select 1 from public.batch_carriers bc where bc.batch_id = b.id)
+      and not exists (
+        select 1 from public.batch_carriers bc
+        where bc.batch_id = b.id
+          and not exists (select 1 from staging_identity.fixture_rows f where f.table_name = 'carriers' and f.row_key = bc.dot_number::text)
+      )
+    );
+  if v_other_profiles <> 0 or v_unregistered_carriers <> 0 or v_unregistered_cargo <> 0 or v_unowned_batches <> 0 then
+    raise exception 'staging reset refused: data not owned by the fixture set (other profiles %, unregistered carriers %, unregistered cargo values %, batches not built from fixture carriers %)',
+      v_other_profiles, v_unregistered_carriers, v_unregistered_cargo, v_unowned_batches;
   end if;
 end
 $$;
 
--- Preserve auth.users and profiles. Delete only application/pipeline data in FK order.
-delete from public.contact_logs;
-delete from public.contact_suppressions;
+-- Fixture-owned rows to remove. Batches are captured before their members are deleted.
+create temporary table tmp_reset_carriers on commit drop as
+select row_key::bigint as dot_number from staging_identity.fixture_rows where table_name = 'carriers';
+create temporary table tmp_reset_batches on commit drop as
+select b.id from public.batches b
+where exists (select 1 from staging_identity.fixture_rows f where f.table_name = 'batches' and f.row_key = b.id::text)
+   or (
+     exists (select 1 from public.batch_carriers bc where bc.batch_id = b.id)
+     and not exists (
+       select 1 from public.batch_carriers bc
+       where bc.batch_id = b.id and bc.dot_number not in (select dot_number from tmp_reset_carriers)
+     )
+   );
+
+-- Preserve auth.users and profiles. Delete only fixture-owned rows, in FK order.
+delete from public.contact_logs
+where dot_number in (select dot_number from tmp_reset_carriers);
 -- Drop only the staging reset's delete trigger; schema and function definitions remain unchanged.
 drop trigger trg_bc_delete on public.batch_carriers;
-delete from public.batch_carriers;
-delete from public.batch_activity;
-delete from public.batch_zones;
-delete from public.batches;
-delete from public.cargo_other_values;
-delete from public.carrier_qc_snapshots;
-delete from public.carrier_inspections;
-delete from public.carrier_safety;
-delete from public.carrier_insurance_filings;
-delete from public.carrier_insurance;
-delete from public.data_quality_reports;
-delete from public.pipeline_runs;
-delete from public.zip_centroids;
-delete from public.city_centroids;
-delete from public.carriers;
+delete from public.batch_carriers
+where dot_number in (select dot_number from tmp_reset_carriers)
+   or batch_id in (select id from tmp_reset_batches);
+-- Zones and activity cascade from their batch.
+delete from public.batches
+where id in (select id from tmp_reset_batches);
+delete from public.cargo_other_values
+where value in (select row_key from staging_identity.fixture_rows where table_name = 'cargo_other_values');
+-- Insurance, filings, safety, inspections, QC snapshots, and carrier-scoped suppressions cascade.
+delete from public.carriers
+where dot_number in (select dot_number from tmp_reset_carriers);
+delete from staging_identity.fixture_rows
+where table_name in ('carriers', 'batches', 'cargo_other_values');
 
--- Restart touched identity sequences where present; schema and migrations are unchanged.
+-- Restart identity sequences of tables the reset emptied; schema and migrations are unchanged.
 -- ALTER SEQUENCE ... RESTART rewrites the sequence inside this transaction, so a failed
 -- reset rolls it back with the deleted rows. Never use the setval function here: its
 -- effect survives ROLLBACK, so a failed reset would leave sequences below surviving row IDs.
+-- A table that still holds rows the reset does not own keeps its sequence untouched.
 do $$
 declare
   v_table text;
   v_sequence text;
+  v_empty boolean;
 begin
   foreach v_table in array array[
     'public.batch_activity', 'public.contact_suppressions', 'public.carrier_inspections',
-    'public.carrier_qc_snapshots', 'public.pipeline_runs'
+    'public.carrier_qc_snapshots'
   ] loop
     v_sequence := pg_get_serial_sequence(v_table, 'id');
-    if v_sequence is not null then
+    execute format('select not exists (select 1 from %s)', v_table) into v_empty;
+    if v_sequence is not null and v_empty then
       execute format('alter sequence %s restart with 1', v_sequence);
     end if;
   end loop;
@@ -954,6 +1000,15 @@ update public.carriers c
 set do_not_contact = true, dnc_reason = d.dnc_reason, dnc_set_by = d.dnc_set_by, dnc_set_at = d.dnc_set_at
 from tmp_dnc_state d
 where c.dot_number = d.dot_number;
+
+-- Register every row this reset created as fixture-owned (the gate above guarantees no
+-- other carriers, batches, or cargo values exist at this point).
+insert into staging_identity.fixture_rows (table_name, row_key, registered_by)
+select 'carriers', dot_number::text, 'reset-fictional-data' from public.carriers;
+insert into staging_identity.fixture_rows (table_name, row_key, registered_by)
+select 'batches', id::text, 'reset-fictional-data' from public.batches;
+insert into staging_identity.fixture_rows (table_name, row_key, registered_by)
+select 'cargo_other_values', value, 'reset-fictional-data' from public.cargo_other_values;
 
 -- Restore the ordinary delete audit trigger before validating and committing.
 create trigger trg_bc_delete before delete on public.batch_carriers
