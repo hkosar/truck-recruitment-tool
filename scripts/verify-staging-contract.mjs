@@ -78,6 +78,63 @@ for (const migration of existsSync(migrationsDir) ? readdirSync(migrationsDir) :
   }
 }
 
+// ---- Round 3: first install adopts only the fingerprinted fictional baseline -------------
+// The installer's fingerprint must stay in lock-step with the generator in the reset, and it
+// must refuse (with per-kind counts) instead of adopting anything unrecognised.
+const resetPath = resolve(stagingDir, 'reset-fictional-data.sql');
+const resetSql = existsSync(resetPath) ? readFileSync(resetPath, 'utf8').replace(/\r\n/g, '\n') : '';
+const installerSql = installer.replace(/\r\n/g, '\n');
+const quoted = (text) => [...text.matchAll(/'((?:[^']|'')*)'/g)].map((match) => match[1]);
+const resetGeoWords = quoted(/insert into tmp_geo_words \(w\) values([\s\S]*?);/.exec(resetSql)?.[1] ?? '');
+const installerGeoWords = quoted(/unnest\(array\[([\s\S]*?)\]\)/.exec(installerSql)?.[1] ?? '');
+if (resetGeoWords.length !== 25 || JSON.stringify(resetGeoWords) !== JSON.stringify(installerGeoWords)) {
+  failures.push('installer fingerprint geo-word list must equal the reset generator list exactly');
+}
+for (const [generator, fingerprint, label] of [
+  ['generate_series(1, 785)', 'c.dot_number between 1200137 and 1307674', 'bulk DOT index range'],
+  ['(1200000 + d.i * 137 + floor(d.r_dot_jit * 130)::int)', '(c.dot_number - 1200000) % 137 < 130', 'bulk DOT formula'],
+  ["'(202) 555-' || lpad((100 + (f.i % 100))::text, 4, '0')", "c.phone = '(202) 555-' || lpad((100 + (((c.dot_number - 1200000) / 137) % 100))::text, 4, '0')", 'bulk phone'],
+  ["'(202) 555-' || lpad((100 + ((f.i + 37) % 100))::text, 4, '0')", "+ 37) % 100))::text, 4, '0')", 'bulk cell phone'],
+  ["'(202) 555-' || lpad((100 + ((f.i + 73) % 100))::text, 4, '0')", "+ 73) % 100))::text, 4, '0')", 'bulk fax'],
+  ["'@carrier.example.invalid'", "c.email_address like '%@carrier.example.invalid'", 'bulk email domain'],
+  ['md5(f.dot_number::text || f.geo_word || f.zip_suffix)', 'c.row_hash = md5(c.dot_number::text || w.word || substr(c.phy_zip, 3))', 'bulk row hash'],
+  ["'75' || f.zip_suffix, '75' || f.zip_suffix", 'substr(c.phy_zip, 3)', 'bulk ZIP suffix'],
+  ["md5('1400015')", 'c.dot_number between 1400001 and 1400015', 'hand-authored DOT set'],
+  ["md5('1400001')", 'c.row_hash = md5(c.dot_number::text)', 'hand-authored row hash'],
+]) {
+  if (!resetSql.includes(generator)) failures.push(`reset no longer generates the fingerprinted ${label}; update the installer fingerprint`);
+  if (!installerSql.includes(fingerprint)) failures.push(`installer fingerprint is missing the ${label} check`);
+}
+const handAuthoredHashes = new Set(resetSql.match(/md5\('14000\d\d'\)/g) ?? []);
+if (handAuthoredHashes.size !== 15) failures.push('reset must hand-author exactly DOT 1400001-1400015 with md5(dot) row hashes');
+for (const [name, creator] of [
+  ['Central Texas Aggregate Recruitment', 'manager@tnbs-recruiter.example.invalid'],
+  ['I-35 Corridor: Austin -> San Antonio', 'editor@tnbs-recruiter.example.invalid'],
+]) {
+  const generated = new RegExp(`'${name.replace(/[.*+?^${}()|[\]\\]/g, '\\$&')}'[\\s\\S]{0,1200}?p\\.email = '${creator}'`).test(resetSql);
+  if (!generated) failures.push(`reset no longer creates baseline batch "${name}" as ${creator}`);
+  if (!installerSql.includes(`b.name = '${name}' and u.email = '${creator}'`)) failures.push(`installer must recognise baseline batch "${name}" only from ${creator}`);
+}
+const resetNotes = [...resetSql.matchAll(/insert into public\.contact_logs[\s\S]*?::contact_disposition,\s*'((?:[^']|'')*)'/g)].map((match) => match[1]);
+const notesBlock = /l\.notes in \(([\s\S]*?)\)/.exec(installerSql)?.[1] ?? '';
+const installerNotes = quoted(notesBlock);
+if (resetNotes.length !== 5 || JSON.stringify([...resetNotes].sort()) !== JSON.stringify([...installerNotes].sort())) {
+  failures.push('installer contact-log fingerprint must list exactly the reset contact notes');
+}
+if (/insert into public\.contact_suppressions/i.test(resetSql) || !installerSql.includes('select count(*) into v_suppressions from public.contact_suppressions;')) {
+  failures.push('baseline has no suppressions; the installer must treat every suppression as unrecognised');
+}
+const countsRefusal = installerSql.indexOf("rows not recognised as the deterministic fictional baseline: carriers %, batches %, cargo values %, contact logs %, contact suppressions %, batch members %, batch activity %, carrier DNC changes by non-fixture users %");
+if (countsRefusal < 0 || countsRefusal > installerSql.indexOf('create schema staging_identity')) {
+  failures.push('installer must refuse unrecognised rows, listing counts per kind, before creating the marker');
+}
+for (const kind of ['carriers', 'batches', 'cargo_other_values']) {
+  const adoption = new RegExp(`select '${kind}', [^;]* from ([\\w.]+);`).exec(installerSql)?.[1];
+  if (!adoption || !adoption.startsWith('tmp_baseline_')) {
+    failures.push(`installer must register ${kind} only from the fingerprinted baseline set (found ${adoption ?? 'none'})`);
+  }
+}
+
 // ---- Cleanup: runner + marker gated, scoped by explicit fixture ownership ---------------
 const runnerGate = cleanup.indexOf(RUNNER_GATE);
 const markerGate = cleanup.indexOf(`to_regclass('${MARKER_TABLE}')`);
@@ -116,4 +173,4 @@ if (failures.length > 0) {
   for (const failure of failures) console.error(`FAIL ${failure}`);
   process.exit(1);
 }
-console.log('PASS staging fixture, runner-gated marker installer, ownership-scoped cleanup, and rollback-only role matrix are paired, non-login, and exact-ref safe');
+console.log('PASS staging fixture, runner-gated baseline-fingerprinted marker installer, ownership-scoped cleanup, and rollback-only role matrix are paired, non-login, and exact-ref safe');
