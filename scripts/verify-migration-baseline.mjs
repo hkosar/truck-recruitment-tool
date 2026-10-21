@@ -27,6 +27,7 @@ const expectedVersions = [
   '20260722223300',
   '20260723004500',
   '20260723010400',
+  '20260723020000',
 ];
 
 const files = readdirSync(migrationsDir)
