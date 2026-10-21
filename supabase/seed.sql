@@ -789,6 +789,23 @@ from public.batches b, public.profiles p
 where b.name = 'I-35 Corridor: Austin -> San Antonio' and p.email = 'editor@tnbs-recruiter.example.invalid';
 
 -- ============================================================================
+-- 6b. Withhold global DNC while writing historical contacts. Batch membership
+--     above was computed with DNC in force (the matcher excludes DNC carriers),
+--     but the contact ledger guard (contact_logs_dnc_guard) rejects any contact
+--     log for a carrier that is DNC *now*. These seeded contacts happened before
+--     the carriers were marked DNC, so DNC state is set aside here and re-applied
+--     unchanged right after the last contact log (section 7b). The guard itself
+--     stays enabled throughout.
+-- ============================================================================
+create temporary table tmp_dnc_state on commit drop as
+select dot_number, dnc_reason, dnc_set_by, dnc_set_at
+from public.carriers
+where do_not_contact;
+update public.carriers
+set do_not_contact = false, dnc_reason = null, dnc_set_by = null, dnc_set_at = null
+where dot_number in (select dot_number from tmp_dnc_state);
+
+-- ============================================================================
 -- 7. contact_logs (F8/G6) -- across channels; the cross-batch carrier
 --    (1400001) gets logs from BOTH batch contexts to demonstrate the unified
 --    per-carrier timeline (mockup's demo invariant).
@@ -841,6 +858,14 @@ where bc.status <> 'new'
   and bc.dot_number between 1200000 and 1307999
 order by bc.batch_id, bc.dot_number
 limit 40;
+
+-- ----------------------------------------------------------------------------
+-- 7b. Re-apply global DNC exactly as generated, now that historical contacts exist.
+-- ----------------------------------------------------------------------------
+update public.carriers c
+set do_not_contact = true, dnc_reason = d.dnc_reason, dnc_set_by = d.dnc_set_by, dnc_set_at = d.dnc_set_at
+from tmp_dnc_state d
+where c.dot_number = d.dot_number;
 
 commit;
 

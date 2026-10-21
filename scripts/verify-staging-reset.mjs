@@ -10,6 +10,10 @@ const reset = readFileSync(resolve(stagingDir, 'reset-fictional-data.sql'), 'utf
 const installerPath = resolve(stagingDir, 'install-staging-identity-marker.sql');
 const installer = existsSync(installerPath) ? readFileSync(installerPath, 'utf8') : '';
 
+// Optional second argument: path to seed.sql (defaults to supabase/seed.sql).
+const seedPath = resolve(process.argv[3] ?? resolve(repositoryRoot, 'supabase/seed.sql'));
+const seed = readFileSync(seedPath, 'utf8');
+
 const STAGING_REF = 'yhyoxhtguyturgdhwywc';
 const PRODUCTION_REF = 'ejrfobddnojbijzrjbii';
 const CONFIRMATION = 'RESET FICTIONAL TNBS RECRUITER DATA';
@@ -70,6 +74,26 @@ if (!(beginIndex >= 0 && guardIndex > beginIndex && scopeIndex > guardIndex && f
   && sequenceIndex > firstDeleteIndex && assertionIndex > sequenceIndex && commitIndex > assertionIndex)) {
   failures.push('marker gate, data-scope check, deletes, sequence restarts, assertions, and commit are not in fail-closed transaction order');
 }
+
+// contact_logs_dnc_guard rejects contact logs for carriers that are DNC at insert time.
+// Historical fixture contacts must be written while DNC is withheld, and DNC re-applied after.
+function checkDncOrdering(sql, name) {
+  const withhold = sql.search(/update public\.carriers\s+set do_not_contact = false/i);
+  const reapply = sql.search(/update public\.carriers c\s+set do_not_contact = true/i);
+  const logInserts = [...sql.matchAll(/insert into public\.contact_logs/gi)].map((m) => m.index ?? -1);
+  if (withhold < 0 || reapply < 0) {
+    failures.push(`${name} must withhold global DNC before historical contacts and re-apply it afterwards`);
+    return;
+  }
+  if (logInserts.length === 0 || logInserts.some((index) => index < withhold || index > reapply)) {
+    failures.push(`${name} inserts a contact log while global DNC is in force (contact_logs_dnc_guard would abort it)`);
+  }
+  if (/contact_logs_dnc_guard\s+on|disable\s+trigger/i.test(sql)) {
+    failures.push(`${name} must not drop or disable the contact-log DNC guard`);
+  }
+}
+checkDncOrdering(reset, 'reset');
+checkDncOrdering(seed, 'seed.sql');
 
 if (failures.length) {
   for (const failure of failures) console.error(`FAIL ${failure}`);
