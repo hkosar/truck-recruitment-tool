@@ -1345,6 +1345,34 @@ begin
 end
 $$;
 
+-- Emergency sign-everyone-out (Hunter decision 4, 2026-10-21). Admin class only = manager:
+-- the only role with Team/account administration (20260720001200_rls.sql:82 profiles_update_mgr,
+-- 20260723004500_profile_service_bootstrap.sql:16-20 guard_profile_update; app router.tsx:77
+-- RequireManager on the Users page). One atomic revocation of EVERY live app session,
+-- including recovery sessions and the actor's own, plus an actor audit row.
+-- OPEN DECISION (not settled here): whether this also invalidates recovery/SMS enrollments.
+-- Recovery code sets are deliberately left untouched.
+create function public.team_sign_everyone_out()
+returns int
+language plpgsql
+volatile
+security definer
+set search_path = public, internal, pg_temp
+as $$
+declare
+  v_actor uuid := internal.lock_and_validate(array['manager']::user_role[], array['link'], '{}', true);
+  v_count int;
+begin
+  update internal.app_sessions
+     set revoked_at = clock_timestamp(), revoked_reason = 'emergency_sign_out'
+   where revoked_at is null;
+  get diagnostics v_count = row_count;
+  insert into internal.auth_events (user_id, kind, detail)
+  values (v_actor, 'emergency_sign_out', jsonb_build_object('sessions_revoked', v_count));
+  return v_count;
+end
+$$;
+
 -- ----------------------------------------------------------------------------
 -- 10. Recovery codes (disabled until policy D2; every function checks recovery_policy)
 -- ----------------------------------------------------------------------------
@@ -1612,6 +1640,7 @@ grant execute on function
   public.team_set_active(uuid, boolean),
   public.team_block_clear(text),
   public.team_recovery_revoke(uuid),
+  public.team_sign_everyone_out(),
   public.recovery_enroll(text[]),
   public.recovery_batches(),
   public.recovery_batch_members(uuid, int, int),

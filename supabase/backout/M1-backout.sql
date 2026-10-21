@@ -20,6 +20,7 @@ drop function if exists public.team_update(uuid, text, user_role, text);
 drop function if exists public.team_set_active(uuid, boolean);
 drop function if exists public.team_block_clear(text);
 drop function if exists public.team_recovery_revoke(uuid);
+drop function if exists public.team_sign_everyone_out();
 drop function if exists public.recovery_enroll(text[]);
 drop function if exists public.recovery_batches();
 drop function if exists public.recovery_batch_members(uuid, int, int);

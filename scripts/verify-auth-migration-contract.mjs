@@ -244,6 +244,19 @@ const eUpdate = evidence.indexOf('update internal.signin_links');
 if (!(eMismatch >= 0 && eMismatch < eInsert && eInsert < eUpdate)) fail('M1: evidence must reject a conflicting message id before any insert or update');
 if (!evidence.includes("'Bounced Address', 'Unsubscribed Address', 'Spam Reporting Address', 'Invalid Address'")) fail('M1: evidence must gate drop blocks on the recipient-reason allowlist');
 
+// K4. Emergency sign-everyone-out: manager only (admin class), every live session (no user
+// filter, so the actor's own and recovery sessions too), one audit row, recovery enrollment
+// untouched (open decision).
+const eso = m1Function('function public.team_sign_everyone_out()')?.join('\n') ?? '';
+if (!eso) fail('M1: team_sign_everyone_out missing');
+else {
+  if (!eso.includes("internal.lock_and_validate(array['manager']::user_role[], array['link']")) fail('M1: emergency sign-out must be manager-only (link session)');
+  const upd = /update internal\.app_sessions[\s\S]*?;/.exec(eso)?.[0] ?? '';
+  if (!/where revoked_at is null;/.test(upd) || /user_id/.test(upd)) fail('M1: emergency sign-out must revoke every live session, with no user filter');
+  if (!eso.includes("'emergency_sign_out'") || !eso.includes('insert into internal.auth_events')) fail('M1: emergency sign-out must write an actor audit row');
+  if (/recovery_(codes|sets)/.test(stripComments(eso))) fail('M1: emergency sign-out must not touch recovery enrollment (undecided)');
+}
+
 // L. Credential retirement order: NOLOGIN, terminate, confirm, then revoke.
 const rNologin = retire.indexOf('alter role recruiter_app nologin');
 const rTerminate = retire.indexOf('pg_terminate_backend(');
