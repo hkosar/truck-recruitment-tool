@@ -183,3 +183,41 @@ including new TNBS assertions (navy tokens, no theme toggle, navy bar, zebra + t
 computed styles, selected-row inset bar, cat-colored zones, global search → carrier
 profile), 0 errors, 0 external requests. Still awaiting from earlier rounds: material
 label structure · CSV keep/cut.
+
+## Round 5 — 2026-10-21 owner decisions (M0 sign-off + team sign-in)
+
+Recorded 2026-10-21 UTC. Source: the owner's answers as relayed to this worker by the
+project-manager thread on 2026-10-21. The owner's words, quoted as relayed: **"Approved next
+phase"**, **"agreed"**, **"accept all 3"**. (This record's author did not see the original
+chat; the mapping of each quote to each decision below is as the project manager relayed it.)
+
+### M0 design sign-off — closed
+
+**Mockup v6.1 is the design to build** ("Approved next phase"). This closes the open loop
+noted in `07-handoff-2026-07-20.md` §M0 and `06-ux-audit.md` §9 item 1.
+
+### The three open design defaults — accepted ("accept all 3")
+
+| F# | Item (open since) | Decision | Lands in |
+|----|------------------|----------|----------|
+| F50 | Material label: free text vs. structured field (round 1) | **Free text now**; structured, filterable field later | Batch builder lanes; revisit after launch |
+| F51 | Contact-sheet CSV export: keep or cut (round 1) | **Keep** | Contact sheet (`ContactSheet.tsx`) |
+| F52 | Warning row wash intensity (`06-ux-audit.md` §9 item 4) | **Red row wash only for DNC / critical warnings; ordinary warnings use ⚠ chips** | All carrier renderings (refines G5) |
+
+Generalized principle G5 is refined accordingly: warnings still appear on every rendering of a
+carrier, but the full pale-red row wash is reserved for DNC/critical; ordinary warnings show as
+chips so the selection highlight stays visible.
+
+### Team sign-in — decided ("agreed")
+
+| F# | Decision | Lands in |
+|----|----------|----------|
+| F53 | Sign-in mirrors the Quote-Queue tool: invite-only roster; a manager adds, edits and deactivates people; **no passwords, no self-signup**; sign in by emailing a one-time link that **expires in 15 minutes**; the same generic "if that address is on the roster, we emailed a sign-in link" response for every outcome; any email/role/active change signs that person out everywhere and cancels unused links; Sign out revokes the session. | `13-team-sign-in-spec.md` |
+| F54 | Sign-in emails go through the **same Resend account Quote-Queue uses**, from a **twistednail.com** address. Account/domain setup is a later owner-gated step. | `13-team-sign-in-spec.md` §9 |
+| F55 | Roles are **manager, editor, viewer**. The guest role and the pending ("waiting for approval") step are dropped. | `13-team-sign-in-spec.md` §4 |
+
+This supersedes the email+password, Register, Forgot/Reset and Pending-gate design in
+`02-frontend-spec.md` §3f and the guest/pending approval model in `01-architecture.md` §2.3/§6.
+Those sections are amended during the build (see `13-team-sign-in-spec.md` §10). Open questions
+from the spec (sender address, first manager, session length, roster-probing gap, Remember me)
+await the owner.
