@@ -244,7 +244,7 @@ export async function probeSafetySources(
 
   const rawRatings = await socrata.fetchPage<Record<string, unknown>>(SAFETY_RATING_DATASET_ID, {
     $select: buildRatingSelectClause(),
-    $where: "phy_state='TX' AND status_code='A' AND safety_rating is not null",
+    $where: SAFETY_RATING_WHERE,
     $order: 'dot_number',
     $limit: sampleLimit,
   });
@@ -271,6 +271,42 @@ export async function probeSafetySources(
     vehicleOosRates: stats(vehicleRates),
     ratingCounts,
   };
+}
+
+/** Active Texas carriers with any recorded rating -- the only rows the sync joins. */
+export const SAFETY_RATING_WHERE = "phy_state='TX' AND status_code='A' AND safety_rating is not null";
+
+/**
+ * Pull every qualifying Company Census rating row, page by page, and prove completeness:
+ * the rows read must equal an independently obtained filtered count(1), that count must not
+ * change during the pull, and DOTs must be unique. Any mismatch throws, so the sync fails
+ * closed instead of reporting success with omitted (possibly adverse) ratings.
+ */
+export async function fetchCompleteSafetyRatings(
+  socrata: SocrataClient,
+  pageSize = DEFAULT_PAGE_SIZE
+): Promise<Record<string, unknown>[]> {
+  const expectedRows = await socrata.count(SAFETY_RATING_DATASET_ID, SAFETY_RATING_WHERE);
+  const rows: Record<string, unknown>[] = [];
+  for await (const page of socrata.paginateOffset<Record<string, unknown>>(
+    SAFETY_RATING_DATASET_ID,
+    { $select: buildRatingSelectClause(), $where: SAFETY_RATING_WHERE, $order: 'dot_number' },
+    pageSize
+  )) {
+    rows.push(...page);
+  }
+  if (rows.length !== expectedRows) {
+    throw new Error(`Safety rating completeness failed: read ${rows.length} rows, expected ${expectedRows}`);
+  }
+  const finalCount = await socrata.count(SAFETY_RATING_DATASET_ID, SAFETY_RATING_WHERE);
+  if (finalCount !== expectedRows) {
+    throw new Error(`Safety rating source changed during the pull (${expectedRows} -> ${finalCount}); retry next run`);
+  }
+  const uniqueDots = new Set(rows.map((row) => String(row.dot_number)));
+  if (uniqueDots.size !== rows.length) {
+    throw new Error(`Safety rating source returned duplicate DOTs: ${rows.length} rows / ${uniqueDots.size} unique`);
+  }
+  return rows;
 }
 
 export interface SafetySyncOptions {
@@ -357,16 +393,12 @@ export async function syncSafety(
       }
     }
 
-    // Ratings are sparse (~3.7k active Texas carriers), so one filtered Census query is both
-    // complete and far cheaper than issuing per-DOT requests. Stage and validate the entire set,
-    // then join it onto safety rows. Rated carriers without an AB/C SMS row remain honestly absent
+    // Ratings are sparse (~3.7k active Texas carriers), so a filtered Census pull is far cheaper
+    // than per-DOT requests. It is paged and checked against an independent filtered count so a
+    // capped or truncated response can never silently drop a rating. Stage and validate the
+    // entire set, then join it onto safety rows. Rated carriers without an AB/C SMS row remain honestly absent
     // from carrier_safety rather than creating an inspection snapshot with invented zero totals.
-    const ratingRows = await socrata.fetchPage<Record<string, unknown>>(SAFETY_RATING_DATASET_ID, {
-      $select: buildRatingSelectClause(),
-      $where: "phy_state='TX' AND status_code='A' AND safety_rating is not null",
-      $order: 'dot_number',
-      $limit: 10_000,
-    });
+    const ratingRows = await fetchCompleteSafetyRatings(socrata, pageSize);
     ratingRowsRead = ratingRows.length;
     const validatedRatings = ratingRows.map((row) => {
       const dotNumber = parseNonNegativeInteger(row.dot_number, 'dot_number');

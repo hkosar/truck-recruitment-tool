@@ -8,6 +8,7 @@ import {
   buildRatingSelectClause,
   buildSelectClause as buildSafetySelectClause,
   buildUpsertSql as buildSafetyUpsertSql,
+  fetchCompleteSafetyRatings,
   mapSafetyRatingCode,
   parseFmcsaCompactDate,
   SAFETY_DATASET_IDS,
@@ -241,6 +242,63 @@ test('safety row validation rejects impossible OOS and inspection totals', () =>
     }),
     /Missing driver_insp_total value/
   );
+});
+
+function fakeRatingSource(options: {
+  rows: number;
+  /** Rows the server will actually return before silently truncating (simulates a cap). */
+  serveRows?: number;
+  /** Sequence of count(1) answers; the last one repeats. */
+  counts?: number[];
+}) {
+  const all = Array.from({ length: options.rows }, (_, index) => ({
+    dot_number: String(1_000_000 + index),
+    safety_rating: 'S',
+    safety_rating_date: '20240101',
+  }));
+  const served = all.slice(0, options.serveRows ?? options.rows);
+  const counts = [...(options.counts ?? [options.rows])];
+  const requests: URLSearchParams[] = [];
+  const fetchImpl: typeof fetch = async (input) => {
+    const params = new URL(String(input)).searchParams;
+    requests.push(params);
+    let body: unknown;
+    if ((params.get('$select') ?? '').includes('count(1)')) {
+      const count = counts.length > 1 ? counts.shift() : counts[0];
+      body = [{ count: String(count) }];
+    } else {
+      const offset = Number(params.get('$offset') ?? 0);
+      const limit = Number(params.get('$limit') ?? 1000);
+      body = served.slice(offset, offset + limit);
+    }
+    return new Response(JSON.stringify(body), { status: 200, headers: { 'content-type': 'application/json' } });
+  };
+  return { client: new SocrataClient({ appToken: 'test-token', fetchImpl }), requests };
+}
+
+test('safety ratings are paginated past one page and checked against an independent filtered count', async () => {
+  const { client, requests } = fakeRatingSource({ rows: 25 });
+  const rows = await fetchCompleteSafetyRatings(client, 10);
+  assert.equal(rows.length, 25);
+  const pageRequests = requests.filter((params) => !(params.get('$select') ?? '').includes('count(1)'));
+  assert.deepEqual(pageRequests.map((params) => params.get('$offset')), ['0', '10', '20']);
+  const countRequests = requests.filter((params) => (params.get('$select') ?? '').includes('count(1)'));
+  assert.equal(countRequests.length, 2, 'count before and after the pull');
+  for (const params of [...pageRequests, ...countRequests]) {
+    assert.equal(params.get('$where'), "phy_state='TX' AND status_code='A' AND safety_rating is not null");
+  }
+});
+
+test('safety ratings refuse a silently truncated (capped) response', async () => {
+  // 10,001 qualifying ratings but the source stops at 10,000 -- the old single capped fetch
+  // would have reported success while omitting a rating.
+  const { client } = fakeRatingSource({ rows: 10_001, serveRows: 10_000 });
+  await assert.rejects(() => fetchCompleteSafetyRatings(client, 10_000), /Safety rating completeness failed: read 10000 rows, expected 10001/);
+});
+
+test('safety ratings refuse a source that changes during the pull', async () => {
+  const { client } = fakeRatingSource({ rows: 25, counts: [25, 26] });
+  await assert.rejects(() => fetchCompleteSafetyRatings(client, 10), /changed during the pull/);
 });
 
 test('safety rating codes and compact dates map fail-closed', () => {
