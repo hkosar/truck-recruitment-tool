@@ -231,8 +231,9 @@ through this function (§6 G1).
      `revoked_at is null`, `issued_at > now() - interval '15 minutes'`, and the profile is active
      with no open email job. On success it sets `claimed_at` and inserts
      `internal.valid_sessions(session_id, user_id, created_at, last_active_at)`;
-  4. if the claim fails → `auth.admin.signOut(access_token)` [docs: takes the user's JWT] to end
-     that Supabase session, and return the generic message. If it succeeds → return the session
+  4. if the claim fails → `auth.admin.signOut(access_token, 'local')` [docs: takes the user's
+     JWT and a scope] to end **only that** Supabase session — the default scope is `global`
+     [docs signOut], which would also end the person's other, valid sessions — and return the generic message. If it succeeds → return the session
      tokens in the response body; the page calls `supabase.auth.setSession(...)` and loads the
      Dashboard. Tokens and the link are never logged.
 - The roster routines lock the same profile row, so a claim and a roster change cannot
@@ -494,6 +495,9 @@ decision owned by WP-AUTH-1 and called out in its report.
     the new link works;
   - a link whose issuance belongs to a different user, a claimed issuance reused, an issuance
     older than 15 minutes → refused;
+  - **rejected confirmation leaves other sessions alone:** the person is signed in and valid in
+    browser A; a confirmation in browser B is refused → only B's new Supabase session is ended
+    (`'local'` scope); A's session still returns data;
   - claim and roster change racing on two connections → exactly one of "claimed then session
     deleted" or "revoked then claim refused"; never a surviving session;
   - revoked session, signed-out session, password sign-in session, a session from Supabase's
@@ -515,7 +519,8 @@ decision owned by WP-AUTH-1 and called out in its report.
 ### 7.2 Staging (owner-approved live step, fictional data)
 
 1. Owner completes §9 Part A and Part B on **staging only**.
-2. Operator deploys the migration and the three functions (each owner-approved).
+2. Operator deploys the migration and the four functions — `request-sign-in`,
+   `confirm-sign-in`, `team-admin`, `send-auth-email` (each owner-approved).
 3. Automated: seed fictional users; bound test links via the staging-only path (§4.4); run the
    role matrix, the release-gate tests, and the email-change / revocation scenarios with two
    browsers.
