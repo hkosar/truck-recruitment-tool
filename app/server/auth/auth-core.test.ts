@@ -14,7 +14,7 @@ import { checkOrigin, issueCsrf, verifyCsrf } from './csrf';
 import { EDITOR, isActiveStaff, isSyntacticallyValidEmail, MANAGER, maskEmail, normalizeEmail, roleAllowed, STAFF, type UserRole, type UserStatus } from './identity';
 import { constantTimeEqual, hmacWithKey, randomSecret } from './keys';
 import { decideMint, nextSendStatus, type SendStatus } from './ladder';
-import { admitRequest, bucketWindowStart, canonicalizeIp } from './rate';
+import { admitRequest, bucketWindowStart, canonicalizeIp, ipBucketKey, UNKNOWN_IP_SENTINEL } from './rate';
 
 const KEY = Buffer.alloc(32, 7).toString('base64url');
 const ORIGIN = 'https://recruiter.example.test';
@@ -141,11 +141,20 @@ describe('rate limits', () => {
     expect(canonicalizeIp('')).toEqual({ ok: false, reason: 'empty' });
   });
   it('admission: 20/IP and 10/address per window; invalid address never admitted', () => {
-    expect(admitRequest({ ipKnown: true, emailValid: true, ipCount: 20, emailCount: 10 })).toBe(true);
-    expect(admitRequest({ ipKnown: true, emailValid: true, ipCount: 21, emailCount: 1 })).toBe(false);
-    expect(admitRequest({ ipKnown: true, emailValid: true, ipCount: 1, emailCount: 11 })).toBe(false);
-    expect(admitRequest({ ipKnown: false, emailValid: true, ipCount: 999, emailCount: 1 })).toBe(true);
-    expect(admitRequest({ ipKnown: true, emailValid: false, ipCount: 1, emailCount: 1 })).toBe(false);
+    expect(admitRequest({ emailValid: true, ipCount: 20, emailCount: 10 })).toBe(true);
+    expect(admitRequest({ emailValid: true, ipCount: 21, emailCount: 1 })).toBe(false);
+    expect(admitRequest({ emailValid: true, ipCount: 1, emailCount: 11 })).toBe(false);
+    expect(admitRequest({ emailValid: false, ipCount: 1, emailCount: 1 })).toBe(false);
+  });
+  it('an unknown IP never bypasses the IP ceiling: all unknown-IP requests share one bucket', () => {
+    expect(ipBucketKey(undefined)).toEqual({ key: UNKNOWN_IP_SENTINEL, known: false });
+    expect(ipBucketKey('garbage')).toEqual({ key: UNKNOWN_IP_SENTINEL, known: false });
+    expect(ipBucketKey('fe80::1%eth0')).toEqual({ key: UNKNOWN_IP_SENTINEL, known: false });
+    expect(ipBucketKey(' ::ffff:10.1.2.3 ')).toEqual({ key: '10.1.2.3', known: true });
+    // 21 requests for 21 different addresses through the shared unknown-IP bucket: the 21st is refused.
+    const decisions = Array.from({ length: 21 }, (_, i) => admitRequest({ emailValid: true, ipCount: i + 1, emailCount: 1 }));
+    expect(decisions.filter(Boolean)).toHaveLength(20);
+    expect(decisions[20]).toBe(false);
   });
   it('fixed 15-minute windows', () => {
     const t = Date.UTC(2026, 0, 1, 10, 14, 59);

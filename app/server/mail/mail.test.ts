@@ -1,9 +1,9 @@
 import { generateKeyPairSync, sign } from 'node:crypto';
 import { describe, expect, it } from 'vitest';
-import { sendStatusFor } from './adapter';
+import { operatorAlertFor, sendStatusFor } from './adapter';
 import { FakeMailAdapter } from './fake';
 import { buildSignInRequest, classifyNetworkError, classifySendGridResponse, SendGridAdapter, type FetchLike } from './sendgrid';
-import { blocksAddress, correlates, evidenceFor, mapEventType, parseEvents, verifySendGridSignature } from './webhook';
+import { blockReasonFor, blocksAddress, correlates, evidenceFor, mapEventType, messageIdCheck, parseEvents, verifySendGridSignature } from './webhook';
 
 const headers = (h: Record<string, string>) => ({ get: (n: string) => h[n.toLowerCase()] ?? null });
 const LINK_ID = '11111111-2222-4333-8444-555555555555';
@@ -23,12 +23,17 @@ describe('SendGrid send', () => {
     expect(classifySendGridResponse(503, headers({}))).toMatchObject({ outcomeClass: 'unknown_outcome', errorCode: 'provider_server_error' });
   });
 
-  it('maps outcomes to link status: uncertain stays unknown (never replayed)', () => {
+  it('maps outcomes as Quote-Queue does: only a recipient refusal is a definite failure', () => {
     expect(sendStatusFor({ outcomeClass: 'accepted' })).toBe('accepted');
-    expect(sendStatusFor({ outcomeClass: 'unknown_outcome' })).toBe('unknown');
-    for (const c of ['rate_limited', 'configuration_permanent', 'recipient_permanent', 'pre_transmission'] as const) {
-      expect(sendStatusFor({ outcomeClass: c })).toBe('definite_failure');
+    expect(sendStatusFor({ outcomeClass: 'recipient_permanent' })).toBe('definite_failure');
+    // Provider-side problems unlock nothing (not definite) and raise an operator alert.
+    for (const c of ['rate_limited', 'configuration_permanent', 'pre_transmission', 'unknown_outcome'] as const) {
+      expect(sendStatusFor({ outcomeClass: c })).toBe('unknown');
     }
+    expect(operatorAlertFor({ outcomeClass: 'rate_limited' })).toBe('provider_rate_limited');
+    expect(operatorAlertFor({ outcomeClass: 'configuration_permanent' })).toBe('provider_configuration');
+    expect(operatorAlertFor({ outcomeClass: 'pre_transmission' })).toBe('provider_unreachable');
+    expect(operatorAlertFor({ outcomeClass: 'unknown_outcome' })).toBeUndefined();
   });
 
   it('timeouts are unknown; pre-transmission failures are definite', () => {
@@ -81,8 +86,29 @@ describe('SendGrid webhook', () => {
     expect(evidenceFor('sent')).toEqual({ status: 'accepted', delivered: false });
     expect(evidenceFor('delivery_delayed')).toEqual({ status: 'unknown', delivered: false });
     expect(evidenceFor('failed').status).toBe('definite_failure');
-    expect(blocksAddress('bounced')).toBe(true);
-    expect(blocksAddress('failed')).toBe(false);
+    expect(blocksAddress('bounced', undefined)).toBe(true);
+    expect(blocksAddress('complained', undefined)).toBe(true);
+    expect(blocksAddress('delivery_delayed', undefined)).toBe(false);
+  });
+  it('a drop blocks the recipient only for recipient-specific reasons; quota or config never does', () => {
+    for (const r of ['Bounced Address', 'Unsubscribed Address', 'Spam Reporting Address', 'Invalid Address']) expect(blocksAddress('failed', r)).toBe(true);
+    for (const r of [undefined, 'Invalid', 'Spam Content', 'Exceeded Quota', 'Invalid SMTPAPI header', 'Unknown reason']) expect(blocksAddress('failed', r)).toBe(false);
+    // The send itself still failed definitely, whoever's fault the drop was.
+    expect(evidenceFor('failed').status).toBe('definite_failure');
+    expect(blockReasonFor('failed', 'Invalid Address')).toBe('invalid');
+    expect(blockReasonFor('failed', 'Unsubscribed Address')).toBe('rejected');
+  });
+  it('message ids: first fills, same matches, different conflicts, missing neither', () => {
+    expect(messageIdCheck(undefined, 'm1')).toBe('fill');
+    expect(messageIdCheck('m1', 'm1')).toBe('match');
+    expect(messageIdCheck('m1', 'm2')).toBe('mismatch');
+    expect(messageIdCheck('m1', undefined)).toBe('absent');
+  });
+  it('keeps the drop reason and message id from the event', () => {
+    const parsed = parseEvents(Buffer.from(JSON.stringify([
+      { email: 'a@b.co', event: 'dropped', reason: 'Bounced Address', sg_message_id: 'msg.1', sg_event_id: 'e9', timestamp: 1, tr_source: 'auth', tr_local_id: LINK_ID },
+    ])));
+    expect(parsed![0]).toMatchObject({ mapped: 'failed', reason: 'Bounced Address', messageId: 'msg.1' });
   });
   it('parses only our correlated sign-in events and checks the recipient', () => {
     const parsed = parseEvents(Buffer.from(JSON.stringify([

@@ -8,9 +8,9 @@ import type { SendStatus } from '../auth/ladder';
 
 export type OutcomeClass =
   | 'accepted'
-  | 'rate_limited' // 429: the provider definitively did not accept the message
+  | 'rate_limited' // 429: provider-side throttling
   | 'configuration_permanent' // 400/401/403: our key, sender or request is wrong
-  | 'recipient_permanent'
+  | 'recipient_permanent' // the provider definitively refused THIS recipient
   | 'pre_transmission' // connection failed before any byte was sent
   | 'unknown_outcome'; // 5xx, timeout, network error after transmission, 2xx without id
 
@@ -34,20 +34,38 @@ export interface MailAdapter {
 }
 
 /**
- * Link status for an outcome. Nothing was sent for rate_limited, configuration_permanent and
- * pre_transmission, so they are definite failures: the person may retry at once (minute
- * ceiling and courtesy bypassed; hour/day ceilings still apply). Uncertain → unknown.
+ * Link status for an outcome, as Quote-Queue records it (request route :437-444): only a
+ * recipient-specific refusal is a definite failure (which unlocks the immediate retry).
+ * Provider throttling (429), our own configuration faults (400/401/403) and pre-send
+ * connection failures are provider-side problems, distinct from a recipient failure
+ * (directive: "provider blocked/delayed is distinct from definite failure"). They are recorded
+ * as `unknown`, unlock nothing, never block the recipient, and raise an operator alert
+ * (operatorAlertFor). Manager decision 2026-10-21; an earlier departure was reverted.
  */
 export function sendStatusFor(outcome: SendOutcome): SendStatus {
   switch (outcome.outcomeClass) {
     case 'accepted':
       return 'accepted';
+    case 'recipient_permanent':
+      return 'definite_failure';
     case 'rate_limited':
     case 'configuration_permanent':
-    case 'recipient_permanent':
     case 'pre_transmission':
-      return 'definite_failure';
     case 'unknown_outcome':
       return 'unknown';
+  }
+}
+
+/** Provider-side failures that operators must see (value-free category names only). */
+export function operatorAlertFor(outcome: SendOutcome): 'provider_rate_limited' | 'provider_configuration' | 'provider_unreachable' | undefined {
+  switch (outcome.outcomeClass) {
+    case 'rate_limited':
+      return 'provider_rate_limited';
+    case 'configuration_permanent':
+      return 'provider_configuration';
+    case 'pre_transmission':
+      return 'provider_unreachable';
+    default:
+      return undefined;
   }
 }

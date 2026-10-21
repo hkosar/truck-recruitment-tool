@@ -4,6 +4,8 @@
 // X-Forwarded-For hop (lib/request-ip.ts:44), which is only correct for its exact proxy chain.
 // This app uses the same extraction only as a placeholder until hosted test T-IP passes for
 // this service's chain. Until then the 20/IP limit is not counted as protection.
+// When no usable IP is found, the caller uses the ONE shared unknown-IP bucket
+// (auth/rate.ts ipBucketKey), so a missing header never bypasses the IP ceiling.
 
 export interface ClientIpOptions {
   /** How many trusted proxy hops append to X-Forwarded-For (1 = take the last entry). */

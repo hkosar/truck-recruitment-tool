@@ -1,8 +1,10 @@
 // Deliberate-use rules for session renewal (doc 14 §3.5, coordinator item 3).
 //
 // Renewal happens only for: a top-level document navigation that is not a prefetch; a
-// submitted mutation; or the SPA activity ping, which must pass session + strict Origin +
-// CSRF checks (done by the route) and this module's throttle. Background reads never renew.
+// write operation on the explicit allowlist below (never "any POST": read-only RPCs and the
+// DNC lookup are POSTs too, and background queries must not renew); or the SPA activity ping,
+// which must pass session + strict Origin + CSRF checks (done by the route) and this module's
+// throttle. Background reads never renew, for either session kind.
 
 export type SessionKind = 'link' | 'recovery';
 
@@ -30,6 +32,38 @@ export function isDeliberateNavigation(method: string, headers: HeaderBag): bool
     headers.get('sec-fetch-dest') === 'document' &&
     !isPrefetch(headers)
   );
+}
+
+/** RPCs that write (doc 15 §14.1 M7, M10–M12). Every other allow-listed RPC is a read. */
+export const WRITE_RPCS: ReadonlySet<string> = new Set(['create_batch', 'refresh_batch', 'bulk_set_status', 'set_do_not_contact', 'log_export']);
+
+/** Write routes that count as deliberate use (method + exact path pattern). */
+const WRITE_ROUTES: ReadonlyArray<{ method: 'POST'; path: RegExp }> = [
+  { method: 'POST', path: /^\/api\/batch-carriers\/status$/ },
+  { method: 'POST', path: /^\/api\/batch-carriers\/promote$/ },
+  { method: 'POST', path: /^\/api\/batches\/[0-9a-f-]{36}\/comments$/ },
+  { method: 'POST', path: /^\/api\/contact-logs$/ },
+  { method: 'POST', path: /^\/api\/team\/(edit|deactivate|reactivate|block-clear|recovery-revoke)$/ },
+  { method: 'POST', path: /^\/api\/recovery\/batch-carriers\/status$/ },
+  { method: 'POST', path: /^\/api\/recovery-codes$/ },
+];
+
+export const ACTIVITY_PING_PATH = '/api/session/activity';
+
+export type RenewalReason = 'navigation' | 'write' | 'ping' | 'none';
+
+/**
+ * Whether this request may renew the session (the ping is further throttled by PingThrottle;
+ * the database renewal is throttled again). Same rule for link and recovery sessions; the
+ * recovery matrix decides separately whether a recovery session may call the route at all.
+ */
+export function renewalReason(method: string, path: string, headers: HeaderBag): RenewalReason {
+  if (isDeliberateNavigation(method, headers)) return 'navigation';
+  if (method !== 'POST' || isPrefetch(headers)) return 'none';
+  if (path === ACTIVITY_PING_PATH) return 'ping';
+  const rpc = /^\/api\/rpc\/([a-z_]+)$/.exec(path);
+  if (rpc) return WRITE_RPCS.has(rpc[1]) ? 'write' : 'none';
+  return WRITE_ROUTES.some((r) => r.method === method && r.path.test(path)) ? 'write' : 'none';
 }
 
 /** New expiry after a renewal; never past the absolute cap. */

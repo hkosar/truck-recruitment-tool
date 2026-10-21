@@ -1,6 +1,6 @@
 import { Readable } from 'node:stream';
 import { describe, expect, it } from 'vitest';
-import { isDeliberateNavigation, PingThrottle, renewedExpiry, SESSION_WINDOWS } from './activity';
+import { isDeliberateNavigation, PingThrottle, renewalReason, renewedExpiry, SESSION_WINDOWS, WRITE_RPCS } from './activity';
 import { BODY_LIMITS, readBodyLimited, type BodySource } from './body';
 import { readFormFields } from './form';
 import { getClientIp } from './ip';
@@ -15,17 +15,23 @@ describe('readBodyLimited (T-BODY, unit level)', () => {
 
   it('rejects an oversized chunked body (no Content-Length) while streaming', async () => {
     let produced = 0;
-    let destroyed = false;
+    let returned = false;
     async function* endless() {
-      for (;;) {
-        produced += 1;
-        yield Buffer.alloc(8 * 1024, 120);
+      try {
+        for (;;) {
+          produced += 1;
+          yield Buffer.alloc(8 * 1024, 120);
+        }
+      } finally {
+        returned = true;
       }
     }
-    const source: BodySource = Object.assign(endless(), { destroy: () => { destroyed = true; } });
+    const source: BodySource = endless();
     const result = await readBodyLimited(source, { maxBytes: BODY_LIMITS.auth });
     expect(result).toEqual({ ok: false, reason: 'too_large' });
-    expect(destroyed).toBe(true);
+    // The reader stops pulling but never closes the source: on a real request that would
+    // destroy the socket before the handler can send its bounded response.
+    expect(returned).toBe(false);
     // Stops at the first chunk that crosses 32 KiB: 5 chunks of 8 KiB, never more.
     expect(produced).toBe(5);
   });
@@ -80,6 +86,34 @@ describe('getClientIp (placeholder until hosted T-IP)', () => {
     expect(getClientIp(headers({ 'x-forwarded-for': '203.0.113.9' }), { trustedHops: 2 })).toBeUndefined();
     expect(getClientIp(headers({ 'x-real-ip': ' 192.0.2.1 ' }))).toBe('192.0.2.1');
     expect(getClientIp(headers({}))).toBeUndefined();
+  });
+});
+
+describe('renewal allowlist (never "any POST")', () => {
+  const none = headers({});
+  it('read-only RPC POSTs and the DNC lookup never renew', () => {
+    for (const rpc of ['search_carriers', 'count_carriers', 'facet_other_values', 'facet_suggested_keywords', 'facet_cargo_flags',
+      'batch_members', 'batch_members_map', 'search_carriers_map', 'generate_contact_sheet', 'batch_status_counts', 'dashboard_totals', 'is_contactable']) {
+      expect(renewalReason('POST', `/api/rpc/${rpc}`, none)).toBe('none');
+    }
+    expect(renewalReason('POST', '/api/dnc/lookup', none)).toBe('none');
+    expect(renewalReason('POST', '/api/rpc/unknown_thing', none)).toBe('none');
+  });
+  it('background GET reads never renew, for link or recovery sessions alike', () => {
+    for (const path of ['/api/session', '/api/dashboard', '/api/carriers/1/profile', '/api/recovery/batches']) {
+      expect(renewalReason('GET', path, headers({ 'sec-fetch-mode': 'cors', 'sec-fetch-dest': 'empty' }))).toBe('none');
+    }
+  });
+  it('allow-listed writes, the ping and real navigations renew', () => {
+    for (const rpc of WRITE_RPCS) expect(renewalReason('POST', `/api/rpc/${rpc}`, none)).toBe('write');
+    expect(renewalReason('POST', '/api/batch-carriers/status', none)).toBe('write');
+    expect(renewalReason('POST', '/api/contact-logs', none)).toBe('write');
+    expect(renewalReason('POST', '/api/recovery/batch-carriers/status', none)).toBe('write');
+    expect(renewalReason('POST', '/api/session/activity', none)).toBe('ping');
+    expect(renewalReason('GET', '/batches/1', headers({ 'sec-fetch-mode': 'navigate', 'sec-fetch-dest': 'document' }))).toBe('navigation');
+  });
+  it('a prefetch never renews, even of a write path', () => {
+    expect(renewalReason('POST', '/api/session/activity', headers({ 'sec-purpose': 'prefetch' }))).toBe('none');
   });
 });
 
