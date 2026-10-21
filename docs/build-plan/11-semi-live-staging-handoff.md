@@ -58,37 +58,56 @@ These require separately provisioned restricted credentials, production-policy d
 
 ## Reset policy
 
-The repository contains supabase/staging/reset-fictional-data.sql and scripts/verify-staging-reset.mjs.
+The repository contains supabase/staging/reset-fictional-data.sql, supabase/staging/cleanup-fixtures.sql, supabase/staging/install-staging-identity-marker.sql, the runner pipeline/src/staging-sql-runner.ts, and the offline checks scripts/verify-staging-reset.mjs and scripts/verify-staging-contract.mjs.
+
+All three SQL files run only through the staging SQL runner. Do not paste them into a SQL editor; they refuse to run without the value the runner sets. Before it opens any connection, the runner:
+
+- parses the database connection string with the same guard the pipeline uses, refusing any query parameter or fragment (these can silently redirect the database driver to another project);
+- refuses the production project outright;
+- requires exactly the staging project named in the Environment section;
+- requires port 5432 (a session connection), so its settings stay on one database session;
+- requires the action's confirmation phrase typed on the command line;
+- without --execute, only prints that the target was verified, and never prints the connection string, password, or host.
 
 The reset:
 
-- requires the staging identity marker (below) inside the database it is connected to, so it is bound to the actual database rather than to text the operator types;
-- also requires the exact staging ref yhyoxhtguyturgdhwywc and the confirmation phrase RESET FICTIONAL TNBS RECRUITER DATA as additional checks;
-- refuses before deleting anything if the database holds a profile other than the seven fixture identities and Hunter's staging login, or a carrier outside the fictional DOT ranges (1200000-1307999 and 1400001-1400099);
-- contains no production ref;
+- requires the runner-verified staging project and the staging identity marker in the connected database, naming that same project;
+- also requires the staging ref setting and the confirmation phrase RESET FICTIONAL TNBS RECRUITER DATA (both supplied by the runner);
+- refuses before deleting anything if any carrier, cargo value, or batch is not fixture-owned, or if any profile is neither a fixture identity nor Hunter's staging login;
+- deletes only rows registered as fixture-owned (plus batches built entirely from registered carriers, such as a batch created during a review session), and then registers every row it recreates;
+- leaves pipeline and reference tables (pipeline runs, data-quality reports, centroids) untouched;
 - preserves auth.users and public.profiles, including Hunter's staging login;
-- deletes only staging application and pipeline data;
-- restarts ID sequences inside the same transaction, so a failed reset leaves both rows and sequences exactly as they were;
+- restarts ID sequences only for tables it emptied, inside the same transaction, so a failed reset leaves both rows and sequences exactly as they were;
+- writes historical fixture contacts before re-applying global do-not-contact, so the contact-log DNC guard stays enabled;
 - restores the deterministic 800-carrier, two-batch fictional baseline in one transaction;
 - rolls back unless identity, carrier, batch, cross-batch, DNC, and warning assertions pass.
 
-supabase/staging/cleanup-fixtures.sql (removes the seven fixture identities) has the same marker gate, its own confirmation phrase CLEAN UP TNBS RECRUITER FIXTURES, the same refusal of non-fictional data, and deletes only fictional carrier rows and batches owned by fixture identities or Hunter's staging login.
+The fixture cleanup (removes the seven fixture identities) has the same runner and marker gates and its own confirmation phrase CLEAN UP TNBS RECRUITER FIXTURES. It deletes only registered fixture rows and the fixture identities (recognised by their explicit test metadata). It clears approval references to those identities under a service-role claim limited to that one statement, and it refuses if any other row still references a fixture identity.
 
-The reset is an operator-run maintenance action, not a browser button. That avoids exposing a destructive database-wide action to ordinary application sessions. Run it only through an authenticated staging maintenance channel after independently confirming the selected project is truck-recruitment-tool-staging.
+The reset is an operator-run maintenance action, not a browser button. That avoids exposing a destructive database-wide action to ordinary application sessions.
+
+### What "fixture-owned" means
+
+The staging-only table staging_identity.fixture_rows lists, by key, every carrier, batch, and cargo value the fixture set owns. The reset adds its own rows to it. When the marker is first installed, everything already in the staging database is adopted into that list once, which is safe only because the runner has verified the connection is the staging project, whose contents are fictional by policy.
 
 ### One-time step before the new reset or cleanup will run
 
 The staging identity marker is a one-row table, staging_identity.marker, that exists only in the staging database. It is not a migration and must never be created in production. Until it exists, the reset and cleanup refuse to run. An approved operator does this once:
 
 1. Get Hunter's approval for this staging change in chat.
-2. Open the Supabase dashboard and select the project named truck-recruitment-tool-staging. Confirm the name and the ref shown in Project Settings match the Environment section above.
-3. Open the SQL editor in that project.
-4. Paste and run, in one run: `select set_config('app.staging_marker_install_confirmation', 'INSTALL TNBS STAGING IDENTITY MARKER', true);` followed by the full contents of supabase/staging/install-staging-identity-marker.sql.
-5. Expect success. The installer refuses if the marker already exists, or if the database does not match the fictional fixture set (exactly seven fixture profiles, no other profile except Hunter's staging login, no carrier outside the fictional DOT ranges). If it refuses, stop and report the message; do not edit the file to force it.
+2. On the operator's own machine, in the repository, run `npm ci` in the pipeline folder.
+3. Put the staging database connection string (session pooler, port 5432, no `?` options) in the environment variable STAGING_DB_URL in that terminal only. Do not save it in a file in the repository.
+4. Dry run first. Nothing connects:
+   `npm --prefix pipeline run staging:sql -- --action=install-marker --confirm="INSTALL TNBS STAGING IDENTITY MARKER"`
+   Expect a line containing staging-sql.verified and then staging-sql.plan_only. If it prints staging-sql.refused instead, stop and report the message.
+5. Run it for real by adding --execute to the same command.
+6. Expect staging-sql.done. The installer refuses if the marker already exists or if any profile is neither a fixture identity nor Hunter's staging login. If it refuses, stop and report the message; do not edit the file to force it.
 
 ### Running the reset afterwards
 
-In the staging SQL editor, in one run: set `app.staging_project_ref` to the staging ref and `app.staging_reset_confirmation` to RESET FICTIONAL TNBS RECRUITER DATA with `set_config(..., true)`, then the full contents of supabase/staging/reset-fictional-data.sql. A refusal message names the gate that failed; nothing has been changed when it refuses.
+Same terminal setup, then:
+`npm --prefix pipeline run staging:sql -- --action=reset --confirm="RESET FICTIONAL TNBS RECRUITER DATA" --execute`
+A refusal message names the gate that failed; nothing has been changed when it refuses.
 
 ## Acceptance evidence
 
