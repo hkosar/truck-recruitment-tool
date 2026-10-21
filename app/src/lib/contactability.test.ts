@@ -44,3 +44,13 @@ describe('dncQueryKey', () => {
     expect(dncQueryKey('b1', [1])).not.toEqual(dncQueryKey('b2', [1]));
   });
 });
+
+import { outreachAllowed } from './contactability';
+
+describe('outreachAllowed', () => {
+  it('rejects outreach unless the lookup is ready', () => {
+    expect(outreachAllowed('ready')).toBe(true);
+    expect(outreachAllowed('pending')).toBe(false);
+    expect(outreachAllowed('failed')).toBe(false);
+  });
+});

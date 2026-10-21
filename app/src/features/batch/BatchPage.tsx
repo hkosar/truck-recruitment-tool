@@ -4,7 +4,7 @@ import { Link, useParams, useSearchParams } from 'react-router-dom';
 import { usePermissions, useSession } from '../../app/guards';
 import { LogContactPanel } from '../../components/LogContactPanel';
 import type { ContactLogInput } from '../../components/LogContactPanel';
-import { DNC_BLOCKED_MESSAGE, dncLookupStatus, dncQueryKey } from '../../lib/contactability';
+import { DNC_BLOCKED_MESSAGE, dncLookupStatus, dncQueryKey, outreachAllowed } from '../../lib/contactability';
 import { loadGlobalDncDots } from '../../lib/dnc';
 import { fmtInt, fmtPhone, fmtRel } from '../../lib/format';
 import { queryKeys } from '../../lib/queryKeys';
@@ -71,6 +71,8 @@ export default function BatchPage() {
   });
   const pageDots = membersQuery.data?.rows.map((row) => row.dot_number) ?? [];
   const dncQuery = useQuery({ queryKey: dncQueryKey(batchId || '', pageDots), queryFn: () => loadGlobalDncDots(pageDots), enabled: Boolean(batchId) && pageDots.length > 0 });
+  const dncStatus = dncLookupStatus(pageDots.length, { isError: dncQuery.isError, hasData: dncQuery.data !== undefined });
+  const outreachLocked = !outreachAllowed(dncStatus);
   const activityQuery = useQuery({
     queryKey: queryKeys.batchActivity(batchId || ''),
     queryFn: async () => {
@@ -95,6 +97,7 @@ export default function BatchPage() {
   const contactMutation = useMutation({
     mutationFn: async (input: ContactLogInput) => {
       if (!userId || !loggingCarrier) throw new Error('Choose a carrier while signed in.');
+      if (outreachLocked) throw new Error('The do-not-contact check is not complete. Outreach is disabled until it succeeds.');
       // Re-check at submission: the panel may have been open while DNC was set elsewhere.
       if ((await loadGlobalDncDots([loggingCarrier.dot_number])).has(loggingCarrier.dot_number)) throw new Error(DNC_BLOCKED_MESSAGE);
       const { error } = await supabase.from('contact_logs').insert({
@@ -138,8 +141,6 @@ export default function BatchPage() {
   const batch = batchQuery.data;
   const counts = countsQuery.data;
   const members = membersQuery.data;
-  const dncStatus = dncLookupStatus(pageDots.length, { isError: dncQuery.isError, hasData: dncQuery.data !== undefined });
-  const outreachLocked = dncStatus !== 'ready';
   const dncDots = dncQuery.data ?? new Set<number>();
   const rows = members.rows.map((row) => (row.do_not_contact || !dncDots.has(row.dot_number) ? row : { ...row, do_not_contact: true }));
   const totalPages = Math.max(1, Math.ceil(members.total / 50));
@@ -150,7 +151,7 @@ export default function BatchPage() {
       {dncStatus === 'failed' ? <div role="alert" className="border border-crit bg-crit-tint px-4 py-3 text-sm font-bold text-crit">Could not check the do-not-contact list, so outreach and status changes are disabled. <button type="button" onClick={() => void dncQuery.refetch()} className="underline">Retry</button></div> : null}
       {dncStatus === 'pending' ? <div className="border border-info bg-info-tint px-4 py-3 text-xs text-info">Checking the do-not-contact list…</div> : null}
       {message ? <div className="border border-info bg-info-tint px-4 py-3 text-sm text-info">{message}</div> : null}
-      {loggingCarrier && !rows.some((row) => row.dot_number === loggingCarrier.dot_number && row.do_not_contact) ? <LogContactPanel carrierName={loggingCarrier.legal_name} submitting={contactMutation.isPending} onCancel={() => setLoggingCarrier(null)} onSubmit={(input) => contactMutation.mutate(input)} /> : null}
+      {loggingCarrier && !outreachLocked && !rows.some((row) => row.dot_number === loggingCarrier.dot_number && row.do_not_contact) ? <LogContactPanel carrierName={loggingCarrier.legal_name} submitting={contactMutation.isPending} onCancel={() => setLoggingCarrier(null)} onSubmit={(input) => contactMutation.mutate(input)} /> : null}
       <header className="flex flex-wrap items-start justify-between gap-4"><div><h1 className="text-xl font-extrabold tracking-[-0.02em]">{batch.name}</h1><div className="mt-1 text-xs text-text-muted">{batch.customer || 'No customer'}{batch.job ? ` · ${batch.job}` : ''}</div><div className="mt-2 flex flex-wrap gap-1.5">{batch.batch_zones.map((zone, index) => <span key={zone.id} className="border border-border bg-surface px-2 py-1 text-[10px] font-bold text-text-muted">{String.fromCharCode(65 + index)} · {zone.label}</span>)}</div></div>{canEdit ? <button type="button" disabled={refreshMutation.isPending} onClick={() => refreshMutation.mutate()} className="bg-accent px-4 py-2.5 text-xs font-bold text-accent-ink disabled:opacity-50">{refreshMutation.isPending ? 'Refreshing…' : 'Refresh batch'}</button> : null}</header>
 
       <section className="grid border border-border bg-surface sm:grid-cols-3 lg:grid-cols-6">{[['Carriers', total], ['With phone', counts.with_phone], ['With email', counts.with_email], ['Interested', counts.interested_count], ['Warnings', counts.warnings_count], ['DNC', counts.dnc_count]].map(([label, value], index) => <div key={String(label)} className={`px-4 py-3 text-center ${index ? 'border-l border-border' : ''}`}><div className="text-[10px] font-extrabold uppercase tracking-[0.08em] text-text-subtle">{label}</div><div className={`mt-1 text-xl font-extrabold tabular-nums ${label === 'Warnings' || label === 'DNC' ? 'text-crit' : ''}`}>{fmtInt(Number(value))}</div></div>)}</section>

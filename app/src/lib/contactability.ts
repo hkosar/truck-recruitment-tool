@@ -33,3 +33,8 @@ export function dncLookupStatus(dotCount: number, query: { isError: boolean; has
 export function dncQueryKey(batchId: string, dots: readonly number[]) {
   return ['batch', batchId, 'global-dnc', [...dots].sort((a, b) => a - b).join(',')] as const;
 }
+
+/** Outreach may be opened or submitted only once the DNC lookup has answered. */
+export function outreachAllowed(status: DncLookupStatus): boolean {
+  return status === 'ready';
+}
