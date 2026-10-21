@@ -8,6 +8,7 @@
 --   20260722223300_security_hardening
 --   20260723004500_profile_service_bootstrap
 --   20260723010400_dnc_activity_enum_cast
+--   20260723020000_contact_logs_dnc_guard
 -- They remain ordinary unapplied migrations and require their own reviewed,
 -- staging-proven production application after this ledger repair.
 --
@@ -19,7 +20,7 @@
 --      20260722042539_geocode_attempt_queue;
 --   4. a current backup is visible and the recovery path is accepted;
 --   5. repository checksums match docs/build-plan/migration-checksums.sha256;
---   6. the three post-geocode migrations listed above are absent from the live
+--   6. the four post-geocode migrations listed above are absent from the live
 --      ledger and their effects are absent from production;
 --   7. the latest Pro daily backup is visible and a restore-to-new-project
 --      rehearsal has passed under 11-recovery-rehearsal-runbook.md.
@@ -54,7 +55,7 @@ begin
   if exists (
     select 1
     from supabase_migrations.schema_migrations
-    where version in ('20260722223300', '20260723004500', '20260723010400')
+    where version in ('20260722223300', '20260723004500', '20260723010400', '20260723020000')
   ) then
     raise exception 'Post-geocode migration precondition failed: a later migration is already registered';
   end if;

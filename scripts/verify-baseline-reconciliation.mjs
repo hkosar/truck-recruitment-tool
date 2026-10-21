@@ -32,6 +32,7 @@ const postGeocode = [
   '20260722223300_security_hardening',
   '20260723004500_profile_service_bootstrap',
   '20260723010400_dnc_activity_enum_cast',
+  '20260723020000_contact_logs_dnc_guard',
 ];
 const failures = [];
 
@@ -57,4 +58,4 @@ if (failures.length > 0) {
   for (const failure of failures) console.error(`FAIL ${failure}`);
   process.exit(1);
 }
-console.log('PASS production baseline proposal adopts only 15 pre-ledger rows and separates 3 unapplied migrations');
+console.log('PASS production baseline proposal adopts only 15 pre-ledger rows and separates 4 unapplied migrations');

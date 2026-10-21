@@ -12,7 +12,8 @@
     "build": "tsc --noEmit -p tsconfig.json && vite build",
     "preview": "vite preview",
     "test": "vitest run",
-    "verify": "npm run typecheck && npm run lint && npm test && npm run build",
+    "verify:assets": "node scripts/verify-assets.mjs",
+    "verify": "npm run typecheck && npm run lint && npm test && npm run verify:assets && npm run build",
     "lint": "eslint .",
     "typecheck": "tsc --noEmit -p tsconfig.json"
   },
