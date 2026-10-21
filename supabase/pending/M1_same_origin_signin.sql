@@ -167,9 +167,14 @@ create table internal.recovery_failures (
 );
 create index recovery_failures_email on internal.recovery_failures (email_hash, at);
 
+-- Events outlive their links: links age out 30 days after they end, events after 180 days.
+-- The link reference becomes null when its link is deleted; the event keeps its own snapshot
+-- of the recipient and message id, so delivery evidence is never lost early.
 create table internal.email_events (
   provider_event_id text primary key,                 -- sg_event_id: replays are no-ops
-  link_id           uuid not null references internal.signin_links(id),
+  link_id           uuid references internal.signin_links(id) on delete set null,
+  recipient_email   text not null,
+  provider_message_id text,
   event_type        text not null,
   reason_code       text check (reason_code is null or length(reason_code) <= 500),
   occurred_at       timestamptz not null,
@@ -343,7 +348,9 @@ begin
   -- Validate from the locked rows only.
   select p.role, p.status, p.email into v_role, v_status, v_email
   from public.profiles p where p.id = v_uid;
-  if v_revoked is not null or v_expires <= now() or v_absolute <= now()
+  -- clock_timestamp(), not now(): now() is frozen at transaction start, and these locks may
+  -- have waited.
+  if v_revoked is not null or v_expires <= clock_timestamp() or v_absolute <= clock_timestamp()
      or v_issued is distinct from v_email
      or v_status <> 'approved'
      or not (v_role = any(p_roles))
@@ -358,7 +365,8 @@ end
 $$;
 
 -- After any business-lock wait: the actor's session row is held FOR SHARE (so it cannot be
--- revoked meanwhile), but it can EXPIRE while we wait. Re-check it; raise if no longer valid.
+-- revoked meanwhile), but it can EXPIRE while we wait. Re-check it against the wall clock
+-- (clock_timestamp(); now() is frozen at transaction start); raise if no longer valid.
 -- Trusted callers (no lock record) are not app sessions and are not checked.
 create function internal.recheck_session() returns void
 language plpgsql
@@ -375,7 +383,7 @@ begin
   if not exists (
     select 1 from internal.app_sessions s
     where s.id = (string_to_array(v_record, '|'))[1]::uuid
-      and s.revoked_at is null and s.expires_at > now() and s.absolute_expires_at > now()
+      and s.revoked_at is null and s.expires_at > clock_timestamp() and s.absolute_expires_at > clock_timestamp()
   ) then
     raise exception 'session expired while waiting' using errcode = 'insufficient_privilege';
   end if;
@@ -1186,8 +1194,9 @@ begin
     return false;                                          -- conflicting message id: nothing updated
   end if;
 
-  insert into internal.email_events (provider_event_id, link_id, event_type, reason_code, occurred_at)
-  values (p_event_id, p_link_id, p_event_type, left(p_reason, 500), p_occurred_at)
+  insert into internal.email_events (provider_event_id, link_id, recipient_email, provider_message_id,
+                                     event_type, reason_code, occurred_at)
+  values (p_event_id, p_link_id, lower(v_recipient), p_message_id, p_event_type, left(p_reason, 500), p_occurred_at)
   on conflict (provider_event_id) do nothing;
   if not found then
     return false;                                          -- replay

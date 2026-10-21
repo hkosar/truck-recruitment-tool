@@ -1083,8 +1083,17 @@ How it stays least-privilege and isolated:
   pipeline service's configuration, approved with the rollout. Until then retention is not
   wired, and the ledgers only grow (slowly, a few rows per sign-in).
 
-Not built yet: the retention script and the pipeline hook (they need `pg` in a server context
-and the pipeline change; the pipeline already depends on `pg`).
+**Retention and the event→link foreign key.** Links age out 30 days after they end; email
+events after 180 days. `internal.email_events.link_id` is `ON DELETE SET NULL`, and each event
+keeps its own `recipient_email` and `provider_message_id` snapshot. Deleting an aged link
+therefore never fails on the foreign key and never deletes delivery evidence early; the event
+just loses its link reference (the referential action runs as the table owner, so
+`recruiter_maintenance` needs no extra grant).
+
+Built (not run, not wired): `app/server/scripts/retention.ts` (bounded batches, wall-clock
+windows, failure isolation per rule) with unit tests, and the A3 database test
+`supabase/tests/a3/retention_fk.sql`. Not built: the pipeline hook (it needs the pipeline
+change and the `MAINTENANCE_DATABASE_URL` setting, approved with the rollout).
 
 ## 24 · Review response (focused review of `2fdbe08` and early code, 2026-10-21)
 
@@ -1097,3 +1106,10 @@ and the pipeline change; the pipeline already depends on `pg`).
 | 5 | C7 wording vs sequence | Wording reconciled (identity set complete before validation; business locks after; QQ difference stated); `recheck_session()` after every business-lock wait, contract-checked | §21 item 6; M1 |
 | 6 | Manager decision: revert the 429/config/pre-send departure | Reverted to QQ: `unknown`, unlocks nothing, never blocks, operator alert; not proposed further | `app/server/mail/adapter.ts`; §22 |
 | — | Coordinator guidance | Retention as a step in the existing nightly pipeline job with its own least-privilege role (§23); architecture described as selected throughout | §23; status lines of docs 14/15 |
+
+## 25 · Review response (fix review of `bdd17b9`, 2026-10-21)
+
+| # | Finding | Change | Where |
+|---|---|---|---|
+| 1 | The expiry re-check after a lock wait used `now()` (frozen at transaction start) | `recheck_session()` and `lock_and_validate`'s validation use `clock_timestamp()`; the offline check forbids `now()` there (mutation-tested); A3 concurrency test where the session expires during a batch-lock wait | M1; `scripts/verify-auth-migration-contract.mjs`; `supabase/tests/a3/recheck_expiry_*.sql` |
+| 2 | Retention windows conflicted with the event→link foreign key | `email_events.link_id` is `ON DELETE SET NULL` with a recipient and message-id snapshot; links 30 days, events 180 days; retention script and unit tests; A3 test that deleting an aged link keeps its event | M1; `app/server/scripts/retention.ts`; `supabase/tests/a3/retention_fk.sql`; §23 |

@@ -225,6 +225,17 @@ for (const [start, lockMarker] of [
   if (lockAt < 0 || recheckAt < lockAt) fail(`M1: ${start} must re-check the session after its last business lock`);
 }
 
+// K2b. Time checks after a possible lock wait use the wall clock, never now() (frozen at
+// transaction start).
+const recheck = m1Function('function internal.recheck_session()')?.join('\n') ?? '';
+if (!recheck.includes('clock_timestamp()') || /\bnow\(\)/.test(stripComments(recheck))) fail('M1: recheck_session must use clock_timestamp(), never now()');
+const lavValidate = (m1Function('function internal.lock_and_validate(')?.join('\n') ?? '').split('-- Validate from the locked rows only.')[1] ?? '';
+if (!lavValidate.includes('clock_timestamp()') || /\bnow\(\)/.test(stripComments(lavValidate))) fail('M1: lock_and_validate validation must use clock_timestamp(), never now()');
+
+// K2c. Events outlive links: SET NULL reference plus a snapshot, so retention never fails or loses evidence.
+if (!/link_id\s+uuid references internal\.signin_links\(id\) on delete set null/.test(m1Code)) fail('M1: email_events.link_id must be ON DELETE SET NULL');
+if (!/create table internal\.email_events \([\s\S]*?recipient_email\s+text not null[\s\S]*?\);/.test(m1Code)) fail('M1: email_events must snapshot the recipient');
+
 // K3. Webhook evidence: message-id conflict rejected before any insert/update; block allowlist in SQL.
 const evidence = m1Function('function internal.auth_apply_send_evidence(')?.join('\n') ?? '';
 const eMismatch = evidence.indexOf('v_message <> p_message_id');
