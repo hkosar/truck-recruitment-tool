@@ -659,7 +659,7 @@ Deadlines are enforced on the **transaction**, not just on the JavaScript promis
     envelope). On a lost ack the code may have been consumed and a session row created, but
     that session's raw value never left the server, so nobody can use it. It expires at the
     1-hour idle limit, and the person uses another code. The audit row (written in the same
-    transaction) shows "code used, session never delivered" for managers. There are no
+    transaction) shows "code used, session delivery unconfirmed" (it is written before COMMIT, so it cannot know the outcome) for managers. There are no
     automatic retries.
   - `/auth/confirm` (link redeem): on a lost ack the link may be consumed. The page shows
     "This link was already used or has expired.", and the person requests a new link. The
