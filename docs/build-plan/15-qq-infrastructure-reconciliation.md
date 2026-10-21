@@ -1,5 +1,8 @@
 # 15 · Quote-Queue infrastructure reconciliation (sign-in)
 
+Revision 2 (2026-10-21 UTC): review edits on IP trust, shutdown contract and SendGrid
+one-shot sends (§10).
+
 Status: **proposal for the coordinator (thr_z77w8egnyw). Nothing built, deployed, installed or
 configured.** Written 2026-10-21 UTC on local branch `auth/same-origin-signin` by the sign-in
 owner (thr_pn5gr4mx94), after Hunter's clarification relayed by the coordinator: *"the process
@@ -67,7 +70,7 @@ badge.
 | Authorization | Central server code: `validateAndRenewSession` on every page/route, role from `users.role`; no RLS | [QQ] `lib/auth/session.ts:182-225`; `lib/roles.ts` (not read in full) |
 | CSRF | Origin (else Host) must match `APP_BASE_URL`; double-submit HMAC token | [QQ] `lib/csrf.ts:90-137` |
 | Client IP | Rightmost `X-Forwarded-For` hop, else `X-Real-IP` | [QQ] `lib/request-ip.ts` |
-| Mail | SendGrid `/v3/mail/send`, click/open tracking off, `custom_args` `qq_source`/`qq_local_id`, idempotency key, outcome classes; signed Event Webhook (ECDSA) at `/webhooks/sendgrid`; DB-enforced send-status lattice | [QQ] `lib/sendgrid.ts`; `app/webhooks/sendgrid/route.ts`; `db/migrations/0006…`, `0007…` |
+| Mail | SendGrid `/v3/mail/send`, click/open tracking off, `custom_args` `qq_source`/`qq_local_id`, a custom key header that is **diagnostic only** (SendGrid does not deduplicate on it, [QQ] `lib/sendgrid.ts:64`), outcome classes; signed Event Webhook (ECDSA) at `/webhooks/sendgrid`; DB-enforced send-status lattice | [QQ] `lib/sendgrid.ts`; `app/webhooks/sendgrid/route.ts`; `db/migrations/0006…`, `0007…` |
 | Post-response work | Next.js `after()` inside a route with `maxDuration = 60` | [QQ] `app/auth/request/route.ts:131-137, 612-614` |
 | Security headers | Middleware: CSP with nonce, HSTS, nosniff, Referrer-Policy, Permissions-Policy, `no-store` | [QQ] `middleware.ts:72-156` |
 | CI | GitHub Actions with a Postgres 16 service, three roles, typecheck, route check, vitest, build | [QQ] `.github/workflows/ci.yml` |
@@ -86,10 +89,10 @@ same design, a small stated change; **New** = no Quote-Queue counterpart.
 | C2 | Opaque Postgres sessions + cookie | `lib/auth/session.ts`, `lib/auth/revoke.ts`, `lib/cookies.ts` | **Reuse**, plus a `kind` column for recovery (doc 14 §3.5) | Supabase Postgres (`internal.app_sessions`) | The renewal rule is fed by navigation, mutation and an in-app activity ping, because the SPA has no full page loads between screens. Recovery sessions get their own windows |
 | C3 | Central server authorization | `validateAndRenewSession` on every request | **Adapt** | Node server + Supabase Postgres | The server validates the session exactly as QQ does, **and** passes `app.session_hash` (transaction-local) so the existing RLS/RPC rules re-check it per statement (§5 D2) |
 | C4 | CSRF, Origin, headers | `lib/csrf.ts`, `middleware.ts` | **Reuse**; strict Origin (required) for recovery and `/api/*` mutations (doc 14 finding 1); SPA mutations carry the token in a header instead of a form field | Node server | Header token for `fetch()` mutations |
-| C5 | SendGrid send | `lib/sendgrid.ts`, the canonical request in `app/auth/request/route.ts:390-430` | **Reuse** | Node server | Its own API key, restricted to Mail Send; `from` = the sender Hunter picks; `custom_args` `tr_source`/`tr_local_id` |
+| C5 | SendGrid send | `lib/sendgrid.ts`, the canonical request in `app/auth/request/route.ts:390-430` | **Reuse** | Node server | Its own API key, restricted to Mail Send; `from` = the sender Hunter picks; `custom_args` `tr_source`/`tr_local_id`. **Each sign-in send is one-shot.** The custom key header (if kept) is diagnostic only; SendGrid does not deduplicate on it. An uncertain outcome (5xx, timeout, network error after transmission) is recorded as `unknown` and is **never** replayed automatically. Only the person's own new request mints a new link and a new send, under the normal ceilings. A 429 is recorded as not sent (QQ's `retryable_rejection`) and is likewise not auto-retried in the sign-in path |
 | C6 | SendGrid signed webhook + delivery ladder | `app/webhooks/sendgrid/route.ts`, migrations 0006/0007 | **Reuse** | Node server `/webhooks/sendgrid`; lattice trigger in Supabase | A **separate** Event Webhook in the same SendGrid account, pointing at this app with its own verification key. SendGrid has supported multiple Event Webhooks per account since May 2023; the per-plan cap (`max_allowed`) is **unverified** for TNBS's plan (owner check). Events whose `tr_source` is missing are ignored |
-| C7 | Post-response work | `after()` + `maxDuration = 60` | **Adapt** | Node server process | Plain Node: write and end the response at the envelope, then run identity work in the same process, tracked in an in-flight set. On `SIGTERM` (Render sends it on deploy, then `SIGKILL` after a default 30 s, configurable up to 300 s) stop accepting work and await the in-flight set up to 25 s. Same honesty as QQ: best effort plus human retry; a lost send leaves the link `pending` |
-| C8 | Client IP | `lib/request-ip.ts` | **Reuse** (same host, so same proxy header) | Render | none |
+| C7 | Post-response work | `after()` + `maxDuration = 60` | **Adapt** (departure D7) | Node server process | Plain Node with an explicit graceful-shutdown contract (§4.1) that tracks every accepted request **and** its continuation. Same honesty as QQ: best effort plus human retry; a lost send leaves the link `pending` or `unknown` |
+| C8 | Client IP | `lib/request-ip.ts` | **Adapt after verification**: QQ's own header comment says the result depends on the specific proxy chain, including any extra CDN in front. That this app's chain matches QQ's is **unverified** | Render | Use QQ's extraction only after hosted test T-IP (§4.2) passes for this service's exact chain (custom domain, any CDN or proxy in front). Until then the 20/IP limit is **not** accepted as protection. If the chain differs, the extraction is pinned to the verified trusted hop |
 | C9 | Config validated at boot | `lib/env.ts`, `instrumentation.ts` | **Reuse** | Render env vars | Names in §6 |
 | C10 | Migrations + roles | `scripts/migrate.ts`, Pre-Deploy Command, `qq_app`/`qq_migration` | **Adapt** | Supabase Postgres | This repo already has its own migration discipline (`supabase/migrations` + pinned checksum manifest, `scripts/verify-migration-baseline.mjs`). The new runtime login role `recruiter_app` is the `qq_app` equivalent. Migrations stay operator-applied per environment, with owner approval, as today; there is **no** automatic Pre-Deploy migration until Hunter decides otherwise |
 | C11 | First-user bootstrap | `scripts/bootstrap-prod.ts` | **Not needed** | — | Existing users and roles are preserved (no new first user). If no active manager exists at cutover, that is a decision for Hunter |
@@ -145,6 +148,67 @@ Browser ──HTTPS──▶ Render web service "recruiter-web" (Node 22, plain 
   Hyperdrive); the T-HYG log gate (now for Render logs, Supabase logs and SendGrid); the probe
   matrix; recovery deny-by-default; concurrency tests.
 
+### 4.1 Graceful-shutdown contract (replaces Next.js `after()`; review edit 2)
+
+Render sends `SIGTERM` to the old instance once the new one is up, then `SIGKILL` after the
+shutdown delay (default 30 s, configurable up to 300 s; Render requires the app to implement
+graceful shutdown itself). Proposed setting: **60 s** (it matches QQ's `maxDuration = 60`), with
+the app's own drain budget **45 s**.
+
+State kept by the server:
+- `accepted`: every request the server has started handling and not yet finished (including
+  `POST /auth/request` while it waits for its 1000 ± 100 ms envelope).
+- `continuations`: every post-response task (identity work, send, outcome recording),
+  registered **before** the response is written, so no gap exists between "response sent"
+  and "continuation tracked".
+- Each continuation carries a deadline (lock ≤ 5 s, provider call ≤ 8 s, outcome write ≤ 5 s,
+  overall ≤ 25 s).
+
+On `SIGTERM`:
+1. **Stop admission:** `server.close()` stops new connections. Keep-alive sockets get
+   `Connection: close`, and any new request that still arrives gets `503` with `Retry-After`
+   (no auth work and no bucket increment).
+2. **Drain `accepted`:** each in-progress request completes normally (the envelope still
+   fires; a request already admitted still gets its continuation registered).
+3. **Drain `continuations`:** await all, bounded by the drain budget. A continuation past its
+   own deadline is aborted (`AbortController` on the provider call; the DB statement is
+   cancelled by `statement_timeout`), leaving the link `pending` (not sent) or `unknown` (sent,
+   outcome unknown). Never `accepted` without evidence.
+4. **Close the database:** `pool.end()` after both sets are empty or the budget ends, whichever
+   is first, so connections close before `SIGKILL`.
+5. Exit 0. A second `SIGTERM` or the budget running out → log the counts of abandoned tasks
+   (counts only, no identities) and exit.
+
+Tests (**T-SHUTDOWN**, local Node server under A4, replacing doc 14's Worker-specific
+T-WRANGLER text): send `SIGTERM` at each phase and assert the result.
+
+| SIGTERM arrives during | Expected |
+|---|---|
+| admission (bucket transaction open) | request completes with the generic envelope or the generic 503; the bucket is counted at most once; no orphan transaction |
+| the response envelope wait | response delivered at the envelope; continuation runs and finishes within budget |
+| the provider send (fake adapter delaying 6 s) | send completes; outcome recorded; then exit |
+| the provider send (fake adapter hanging) | aborted at 8 s; link stays `pending`/`unknown`; never auto-replayed; exit within budget |
+| outcome recording (DB lock held) | statement times out; link stays in its prior state; pool closed; exit within budget |
+| new request after SIGTERM | 503 + `Retry-After`; no DB work |
+
+Also: the pool has zero open connections at exit (checked from the test DB's
+`pg_stat_activity`), and the process exits before the configured delay.
+
+### 4.2 Client-IP trust test (T-IP; review edit 1)
+
+Hosted, on the staging web service only, under a separately approved probe run (part of A5a:
+no login, no data):
+1. Two independent clients on different networks each send requests with **forged**
+   `X-Forwarded-For` (several shapes: a single fake IP; a list; another client's real IP) and
+   `X-Real-IP` headers. A diagnostic endpoint, present on staging only and removed before
+   production, returns only the keyed **bucket hash class** (equal/not equal across requests),
+   never the IP.
+2. Pass: each client's requests map to that client's real source, whatever it forges; the
+   two clients never share a bucket; forged values never choose the bucket.
+3. Then the 21st request from one client is refused while the other client is unaffected.
+4. Repeat if the hosting chain changes (custom domain, CDN). Until T-IP passes, the per-IP
+   limit is recorded as unverified and the release gate for production includes it.
+
 ### Gap findings carried forward (not copied from Quote-Queue as-is)
 
 | Item | Quote-Queue as read | Here |
@@ -165,6 +229,7 @@ Browser ──HTTPS──▶ Render web service "recruiter-web" (Node 22, plain 
 | D3 | SPA + JSON API instead of server-rendered business pages | The app is a Vite/React SPA ([repo] `app/`) | Rewriting the screens is out of scope | The sign-in pages are server-rendered exactly like QQ. The app's mutations use a CSRF header. The activity ping counts as deliberate use | Staff: same sign-in. Security: same CSRF strength (header and Origin). Testing: route tests for the ping and no renewal on polling |
 | D4 | Existing identities have Supabase Auth accounts and `profiles.id → auth.users` | [repo] `20260720000300_profiles.sql:13` | QQ users are its own table rows | Backout window: Team "add" and email edits paused until M2 (doc 14 §5.4, §11.5) | Staff: new people can't be added until the window closes. Testing: backout rehearsal |
 | D5 | Staging host | Staging today is a Cloudflare Worker serving static files ([repo] `app/wrangler.jsonc`; doc 11) | The new server is a Node process | Proposal: a Render web service for staging too (same code path as production). The free tier is acceptable for staging only if a ~1-minute cold start is acceptable for testing, **but** it breaks the timing tests. So a paid Starter for staging during the test period, or accept untimed staging | Cost decision for Hunter |
+| D7 | Plain Node server with its own shutdown contract instead of Next.js `after()` | QQ uses Next.js `after()` + `maxDuration` ([QQ] `app/auth/request/route.ts:131-137`); this app is a Vite SPA with no Next.js | Adopting Next.js only to obtain `after()` would add a framework, a build system and a routing layer around an existing SPA. `after()` itself is "best effort, human-retried" in QQ, not a durable queue | §4.1: explicit tracking of accepted requests and continuations, stop admission, drain both, close the DB within the deadline. Fewer dependencies is **not** the justification; the justification is equivalent tested behaviour (T-SHUTDOWN) without adding a framework | Staff: none. Security: same envelope; abandoned sends stay `pending`/`unknown` and are never replayed. Testing: T-SHUTDOWN replaces QQ's "after() kill test" |
 | D6 | Recovery codes | Coordinator directive | QQ has none | Doc 14 §7, off by flag until policy D2 | None until enabled |
 
 ---
@@ -195,7 +260,10 @@ the operator out of band.
   service).
 - **Renamed:** doc 14's runtime login role `recruiter_worker` is `recruiter_app` here (the `qq_app` equivalent); its classification as an authentication authority (doc 14 §2.1, T-CRED) is unchanged.
 - **Unchanged:** behaviour contract, threat model, recovery design, probe matrix, L1, backout,
-  T-HYG, test plan IDs.
+  T-HYG and the other test IDs. **Replaced tests:** doc 14's T-WRANGLER (workerd, `waitUntil`,
+  CPU sample, `run_worker_first`) becomes **T-SHUTDOWN** (§4.1) plus a local Node run of the same
+  flows, cookie attributes and static serving (A4). The `CF-Connecting-IP` assumption (E12)
+  becomes **T-IP** (§4.2).
 - **Approvals, revised:**
   - **A2** becomes: add `pg` and `@types/pg` to a new `server/` package (or to `app/`). No
     `wrangler` and no `@cloudflare/workers-types`.
@@ -227,3 +295,11 @@ the operator out of band.
 - SendGrid multiple Event Webhooks: https://www.twilio.com/en-us/changelog/event-webhooks ;
   https://www.twilio.com/docs/sendgrid/api-reference/webhooks/get-all-event-webhooks
 - [repo] `render.yaml`, `app/wrangler.jsonc`, `docs/build-plan/04-costs.md:39`, doc 14.
+
+## 10 · Review response (Codex review of `a7bf236`, 2026-10-21)
+
+| # | Finding | Change | Sections |
+|---|---|---|---|
+| 1 | Render IP trust assumed from "same host" | Marked unverified; hosted T-IP with forged headers and two independent clients; the per-IP limit is not accepted until it passes | §3 C8, §4.2 |
+| 2 | Post-response replacement lacked a full shutdown contract | Tracks accepted requests and continuations (registered before the response); stop admission → drain both → close the pool within the deadline; T-SHUTDOWN at each phase replaces T-WRANGLER; recorded as departure D7 with its justification | §3 C7, §4.1, §5 D7, §7 |
+| 3 | "Idempotency key" overstated SendGrid protection | Sends are one-shot; the custom header is diagnostic only; uncertain outcomes are never auto-replayed | §2 Mail row, §3 C5 |
