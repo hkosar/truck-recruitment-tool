@@ -74,11 +74,19 @@ const EnvSchema = z.object({
    *  invocation can never silently target the production project. */
   PIPELINE_ENV: z.enum(['prod', 'dev']).default('dev'),
   /** Comma-separated explicit allowlist for dev/staging project refs. Required
-   * when PIPELINE_ENV=dev; production can never appear in it as a substitute. */
+   * when PIPELINE_ENV=dev; production can never appear in it as a substitute. Empty by
+   * default: no project is writable in dev mode until it is named here. */
   PIPELINE_ALLOWED_DEV_REFS: z
     .string()
-    .default('yhyoxhtguyturgdhwywc')
+    .default('')
     .transform((value) => value.split(',').map((ref) => ref.trim()).filter(Boolean)),
+  /** Explicit opt-in to write real FMCSA data into the shared staging project, whose
+   *  contents are otherwise fictional fixtures only. Even when staging is allowlisted the
+   *  target guard refuses it unless this is exactly "true". */
+  PIPELINE_ALLOW_STAGING_WRITES: z
+    .enum(['true', 'false'], { message: 'PIPELINE_ALLOW_STAGING_WRITES must be "true" or "false"' })
+    .default('false')
+    .transform((value) => value === 'true'),
 });
 
 export type Config = z.infer<typeof EnvSchema>;

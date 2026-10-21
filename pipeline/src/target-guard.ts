@@ -9,6 +9,8 @@ export interface TargetGuardInput {
   /** SUPABASE_DB_URL -- the bulk-write Postgres connection. Must resolve to the same ref. */
   supabaseDbUrl: string;
   allowedDevRefs?: readonly string[];
+  /** PIPELINE_ALLOW_STAGING_WRITES. The staging project is refused unless this is true. */
+  allowStagingWrites?: boolean;
 }
 
 export interface VerifiedTarget {
@@ -132,6 +134,11 @@ export function verifyPipelineTarget(input: TargetGuardInput): VerifiedTarget {
     }
     if (!allowed.has(projectRef)) {
       throw new Error(`Dev project ref ${projectRef} is not in PIPELINE_ALLOWED_DEV_REFS`);
+    }
+    if (projectRef === STAGING_PROJECT_REF && input.allowStagingWrites !== true) {
+      throw new Error(
+        'PIPELINE_ENV=dev refuses the shared staging project (fictional fixture data only) unless PIPELINE_ALLOW_STAGING_WRITES=true'
+      );
     }
   }
   return { projectRef, environment: input.environment };

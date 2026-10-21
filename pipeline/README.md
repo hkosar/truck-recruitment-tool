@@ -49,7 +49,8 @@ the source of truth for what's required vs optional/defaulted):
 | `ALERT_EMAIL` | no | Set together with `RESEND_API_KEY`; Render's native cron failure notification is used otherwise |
 | `CENSUS_GEOCODER_BASE_URL`, `CENSUS_GEOCODER_BENCHMARK`, `CENSUS_BATCH_MAX_RECORDS`, `CENSUS_MAX_BATCHES_PER_RUN` | no | Sensible defaults; override for local smoke tests |
 | `PIPELINE_ENV` | no | `dev` (default) / `prod` — enforces the exact project-ref target and labels logs/run metadata |
-| `PIPELINE_ALLOWED_DEV_REFS` | for dev | Comma-separated explicit dev/staging refs; defaults to the dedicated recruiter staging ref; production is always refused in dev mode |
+| `PIPELINE_ALLOWED_DEV_REFS` | for dev | Comma-separated explicit dev/staging refs; empty by default; production is always refused in dev mode |
+| `PIPELINE_ALLOW_STAGING_WRITES` | no | `false` (default) / `true` — the shared staging project (fictional fixtures only) is refused unless this is `true` and staging is also allowlisted |
 
 `QCMOBILE_WEBKEY` is deliberately **not** an env var here — per `01-architecture.md`
 reconciliation amendment #16, QCMobile per-carrier lookups are a Supabase **Edge Function**

@@ -1,6 +1,7 @@
 import { existsSync } from 'node:fs';
 import assert from 'node:assert/strict';
 import { parseArgs } from './run.js';
+import { loadConfig } from './config.js';
 import { buildSelectClause as buildInsuranceSelectClause, buildWhereClause as buildInsuranceWhereClause, buildFilingsUpsertSql } from './sources/insurance.js';
 import { buildSelectClause as buildAuthoritySelectClause, buildUpsertSql as buildAuthorityUpsertSql } from './sources/authority.js';
 import { DEFAULT_PAGE_SIZE, SocrataClient } from './socrata.js';
@@ -47,6 +48,7 @@ test('pipeline target guard requires exact production and allowlisted developmen
       supabaseUrl: `https://${RECORDED_PROJECT_REFS.staging}.supabase.co`,
       supabaseDbUrl: `postgresql://postgres.${RECORDED_PROJECT_REFS.staging}:redacted@aws-0-us-east-2.pooler.supabase.com:5432/postgres`,
       allowedDevRefs: [RECORDED_PROJECT_REFS.staging],
+      allowStagingWrites: true,
     }),
     { projectRef: RECORDED_PROJECT_REFS.staging, environment: 'dev' }
   );
@@ -73,8 +75,47 @@ test('pipeline target guard requires exact production and allowlisted developmen
       supabaseUrl: 'https://fwmsyfndwgmvmbxaagzu.supabase.co',
       supabaseDbUrl: 'postgresql://postgres.fwmsyfndwgmvmbxaagzu:redacted@aws-0-us-east-2.pooler.supabase.com:5432/postgres',
       allowedDevRefs: [RECORDED_PROJECT_REFS.staging],
+      allowStagingWrites: true,
     }),
     /not in PIPELINE_ALLOWED_DEV_REFS/
+  );
+});
+
+test('pipeline refuses to write to staging unless PIPELINE_ALLOW_STAGING_WRITES=true', () => {
+  const { staging } = RECORDED_PROJECT_REFS;
+  const baseEnv = {
+    SUPABASE_URL: `https://${staging}.supabase.co`,
+    SUPABASE_SERVICE_ROLE_KEY: 'x'.repeat(40),
+    SUPABASE_DB_URL: `postgresql://postgres.${staging}:redacted@aws-0-us-east-2.pooler.supabase.com:5432/postgres`,
+    SOCRATA_APP_TOKEN: 'test-token',
+  };
+  const guardFor = (env: Record<string, string>) => {
+    const config = loadConfig(env as NodeJS.ProcessEnv);
+    return verifyPipelineTarget({
+      environment: config.PIPELINE_ENV,
+      supabaseUrl: config.SUPABASE_URL,
+      supabaseDbUrl: config.SUPABASE_DB_URL,
+      allowedDevRefs: config.PIPELINE_ALLOWED_DEV_REFS,
+      allowStagingWrites: config.PIPELINE_ALLOW_STAGING_WRITES,
+    });
+  };
+
+  // Defaults: no dev project is allowlisted and staging writes are off.
+  const defaults = loadConfig(baseEnv as NodeJS.ProcessEnv);
+  assert.deepEqual(defaults.PIPELINE_ALLOWED_DEV_REFS, []);
+  assert.equal(defaults.PIPELINE_ALLOW_STAGING_WRITES, false);
+  assert.throws(() => guardFor(baseEnv), /not in PIPELINE_ALLOWED_DEV_REFS/);
+  // Allowlisting staging is not enough on its own.
+  assert.throws(() => guardFor({ ...baseEnv, PIPELINE_ALLOWED_DEV_REFS: staging }), /PIPELINE_ALLOW_STAGING_WRITES=true/);
+  assert.throws(
+    () => guardFor({ ...baseEnv, PIPELINE_ALLOWED_DEV_REFS: staging, PIPELINE_ALLOW_STAGING_WRITES: 'false' }),
+    /PIPELINE_ALLOW_STAGING_WRITES=true/
+  );
+  assert.throws(() => loadConfig({ ...baseEnv, PIPELINE_ALLOW_STAGING_WRITES: 'yes' } as NodeJS.ProcessEnv), /PIPELINE_ALLOW_STAGING_WRITES/);
+  // Explicit opt-in plus allowlist is the only way in.
+  assert.deepEqual(
+    guardFor({ ...baseEnv, PIPELINE_ALLOWED_DEV_REFS: staging, PIPELINE_ALLOW_STAGING_WRITES: 'true' }),
+    { projectRef: staging, environment: 'dev' }
   );
 });
 
@@ -87,7 +128,7 @@ test('pipeline target guard binds SUPABASE_DB_URL to the same approved project a
   // Matching pairs pass for both supported connection-string shapes.
   for (const dbUrl of [poolerUrl(staging), directUrl(staging)]) {
     assert.deepEqual(
-      verifyPipelineTarget({ environment: 'dev', supabaseUrl: apiUrl(staging), supabaseDbUrl: dbUrl, allowedDevRefs: [staging] }),
+      verifyPipelineTarget({ environment: 'dev', supabaseUrl: apiUrl(staging), supabaseDbUrl: dbUrl, allowedDevRefs: [staging], allowStagingWrites: true }),
       { projectRef: staging, environment: 'dev' }
     );
   }
@@ -99,7 +140,7 @@ test('pipeline target guard binds SUPABASE_DB_URL to the same approved project a
   // Staging API settings + production bulk-write connection must be refused (Codex finding 2).
   for (const dbUrl of [poolerUrl(production), directUrl(production)]) {
     assert.throws(
-      () => verifyPipelineTarget({ environment: 'dev', supabaseUrl: apiUrl(staging), supabaseDbUrl: dbUrl, allowedDevRefs: [staging] }),
+      () => verifyPipelineTarget({ environment: 'dev', supabaseUrl: apiUrl(staging), supabaseDbUrl: dbUrl, allowedDevRefs: [staging], allowStagingWrites: true }),
       /SUPABASE_DB_URL .* does not match SUPABASE_URL/
     );
   }
@@ -117,18 +158,18 @@ test('pipeline target guard binds SUPABASE_DB_URL to the same approved project a
     `postgresql://postgres.${staging}:redacted@db.${staging}.supabase.co.evil.example:5432/postgres`,
   ]) {
     assert.throws(
-      () => verifyPipelineTarget({ environment: 'dev', supabaseUrl: apiUrl(staging), supabaseDbUrl: dbUrl, allowedDevRefs: [staging] }),
+      () => verifyPipelineTarget({ environment: 'dev', supabaseUrl: apiUrl(staging), supabaseDbUrl: dbUrl, allowedDevRefs: [staging], allowStagingWrites: true }),
       /SUPABASE_DB_URL/
     );
   }
 
   // The database connection string is required, and errors never echo its password.
   assert.throws(
-    () => verifyPipelineTarget({ environment: 'dev', supabaseUrl: apiUrl(staging), supabaseDbUrl: '', allowedDevRefs: [staging] }),
+    () => verifyPipelineTarget({ environment: 'dev', supabaseUrl: apiUrl(staging), supabaseDbUrl: '', allowedDevRefs: [staging], allowStagingWrites: true }),
     /SUPABASE_DB_URL/
   );
   try {
-    verifyPipelineTarget({ environment: 'dev', supabaseUrl: apiUrl(staging), supabaseDbUrl: poolerUrl(production), allowedDevRefs: [staging] });
+    verifyPipelineTarget({ environment: 'dev', supabaseUrl: apiUrl(staging), supabaseDbUrl: poolerUrl(production), allowedDevRefs: [staging], allowStagingWrites: true });
   } catch (error) {
     assert.doesNotMatch(String(error), /redacted/);
   }
@@ -149,7 +190,7 @@ test('pipeline target guard refuses driver-level host/user overrides in SUPABASE
   ];
   for (const dbUrl of bypasses) {
     assert.throws(
-      () => verifyPipelineTarget({ environment: 'dev', supabaseUrl: apiUrl, supabaseDbUrl: dbUrl, allowedDevRefs: [staging] }),
+      () => verifyPipelineTarget({ environment: 'dev', supabaseUrl: apiUrl, supabaseDbUrl: dbUrl, allowedDevRefs: [staging], allowStagingWrites: true }),
       /SUPABASE_DB_URL/,
       `must refuse ${dbUrl.replace(/:redacted@/, ':***@')}`
     );

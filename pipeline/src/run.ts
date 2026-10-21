@@ -224,6 +224,7 @@ async function main(): Promise<void> {
     supabaseUrl: config.SUPABASE_URL,
     supabaseDbUrl: config.SUPABASE_DB_URL,
     allowedDevRefs: config.PIPELINE_ALLOWED_DEV_REFS,
+    allowStagingWrites: config.PIPELINE_ALLOW_STAGING_WRITES,
   });
   const ctx = createPipelineContext(config, args.command);
   const socrata = new SocrataClient({ appToken: config.SOCRATA_APP_TOKEN, log: ctx.log });
