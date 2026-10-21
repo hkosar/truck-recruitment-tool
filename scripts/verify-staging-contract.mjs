@@ -135,6 +135,24 @@ for (const kind of ['carriers', 'batches', 'cargo_other_values']) {
   }
 }
 
+// ---- Round 4: refusal predicates must be NULL-safe ---------------------------------------
+// "where not (recognised)" and "x not in (select ...)" evaluate to NULL when any part of the
+// test is NULL, which silently drops the row from a refusal count. Refusal checks must use
+// "(recognised) is not true" instead. Applies to the installer, the cleanup, and the reset's
+// gate (everything before its first fixture scope table).
+const resetGate = resetSql.slice(0, Math.max(0, resetSql.indexOf('create temporary table tmp_reset_carriers')));
+const stripComments = (sql) => sql.replace(/--[^\n]*/g, '');
+for (const [label, sql] of [['installer', installerSql], ['cleanup', cleanup.replace(/\r\n/g, '\n')], ['reset gate', resetGate]]) {
+  const body = stripComments(sql);
+  for (const match of body.matchAll(/\b(?:where|and|or)\s+not\s*\(/gi)) {
+    failures.push(`${label} uses a NULL-unsafe refusal predicate "${match[0]}"; use "(...) is not true"`);
+  }
+  for (const match of body.matchAll(/\bnot\s+in\s*\(\s*select/gi)) {
+    failures.push(`${label} uses a NULL-unsafe "${match[0]}"; use "(x in (select ...)) is not true"`);
+  }
+}
+if (!resetGate) failures.push('reset gate could not be located for the NULL-safety check');
+
 // ---- Cleanup: runner + marker gated, scoped by explicit fixture ownership ---------------
 const runnerGate = cleanup.indexOf(RUNNER_GATE);
 const markerGate = cleanup.indexOf(`to_regclass('${MARKER_TABLE}')`);

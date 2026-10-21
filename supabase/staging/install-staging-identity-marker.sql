@@ -128,6 +128,9 @@ where v.carrier_count_tx > 0
       and c.dot_number in (select dot_number from tmp_baseline_carriers)
   );
 
+-- Every refusal predicate below is written as "(recognised) is not true" rather than
+-- "not (recognised)": a NULL anywhere in the recognition test (for example a NULL note)
+-- must count the row as unrecognised, not silently drop it from the count.
 do $$
 declare
   v_carriers bigint;
@@ -140,15 +143,15 @@ declare
   v_dnc_changes bigint;
 begin
   select count(*) into v_carriers from public.carriers
-  where dot_number not in (select dot_number from tmp_baseline_carriers);
+  where (dot_number in (select dot_number from tmp_baseline_carriers)) is not true;
   select count(*) into v_batches from public.batches
-  where id not in (select id from tmp_baseline_batches);
+  where (id in (select id from tmp_baseline_batches)) is not true;
   select count(*) into v_cargo from public.cargo_other_values
-  where value not in (select value from tmp_baseline_cargo);
+  where (value in (select value from tmp_baseline_cargo)) is not true;
   -- Baseline contact logs: one of the reset's fixed notes, by a fixture identity, on a
   -- baseline carrier, in a baseline batch (or none).
   select count(*) into v_contact_logs from public.contact_logs l
-  where not (
+  where (
     l.notes in (
       'Reached dispatcher, walked through the belt job rates.',
       'Also a fit for the I-35 run -- same owner, different job.',
@@ -159,23 +162,23 @@ begin
     and l.user_id in (select id from tmp_fixture_users)
     and l.dot_number in (select dot_number from tmp_baseline_carriers)
     and (l.batch_id is null or l.batch_id in (select id from tmp_baseline_batches))
-  );
+  ) is not true;
   -- The baseline has no suppressions at all.
   select count(*) into v_suppressions from public.contact_suppressions;
   select count(*) into v_members from public.batch_carriers bc
-  where not (
+  where (
     bc.batch_id in (select id from tmp_baseline_batches)
     and bc.dot_number in (select dot_number from tmp_baseline_carriers)
     and (bc.status_changed_by is null or bc.status_changed_by in (select id from tmp_fixture_users))
     and (bc.promoted_by is null or bc.promoted_by in (select id from tmp_fixture_users))
-  );
+  ) is not true;
   select count(*) into v_activity from public.batch_activity a
-  where not (
+  where (
     a.batch_id in (select id from tmp_baseline_batches)
     and (a.actor_id is null or a.actor_id in (select id from tmp_fixture_users))
-  );
+  ) is not true;
   select count(*) into v_dnc_changes from public.carriers
-  where dnc_set_by is not null and dnc_set_by not in (select id from tmp_fixture_users);
+  where dnc_set_by is not null and (dnc_set_by in (select id from tmp_fixture_users)) is not true;
 
   if v_carriers + v_batches + v_cargo + v_contact_logs + v_suppressions + v_members + v_activity + v_dnc_changes <> 0 then
     raise exception 'staging marker install refused: rows not recognised as the deterministic fictional baseline: carriers %, batches %, cargo values %, contact logs %, contact suppressions %, batch members %, batch activity %, carrier DNC changes by non-fixture users %',

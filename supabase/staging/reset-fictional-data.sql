@@ -92,14 +92,14 @@ begin
   select count(*) into v_unowned_batches
   from public.batches b
   where not exists (select 1 from staging_identity.fixture_rows f where f.table_name = 'batches' and f.row_key = b.id::text)
-    and not (
+    and (
       exists (select 1 from public.batch_carriers bc where bc.batch_id = b.id)
       and not exists (
         select 1 from public.batch_carriers bc
         where bc.batch_id = b.id
           and not exists (select 1 from staging_identity.fixture_rows f where f.table_name = 'carriers' and f.row_key = bc.dot_number::text)
       )
-    );
+    ) is not true;
   if v_other_profiles <> 0 or v_unregistered_carriers <> 0 or v_unregistered_cargo <> 0 or v_unowned_batches <> 0 then
     raise exception 'staging reset refused: data not owned by the fixture set (other profiles %, unregistered carriers %, unregistered cargo values %, batches not built from fixture carriers %)',
       v_other_profiles, v_unregistered_carriers, v_unregistered_cargo, v_unowned_batches;
