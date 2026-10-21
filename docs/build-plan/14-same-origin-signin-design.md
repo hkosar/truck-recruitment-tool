@@ -8,6 +8,8 @@ any code is written.
 "approved to implement — yes after edits"; 2 blockers, 5 should-fix). See §13.
 **Revision 3 (2026-10-21 UTC):** addresses the re-review of `7f8a918` (2 blockers,
 1 should-fix). See §14.
+**Revision 4 (2026-10-21 UTC):** addresses the review of `ecc2751` (2 blockers, 1 should-fix,
+all rollout/backout). See §15.
 
 **What this replaces.** Spec 13 (`13-team-sign-in-spec.md`) wherever it relies on
 browser-held Supabase tokens, Supabase OTP links, the Send Email hook, or accepted gaps (its
@@ -539,9 +541,10 @@ self-deactivation; the last active manager is protected under `internal.roster_l
   `profiles.email` and the old `auth.users.email` would drift, and a backout would bring back
   an obsolete sign-in identity (re-review finding 3). Name and role edits, deactivate and
   reactivate still work. Name and status live only in `profiles`, which the old app reads too.
-  An urgent address change during the window is an operator runbook step, approved by the
-  owner: update `auth.users` through the Admin API and `profiles.email` together, then check
-  they match. So during the window every profile keeps a matching Supabase Auth account, and
+  There is **no exception** during the window: an address change waits until the window
+  closes. Any future override needs its own separately reviewed runbook that defines a
+  narrowly authorized trigger bypass and safe handling of a partial failure (review round 4,
+  finding 3). It is not part of this design. So during the window every profile keeps a matching Supabase Auth account, and
   a backout restores a working old app (review finding 5). Re-adding the FK `NOT VALID` later is
   **not** a backout path and is not claimed as one. The rejected alternative, creating Supabase
   Auth users from the Worker, needs `service_role` in the Worker.
@@ -678,7 +681,7 @@ recovery-code pattern appears in any test output or artifact (T-HYG).
 | T-REPLAY | staging full migration replay with PostGIS (M1, backout, M1 again) | geometry RPCs under re-keyed helpers; backout rehearsal | staging approvals |
 | T-REC | T-SQL + T-INT | single use; rate limits; regeneration revokes; trigger revokes. **Login-CSRF:** cross-site recovery posts (no Origin, `null`, foreign Origin, missing or wrong pre-token) never consume a code or touch cookies; a post while signed in is refused and the existing session still works. **Matrix:** with a recovery session, call **every** normal `/api/*` route, every allow-listed RPC and every table/view directly in SQL; expect 403 or refusal/empty. `recovery_*` results contain exactly the §7.3 columns (column-set assertion). **Role intersection:** a Viewer's recovery session calling `recovery_set_status` directly (Worker route and SQL) is refused, and no row changes; an Editor's succeeds; demoting the Editor to Viewer mid-session makes the next call fail. **Own profile:** with a recovery session, `select … from profiles where id = <self>` returns zero rows (direct SQL and Worker); with a link session it returns the row. **Renewal:** recovery expiry after navigation, mutation and activity ping (extension ≤ 1 h, never past 12 h) and after background polling (no extension) | A1, A3 |
 | T-CRED | T-SQL | with only the `recruiter_worker` login (no Worker keys, no email): mint → redeem with a self-chosen hash → set the GUC → read staff data. **Expected to succeed**, which proves §2.1's classification; also asserts that the audit row exists and the tripwire query flags it | A3 |
-| T-BACKOUT | T-SQL (local), then T-REPLAY (staging) | snapshot role-matrix results and grants on the pre-M1 schema → apply M1 → retire app credentials → apply the backout script → results and grants identical to the snapshot; the old JWT-claims role matrix passes again. Plus the §11.5 rehearsal cases (a)–(d): email edit refused during the window, open `recruiter_worker` connection terminated and unable to reconnect, pre-backout session/link/code refused after M1 is re-applied, email alignment check | A3; staging approvals |
+| T-BACKOUT | T-SQL (local, with a reconnect loop as `recruiter_worker`), then T-REPLAY (staging) | snapshot role-matrix results and grants on the pre-M1 schema → apply M1 → retire app credentials → apply the backout script → results and grants identical to the snapshot; the old JWT-claims role matrix passes again. Plus the §11.5 rehearsal cases (a)–(d): email edit refused during the window, open `recruiter_worker` connection terminated and unable to reconnect, pre-backout session/link/code refused after M1 is re-applied, email alignment check | A3; staging approvals |
 | T-HYG | **release gate**, local + staging | (1) credential-pattern scan of every test output and artifact. (2) **Canary log search**: run each flow (request, verify, confirm, recovery, sign-out, `/api/*`) plus forced error paths (statement error and lock timeout while `app.session_hash` is set, malformed bind, bad webhook signature) with harness-generated canary values. Search Worker Logs/Tail, Hyperdrive, Postgres logs (normal and error) and the mail provider's activity view for the raw cookie, the session hash, the link token and URL, the recovery code and the pre-token. **Pass = zero hits in every log; any hit stops the release** | A3/A4 local; A7 staging |
 | Project checks | existing | `app`: `npm run verify`; `pipeline`: `npm test`, `npm run build`; `node scripts/verify-migration-baseline.mjs` (fresh LF checkout); `verify-staging-contract.mjs`; other offline scripts | A1 |
 
@@ -721,6 +724,7 @@ attempts mail).**
 | `/signup` | — | ✓ | — | — | — | **never before signups are off** (it would create an Auth user and a profile) | `signup_disabled`; if a user is created anyway → stop, report, clean up with the existing guarded cleanup script |
 | `GET /user`, and `PUT /user` proposing (a) another fixture's email and (b) a fresh `.example.invalid` address, with the pre-cutover **access** token, **after L1** and again after the access-token lifetime (3600 s, `config.toml:54`) | ✓ | — | ✓ | ✓ | ✓ | `GET` only (documents today's exposure); **no** `PUT` before L1 | refused for both (a) and (b) with the **same** status and error code, so there is no email-duplicate oracle; `auth.users` emails unchanged |
 | `/verify` with a junk token | ✓ | — | — | — | — | no | refused |
+| Valid pre-cutover verification credentials L-a / L-b / L-c (Admin `generateLink` for fixtures, and one fixture email-change token; §11.6) | ✓ | — | ✓ | — | — | created before O2 | L-a: any session it made is gone after L1, and `/user` is refused after W; L-b and L-c refused after L1; no email changed |
 
 **Equivalence rule.** For each Auth route, the HTTP status, error code and body shape must be
 the same across K/U/D/LP/LG. A difference is a roster oracle on Supabase's side. It blocks
@@ -870,14 +874,29 @@ ledger tables stay in place, inert, for audit.
   (including `profiles_update_self`), and the grants to `anon`/`authenticated` (generated
   from, and checked against, the snapshot). It drops the revocation trigger and the window
   email trigger. It deletes no ledger table and no data.
-- `supabase/backout/retire-app-credentials.sql`: one transaction, run **before** the
-  definitions are restored (re-review finding 3):
-  `alter role recruiter_worker nologin`; then
-  `select pg_terminate_backend(pid) from pg_stat_activity where usename = 'recruiter_worker'`
-  (`NOLOGIN` only blocks new connections; existing pooled ones must be ended); then mark
-  **every** live app session, unused sign-in link and unused recovery code
-  `revoked_at = now(), revoked_reason = 'backout'`. A later re-apply of M1 therefore
-  resurrects nothing. Check: zero backends for the role, zero live ledger rows.
+- `supabase/backout/retire-app-credentials` (an ordered operator procedure, not one
+  transaction; review round 4, finding 2). It runs **before** the definitions are restored:
+  1. **Stop the pool first.** The Worker maintenance flag must already be on (that code path
+     opens no DB connection). Then delete the Hyperdrive config, or replace its stored
+     password with a random throwaway value, so the pool cannot reconnect with a valid
+     credential.
+  2. **Commit `NOLOGIN` on its own:** `alter role recruiter_worker nologin password null;` in
+     autocommit (its own committed transaction), so every *new* login fails from that
+     moment. A `NOLOGIN` left uncommitted inside a larger transaction would not be visible
+     to new connections.
+  3. **Terminate, then confirm:**
+     `select pg_terminate_backend(pid, 5000) from pg_stat_activity where usename =
+     'recruiter_worker';` (the PG ≥ 14 form waits up to 5 s per backend and returns false on
+     timeout). Then poll `select count(*) from pg_stat_activity where usename =
+     'recruiter_worker'` every second until it reads 0 **three times in a row**. More than
+     60 s without that → stop and escalate; do not continue the backout. Hosted support for
+     the timeout argument is **[assume: verify the PG version]**; without it, use the plain
+     form and the same poll.
+  4. **Only then** revoke the ledgers in one transaction: mark every live app session, unused
+     sign-in link and unused recovery code `revoked_at = now(), revoked_reason = 'backout'`.
+     A later re-apply of M1 therefore resurrects nothing.
+  5. Checks: zero backends for the role, a login attempt as `recruiter_worker` fails, zero
+     live ledger rows.
 - Re-forward after a backout uses **new** Worker keys (`KEY_LINKS`, `KEY_SESSIONS`,
   `KEY_RATE`) and a new `recruiter_worker` password, so nothing issued before the backout can
   match again.
@@ -887,9 +906,9 @@ ledger tables stay in place, inert, for audit.
 **Backout procedure** (owner "go" required; the operator runs it):
 1. Turn the maintenance flag on. It is a Worker env var: every route serves a static "Back
    shortly" page, with no DB change.
-2. Run `retire-app-credentials.sql` (login off, Worker connections terminated, all app
-   sessions, links and recovery codes revoked); check its counts. Also delete or disable the
-   Hyperdrive config, so its pool stops retrying.
+2. Run the `retire-app-credentials` procedure in its fixed order: pool stopped (Hyperdrive
+   config deleted or neutralized) → `NOLOGIN` committed → backends terminated and confirmed
+   gone → ledgers revoked → checks.
 3. Check identity alignment: for every approved profile, `profiles.email = auth.users.email`
    (expected, because email edits were paused; any mismatch is fixed by the operator before
    step 6).
@@ -908,9 +927,11 @@ For access-control or credential defects, back out first and fix later.
 **Rehearsal (required before production):** T-BACKOUT locally on the throwaway cluster
 (snapshot → M1 → backout → identical results), then on staging inside T-REPLAY: M1 → backout
 → old app works → M1 again → new app works. The rehearsal also proves: (a) a Team email edit
-during the window is refused by both the route and the trigger; (b) a `recruiter_worker`
-connection held open from a second client is terminated by `retire-app-credentials.sql` and
-cannot reconnect; (c) a session, link and recovery code issued before the backout are all
+during the window is refused by both the route and the trigger; (b) **concurrent
+reconnection**: a client loop tries to connect as `recruiter_worker` every 50 ms throughout
+the procedure, alongside two held-open connections. After the `NOLOGIN` commit, every new
+attempt fails. After termination the held connections are gone, and the backend count stays
+0 for 60 s while the loop keeps trying; (c) a session, link and recovery code issued before the backout are all
 refused after M1 is re-applied (old keys, and the rows are revoked); (d) the
 `profiles.email = auth.users.email` check passes on the fixtures.
 
@@ -918,50 +939,95 @@ refused after M1 is re-applied (old keys, and the rows are revoked); (d) the
 Auth account, so the M1 backout would no longer give them a working old app. That is why M2
 waits for the owner to close the window.
 
-### 11.6 L1 — closing legacy Supabase Auth sessions (re-review finding 2)
+### 11.6 L1 — closing legacy Supabase Auth credentials (re-review finding 2; round 4 finding 1)
 
-**Why.** Turning the providers off (O2) stops **new** Supabase sign-ins. It does not end sessions
-people already have. A surviving access or refresh token can still call Supabase Auth's own
-`/user` endpoint. Its email-update path checks the proposed address for duplicates, which
-could reveal whether an address belongs to a roster member (an oracle). Having no app data
-behind those tokens does not close that.
+**Why.** Turning the providers off (O2) stops **new** Supabase sign-ins. It does not end what
+already exists:
+- sessions and refresh tokens;
+- outstanding **verification credentials**: magic-link, OTP, recovery, confirmation,
+  email-change and reauthentication tokens, plus PKCE flow state. Supabase's verify endpoint
+  turns a valid one into a **fresh session** (`internal/api/verify.go`, per the review).
 
-**What L1 does** (its own owner approval, after O2, on staging first, then production;
-operator runs it as the `postgres` role in one transaction):
-1. Record counts (no identities, no tokens): `select count(*) from auth.sessions`; `select
-   count(*) from auth.refresh_tokens where not revoked`.
-2. `delete from auth.refresh_tokens;` then `delete from auth.sessions;` (all users; staff no
-   longer use Supabase Auth). These are Supabase-internal tables. Their exact shape on the
-   hosted version is **[assume]**, so the step is preceded by a read-only column listing, and the
-   statements are adjusted (never widened) if the shape differs.
-3. Re-count: both must be 0.
-4. Wait at least one access-token lifetime (`jwt_expiry = 3600` s, `config.toml:54`). Any access
-   token minted before step 2 has then expired whatever Auth does with its session check.
-5. Run the §8.1 class-B probes that use the pre-cutover tokens: `GET /user`, `PUT /user`
-   (duplicate and fresh email) and refresh must all be refused, identically.
-6. During the backout window: a daily read-only count of `auth.sessions` and
-   `auth.refresh_tokens`. Any non-zero count is an incident (providers are off and signups are
-   off, so nothing should create one).
+Any of these can reach Supabase Auth's own `/user` endpoint. Its email-update path checks the
+proposed address for duplicates, which could reveal whether an address belongs to a roster
+member (an oracle). Having no app data behind those credentials does not close that.
 
-**Effect on people.** Old-app sessions end. Nothing else changes: no password is scrambled, no
-user is banned or disabled, no `auth.users` row or profile is modified. On backout, people sign
-in to the old app again with their existing passwords.
+**Order** (each step owner-approved; staging first, then production; the operator runs it as
+`postgres`; no password is scrambled, no user is banned or disabled, and no email, password or
+profile is changed):
 
-**Fallback.** If step 4–5 shows `/user` still answering for a closed session (Auth not checking
-session existence), the oracle stays open only until those access tokens expire (≤ 1 h after
-step 2). If even that fails, the production go stops and the issue goes to the coordinator.
+0. **Read the hosted settings, read-only, and record them:** access-token (JWT) expiry and
+   email OTP/link expiry, from the Auth settings of that project. The waiting bound **W** =
+   the larger of the two, plus 5 minutes of clock margin. `config.toml` values are **not** used
+   for W; they describe local dev only. If either setting cannot be read, L1 stops.
+1. **Stop issuance first (O2):** signups off, and every provider off (email, phone, anonymous,
+   OAuth). Then confirm with the §8.1 class-B issuance probes (`/otp`, `/magiclink`, `/recover`,
+   `/resend`, `/signup`) that nothing new can be issued. A request already in flight at that
+   moment can still finish issuing a credential; the steps below and the wait W cover it.
+2. **Read-only shape check:** list the columns of `auth.sessions`, `auth.refresh_tokens`,
+   `auth.one_time_tokens`, `auth.flow_state` and the token columns of `auth.users`. Classify
+   every other `auth.*` table as credential-bearing or not. Anything credential-bearing that
+   is not listed below stops L1 for review **[assume: hosted schema matches current
+   supabase/auth master]**.
+3. **One transaction:**
+   - `delete from auth.refresh_tokens;`
+   - `delete from auth.sessions;`
+   - `delete from auth.one_time_tokens;`
+   - `delete from auth.flow_state;`
+   - `update auth.users set confirmation_token = '', recovery_token = '',
+     email_change_token_new = '', email_change_token_current = '', phone_change_token = '',
+     reauthentication_token = '' where <any of these is not empty>;` This clears **only**
+     outstanding verification-token values. Email, pending-change target, password hash,
+     ban state and every other column are untouched. This `auth.users` update is the one
+     change to that table and is named explicitly in the approval request.
+   - Counts before and after are recorded as numbers only.
+4. **Re-count:** all four tables at 0, and no `auth.users` row with a non-empty token column.
+5. **Wait W** (step 0). Any access token minted before or during steps 1–3 (including by an
+   in-flight request) has then expired, whatever Auth does with its session check. A
+   credential issued in flight after step 3 is caught by step 6.
+6. **Second sweep:** repeat steps 3–4. Expect zero rows changed. Any non-zero → incident:
+   stop and investigate.
+7. **Probes** (§8.1 class B, A5b), including the **valid pre-cutover link test** below. All must
+   pass.
+8. **During the backout window:** daily read-only counts of the four tables and of non-empty
+   token columns. Any non-zero is an incident (nothing should be able to issue one).
+
+**Valid pre-cutover link test (staging only, fixture users, links in probe memory only, never
+printed or logged).** Before step 1, the operator generates real verification credentials for
+fixture users with the Admin API (`generateLink`, magic-link and recovery types):
+- **L-a**, used **during** L1: redeemed after step 1 and before step 3. Whether Auth still
+  accepts it then is recorded. If it does, the resulting session S-a must be gone after step 3
+  (refresh refused). After W, `GET`/`PUT /user` with S-a's access token must be refused, the
+  same as for any other closed session.
+- **L-b**, used **after** L1 (after step 3, and again after W): it must be refused, and no
+  session row may appear.
+- **L-c**, an email-change token for a fixture, created before step 1 by a stateful `PUT /user`
+  under A5b: after step 3 its confirmation must be refused, and the fixture's email must be
+  unchanged.
+
+**Effect on people.** Old-app sessions and any pending Supabase emails or links stop working.
+Passwords, bans, emails and profiles are unchanged. On backout, people sign in to the old app
+again with their existing passwords; password reset works again once the email provider is
+re-enabled.
+
+**Fallback.** If a probe after W still succeeds, the production go stops and the issue goes to
+the coordinator.
 
 **Not planned, listed only because they would close the same gap more bluntly:** scrambling
 every password, banning users, or rotating the project's JWT signing key (which would also
 break the pipeline's legacy keys). Each would need its own **explicit authorization** decision
 and is not part of this design.
 
-### 11.7 What changed in the approvals list (revisions 2 and 3)
+### 11.7 What changed in the approvals list (revisions 2–4)
 
 A1 is approved (2026-10-21). A5 is split into **A5a** (stateless) and **A5b** (stateful,
 separate). **A7** (staging log inspection for the T-HYG gate) is new. A2, A3, A4 and A6 are
 unchanged. Revision 3 adds **L1** (§11.6) as a separately approved rollout step on staging
-and production, and its `PUT /user` and refresh probes go under A5b.
+and production, and its `PUT /user` and refresh probes go under A5b. Revision 4 widens L1:
+it also clears outstanding verification tokens (`auth.one_time_tokens`, `auth.flow_state`,
+and the token columns of `auth.users`, which the approval names explicitly). It needs a
+read-only reading of the hosted Auth expiry settings, and A5b now includes Admin
+`generateLink` for staging fixtures (operator, service role, in memory only).
 
 ---
 
@@ -1008,4 +1074,14 @@ and production, and its `PUT /user` and refresh probes go under A5b.
 |---|---|---|---|
 | 1 | **Blocker:** recovery could exceed a Viewer's role; the own-profile exception was still reachable | The matrix gains a "minimum ordinary role" column. Effective permission = matrix ∩ the live ordinary role, checked in SQL by each `recovery_*` function. `recovery_set_status` requires editor or manager, so a Viewer's recovery session has no writes. `profiles_select` loses its own-row exception: profiles are readable only with a link session, and the own name comes from the session row. Direct tests: a Viewer recovery write is refused, a mid-session demotion is enforced, and a recovery own-profile read returns nothing | §4.1, §7.3, §8 T-REC |
 | 2 | **Blocker:** surviving legacy Supabase Auth sessions and refresh tokens (`/user` email-duplicate oracle) | New rollout step **L1**, separately owner-approved: count, then delete `auth.refresh_tokens` and `auth.sessions` (after a shape check), re-count, wait one access-token lifetime, run the probes, monitor daily during the window. No password scrambling, banning or user changes. Those are listed only as alternatives that would need explicit authorization. Probe rows for refresh and `GET`/`PUT /user` (duplicate vs fresh email) after L1, with an identical-response rule | §11.2, §11.6, §8.1, §11.7 |
-| 3 | Backout gaps: email edits, app credentials, open DB connections | Email edits paused during the window (route flag + M1 trigger; urgent changes via an owner-approved operator runbook). New `retire-app-credentials.sql` runs before backout: `NOLOGIN`, `pg_terminate_backend` for the role, all app sessions/links/codes revoked. Hyperdrive config disabled. Email-alignment check. New keys and password on re-forward. All four cases added to the rehearsal | §5.4, §11.5, §8 T-BACKOUT, D10 |
+| 3 | Backout gaps: email edits, app credentials, open DB connections | Email edits paused during the window (route flag + M1 trigger; the urgent-change exception proposed here was withdrawn in revision 4). New `retire-app-credentials.sql` runs before backout: `NOLOGIN`, `pg_terminate_backend` for the role, all app sessions/links/codes revoked. Hyperdrive config disabled. Email-alignment check. New keys and password on re-forward. All four cases added to the rehearsal | §5.4, §11.5, §8 T-BACKOUT, D10 |
+
+---
+
+## 15 · Round 4 response (Codex review of `ecc2751`, 2026-10-21)
+
+| # | Finding (short) | Change | Sections |
+|---|---|---|---|
+| 1 | **Blocker:** L1 left legacy verification credentials usable | L1 now: reads the hosted JWT and OTP expiry settings and derives the wait W from them (not `config.toml`); stops issuance first (providers and signups off, verified by probes); shape-checks `auth.*`; in one transaction deletes refresh tokens, sessions, `one_time_tokens` and `flow_state`, and clears only the verification-token columns of `auth.users`; re-counts; waits W; sweeps again; monitors daily. New staging test with valid pre-cutover credentials L-a (used during L1), L-b (after) and L-c (email change). No password scrambling, banning or email/profile changes | §11.6, §8.1, §11.7 |
+| 2 | **Blocker:** reconnection race in credential retirement | Ordered procedure: maintenance flag and Hyperdrive stopped or neutralized → `NOLOGIN` + `password null` committed on its own → `pg_terminate_backend(pid, 5000)` and poll until 0 three times (60 s limit, else escalate) → ledgers revoked → checks. Rehearsal adds a 50 ms reconnect loop plus held-open connections | §11.5, §8 T-BACKOUT |
+| 3 | Urgent email-change exception conflicted with the pause trigger | Removed. No exception during the window; any override is a future, separately reviewed runbook | §5.4 |
