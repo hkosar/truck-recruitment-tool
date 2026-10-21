@@ -2,6 +2,8 @@
 
 Revision 2 (2026-10-21 UTC): review edits on IP trust, shutdown contract and SendGrid
 one-shot sends (§10).
+Revision 8 (2026-10-21 UTC): member-insert attribution, identity before trigger locks on
+direct contact-log inserts, frozen-set test (§20).
 Revision 7 (2026-10-21 UTC): batch-parent locks, DNC serialization, frozen write sets and
 attribution constraints (§17.2, §17.4, §19).
 Revision 6 (2026-10-21 UTC): one global lock order including the business tables, compared
@@ -842,9 +844,22 @@ Rules:
   contact log is accepted if and only if the carrier was contactable **when the log's carrier
   lock was granted**. A DNC change granted later is ordered after the log. Implementation:
   - The contact-log guard (`20260723020000_contact_logs_dnc_guard.sql`, today an unlocked read
-    at :23-31) is replaced in M1. It first locks the batch (`FOR KEY SHARE`, if `batch_id` is
-    set; B1), then `select … from carriers where dot_number = new.dot_number for share`
-    (B4), and then checks `do_not_contact` and the carrier-wide suppressions.
+    at :23-31) is replaced in M1. A `BEFORE INSERT` trigger runs **before** the policy's
+    `WITH CHECK`, so the guard must not take business locks for an unvalidated caller. Its
+    order:
+    1. **Identity first, for app callers:** if the caller is the app login (`session_user` is
+       a member of `recruiter_api`), call `lock_and_validate(EDITOR, '{link}')` (I2, I3), then
+       require `new.user_id = actor`. Any failure raises **before any batch or carrier lock**.
+       For trusted callers (`service_role`, the migration/operator role, the staging fixture
+       runner) this step is skipped, as today, and `user_id` is not forced.
+    2. Lock the batch (`FOR KEY SHARE`, if `batch_id` is set; B1).
+    3. `select … from carriers where dot_number = new.dot_number for share` (B4).
+    4. Check `do_not_contact` and the carrier-wide suppressions (unchanged rule).
+    - **General rule:** any `BEFORE` trigger that takes locks must do step 1 first for app
+      callers. Inventory: this guard is the only such trigger. `log_bc_change` is a `BEFORE
+      UPDATE` trigger, which runs after the policy's `USING` (where identity and the batch lock
+      are taken). The new `batch_carriers` insert trigger and the `batches.created_by`
+      immutability trigger take no locks.
   - Every DNC or suppression change takes `FOR NO KEY UPDATE` on that carrier **before**
     touching it or its suppressions: `set_do_not_contact` (B4 then B5), and the
     `suppress_insert`/`suppress_delete` policies for rows with a `dot_number` (through the
@@ -878,8 +893,13 @@ Rules:
   - `carriers`: the `recruiter_api` column grant drops `do_not_contact`, `dnc_reason`,
     `dnc_set_by` and `dnc_set_at`, keeping only the three `contact_*_override` columns. DNC
     changes only through `set_do_not_contact`, which writes the actor's id.
-  - `batch_carriers`: column `UPDATE` only on `(status, promoted_at)`. The existing trigger
-    sets `status_changed_by`/`promoted_by` from `current_staff_id()`.
+  - `batch_carriers`: column `UPDATE` only on `(status, promoted_at)`, and column `INSERT`
+    only on `(batch_id, dot_number)`. A new `BEFORE INSERT` trigger forces
+    `status_changed_by`, `status_changed_at`, `promoted_by` and `promoted_at` to null and
+    `status` to `'new'` for every caller except `service_role`/the migration role (the
+    definer RPCs insert only `batch_id`, `dot_number`, `status='new'`, `added_via_refresh`,
+    so their behaviour is unchanged). On update, the existing trigger sets
+    `status_changed_by`/`promoted_by` from `current_staff_id()`.
   - `contact_suppressions`: `suppress_insert` adds `created_by = current_staff_id()`.
   - `contact_logs.user_id`, `batch_activity.actor_id`, `batches.created_by` on insert:
     already `= current_staff_id()` in their policies.
@@ -924,6 +944,7 @@ Each case runs in both arrival orders and asserts the **final state** and each s
 | Two overlapping `bulk_set_status` calls, opposite member order | both complete; final status = the later committer's; the activity counts match |
 | `bulk_set_status` on {a,b,c} while b is deleted **before** the locks | count = 2; b absent; no error |
 | `bulk_set_status` on {a,b,c} while d is inserted **after** the locks | d untouched; count = 3 |
+| `bulk_set_status` on {a,b,c} where b is **absent** when the locks are taken and another transaction inserts b (requested, originally absent) right after | b keeps its inserted state (`status = 'new'`, no `status_changed_by`); count = 2; the activity row lists only a and c |
 | `bulk_set_status` on {a,b,c} while b's delete waits on the lock | bulk updates b, then the delete removes it |
 | `refresh_batch` ‖ manager removes member m (m still matches) | removal-first: refresh re-adds m (documented rule). Refresh-first: the removal runs after it and m stays removed |
 | `refresh_batch` ‖ `refresh_batch` (same batch) | the second waits; the first adds n; the second adds 0 |
@@ -931,6 +952,9 @@ Each case runs in both arrival orders and asserts the **final state** and each s
 | Team edit A→B ‖ B→A (managers) | one waits; both complete or one is refused by B10 / the last-manager rule; never a deadlock |
 | Pipeline-style carrier update batch ‖ DNC set on one of those carriers | both complete in lock order |
 | Editor tries to change `batches.created_by`, `carriers.dnc_set_by`, `do_not_contact` directly, or insert a suppression with another `created_by` | refused (permission or trigger) |
+| Editor direct `INSERT` into `batch_carriers` supplying `status_changed_by` = another profile, and separately `promoted_by` = another profile | refused (column not granted); with only `(batch_id, dot_number)` the row gets nulls and `status = 'new'` |
+| Direct `INSERT` into `contact_logs` as the app login: (a) valid Editor link session; (b) no/revoked session; (c) Viewer; (d) `user_id` of another person | (a) succeeds, and `pg_locks` order shows profile → session → batch → carrier; (b)–(d) refused **with no batch or carrier lock ever taken** (checked by a second connection holding those rows `FOR UPDATE`: the refused insert does not wait) |
+| Direct `INSERT` into `contact_logs` as `service_role` (fixture/trusted path) | succeeds without a session; the DNC guard still applies |
 | A deliberately mis-ordered test transaction forcing 40P01 | mapped to the generic retry outcome and logged; never a 500 |
 
 ## 18 · Review response (coordinator-relayed QQ 8111f3c, 2026-10-21)
@@ -951,3 +975,11 @@ Each case runs in both arrival orders and asserts the **final state** and each s
 | 3 | Discovery recheck needs a frozen write set | `bulk_set_status` writes exactly its locked rows; refresh rule defined; retry loop withdrawn; tests for members deleted before, inserted after, and waiting on the locks | §17.2, §17.4 |
 | 4 | Attribution columns writable via SQL | M1 constrains `batches` (column grant + immutable `created_by`), `carriers` (no DNC columns for the app role), `batch_carriers` (status, promoted_at only), suppressions (`created_by` = actor); denial tests | §17.1, §17.2, §17.4 |
 | — | Tests must assert outcomes | Every case states the final state per arrival order; tests use a long `lock_timeout` | §17.4 |
+
+## 20 · Review response (Codex review of `ff9e5ff`, 2026-10-21)
+
+| # | Finding | Change | Sections |
+|---|---|---|---|
+| 1 | Member INSERT can set attribution | Column `INSERT` limited to `(batch_id, dot_number)` and a trigger forcing attribution null and status `'new'`; denial tests for both fields | §17.2, §17.4 |
+| 2 | Direct contact-log INSERT locks before identity | The guard validates the app caller's identity first (then the batch, then the carrier); trusted service-role/fixture path unchanged; general rule and inventory for lock-taking `BEFORE` triggers; direct-insert tests | §17.2, §17.4 |
+| 3 | Frozen-set test missing the "requested but absent, then inserted" case | Added | §17.4 |
