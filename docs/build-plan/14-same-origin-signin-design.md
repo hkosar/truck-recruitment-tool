@@ -4,6 +4,8 @@ Status: **design only. Nothing built, run, installed or touched live.** Written 
 local branch `auth/same-origin-signin` (from `docs/auth-spec-m0-signoff`, 9fc3425), by the
 sign-in implementation owner (thread thr_pn5gr4mx94). Needs independent security review before
 any code is written.
+**Revision 2 (2026-10-21 UTC):** addresses the Gate 1 review of `3b841a7` (Codex, thr_9ftwddufse,
+"approved to implement — yes after edits"; 2 blockers, 5 should-fix). See §13.
 
 **What this replaces.** Spec 13 (`13-team-sign-in-spec.md`) wherever it relies on
 browser-held Supabase tokens, Supabase OTP links, the Send Email hook, or accepted gaps (its
@@ -54,9 +56,11 @@ once someone has counted them.
 
 **If email is down.** People already signed in keep working. For new sign-ins during an email
 outage, this design proposes **recovery codes**: a short list of one-time codes each person can
-print and keep. A code signs you in for a limited time with limited powers: no Team page, no
-exports, no new codes. Whether to adopt them, and the exact rules, is a cross-app decision still
-open (§7).
+print and keep. A code signs you in for a limited time (one hour without use, twelve hours at
+most) and shows only a short, fixed list of screens. By default those screens show no phone
+numbers, emails, contact names or call notes, and there is no Team page, no export and no way to
+make new codes. Whether to adopt recovery codes, and whether contact details should be visible
+during an outage, is a cross-app decision still open (§7).
 
 **What you need to do now:** nothing. The decisions and approvals listed in §11 come to you
 through the manager, one at a time, before anything live happens.
@@ -91,6 +95,20 @@ Browser ──HTTPS──▶ Cloudflare Worker (same origin as the app)
   `select set_config('app.session_hash', $1, true)` (transaction-local). `$1` is
   HMAC-SHA256(`KEY_SESSIONS`, raw cookie value). The database resolves it against the
   session ledger on every statement. There is no "user id" GUC that a caller could set.
+- **The Worker DB credential is an authentication authority (review finding 4).** Whoever holds
+  the `recruiter_worker` credential can call the mint and redeem functions with values of their
+  own choosing. That gives them a valid session for any active staff member **without** the
+  Worker's HMAC keys and without any email being delivered. The database cannot tell this
+  apart from the Worker, because no proof exists that the Worker holds but a credential holder
+  does not. So this credential is classified and protected exactly like a signing key: Worker
+  secret only, never on a laptop or in CI, rotated on any suspicion, and covered by the
+  emergency sign-out (D1). Detective tripwires (not proof) are in §5.2 P12. The precise
+  credential-only attack is a test (T-CRED) that is expected to **succeed**, so the
+  classification stays honest.
+- **No credential in any log (review finding 7).** Session values and hashes, link tokens and
+  URLs, recovery codes, cookies and DB bind parameters must be absent from Worker, Hyperdrive,
+  Postgres (normal and error) and provider logs. This is a **release gate** (§8 T-HYG, §11.2),
+  not a residual risk. If any of them cannot be shown absent, the release stops.
 - **The SPA keeps its screens.** Only its data layer changes: `lib/supabase.ts` is removed from
   the bundle, `lib/rpc.ts` keeps its function signatures but calls `/api/rpc/<name>`, and the
   direct table queries move to named `/api/...` endpoints (§4.2). No Supabase URL or key ships
@@ -252,10 +270,11 @@ Mirrors [QQ] `app/auth/verify/route.ts:65-113`. Does **not** consume the link.
    `Referrer-Policy: no-referrer`. The token leaves the address bar immediately. The landing
    binding is created **when the email is opened**, on whichever device opens it, so
    cross-device works (the request device does not matter).
-3. The `token` query string must never reach logs. Cloudflare Workers Logs / Logpush record the
-   request URL **[assume]**. So: Workers observability for this Worker is configured to exclude
-   the URL query, or the operator confirms no request logging is enabled. This is a release gate
-   (§8 T-HYG), not an assumption.
+3. The `token` query string must never reach logs. Cloudflare Workers Logs / Logpush / Tail may
+   record the request URL **[assume]**. The Worker itself never logs URLs, headers, cookies or
+   bodies on auth routes. Platform logging must be shown to exclude them by the canary test in
+   §8 T-HYG. That is a **release gate**: if the URL cannot be shown absent, the release stops.
+   There is no "accept and document" path.
 
 ### 3.3 Confirm page — `GET /auth/confirm?x=…`
 
@@ -274,9 +293,13 @@ button". I copy QQ's label exactly.
 Mirrors [QQ] `:263-303`, `:360-436`.
 
 1. Body preflight (form only, ≤ 32 KiB, single-valued fields).
-2. CSRF: `Origin` must equal `APP_ORIGIN` exactly (else `Host` must equal its host; neither →
-   fail); `__Host-tr_csrf` present; `csrf_token == hmac(KEY_SESSIONS, cookie)` compared in
-   constant time ([QQ] `lib/csrf.ts:90-137`).
+2. CSRF: if `Origin` is present it must equal `APP_ORIGIN` exactly, and a present-but-wrong
+   `Origin` (including `null`) fails with **no** fallback to `Host`. Only when `Origin` is absent
+   must `Host` equal the canonical host. Neither → fail. Then `__Host-tr_csrf` must be present
+   and `csrf_token == hmac(KEY_SESSIONS, cookie)`, compared in constant time ([QQ]
+   `lib/csrf.ts:90-137`, same order). One shared `checkOrigin(strict: boolean)` serves every
+   route. `strict=true` (Origin required, never Host) is used for `/auth/recovery` (§7.2) and
+   all `/api/*` mutations.
 3. Form nonce == cookie nonce.
 4. `internal.auth_link_redeem(hmac(KEY_LINKS, token), hmac(KEY_SESSIONS, new_session_raw))` in
    one transaction, `lock_timeout='5s'`: find the link's user id → lock the profile row
@@ -297,9 +320,17 @@ Mirrors [QQ] `:263-303`, `:360-436`.
   exists, `revoked_at is null`, `expires_at > now()`, `absolute_expires_at > now()`, the profile
   is `approved` with role manager/edit/view, and `profiles.email` still equals the email the
   session was minted for (belt and braces with §5.3).
-- **Deliberate use only.** `internal.auth_session_touch()` (throttled to once per 5 minutes in its
-  WHERE, [QQ] `session.ts:211-222`) sets `last_seen_at=now()` and
-  `expires_at = least(now()+30 days, absolute_expires_at)`. The Worker calls it **only** for:
+- **Renewal depends on the session kind (review finding 3).** Each session row stores its kind's
+  idle window at creation: `idle_window = '30 days'` for `kind='link'` (absolute 90 days),
+  `'1 hour'` for `kind='recovery'` (absolute 12 hours). A check constraint ties each kind to its
+  windows, so the Worker cannot pass a longer window. `internal.auth_session_touch()` sets
+  `last_seen_at=now()` and `expires_at = least(now() + idle_window, absolute_expires_at)`.
+  The throttle (QQ's 5 minutes, [QQ] `session.ts:211-222`) is 5 minutes for link sessions and
+  1 minute for recovery sessions. A one-hour idle window must not lose up to 5 minutes of
+  precision, and it is never longer than the window. Nothing in the touch path reads a
+  constant 30 days. Tests in T-REC: recovery expiry after navigation, mutation, activity ping
+  and background polling (the last must **not** extend it).
+- **Deliberate use only.** The Worker calls the touch **only** for:
   (a) a document navigation (`Sec-Fetch-Mode: navigate` + `Sec-Fetch-Dest: document`), (b) any
   `POST /api/*` mutation, and (c) `POST /api/session/activity`, which the SPA sends on an
   in-app route change. This is the SPA equivalent of a full navigation; the SPA has no full
@@ -400,8 +431,15 @@ Measured: `auth.uid()` appears 22 times in 4 migrations (`activity` 7, `rpc` 8, 
 - Pipeline effect: the pipeline sets no `app.session_hash`, so `current_staff_id()` is null.
   Today `auth.uid()` is also null for `service_role`, so trigger actor columns behave exactly
   as before. Pipeline tests and the role matrix must prove this (§8).
-- Recovery sessions: `internal.is_manager()` and `internal.can_export()` (new; used by
-  `log_export` and `generate_contact_sheet`) return false when `kind='recovery'` (§7.3).
+- **Recovery sessions are denied by default at the database (review finding 2).**
+  `internal.current_app_role()` returns a role **only for `kind='link'` sessions**, so for a
+  recovery session `is_staff()`, `can_edit()` and `is_manager()` are all false. Every existing
+  policy, view and RPC then returns nothing or refuses, including `carriers.select('*')`,
+  `contact_logs`, `contact_suppressions`, the search RPCs and the contact sheet. A recovery
+  session can reach data **only** through the separate `public.recovery_*` definer functions of
+  the §7.3 matrix. Each one checks `internal.current_session().kind = 'recovery'` and an
+  active-staff role, and returns an **explicit column list** (no `*`, no `jsonb` of whole rows).
+  So adding a column to `carriers` never leaks into recovery.
 
 ### 4.2 App: every supabase-js call moves behind the Worker
 
@@ -446,21 +484,22 @@ probing other people's access; someone who reads logs; a compromised Worker or D
 |---|---|---|---|---|
 | P1 | Worker `/api/*` | — | session cookie → hash → `current_session()` on every statement | T-SQL, T-W |
 | P2 | Worker auth routes | — | §3; generic response + timing on `/auth/request` and `/auth/recovery`; fail-closed pages | T-W, T-TIME |
-| P3 | PostgREST `/rest/v1` with anon/publishable key | RLS-gated reads for `authenticated` | no grants for `anon`/`authenticated`; RLS re-keyed | **T-LIVE** (hosted) |
-| P4 | PostgREST with a Supabase user JWT (password or OTP session of an existing user) | full staff access | same as P3: no grants, no `app.session_hash` → nothing | T-LIVE |
-| P5 | GraphQL `/graphql/v1` | grants-gated | same as P3 | T-LIVE |
-| P6 | Realtime postgres_changes | RLS-gated, publication has 6 tables (`20260720001300_realtime.sql`) | needs SELECT grant → none; policies need session → none. Recommended additionally: remove the 6 tables from `supabase_realtime` (reversible) | T-LIVE |
-| P7 | Realtime Broadcast/Presence | open message bus for anon key, no DB data | no data either way; owner may enable "private channels only" (O6) | T-LIVE (read) |
-| P8 | Supabase Auth `/auth/v1/otp`, `/magiclink`, `/recover`, `/signup`, `/token` (password, refresh), `/verify`, `/resend`, `/user` | live; password sign-in in use | Owner disables signups and every provider (email, phone, anonymous, OAuth) (O2). Tokens that still exist reach no data (P4). Expected codes: `signup_disabled`, `email_provider_disabled`, `otp_disabled` [SB error codes]. **The actual responses must be read live** before and after the change (A5) | T-LIVE |
-| P9 | Storage `/storage/v1` | enabled (`config.toml:47`); no buckets in migrations | Verify no buckets exist and `storage.objects` has no policies for anon/authenticated | T-LIVE |
+| P3 | PostgREST `/rest/v1` with anon/publishable key | RLS-gated reads for `authenticated` | no grants for `anon`/`authenticated`; RLS re-keyed | **T-LIVE-A** (hosted) |
+| P4 | PostgREST with a Supabase user JWT (password or OTP session of an existing user) | full staff access | same as P3: no grants, no `app.session_hash` → nothing | T-LIVE-B |
+| P5 | GraphQL `/graphql/v1` | grants-gated | same as P3 | T-LIVE-A |
+| P6 | Realtime postgres_changes | RLS-gated, publication has 6 tables (`20260720001300_realtime.sql`) | needs SELECT grant → none; policies need session → none. Recommended additionally: remove the 6 tables from `supabase_realtime` (reversible) | T-LIVE-A |
+| P7 | Realtime Broadcast/Presence | open message bus for anon key, no DB data | no data either way; owner may enable "private channels only" (O6) | T-LIVE-A |
+| P8 | Supabase Auth `/auth/v1/otp`, `/magiclink`, `/recover`, `/signup`, `/token` (password, refresh), `/verify`, `/resend`, `/user` | live; password sign-in in use | Owner disables signups and every provider (email, phone, anonymous, OAuth) (O2). Tokens that still exist reach no data (P4). Expected codes: `signup_disabled`, `email_provider_disabled`, `otp_disabled` [SB error codes]. **The actual responses must be read live** before and after the change (A5b, §8.1) | T-LIVE-B |
+| P9 | Storage `/storage/v1` | enabled (`config.toml:47`); no buckets in migrations | Verify no buckets exist and `storage.objects` has no policies for anon/authenticated | T-LIVE-A |
 | P10 | Edge Functions | none exist (`supabase/functions` absent) | none | repo |
 | P11 | Direct Postgres (`postgres`, `service_role`, pipeline) | operator/pipeline | unchanged; trusted | — |
-| P12 | `recruiter_worker` credential leak | — | can only reach `recruiter_api` grants. Without a valid session hash, all reads are empty and all writes are refused. It cannot read auth ledgers (definer functions only; no table grants). It **can** mint links, but only for active staff, and they are emailed to the roster address. It **can** do anonymous bucket hits. **Residual risk R1.** | T-SQL |
-| P13 | Old SPA bundle with the anon key | — | same as P3/P8 | T-LIVE |
+| P12 | `recruiter_worker` credential leak | — | **Authentication authority (finding 4).** The holder can mint a link for any active staff address with a token of their own, redeem it with a session hash of their own, and set that hash, giving full staff access with no email and no Worker keys. They cannot read the auth ledger tables (definer functions only) or bypass RLS. Protection: the credential is a Worker/Hyperdrive secret only, with rotation runbook, `connection limit`, emergency sign-out (D1). **Tripwires (detective, not proof):** every redeem is audited in `internal.auth_events` by the definer function itself; a daily operator query flags redeems whose link has `send_attempted_at is null` or no provider message id, and sessions created outside the Worker's normal request pattern. | **T-CRED** (expected to succeed; proves the classification) |
+| P13 | Old SPA bundle with the anon key | — | same as P3/P8 | T-LIVE-A/B |
 | P14 | Session-id GUC injection | — | `app.session_hash` is a hash of a 256-bit secret, not an identity. Setting it requires SQL access plus knowledge of a live hash | T-SQL |
-| P15 | CSRF / cross-site | — | SameSite=Lax + exact Origin + double-submit HMAC token on every POST except `/auth/request` and `/auth/recovery` (public by design, as [QQ]) and the webhook (signature) | T-W |
+| P15 | CSRF / cross-site | — | SameSite=Lax + Origin + double-submit HMAC token on every POST. Exceptions: `/auth/request` (public by design, as [QQ]: it creates no session and sets no cookie) and the webhook (signature). **`/auth/recovery` is not an exception (finding 1):** it creates a session, so it needs a strict Origin (required, exact) plus an anonymous pre-session form token (§7.2) | T-W, T-REC |
 | P16 | XSS stealing the session | tokens in `localStorage` (`supabase.ts:33-52`) | HttpOnly cookie; strict CSP; sign-in pages run no script | T-W headers |
 | P17 | Link in URL leaking (Referer, history, logs) | — | removed on first hop by 303; `no-referrer`; log exclusion gate | T-HYG |
+| P18 | Recovery session reading normal data | — | denied at the DB: no staff role for `kind='recovery'`; only `recovery_*` functions with explicit columns (§7.3); the Worker also allow-lists recovery routes | T-REC direct requests |
 
 ### 5.3 Revocation consistency
 
@@ -482,10 +521,15 @@ self-deactivation; the last active manager is protected under `internal.roster_l
 
 - **Add** creates a profile row directly (`status='approved'`, chosen role). Because
   `profiles.id` references `auth.users(id) on delete cascade` (`20260720000300_profiles.sql:13`),
-  a new staff member would need an `auth.users` row. **Proposed:** the migration drops that FK
-  (existing ids and rows are untouched; it can be re-added `NOT VALID`). This also removes the
-  cascade-delete hazard. It is a schema decision for review (**D8**). The rejected alternative,
-  creating Supabase Auth users from the Worker, needs `service_role` in the Worker.
+  a new staff member would need an `auth.users` row. **Proposed:** a **separate, later**
+  migration M2 drops that FK (existing ids and rows untouched; also removes the cascade-delete
+  hazard). It is a schema decision (**D8**). M2 is applied only after the backout window
+  closes (§11.5). Until then the cutover migration M1 keeps the FK, and **Add** is disabled by
+  the Worker flag `TEAM_ADD_ENABLED=false`. Edit, deactivate and reactivate of existing people
+  still work. So during the window every profile still has its Supabase Auth account, and a
+  backout restores a working old app (review finding 5). Re-adding the FK `NOT VALID` later is
+  **not** a backout path and is not claimed as one. The rejected alternative, creating Supabase
+  Auth users from the Worker, needs `service_role` in the Worker.
 - Email uniqueness: a partial unique index on `lower(email)` for active staff. Creating it can
   fail if duplicates exist in production, so it depends on the verified inventory (O1). Until
   then, the add/edit routes check under the roster lock.
@@ -498,7 +542,7 @@ self-deactivation; the last active manager is protected under `internal.roster_l
 | Route | Controls |
 |---|---|
 | `POST /auth/request` | 20/IP, 10/address per 15 min (pre-response, atomic); per user 1/min, 5/h, 10/Chicago-day; 2-min courtesy; definite-failure exception (§3.1) |
-| `POST /auth/recovery` | same envelope; own buckets 20/IP, 10/address per 15 min; per user ≤ 5 failed attempts per hour and 10 per Chicago day, then refused (generic) (§7) |
+| `POST /auth/recovery` | strict Origin (required, exact) + anonymous pre-session form token (§7.2); refused if a valid session cookie is already present; same envelope; own buckets 20/IP, 10/address per 15 min; per user ≤ 5 failed attempts per hour and 10 per Chicago day, then refused (generic) (§7) |
 | `GET /auth/verify`, `GET/POST /auth/confirm` | 256-bit tokens; no oracle beyond "valid link → button"; no rate limit needed for guessing; body caps |
 | `POST /webhooks/sendgrid` | signature first; body cap; no outcome leak |
 | `POST /auth/signout` | CSRF |
@@ -555,14 +599,34 @@ everyday sign-in method.
 | Enrollment | From the signed-in **Account** panel, any active staff member (policy option: managers only, D2) presses "Create recovery codes". Requires a `kind='link'` session created **≤ 15 minutes ago** (fresh email proof), plus CSRF. Generates **10 codes**, each 16 characters from a 32-symbol alphabet without look-alikes (80 bits), shown **once** with "Print" and "I saved them". Generating a new set revokes the old set. |
 | Storage | `internal.recovery_codes(id, user_id, set_id, code_hash unique, created_at, expires_at, used_at, revoked_at, revoked_reason)`. `code_hash = hmac(KEY_RATE, normalized code)`, keyed so a table read cannot be brute-forced offline. The raw code exists only in the one response that shows it (`no-store`) and is never logged. |
 | Expiry | 180 days after creation (proposal). The Account panel shows remaining codes and the expiry. |
-| Use | `GET /signin/recovery` (not linked from `/signin`, so the decision-19 page stays identical). The form takes email + code. `POST /auth/recovery`: same 1000 ± 100 ms envelope; anonymous buckets first; then, **before** the response (it must decide whether to set a cookie), one transaction locks the profile row, checks active staff and the per-user failure ceilings, and matches an unused, unrevoked, unexpired code for that user. On success: mark it used and create a session `kind='recovery'`. The response is either 303 `/` with a session, or the single generic page "That didn't work. Check the address and code, or ask a manager." for every failure class. The envelope covers the DB work (target ≤ 600 ms; over → fail closed). |
+| Use | `GET /signin/recovery` (not linked from `/signin`, so the decision-19 page stays identical) renders the form (email + code) and sets an **anonymous pre-session CSRF cookie** `__Host-tr_pre` (random 256-bit, `Secure; HttpOnly; SameSite=Strict; Path=/`, 30 min), with hidden field `pre_token = hmac(KEY_SESSIONS, "pre:" ‖ cookie)`. If the browser already has a valid session, the page redirects to `/` instead. `POST /auth/recovery`, **before any DB work and before any code is touched (review finding 1)**: (1) `Origin` **must be present** and equal `APP_ORIGIN` exactly. A missing, `null` or different Origin is refused, never falling back to `Host`. (2) `__Host-tr_pre` present and `pre_token` matches it in constant time. (3) **No valid `__Host-tr_session` already present.** A signed-in browser is never switched to another account; the victim's existing session and cookies are left untouched. Any failure in (1)–(3) → the generic failure page, no code consumed, no cookie set or cleared. Then: same 1000 ± 100 ms envelope; anonymous buckets; then **before** the response (it must decide whether to set a cookie), one transaction locks the profile row, checks active staff and the per-user failure ceilings, and matches an unused, unrevoked, unexpired code for that user. On success: mark it used, create a session `kind='recovery'`, clear `__Host-tr_pre`, set the session and app-CSRF cookies, 303 `/recovery`. Every failure class gets the single generic page "That didn't work. Check the address and code, or ask a manager." The envelope covers the DB work (target ≤ 600 ms; over → fail closed). Tests (T-REC): a cross-site form post with a valid attacker code (no Origin, foreign Origin, `null` Origin, missing or wrong pre-token) never consumes the code and never changes the victim's cookies; a same-site post while signed in is refused and the victim's session still works. |
 | Limits | Buckets as §5.5. Per user: 5 failed codes per hour, 10 per Chicago day, counted only after the profile lock. A wrong code never reveals whether the address exists. |
-| Session restrictions | `kind='recovery'`: absolute life **12 hours**, idle **1 hour**, never renewed beyond 12 h. `is_manager()` returns **false** (no Team page, no identity/role/status changes, no curation or manager deletes). `can_export()` returns false (no contact sheet or CSV export: no bulk sensitive reveal). No recovery-code view or regeneration (no recovery escalation). No adding staff and no creating anything that grants access (no indirect grants). Templates: this app has none. The UI shows a persistent banner: "Signed in with a recovery code — limited access until email sign-in works again." |
+| Session restrictions | `kind='recovery'`: absolute life **12 hours**, idle **1 hour** (kind-dependent renewal, §3.5). **Deny by default at the database:** no staff role, so every normal policy, view and RPC refuses (§4.1). Only the §7.3 matrix is reachable, enforced at **both** the Worker (route allow-list per session kind) and the DB (`recovery_*` functions check the kind and return explicit columns). There is no Team page, no identity/role/status change, no exports or contact sheet, no recovery-code view or regeneration (no recovery escalation), no adding staff and no indirect grants. This app has no templates. The UI shows a reduced recovery screen with a persistent banner: "Signed in with a recovery code — limited access until email sign-in works again." Hiding buttons is **not** relied on; T-REC calls every normal endpoint and RPC directly with a recovery session and expects refusal. |
 | Revocation | The §5.3 trigger (email/role/status change). Regenerating a set. Manager "Revoke recovery codes" on the Team page (needs a link session). Emergency sign-out (D1). |
 | Audit | `internal.auth_events(id, at, user_id null, kind, detail jsonb)` for: set created, code used, recovery failure (with keyed IP hash, no code), set revoked, emergency sign-out. Managers see recent recovery events on the Team page. A notice email ("a recovery code was used") is queued and sent when mail works. |
 | Outage drill | Staging only, quarterly (proposal): switch the mail adapter to a fault-injecting fake, sign in with a fixture user's recovery code, check every restriction (T-REC), regenerate, record a dated note. No live email involved. |
 
-### 7.3 Consistency with the other apps
+### 7.3 Recovery permission matrix (default proposal; D2 may widen it only by editing this table)
+
+Field classes: **C** = contact details (phone, email, contact names and every
+`contact_*_override`, street address); **N** = free-text notes (call notes, comments,
+`next_steps`, DNC reasons); **I** = identity/roster data of colleagues (emails, roles).
+Allowed columns are listed exactly. Everything not listed is denied.
+
+| Recovery route (Worker) | DB function | Returns / does | C | N | I |
+|---|---|---|---|---|---|
+| `GET /api/session` | `internal.current_session()` | own name, role, `sessionKind='recovery'`, expiry | — | — | own name only |
+| `GET /api/recovery/batches` | `public.recovery_batches()` | `id, name, customer, job, created_at`, member counts by status | no | no | no |
+| `GET /api/recovery/batches/:id/members` | `public.recovery_batch_members(uuid, int, int)` | `dot_number, legal_name, dba_name, phy_city, phy_state, status, status_changed_at`, plus a DNC **flag** (boolean only) | no | no | no |
+| `POST /api/recovery/batch-carriers/status` | `public.recovery_set_status(uuid, bigint, batch_carrier_status)` | single status change; DNC carriers refused; actor = session user; audited | no | no | no |
+| `POST /auth/signout` | `internal.auth_session_revoke` | sign out | — | — | — |
+| **everything else** (`/api/rpc/*`, `/api/carriers/*`, `/api/contact-logs`, `/api/team/*`, `/api/recovery-codes/*`, exports, sheet, maps, search) | normal functions | **403 at the Worker; refused or empty at the DB** | — | — | — |
+
+Whether contact details (C) should be visible during an outage, so people can keep calling,
+is a policy choice for the coordinator (D2). If they are allowed, they are added as a new row
+with an explicit column list and its own test, never by granting the staff role.
+
+### 7.4 Consistency with the other apps
 
 The coordinator relayed "restricted recovery codes as the proposed shared outage fallback". The
 values above (10 codes, 80 bits, 180 days, 12 h / 1 h, who may enroll, the restriction list)
@@ -587,15 +651,58 @@ recovery-code pattern appears in any test output or artifact (T-HYG).
 | T-TIME | T-INT harness | 200 mixed requests (active, unknown, inactive, over-limit, invalid, malformed body) → body/status identical, response times within 900–1100 ms in Node. Faults: DB lock held 2 s, mail adapter 5 s delay or throw, bucket transport delay → identical envelope; no send when the admission deadline is missed | A3 |
 | T-WRANGLER | `wrangler dev` locally | Same flows in workerd; `waitUntil` completion after the response; CPU-time sample; real cookie attributes; static routing (`run_worker_first`) | A2, A4 |
 | T-VIS | local `wrangler dev` + bb browser automation | screenshots of the 5 states at 1280 and 390 wide vs [QQ] measurements (440 px shell, 72 px badge, 40 px controls), axe-style label check | A4, A6 |
-| T-LIVE | hosted **staging**, read-only probes with `.invalid` addresses | P3–P9 before and after the owner's config change; full migration replay with PostGIS | A5, later approvals |
-| T-REC | T-SQL + T-INT | recovery restrictions; single use; rate limits; regeneration revokes; trigger revokes | A3 |
-| T-HYG | all of the above | credential-pattern scan of outputs; Worker log config check (owner, O5) | — |
+| T-LIVE-A | hosted **staging**, stateless reads with the public anon key only (§8.1, class A) | P3, P5, P6, P7, P9 before and after cutover | A5a |
+| T-LIVE-B | hosted **staging**, **stateful** fixture probes (§8.1, class B) | P4, P8 and write attempts, per fixture class, before/after | A5b (separate) |
+| T-REPLAY | staging full migration replay with PostGIS (M1, backout, M1 again) | geometry RPCs under re-keyed helpers; backout rehearsal | staging approvals |
+| T-REC | T-SQL + T-INT | single use; rate limits; regeneration revokes; trigger revokes. **Login-CSRF:** cross-site recovery posts (no Origin, `null`, foreign Origin, missing or wrong pre-token) never consume a code or touch cookies; a post while signed in is refused and the existing session still works. **Matrix:** with a recovery session, call **every** normal `/api/*` route, every allow-listed RPC and every table/view directly in SQL; expect 403 or refusal/empty. `recovery_*` results contain exactly the §7.3 columns (column-set assertion). **Renewal:** recovery expiry after navigation, mutation and activity ping (extension ≤ 1 h, never past 12 h) and after background polling (no extension) | A1, A3 |
+| T-CRED | T-SQL | with only the `recruiter_worker` login (no Worker keys, no email): mint → redeem with a self-chosen hash → set the GUC → read staff data. **Expected to succeed**, which proves §2.1's classification; also asserts that the audit row exists and the tripwire query flags it | A3 |
+| T-BACKOUT | T-SQL (local), then T-REPLAY (staging) | snapshot role-matrix results and grants on the pre-M1 schema → apply M1 → apply the backout script → results and grants identical to the snapshot; the old JWT-claims role matrix passes again | A3; staging approvals |
+| T-HYG | **release gate**, local + staging | (1) credential-pattern scan of every test output and artifact. (2) **Canary log search**: run each flow (request, verify, confirm, recovery, sign-out, `/api/*`) plus forced error paths (statement error and lock timeout while `app.session_hash` is set, malformed bind, bad webhook signature) with harness-generated canary values. Search Worker Logs/Tail, Hyperdrive, Postgres logs (normal and error) and the mail provider's activity view for the raw cookie, the session hash, the link token and URL, the recovery code and the pre-token. **Pass = zero hits in every log; any hit stops the release** | A3/A4 local; A7 staging |
 | Project checks | existing | `app`: `npm run verify`; `pipeline`: `npm test`, `npm run build`; `node scripts/verify-migration-baseline.mjs` (fresh LF checkout); `verify-staging-contract.mjs`; other offline scripts | A1 |
 
 **Evidence limits.** T-SQL runs on PG 16.15; hosted Supabase runs PG 15 (`config.toml:17`
 `major_version = 15`). It also runs without PostGIS, so the RPCs that use geometry
 (`search_carriers`, matcher, maps) are not exercised against the re-keyed helpers until a
 PostGIS-capable run (staging replay) happens. This is stated in every report.
+
+### 8.1 Hosted probe matrix (review finding 6)
+
+Run on **staging only**, against the existing staging fixture accounts
+(`supabase/staging/profile-fixtures.sql`, addresses at `tnbs-recruiter.example.invalid`, which
+cannot receive mail), plus one fresh, never-registered `.example.invalid` address. The fixture
+passwords come from the operator's environment and are never printed.
+
+Fixture classes: **K** known active (manager, editor, viewer) · **U** unknown address ·
+**D** deactivated · **LP** legacy pending · **LG** legacy guest.
+
+**Class A: stateless (approval A5a).** Public anon key only, no login, no write:
+- `GET /rest/v1/<every table and view>`.
+- `POST /rest/v1/rpc/<each read-only RPC>` (search, counts, facets, dashboard,
+  `batch_status_counts`, `is_contactable`).
+- A GraphQL introspection query and one read query.
+- `GET /storage/v1/bucket`, and a list on any bucket found.
+- A Realtime `postgres_changes` subscription to each published table for 60 s. The fixture row
+  change that should trigger it is a staging write, so it belongs to A5b.
+
+Run before and after cutover. After-cutover pass: permission errors or empty results
+everywhere, and no Realtime event.
+
+**Class B: stateful (approval A5b, separate; each item creates Auth sessions or tokens, or
+attempts mail).**
+
+| Probe | K | U | D | LP | LG | Before cutover | After: passes when |
+|---|---|---|---|---|---|---|---|
+| `/token?grant_type=password` | ✓ | ✓ | ✓ | ✓ | ✓ | yes (documents today's exposure) | every class gets the same provider-disabled error class; no token |
+| With a token obtained **before** cutover (held only in the probe process's memory): REST and GraphQL reads, every RPC including writes (`create_batch` with a `PROBE-` name), Storage list, Realtime subscribe | ✓ | — | — | ✓ | ✓ | read-only part only | everything refused or empty; no row written (the staging fixture cleanup verifies) |
+| `/token?grant_type=refresh_token` with that token | ✓ | — | — | — | — | no | refused **[assume: turning providers off stops refresh; if not, the refreshed token must still reach no data]** |
+| `/otp`, `/magiclink`, `/recover`, `/resend` | ✓ | ✓ | ✓ | ✓ | ✓ | **no** (would attempt mail) | identical status and error code for K/U/D/LP/LG (no roster oracle); no mail attempt in the Auth logs |
+| `/signup` | — | ✓ | — | — | — | **never before signups are off** (it would create an Auth user and a profile) | `signup_disabled`; if a user is created anyway → stop, report, clean up with the existing guarded cleanup script |
+| `/verify` with a junk token; `GET`/`PUT /user` with the pre-cutover token | ✓ | — | — | — | — | no | refused; any accepted `PUT /user` is a finding |
+
+**Equivalence rule.** For each Auth route, the HTTP status, error code and body shape must be
+the same across K/U/D/LP/LG. A difference is a roster oracle on Supabase's side. It blocks
+production until it is closed or the coordinator rules on it. Results are recorded as classes
+only: no keys, tokens, URLs or project refs.
 
 ---
 
@@ -604,22 +711,24 @@ PostGIS-capable run (staging replay) happens. This is stated in every report.
 | # | Claim | Status | Evidence / test |
 |---|---|---|---|
 | E1 | Worker can serve the SPA plus server routes on one origin | **Documented**, not measured | [CF] static-assets routing (`run_worker_first`, `env.ASSETS.fetch`); T-WRANGLER |
-| E2 | Worker reaches Supabase Postgres as a custom low-privilege role via Hyperdrive | **Documented** (CF Supabase guide) | live verification needed (A5/O3); IPv6 reachability **unverified** |
+| E2 | Worker reaches Supabase Postgres as a custom low-privilege role via Hyperdrive | **Documented** (CF Supabase guide) | live verification needed (O3, staging); IPv6 reachability **unverified** |
 | E3 | Hyperdrive on Workers Free | **Documented** "100,000 / day" | — |
 | E4 | Workers Free 10 ms CPU is enough | **Unverified** | T-WRANGLER CPU sample; else D5 |
 | E5 | `waitUntil` ≤ 30 s after response, then cancelled | **Documented** | T-WRANGLER |
 | E6 | Transaction-local GUC is safe under transaction pooling | **Reasoned** (Postgres semantics of `set_config(..., true)`) | T-SQL, T-INT |
-| E7 | Revoking anon/authenticated grants closes PostgREST, GraphQL and Realtime data | **Reasoned** from [SB] "Postgres checks table grants before RLS" | T-SQL locally; T-LIVE hosted |
-| E8 | Supabase Auth endpoints answer with errors once providers are off | **Documented codes only** | T-LIVE before/after (A5) |
-| E9 | No storage buckets exist | **Repo only** (none in migrations) | T-LIVE |
+| E7 | Revoking anon/authenticated grants closes PostgREST, GraphQL and Realtime data | **Reasoned** from [SB] "Postgres checks table grants before RLS" | T-SQL locally; T-LIVE-A/B hosted |
+| E8 | Supabase Auth endpoints answer with errors once providers are off, identically for known and unknown addresses | **Documented codes only** | T-LIVE-B before/after (A5b) |
+| E9 | No storage buckets exist | **Repo only** (none in migrations) | T-LIVE-A |
 | E10 | `auth.uid()` scope = 22 sites / 4 migrations; 17 RPC + 24 table + 12 auth calls in app | **Measured** (`grep`, 9fc3425) | — |
 | E11 | Badge asset identical to [QQ] | **Measured** (git blob `dc6d248`, 1413×1377) | — |
 | E12 | `CF-Connecting-IP` is reliable | **Unverified** here | T-WRANGLER + staging |
 | E13 | `pg` works in Workers with `nodejs_compat` | **Unverified** here | T-WRANGLER |
-| E14 | Worker logs exclude query strings | **Unverified** | O5 + T-HYG |
+| E14 | No credential in Worker, Hyperdrive, Postgres or provider logs, including error paths and bind parameters | **Unverified; release gate** | T-HYG canary search (A7) |
 | E15 | Pipeline unaffected | **Reasoned** (service role, `auth.uid()` already null) | T-SQL pipeline-like writes; pipeline smoke tests |
 | E16 | Supavisor accepts custom roles | **Unverified** (no doc found) | only needed for the fallback |
 | E17 | Production user/profile inventory | **Unknown** | O1 (owner-run read-only query) |
+| E18 | A recovery session reaches only the §7.3 matrix | **Design** | T-REC direct calls |
+| E19 | Backout restores today's working app during the window | **Design** | T-BACKOUT local + T-REPLAY staging |
 
 ---
 
@@ -627,15 +736,15 @@ PostGIS-capable run (staging replay) happens. This is stated in every report.
 
 | # | Risk | Effect | Mitigation |
 |---|---|---|---|
-| R1 | Worker or `recruiter_worker` compromise is the new trust boundary | Attacker with Worker secrets can mint sessions | Secrets only in Worker env; DB role narrow; ledgers behind definer functions; key rotation runbook; emergency sign-out (D1) |
-| R2 | DB statement logs might capture `app.session_hash` bind values | Session replay by someone with logs **and** the Worker DB credential | Set `log_parameter_max_length=0` for the role if Supabase permits it **[assume]**; otherwise accept and document |
+| R1 | Worker secrets or the `recruiter_worker` credential leak; **the DB credential alone is an authentication authority** (§2.1, P12) | Attacker can create a session for any active staff member | Treated as a signing key: Worker/Hyperdrive secret only, never on laptops or CI; rotation runbook; connection limit; audit plus a daily tripwire query; emergency sign-out (D1). T-CRED keeps the claim honest |
+| R2 | Credentials in logs | — | **Not a residual risk: a release gate (T-HYG).** If any log is shown or suspected to contain one, the release stops and the problem is escalated. There is no "accept and document" path |
 | R3 | Envelope is a measured target | Platform stalls can shift timing for any address | T-TIME; fail-closed admission deadline |
 | R4 | `waitUntil` cancellation at 30 s | A link minted but not sent | Courtesy 2 min, human retry; status stays honest |
 | R5 | No PostGIS locally | Geometry RPCs not exercised under the new helpers until staging | Staging replay before rollout |
 | R6 | Mail provider outage | No new link sign-ins | Recovery codes (if adopted); existing sessions continue |
 | R7 | `run_worker_first: true` counts asset requests | Free-plan 100k/day request cap | Array patterns for assets; measure |
-| R8 | Old Supabase passwords still exist (not scrambled, per directive) | Usable only against Supabase Auth, which reaches no data; once providers are off, not usable at all | O2 + T-LIVE |
-| R9 | Dropping the `profiles → auth.users` FK | Loses a referential check | Reversible; reviewed as D8 |
+| R8 | Old Supabase passwords still exist (not scrambled, per directive) | Usable only against Supabase Auth, which reaches no data; once providers are off, not usable at all | O2 + T-LIVE-B |
+| R9 | Dropping the `profiles → auth.users` FK (M2, after the backout window) | Loses a referential check; ends old-app compatibility for new staff | Only after the window closes (§11.5); D8 |
 | R10 | PG16 vs hosted PG15 | Version differences | Staging replay |
 
 ---
@@ -662,40 +771,47 @@ PostGIS-capable run (staging replay) happens. This is stated in every report.
 - **A4 — local Worker:** `npx wrangler dev --ip 127.0.0.1 --port 8788 --local` in `app/`, with
   `.dev.vars` holding throwaway test keys (in thread storage, not committed) and the DB pointed
   at A3. Purpose: T-WRANGLER, T-VIS.
-- **A5 — live read-only probes of hosted staging** (separate approval, later): anonymous calls to
-  staging's `/auth/v1/{otp,recover,signup,token}`, `/rest/v1/<table>`, `/graphql/v1`,
-  `/storage/v1/bucket` using only addresses at `example.invalid` (cannot receive mail), before and
-  after the owner's config change. No writes beyond what those endpoints do for a non-existent
-  address. Results recorded without keys or URLs.
+- **A5a — stateless staging probes** (later): class A of §8.1. Public anon key only, no login,
+  no writes. Before and after cutover.
+- **A5b — stateful staging probes** (later, approved separately): class B of §8.1, using the
+  staging fixture accounts. They create Auth sessions and tokens, attempt mail to undeliverable
+  fixture addresses after providers are off, and make one `PROBE-` write attempt that must
+  fail. `/signup` runs only after signups are disabled.
 - **A6 — bb browser automation** against `http://127.0.0.1:8788` only, for screenshots.
+- **A7 — staging log inspection for the T-HYG gate** (later): an operator or owner searches the
+  Cloudflare Worker/Hyperdrive logs and the Supabase Postgres logs for harness canary values,
+  and reports hit counts only.
 
 ### 11.2 Rollout plan (each step its own owner "go")
 
 1. Gate 1 review of this design → fixes → approval.
-2. Build on this branch with A1–A4, A6 → Gate 2 independent code review.
+2. Build on this branch with A1–A4, A6 (A1 approved 2026-10-21; the others pending) → Gate 2 independent code review.
 3. Staging: owner-approved staging DB migration, Hyperdrive config (caching disabled), Worker
    secrets, `recruiter_worker` password, the mail provider (or fake mail on staging), and staging
-   rebuild if needed (that rebuild was deferred until after sign-in). T-LIVE probes.
+   rebuild if needed (that rebuild was deferred until after sign-in). §8.1 probes (A5a, A5b),
+   T-REPLAY with the backout rehearsal, T-HYG gate (A7).
    Hunter's 5-minute walkthrough.
-4. Production: read-only inventory (O1) → decisions on pending/guest and the FK/unique index →
-   migration → Worker deploy → owner disables Supabase Auth providers (O2) → probes → first
-   manager signs in. **Rollback:** redeploy the previous Worker build and re-enable the email
-   provider. The migration's grant revocations have a prepared reverse script. Data is never
-   touched, so rollback is configuration only.
+4. Production: read-only inventory (O1) → decisions on pending/guest and the unique index →
+   pre-cutover grant/policy snapshot (read-only, §11.5) → maintenance flag on → **M1** → Worker
+   deploy → owner disables the Supabase Auth providers (O2) → probes as in §8.1 → T-HYG gate →
+   maintenance flag off → first manager signs in. The backout window opens (§11.5).
+5. Window closes (owner decision, D10) → **M2** (FK drop, D8) and `TEAM_ADD_ENABLED=true`. From
+   then on, forward-fix only.
 
 ### 11.3 Open central decisions (not resolved here) and what each blocks
 
 | ID | Decision | Owner | Blocks |
 |---|---|---|---|
 | D1 | Who may trigger "sign everyone out" (and how): manager role in-app, operator SQL only, or the coordinator's shared procedure | coordinator | recovery slice S6 (emergency revoke UI); rollout S8 runbook |
-| D2 | Recovery-code policy: adopt? who enrolls; count; entropy; expiry; recovery-session limits and restriction list | coordinator + independent review | S6 (built behind a disabled flag until decided) |
+| D2 | Recovery-code policy: adopt? who enrolls; count; entropy; expiry; recovery-session limits; **the §7.3 permission matrix, especially whether contact details (C) are visible during an outage** | coordinator + independent review | S6 (built with the default deny matrix, behind a disabled flag, until decided) |
 | D3 | Mail provider and sender (Quote-Queue's SendGrid account vs other; address) | Hunter via coordinator | live delivery S7-live and rollout S8 only; the adapter and fakes are not blocked |
-| D4 | Test-environment and rollout approvals (A1–A6, staging, production) | manager / Hunter | testing of all slices; S8 |
+| D4 | Test-environment and rollout approvals (A2–A7, staging, production; A1 approved 2026-10-21) | manager / Hunter | testing of all slices; S8 |
 | D5 | Workers plan if Free CPU is insufficient (spend) | Hunter | S8 |
 | D6 | DB connection path on hosted (Hyperdrive direct vs pooler; IPv4 add-on if required, which is spend) | manager / Hunter after A5 | S8 |
 | D7 | Fate of legacy pending/guest rows | Hunter, after O1 | nothing in the build; production cleanup only |
-| D8 | Drop `profiles.id → auth.users` FK (schema change) | review + manager | S1 roster-add; alternative designs listed in §5.4 |
+| D8 | Drop the `profiles.id → auth.users` FK (schema change), in **M2 after the backout window** | review + manager / Hunter | S5 Team "add" only (disabled until M2); M1 and the rest are not blocked |
 | D9 | Design-system version for the sign-in surfaces (v1.0 vs [QQ] v1.1) | coordinator | S4 final visual sign-off only |
+| D10 | Length of the backout window, and who declares it closed | Hunter via manager | M2 timing; production rollout plan |
 
 Build slices: S1 DB migration + SQL tests · S2 Worker auth core · S3 data API + SPA port ·
 S4 sign-in pages · S5 Team page · S6 recovery codes · S7 mail adapter + webhook · S8 rollout.
@@ -709,8 +825,57 @@ S4 sign-in pages · S5 Team page · S6 recovery codes · S7 mail adapter + webho
 - O3 Create the Hyperdrive config (caching disabled) and the `recruiter_worker` password; add
   Worker secrets (keys, DB, mail).
 - O4 Mail provider setup per D3 (sender, send key, signed event webhook).
-- O5 Confirm Worker logging excludes query strings (or is off).
+- O5 Provide log access (or run the canary searches) for the T-HYG gate (A7). Set logging so
+  that query strings, headers and bind parameters are excluded wherever the platform allows.
 - O6 Optionally set Realtime to private channels only.
+
+### 11.5 Backout and forward-fix (review finding 5)
+
+**Why it works.** During the window the database still has everything the old app needs. M1
+keeps the `profiles → auth.users` FK and Team "add" is off, so every profile still has its
+Supabase Auth account. No password was scrambled. Data the new app writes (contact logs,
+statuses, comments) uses the same profile ids, so the old app reads it unchanged. The new
+ledger tables stay in place, inert, for audit.
+
+**Prepared artifacts (in the repo, reviewed at Gate 2, rehearsed):**
+- `supabase/backout/pre-cutover-snapshot.sql`: read-only. Lists every grant on `public` and
+  `internal` objects, every policy definition and every function definition that M1 touches,
+  plus the role-matrix results. It runs before M1, and its output is stored with the release.
+- `supabase/backout/M1-backout.sql`: one transaction. It restores the exact pre-M1 bodies of
+  `current_app_role`, the replaced triggers and RPCs, the dropped or recreated policies
+  (including `profiles_update_self`), and the grants to `anon`/`authenticated` (generated
+  from, and checked against, the snapshot). It sets `recruiter_worker` to `NOLOGIN` and drops
+  the revocation trigger. It deletes no ledger table and no data.
+- The pre-cutover Worker version id, recorded at deploy, for `wrangler rollback` (the previous
+  static build with supabase-js).
+
+**Backout procedure** (owner "go" required; the operator runs it):
+1. Turn the maintenance flag on. It is a Worker env var: every route serves a static "Back
+   shortly" page, with no DB change.
+2. Apply `M1-backout.sql`.
+3. Re-enable the Supabase email provider (the reverse of O2; signups stay off).
+4. Roll the Worker back to the recorded pre-cutover version.
+5. Smoke test. On staging: a fixture signs in on the old password page, reads a batch and logs
+   a test call. On production: a read-only check. Compare the role matrix with the snapshot.
+6. Tell the team. Sessions from the new system are simply gone; everyone signs in the old way.
+
+**Forward-fix** is preferred for defects that don't threaten data or access control:
+maintenance flag on → fix on the branch → expedited independent review → redeploy → flag off.
+For access-control or credential defects, back out first and fix later.
+
+**Rehearsal (required before production):** T-BACKOUT locally on the throwaway cluster
+(snapshot → M1 → backout → identical results), then on staging inside T-REPLAY: M1 → backout
+→ old app works → M1 again → new app works.
+
+**After the window:** M2 drops the FK and turns Team "add" on. New staff then have no Supabase
+Auth account, so the M1 backout would no longer give them a working old app. That is why M2
+waits for the owner to close the window.
+
+### 11.6 What changed in the approvals list (revision 2)
+
+A1 is approved (2026-10-21). A5 is split into **A5a** (stateless) and **A5b** (stateful,
+separate). **A7** (staging log inspection for the T-HYG gate) is new. A2, A3, A4 and A6 are
+unchanged.
 
 ---
 
@@ -734,3 +899,17 @@ S4 sign-in pages · S5 Team page · S6 recovery codes · S7 mail adapter + webho
 - Manager reports: `thr_9apu26rmg8` storage `signin-alignment-report.md`,
   `signin-correction-impact.md`, `signin-amendments-2.md`, `evidence-brief.md`,
   `manager-onboarding.json`.
+
+---
+
+## 13 · Review response (Codex Gate 1 review of `3b841a7`, 2026-10-21)
+
+| # | Finding (short) | Change | Sections |
+|---|---|---|---|
+| 1 | **Blocker:** the recovery route allowed login CSRF | `/auth/recovery` now requires a present, exact `Origin` (no `Host` fallback; `null` refused) plus an anonymous pre-session form token (`__Host-tr_pre`, SameSite=Strict). It refuses when a valid session already exists, so a victim is never switched to another account. All three checks run before any DB work, code consumption or cookie change. One shared `checkOrigin(strict)` for every route. Tests for cross-site posts and preservation of the victim's session | §3.4, §5.2 P15, §5.5, §7.2, §8 T-REC |
+| 2 | **Blocker:** recovery restrictions left sensitive reads open | Deny by default at the DB: `current_app_role()` gives no role to recovery sessions, so every normal policy, view and RPC refuses. Recovery reaches only `recovery_*` definer functions with explicit column lists. A new §7.3 permission matrix (routes × functions × returned columns × contact/notes/identity classes), enforced at both the Worker and the DB. Contact visibility during an outage becomes an explicit D2 policy question. Tests call every normal endpoint and RPC directly | §1, §4.1, §5.2 P18, §7.2, §7.3, §8 T-REC, §11.3 D2 |
+| 3 | Renewal ignored recovery's idle limit | Each session row carries a constraint-bound `idle_window` per kind (30 days / 1 hour). The touch uses it, capped at the absolute expiry, with a 1-minute throttle for recovery. Tests for navigation, mutation, activity ping and polling | §3.5, §8 T-REC |
+| 4 | DB-credential containment overstated | The `recruiter_worker` credential is classified as an **authentication authority** and protected like a signing key. Audit plus tripwires are labelled detective, not proof. T-CRED demonstrates the credential-only attack (expected to succeed) | §2.1, §5.2 P12, §8 T-CRED, §10 R1 |
+| 5 | Rollback did not restore a working app | The FK drop moves to a later M2 after a backout window; Team "add" is off until then. A full backout procedure: snapshot, `M1-backout.sql` restoring exact pre-M1 definitions and grants, re-enabling the provider, Worker version rollback, smoke test. Forward-fix rules. Local and staging rehearsal required. `NOT VALID` re-add is no longer claimed as a backout | §5.4, §8 T-BACKOUT/T-REPLAY, §10 R9, §11.2, §11.5, D8, D10 |
+| 6 | Hosted probes not read-only and not sufficient | §8.1 matrix: stateless class A (A5a) vs stateful class B (A5b, separate approval). Fixture classes known/unknown/deactivated/legacy pending/legacy guest. All P8 routes, including `/magiclink`, `/verify`, `/resend`, `/user` and refresh. `/signup` never before signups are off. Equivalence rule across classes | §8 T-LIVE-A/B, §8.1, §11.1 A5a/A5b |
+| 7 | Credential logging was an accepted fallback | R2 is now a release gate (T-HYG canary search across the Worker, Hyperdrive, Postgres normal and error logs, and the provider, for cookies, session hashes, link tokens and URLs, recovery codes and pre-tokens). Any hit stops the release. "Accept and document" removed. New approval A7 | §2.1, §3.2, §8 T-HYG, §9 E14, §10 R2, §11.1 A7, O5 |
