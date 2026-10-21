@@ -15,7 +15,7 @@
     "verify:assets": "node scripts/verify-assets.mjs",
     "verify": "npm run typecheck && npm run lint && npm test && npm run verify:assets && npm run build",
     "lint": "eslint .",
-    "typecheck": "tsc --noEmit -p tsconfig.json"
+    "typecheck": "tsc --noEmit -p tsconfig.json && tsc --noEmit -p tsconfig.server.json"
   },
   "dependencies": {
     "@googlemaps/js-api-loader": "^2.1.1",

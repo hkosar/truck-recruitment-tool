@@ -36,4 +36,12 @@ export default tseslint.config(
       ],
     },
   },
+  // Same-origin sign-in server (docs/build-plan/15-qq-infrastructure-reconciliation.md):
+  // plain Node code, no browser globals.
+  {
+    files: ['server/**/*.ts'],
+    languageOptions: {
+      globals: globals.node,
+    },
+  },
 );
