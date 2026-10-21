@@ -30,18 +30,48 @@
 
 begin;
 
--- Invocation contract: set both transaction-local settings before running the reset body:
---   select set_config('app.staging_project_ref', 'yhyoxhtguyturgdhwywc', true);
---   select set_config('app.staging_reset_confirmation', 'RESET FICTIONAL TNBS RECRUITER DATA', true);
--- The hosted reset runner supplies these in the same transaction/session.
--- Fail closed unless the operator/session supplies the exact isolated staging ref.
+-- Invocation contract (all three gates must pass before any row is deleted):
+--   1. The connected database must carry the staging identity marker created once by
+--      supabase/staging/install-staging-identity-marker.sql. The marker is never part of
+--      supabase/migrations, so production does not have it. This binds the reset to the
+--      database it is actually connected to, not to text the caller supplies.
+--   2. Transaction-local settings, set in the same run, as additional operator checks:
+--        select set_config('app.staging_project_ref', 'yhyoxhtguyturgdhwywc', true);
+--        select set_config('app.staging_reset_confirmation', 'RESET FICTIONAL TNBS RECRUITER DATA', true);
+--   3. The database must hold only fictional data: no profiles other than the seven
+--      fixture identities and the staging owner, and no carriers outside the fictional
+--      DOT ranges. Anything else is treated as real business data and the reset stops.
 do $$
+declare
+  v_marker_rows bigint;
+  v_marker_ok boolean;
+  v_other_profiles bigint;
+  v_real_range_carriers bigint;
 begin
+  if to_regclass('staging_identity.marker') is null then
+    raise exception 'staging reset refused: this database has no staging identity marker (run install-staging-identity-marker.sql once on staging only)';
+  end if;
+  execute 'select count(*), bool_and(environment = ''staging'' and marker_id = ''a8512f81-fe47-485d-95cd-092c46e4920b''::uuid) from staging_identity.marker'
+    into v_marker_rows, v_marker_ok;
+  if v_marker_rows <> 1 or v_marker_ok is not true then
+    raise exception 'staging reset refused: staging identity marker is missing or does not match';
+  end if;
   if current_setting('app.staging_project_ref', true) is distinct from 'yhyoxhtguyturgdhwywc' then
     raise exception 'staging reset refused: app.staging_project_ref must equal yhyoxhtguyturgdhwywc';
   end if;
   if current_setting('app.staging_reset_confirmation', true) is distinct from 'RESET FICTIONAL TNBS RECRUITER DATA' then
     raise exception 'staging reset refused: confirmation phrase is missing';
+  end if;
+  select count(*) into v_other_profiles
+  from public.profiles
+  where not (id::text like '71000000-0000-4000-8000-00000000000%' and email like '%@tnbs-recruiter.example.invalid')
+    and email is distinct from 'hunter@twistednail.com';
+  select count(*) into v_real_range_carriers
+  from public.carriers
+  where not (dot_number between 1200000 and 1307999 or dot_number between 1400001 and 1400099);
+  if v_other_profiles <> 0 or v_real_range_carriers <> 0 then
+    raise exception 'staging reset refused: unexpected non-fictional data (other profiles %, carriers outside fictional DOT ranges %)',
+      v_other_profiles, v_real_range_carriers;
   end if;
 end
 $$;
@@ -67,12 +97,26 @@ delete from public.zip_centroids;
 delete from public.city_centroids;
 delete from public.carriers;
 
--- Reset touched identity sequences where present; schema and migrations are unchanged.
-select setval(pg_get_serial_sequence('public.batch_activity', 'id'), 1, false);
-select setval(pg_get_serial_sequence('public.contact_suppressions', 'id'), 1, false);
-select setval(pg_get_serial_sequence('public.carrier_inspections', 'id'), 1, false);
-select setval(pg_get_serial_sequence('public.carrier_qc_snapshots', 'id'), 1, false);
-select setval(pg_get_serial_sequence('public.pipeline_runs', 'id'), 1, false);
+-- Restart touched identity sequences where present; schema and migrations are unchanged.
+-- ALTER SEQUENCE ... RESTART rewrites the sequence inside this transaction, so a failed
+-- reset rolls it back with the deleted rows. Never use the setval function here: its
+-- effect survives ROLLBACK, so a failed reset would leave sequences below surviving row IDs.
+do $$
+declare
+  v_table text;
+  v_sequence text;
+begin
+  foreach v_table in array array[
+    'public.batch_activity', 'public.contact_suppressions', 'public.carrier_inspections',
+    'public.carrier_qc_snapshots', 'public.pipeline_runs'
+  ] loop
+    v_sequence := pg_get_serial_sequence(v_table, 'id');
+    if v_sequence is not null then
+      execute format('alter sequence %s restart with 1', v_sequence);
+    end if;
+  end loop;
+end
+$$;
 
 select setseed(0.42);
 
