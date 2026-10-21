@@ -1022,3 +1022,31 @@ Each case runs in both arrival orders and asserts the **final state** and each s
 | 4 | D8 and D10 are unapproved proposals; RLS re-keying and L1 stay reviewed gates; data preserved | Status block; doc 14 D8/D10 rows, §5.4, §11.5 |
 | 5 | Costs and connectivity | Render pricing and minimal costs to verify before any hosting approval; pooler custom-role support to verify from docs before claiming the add-on; SendGrid unverified and later-gated (§1, §4, §8) |
 | 6 | QQ 8111f3c C7/D9 and full-set lock order | Confirmed reflected at `de3486e`: one global class order with identity first and business classes (§17.2); lock sets taken before validation; validation under locks (§14.2); frozen sets (§17.2); bounded, uniformly fail-closed pre-response work (§14.4, §17.3) |
+
+## 22 · Implementation status (dependency-free slices, 2026-10-21)
+
+Built on `auth/same-origin-signin` under approval A1 only: no new dependency, no server, no SQL
+executed. Everything below is unit-tested or text-checked; nothing is wired to a server or a
+database yet (that waits for the coordinator's focused review and approvals A2–A4).
+
+| Piece | Location | Evidence |
+|---|---|---|
+| Keys, cookies, CSRF (strict Origin), identity and role sets, Chicago day, IP canonicalization and flood admission, mint ladder, delivery lattice | `app/server/auth/*` | `auth-core.test.ts` (24 tests) |
+| Streaming body limit, form parsing, client IP (placeholder until T-IP), deliberate-use rules and ping throttle | `app/server/http/*` | `http-core.test.ts` (11) |
+| Mail seam, SendGrid request/classification, fake adapter, signed webhook verification and event mapping | `app/server/mail/*` | `mail.test.ts` (10, locally generated key) |
+| Decision 19/35 pages, `/auth/signin.css`, black badge, recovery code format and default-deny matrix (off) | `app/server/pages/*`, `app/server/recovery/*`, `app/public/auth/signin.css`, `app/public/brand/badge-black.png` | `pages-recovery.test.ts` (15) |
+| SPA activity ping (not wired) | `app/src/lib/activity.ts` | `activity.test.ts` (5) |
+| M1 migration (pending), backout, credential retirement, snapshot, L1 | `supabase/pending/`, `supabase/backout/`, `supabase/rollout/` | `scripts/verify-auth-migration-contract.mjs` (text checks; mutation-tested) |
+
+**Deviation from Quote-Queue found while building (for review):** QQ records a SendGrid `429`
+as `unknown` (its request route maps only accepted / definite / everything else to unknown).
+Here a `429` is a **definite failure**, because it proves the message was not accepted. So the
+person may retry at once: the minute ceiling and the courtesy are bypassed, while the hour and
+day ceilings still apply. The same applies to `400/401/403` and to connection failures before
+transmission. `5xx`, timeouts and errors after transmission stay `unknown` and are never
+replayed (`app/server/mail/adapter.ts` `sendStatusFor`).
+
+**Not built yet (needs approvals or the focused review):** the Node server and its routes, `pg`
+wiring, the SPA data-layer port and removal of the Supabase screens, the staging SQL
+adaptations (§12.5), executing any SQL (A3), local server runs (A4), hosted probes and log
+gates (A5a/A5b/A7).
