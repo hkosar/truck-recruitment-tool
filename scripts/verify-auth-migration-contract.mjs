@@ -209,6 +209,30 @@ const gBatch = guard.indexOf('from public.batches where id = new.batch_id for ke
 const gCarrier = guard.indexOf('from public.carriers where dot_number = new.dot_number for share');
 if (!(gIdentity >= 0 && gIdentity < gBatch && gBatch < gCarrier)) fail('M1: contact-log guard must do identity, then batch, then carrier');
 
+// K2. Session re-checked after every business-lock wait (doc 15 C7 reconciliation).
+for (const [start, lockMarker] of [
+  ['function internal.member_write_ok(', 'for key share'],
+  ['function internal.suppression_write_ok(', 'for no key update'],
+  ['function public.refresh_batch(', 'for no key update'],
+  ['function public.bulk_set_status(', 'for no key update'],
+  ['function public.set_do_not_contact(', 'for no key update'],
+  ['function internal.contact_logs_dnc_guard()', 'for share'],
+  ['function public.recovery_set_status(', 'for no key update'],
+]) {
+  const body = m1Function(start)?.join('\n') ?? '';
+  const lockAt = body.lastIndexOf(lockMarker);
+  const recheckAt = body.lastIndexOf('internal.recheck_session()');
+  if (lockAt < 0 || recheckAt < lockAt) fail(`M1: ${start} must re-check the session after its last business lock`);
+}
+
+// K3. Webhook evidence: message-id conflict rejected before any insert/update; block allowlist in SQL.
+const evidence = m1Function('function internal.auth_apply_send_evidence(')?.join('\n') ?? '';
+const eMismatch = evidence.indexOf('v_message <> p_message_id');
+const eInsert = evidence.indexOf('insert into internal.email_events');
+const eUpdate = evidence.indexOf('update internal.signin_links');
+if (!(eMismatch >= 0 && eMismatch < eInsert && eInsert < eUpdate)) fail('M1: evidence must reject a conflicting message id before any insert or update');
+if (!evidence.includes("'Bounced Address', 'Unsubscribed Address', 'Spam Reporting Address', 'Invalid Address'")) fail('M1: evidence must gate drop blocks on the recipient-reason allowlist');
+
 // L. Credential retirement order: NOLOGIN, terminate, confirm, then revoke.
 const rNologin = retire.indexOf('alter role recruiter_app nologin');
 const rTerminate = retire.indexOf('pg_terminate_backend(');

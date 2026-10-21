@@ -141,7 +141,8 @@ create table internal.signin_links (
                         check (send_status in ('pending', 'accepted', 'unknown', 'definite_failure')),
   send_attempted_at   timestamptz,
   send_error_code     text,
-  provider_message_id text,
+  provider_request_id text,          -- X-Message-Id from the send response
+  provider_message_id text,          -- sg_message_id, filled once from the first event that carries it
   delivered_at        timestamptz,
   constraint signin_links_revoked_pair check ((revoked_at is null) = (revoked_reason is null)),
   constraint signin_links_used_xor_revoked check (used_at is null or revoked_at is null),
@@ -170,6 +171,7 @@ create table internal.email_events (
   provider_event_id text primary key,                 -- sg_event_id: replays are no-ops
   link_id           uuid not null references internal.signin_links(id),
   event_type        text not null,
+  reason_code       text check (reason_code is null or length(reason_code) <= 500),
   occurred_at       timestamptz not null,
   received_at       timestamptz not null default now()
 );
@@ -355,6 +357,31 @@ begin
 end
 $$;
 
+-- After any business-lock wait: the actor's session row is held FOR SHARE (so it cannot be
+-- revoked meanwhile), but it can EXPIRE while we wait. Re-check it; raise if no longer valid.
+-- Trusted callers (no lock record) are not app sessions and are not checked.
+create function internal.recheck_session() returns void
+language plpgsql
+volatile
+security definer
+set search_path = public, internal, pg_temp
+as $$
+declare
+  v_record text := nullif(current_setting('app.actor_locked', true), '');
+begin
+  if v_record is null then
+    return;
+  end if;
+  if not exists (
+    select 1 from internal.app_sessions s
+    where s.id = (string_to_array(v_record, '|'))[1]::uuid
+      and s.revoked_at is null and s.expires_at > now() and s.absolute_expires_at > now()
+  ) then
+    raise exception 'session expired while waiting' using errcode = 'insufficient_privilege';
+  end if;
+end
+$$;
+
 -- Write-policy guard: actor-only lock sequence for LINK sessions. Returns false (never raises)
 -- so a refused row is simply not written.
 create function internal.actor_can_write(p_roles user_role[]) returns boolean
@@ -387,7 +414,11 @@ begin
   else
     perform 1 from public.batches where id = p_batch_id for key share;
   end if;
-  return found;
+  if not found then
+    return false;
+  end if;
+  perform internal.recheck_session();
+  return true;
 end
 $$;
 
@@ -602,6 +633,7 @@ begin
   if not found then
     raise exception 'batch % not found', p_batch_id;
   end if;
+  perform internal.recheck_session();
 
   select coalesce(jsonb_agg(jsonb_build_object(
            'zone_type', z.zone_type, 'label', z.label, 'params', z.params
@@ -666,6 +698,7 @@ begin
     order by x.dot_number
     for no key update
   ) bc;
+  perform internal.recheck_session();
 
   perform set_config('app.suppress_row_activity', 'on', true);
 
@@ -707,6 +740,7 @@ begin
   if not found then
     raise exception 'carrier % not found', p_dot;
   end if;
+  perform internal.recheck_session();
 
   update public.carriers
      set do_not_contact = p_on,
@@ -778,6 +812,7 @@ begin
     perform 1 from public.batches where id = new.batch_id for key share;
   end if;
   perform 1 from public.carriers where dot_number = new.dot_number for share;
+  perform internal.recheck_session();
   if exists (
     select 1 from public.carriers c
     where c.dot_number = new.dot_number and c.do_not_contact
@@ -808,6 +843,7 @@ begin
   end if;
   if p_dot is not null then
     perform 1 from public.carriers where dot_number = p_dot for no key update;
+    perform internal.recheck_session();
   end if;
   return true;
 end
@@ -1006,8 +1042,8 @@ begin
          send_error_code = case
            when l.send_status = 'definite_failure' then l.send_error_code
            when p_status = 'definite_failure' then coalesce(p_error_code, 'unspecified')
-           else l.send_error_code end,
-         provider_message_id = coalesce(l.provider_message_id, p_provider_message_id),
+           else coalesce(p_error_code, l.send_error_code) end,     -- diagnostic only for unknown
+         provider_request_id = coalesce(l.provider_request_id, p_provider_message_id),
          send_attempted_at = coalesce(l.send_attempted_at, now())
    where l.id = p_link_id;
 end
@@ -1117,10 +1153,14 @@ as $$
      and revoked_at is null
 $$;
 
--- Verified webhook evidence. Replays are no-ops; the recipient must match the snapshot.
+-- Verified webhook evidence (QQ route.ts:869-908, 973-1027, 510-538). Order: lock the link
+-- row; the recipient must match the snapshot; the sg_message_id fills once and a different one
+-- is rejected; the event id is unique (replays are no-ops); only then delivery and block
+-- updates. Blocking is gated here too: bounced/complained/suppressed always; a drop only for a
+-- recipient-specific reason. Quota or configuration drops never block a recipient.
 create function internal.auth_apply_send_evidence(
-  p_event_id text, p_link_id uuid, p_email text, p_event_type text,
-  p_status text, p_delivered boolean, p_blocks boolean, p_occurred_at timestamptz
+  p_event_id text, p_link_id uuid, p_email text, p_message_id text, p_event_type text, p_reason text,
+  p_status text, p_delivered boolean, p_occurred_at timestamptz
 ) returns boolean
 language plpgsql
 volatile
@@ -1129,19 +1169,33 @@ set search_path = public, internal, pg_temp
 as $$
 declare
   v_recipient text;
+  v_message   text;
+  v_blocks    boolean;
 begin
-  select l.recipient_email into v_recipient from internal.signin_links l where l.id = p_link_id;
-  if v_recipient is null or lower(v_recipient) <> lower(p_email) then
-    return false;
+  if p_status not in ('accepted', 'unknown', 'definite_failure') then
+    raise exception 'invalid evidence status';
   end if;
-  insert into internal.email_events (provider_event_id, link_id, event_type, occurred_at)
-  values (p_event_id, p_link_id, p_event_type, p_occurred_at)
+  select l.recipient_email, l.provider_message_id into v_recipient, v_message
+  from internal.signin_links l where l.id = p_link_id
+  for update;
+  if v_recipient is null or lower(v_recipient) <> lower(p_email) then
+    return false;                                          -- not our recipient
+  end if;
+  if p_message_id is not null and v_message is not null and v_message <> p_message_id then
+    insert into internal.auth_events (kind, detail) values ('webhook_message_id_mismatch', jsonb_build_object('link', p_link_id));
+    return false;                                          -- conflicting message id: nothing updated
+  end if;
+
+  insert into internal.email_events (provider_event_id, link_id, event_type, reason_code, occurred_at)
+  values (p_event_id, p_link_id, p_event_type, left(p_reason, 500), p_occurred_at)
   on conflict (provider_event_id) do nothing;
   if not found then
     return false;                                          -- replay
   end if;
+
   update internal.signin_links l
-     set send_status = case
+     set provider_message_id = coalesce(l.provider_message_id, p_message_id),
+         send_status = case
            when l.send_status = 'definite_failure' then l.send_status
            when l.send_status = 'accepted' and p_status <> 'definite_failure' then l.send_status
            when l.send_status = 'unknown' and p_status = 'pending' then l.send_status
@@ -1152,8 +1206,12 @@ begin
          send_attempted_at = coalesce(l.send_attempted_at, p_occurred_at),
          delivered_at = case when p_delivered then coalesce(l.delivered_at, p_occurred_at) else l.delivered_at end
    where l.id = p_link_id;
-  if p_blocks then
-    -- Newer evidence only; a manual clear is not undone by an older event.
+
+  v_blocks := p_event_type in ('bounced', 'complained', 'suppressed')
+              or (p_event_type = 'failed'
+                  and p_reason in ('Bounced Address', 'Unsubscribed Address', 'Spam Reporting Address', 'Invalid Address'));
+  if v_blocks then
+    -- A4: newer evidence only; a manual clear is not undone by an older event.
     insert into internal.blocked_email_addresses as b (normalized_email, reason, evidence_at, evidence_event)
     values (lower(v_recipient), p_event_type, p_occurred_at, p_event_id)
     on conflict (normalized_email) do update
@@ -1462,6 +1520,7 @@ begin
   perform 1 from public.batches where id = p_batch_id for key share;                -- B1
   perform 1 from public.batch_carriers where batch_id = p_batch_id and dot_number = p_dot for no key update;  -- B3
   if not found then return false; end if;
+  perform internal.recheck_session();
   if exists (select 1 from public.carriers c where c.dot_number = p_dot and c.do_not_contact) then
     raise exception 'carrier is do-not-contact' using errcode = 'check_violation';
   end if;
@@ -1577,7 +1636,7 @@ grant execute on function
   internal.auth_session_info(),
   internal.auth_session_touch(),
   internal.auth_session_revoke(),
-  internal.auth_apply_send_evidence(text, uuid, text, text, text, boolean, boolean, timestamptz),
+  internal.auth_apply_send_evidence(text, uuid, text, text, text, text, text, boolean, timestamptz),
   internal.recovery_require_enabled(),
   internal.recovery_failures_allow(text, timestamptz, timestamptz),
   internal.recovery_record_failure(text),
