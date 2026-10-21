@@ -1,0 +1,23 @@
+/* Sign-in pages (decisions 19 and 35), rendered by the server, not the SPA.
+   Values copied from Quote-Queue app/signin/signin.css and the confirm page CSS
+   (origin/main f1167dc): no card, 440px shell, 72px badge, 40px controls. */
+@font-face { font-family: "Montserrat"; src: url("/fonts/montserrat/Montserrat-Regular.ttf") format("truetype"); font-weight: 400; font-display: swap; }
+@font-face { font-family: "Montserrat"; src: url("/fonts/montserrat/Montserrat-Bold.ttf") format("truetype"); font-weight: 700; font-display: swap; }
+@font-face { font-family: "Montserrat"; src: url("/fonts/montserrat/Montserrat-ExtraBold.ttf") format("truetype"); font-weight: 800; font-display: swap; }
+
+body { margin: 0; background: #f7f6f4; color: #231f20; font-family: Montserrat, -apple-system, BlinkMacSystemFont, "Segoe UI", sans-serif; font-size: 14px; line-height: 1.5; -webkit-font-smoothing: antialiased; }
+:focus-visible { outline: 2px solid #1e3a6e; outline-offset: 2px; }
+
+.signin-staging { background: #fde68a; color: #231f20; text-align: center; font-size: 12px; font-weight: 700; padding: 6px 12px; }
+.signin-page { min-height: 100vh; display: flex; align-items: center; justify-content: center; padding: 24px; box-sizing: border-box; }
+.signin-shell { width: 100%; max-width: 440px; display: flex; flex-direction: column; align-items: center; gap: 24px; }
+.signin-wordmark { display: flex; flex-direction: column; align-items: center; gap: 14px; font-weight: 800; font-size: 14px; letter-spacing: 0.16em; text-transform: uppercase; color: #231f20; }
+.signin-wordmark img { width: 72px; height: 72px; display: block; object-fit: contain; }
+.signin-block { width: 100%; }
+.signin-form { display: flex; flex-direction: column; gap: 10px; width: 100%; margin: 0; }
+.signin-input { box-sizing: border-box; width: 100%; height: 40px; padding: 0 12px; font-family: inherit; font-size: 13px; color: #231f20; background: #ffffff; border: 1px solid #e7e4e2; border-radius: 8px; }
+.signin-btn { display: inline-flex; align-items: center; justify-content: center; box-sizing: border-box; width: 100%; height: 40px; font-family: inherit; font-size: 12px; font-weight: 800; border-radius: 9px; padding: 0 22px; border: 1px solid transparent; background: #231f20; color: #fff; text-decoration: none; cursor: pointer; }
+.signin-message { margin: 0; font-size: 13px; line-height: 1.6; text-align: center; color: #231f20; }
+.signin-message b, .signin-message strong { font-weight: 800; }
+.signin-link { font-size: 12px; font-weight: 700; color: #1e3a6e; text-align: center; }
+.signin-message .signin-link { margin-left: 6px; }
