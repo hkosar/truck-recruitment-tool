@@ -455,7 +455,7 @@ Measured: `auth.uid()` appears 22 times in 4 migrations (`activity` 7, `rpc` 8, 
 
 Measured inventory (`grep` at 9fc3425, excluding tests): **17 RPC calls** in `lib/rpc.ts` (18 grep hits, one is a comment at `:31`);
 **24 direct table calls** in `guards.tsx`, `Sidebar.tsx`, `BatchPage.tsx`, `ContactSheet.tsx`,
-`CarrierProfile.tsx`, `Dashboard.tsx`, `UsersAdmin.tsx` and `dnc.ts`; **12 `supabase.auth.*`
+`CarrierProfile.tsx`, `Dashboard.tsx`, `UsersAdmin.tsx` and `dnc.ts`; **11 `supabase.auth.*`
 calls** in the auth screens, guards, Sidebar and ContactSheet. No `.storage` or `.channel`
 calls. Realtime is not wired (`Topbar.tsx:60` TODO).
 
@@ -746,7 +746,7 @@ only: no keys, tokens, URLs or project refs.
 | E7 | Revoking anon/authenticated grants closes PostgREST, GraphQL and Realtime data | **Reasoned** from [SB] "Postgres checks table grants before RLS" | T-SQL locally; T-LIVE-A/B hosted |
 | E8 | Supabase Auth endpoints answer with errors once providers are off, identically for known and unknown addresses | **Documented codes only** | T-LIVE-B before/after (A5b) |
 | E9 | No storage buckets exist | **Repo only** (none in migrations) | T-LIVE-A |
-| E10 | `auth.uid()` scope = 22 sites / 4 migrations; 17 RPC + 24 table + 12 auth calls in app | **Measured** (`grep`, 9fc3425) | — |
+| E10 | `auth.uid()` scope = 22 sites / 4 migrations; 17 RPC + 24 table + 11 auth calls in app (corrected from 12, see doc 15 §12.1) | **Measured** (`grep`, 9fc3425) | — |
 | E11 | Badge asset identical to [QQ] | **Measured** (git blob `dc6d248`, 1413×1377) | — |
 | E12 | `CF-Connecting-IP` is reliable | **Unverified** here | T-WRANGLER + staging |
 | E13 | `pg` works in Workers with `nodejs_compat` | **Unverified** here | T-WRANGLER |

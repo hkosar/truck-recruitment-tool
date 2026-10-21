@@ -2,6 +2,8 @@
 
 Revision 2 (2026-10-21 UTC): review edits on IP trust, shutdown contract and SendGrid
 one-shot sends (§10).
+Revision 4 (2026-10-21 UTC): streaming body limits (§4.3), staging SQL adaptation inventory
+(§12.5), email events marked Adapt, exact Auth call list (§12.1). See §13.
 Revision 3 (2026-10-21 UTC): checked against Quote-Queue's infrastructure map
 (`1f7cce2:docs/handoff/SIGNIN-2026-10-21-infra-map.md`). Adds the reuse table (§11) and the
 data-access and permission migration boundary inventory (§12).
@@ -212,6 +214,35 @@ no login, no data):
 4. Repeat if the hosting chain changes (custom domain, CDN). Until T-IP passes, the per-IP
    limit is recorded as unverified and the release gate for production includes it.
 
+### 4.3 Request-body limits in plain Node (replaces Next.js protection; review edit)
+
+QQ relies on Next.js for a framework-level body cap (`next.config.ts`
+`middlewareClientMaxBodySize: "1mb"`), and its webhook checks the actual size only **after**
+reading the full body. A plain Node server has no such cap, so copying that order would let
+an oversized chunked request (no `Content-Length`, placeholder signature headers) consume
+memory before rejection.
+
+One shared reader, `readBodyLimited(req, maxBytes, deadlineMs)`, is used by every route that
+reads a body, before any collection or parsing:
+- Limits: `/auth/request`, `/auth/confirm`, `/auth/signout`, `/auth/recovery` 32 KiB;
+  `/api/*` 256 KiB; `/webhooks/sendgrid` 1 MiB.
+- A declared `Content-Length` above the limit is rejected before reading. Without one
+  (chunked), bytes are counted **as chunks arrive**; the moment the running total exceeds the
+  limit, reading stops, the socket is destroyed after a `413` (or, on the auth routes, the
+  normal generic envelope with no identity work, matching QQ's "malformed body = invalid
+  email" rule), and nothing is buffered beyond the limit.
+- A per-request read deadline (10 s) and the server's `requestTimeout`/`headersTimeout` stop
+  slow uploads. An aborted or erroring stream is treated as an empty body, with no partial
+  parse.
+- Webhook order: size-limited read → signature check over the exact raw bytes → only then
+  JSON parse. A bad or missing signature is rejected without parsing.
+
+Tests (T-BODY, local, A4): oversized chunked body with no `Content-Length` on each route
+class (rejected; process memory stays bounded); declared oversize (rejected without
+reading); webhook with a placeholder or invalid signature at and over 1 MiB (rejected, no
+parse); interrupted upload and slow-drip upload (no partial parse; the socket is freed; the
+auth envelope is unchanged).
+
 ### Gap findings carried forward (not copied from Quote-Queue as-is)
 
 | Item | Quote-Queue as read | Here |
@@ -324,7 +355,7 @@ of what GitHub or the live service runs. Quote-Queue's own fixes are under revie
 | Link ledger | `auth_tokens` (0001:286-322; 0002 split ids) | **Adapt**: same columns and CHECKs; app prefix | `internal.signin_links` (pending M1) |
 | Sessions | `sessions` (0001:350-361) | **Adapt**: plus `kind`, `idle_window`, `absolute_expires_at`, `email_at_issue`, `revoked_reason` (doc 14 §3.5) | `internal.app_sessions` |
 | Flood buckets | `auth_request_buckets` (0001:369-379), `lib/rate.ts` `incrementAuthRequestBuckets` :252, ceilings :212-213 | **Copy logic**; dimensions add `recovery_ip`/`recovery_email` only if recovery is enabled. Fixed 15-minute windows (2× burst at the edge) kept, for parity with QQ | `internal.auth_request_buckets` |
-| Email events | `email_events` (0001:627-646; 0003) | **Copy** | `internal.email_events` |
+| Email events | `email_events` (0001:627-646; 0003) | **Adapt**: QQ-only digest dependencies are omitted (`digest_send_id REFERENCES digest_sends`, 0001:637; this app has no digest). Kept: unique `provider_event_id` (sg_event_id) for replay safety, correlation to the sign-in link **and** its snapshotted recipient, and block-clear evidence ordering (older evidence never overwrites newer; a manual clear is not undone by an older event) | `internal.email_events` |
 | Block list | `blocked_email_addresses` (0001:654-697), `applyBlock` (webhook :1197) | **Adapt**. Doc 14 had no block list; adopted here. Blocks are **never** cleared automatically or for a retry, only by a manager action that is audited | `internal.blocked_email_addresses` |
 | Audit | `admin_events` (0001:730-743), `lib/audit.ts` | **Adapt** | `internal.auth_events` |
 | Send-status lattice | trigger `auth_tokens_send_status_monotonic_trg` (0001:340; function per 0007:45) | **Copy as-is** | trigger on `internal.signin_links` |
@@ -389,6 +420,8 @@ executed as `recruiter_app` with `app.session_hash` set, so the same RLS and RPC
 | `lib/dnc.ts:8, 9` | `carriers.do_not_contact`, `contact_suppressions` | read | `POST /api/dnc/lookup` |
 | `lib/rpc.ts:103-364` | 17 RPCs: `search_carriers`, `count_carriers`, `facet_other_values`, `facet_suggested_keywords`, `facet_cargo_flags`, `create_batch`, `refresh_batch`, `bulk_set_status`, `set_do_not_contact`, `log_export`, `batch_members`, `batch_members_map`, `search_carriers_map` (:310), `generate_contact_sheet`, `batch_status_counts`, `dashboard_totals`, `is_contactable` | rpc | `POST /api/rpc/:name`, allow-list = exactly these 17 (= the grants in `20260722223300_security_hardening.sql:39-57`); `rpc.ts` keeps its exported signatures |
 
+Totals: **24 table calls, 17 RPC wrappers, 11 Auth calls.** Auth, exactly: 11 calls: `app/guards.tsx:43` getSession, `:49` onAuthStateChange, `:143` signOut; `app/Sidebar.tsx:141` signOut; `features/auth/Forgot.tsx:18` resetPasswordForEmail; `Login.tsx:31` signInWithPassword; `Pending.tsx:15` signOut; `Register.tsx:21` signUp; `Reset.tsx:24` getSession, `:43` updateUser; `features/batch/sheet/ContactSheet.tsx:32` getSession. (Earlier docs said 12: that `grep -c` also counted the comment at `lib/supabase.ts:72`.)
+
 No `.storage`, `.channel` or Realtime use in the app (`Topbar.tsx:60` TODO). `lib/supabase.ts`
 and the `VITE_SUPABASE_*` variables leave the bundle.
 
@@ -420,8 +453,7 @@ and the `VITE_SUPABASE_*` variables leave the bundle.
 | Pipeline supabase-js with the service-role key (PostgREST): `pipeline_runs`, `data_quality_reports` | `pipeline/src/db.ts:65`; `runs.ts:60, 86, 118, 214`; `dq-report.ts:192` | none: `service_role` keeps its grants (`20260720001500_service_role_pipeline_grants.sql`); PostgREST stays enabled for it |
 | Pipeline direct `pg` (`SUPABASE_DB_URL`): inserts into `carriers`, `carrier_insurance`, `carrier_insurance_filings`, `carrier_safety`, `cargo_other_values` | `pipeline/src/db.ts:74`; `pipeline/src/**` insert statements | none: no `auth.uid()` on those tables; no `app.session_hash`, so `current_staff_id()` is null exactly as `auth.uid()` is today |
 | Pipeline never touches `batch_carriers`, `batch_activity`, `profiles` | `grep` over `pipeline/src`: no match | the re-keyed triggers are not on its path |
-| Staging fixture scripts (Admin API createUser/deleteUser) | `scripts/seed-auth-users.ts:90, 121`; `scripts/cleanup-auth-users.ts:53, 101` | **updated later**: fixtures need profiles and app sessions, not Supabase Auth logins; left as-is until the staging slice |
-| Staging SQL runner and marker | `pipeline/src/staging-sql-runner.ts`; `supabase/staging/*` | unchanged except the role matrix (§12.2) |
+| Staging fixture scripts, SQL runner, marker, reset, cleanup and their offline checks | `scripts/seed-auth-users.ts`, `scripts/cleanup-auth-users.ts`, `pipeline/src/staging-sql-runner.ts`, `supabase/staging/*`, `scripts/verify-staging-*.mjs`, `scripts/check-hosted-fixtures.mjs` | **adapted**, see §12.5 (not unchanged) |
 
 ### 12.4 What stays unchanged
 
@@ -430,3 +462,40 @@ Viewer) and statuses, including legacy pending/guest; every policy predicate apa
 5 `auth.uid()` policies; every RPC body apart from the `auth.uid()` swap; the matcher, PostGIS
 and warnings; the pipeline and its schedule; the SPA screens (only the data layer changes);
 Google Maps.
+
+
+### 12.5 Staging SQL adaptations (behaviour before and after M2)
+
+Today, staging identities are Supabase Auth rows tagged in `raw_user_meta_data` (`test_only`,
+`test_run_id`), and several scripts use that tag as the proof of ownership. After M2 removes
+the `profiles → auth.users` FK, new profile-only fixtures have no Auth row, and deleting from
+`auth.users` no longer removes the profile. So these files change. Every production-refusal
+protection stays: the runner's target parser and production-ref refusal, the
+`app.staging_runner_verified_ref` check, the marker table with its fixed id, the
+confirmation phrases, the "never in `supabase/migrations`" rule, and the offline
+production-ref scans.
+
+| File (evidence) | Today | M1 (FK kept; backout window) | After M2 (FK dropped) |
+|---|---|---|---|
+| `supabase/staging/profile-fixtures.sql` (inserts into `auth.users` at :8 with tag metadata, then updates `profiles` at :31) | Auth rows + profiles; includes pending (…0005) and guest (…0006) | Unchanged rows. Add app-session fixtures only inside role-matrix transactions (rolled back) | Fixtures become **profile-only**, registered in a new `staging_identity.fixture_identities(profile_id, test_run_id)` table (the ownership registry for identities, alongside `fixture_rows`). No `auth.users` insert. Pending/guest fixtures are kept, as legacy-state probes |
+| `supabase/staging/install-staging-identity-marker.sql` (`v_other_profiles` at :45-56 recognises fixtures through `auth.users` metadata) | refuses if any profile is not a tagged fixture or the owner | unchanged | Recognises fixtures through `fixture_identities` **or** the existing Auth tag, so it works on both old and new databases. Still refuses unknown profiles (refusal logic kept); still deletes nothing |
+| `supabase/staging/cleanup-fixtures.sql` (fixture ids from `auth.users` metadata at :50-52; `delete from auth.users` at :104) | deletes registered business rows, then fixture Auth users (profiles cascade) | Adds: revoke and delete fixture rows in `internal.app_sessions`, `internal.signin_links`, `internal.recovery_codes`, `internal.email_events`, `internal.blocked_email_addresses` and `internal.auth_events` for fixture profile ids only, **before** the identity delete (they reference `profiles`) | Deletes fixture **profiles** listed in `fixture_identities` (and any legacy tagged Auth users), after the auth-ledger rows; refuses if a non-fixture row still references a fixture profile (existing check at :99 kept) |
+| `supabase/staging/reset-fictional-data.sql` (`v_other_profiles` at :76-79 via `auth.users`; `v_fixture_profiles <> 7`; preserves `auth.users` and `profiles`, :124) | resets business rows only | Unchanged, plus clears fixture auth-ledger rows (sessions, links, buckets) so each reset starts clean | Ownership through `fixture_identities`; the count check becomes the registry count; never deletes non-fixture profiles |
+| `supabase/staging/verify-role-matrix.sql` (`request.jwt.claims` at :15; `set local role anon/authenticated` at :46, :53) | JWT claims + Supabase roles | Probes as `recruiter_api` with `app.session_hash` fixture sessions (link and recovery kinds) inserted inside the rolled-back transaction; adds the doc 14 probes (revoked, expired, idle, recovery matrix, Viewer recovery write, own-profile read) and **anon/authenticated must now be denied everything** | Same |
+| `scripts/seed-auth-users.ts`, `scripts/cleanup-auth-users.ts` (Admin API `createUser`/`deleteUser`, :90, :121, :53, :101) | create/delete hosted Auth fixtures with passwords | Kept only for the L1 and A5b probes (pre-cutover tokens); otherwise unused | Retired for app tests (staff never use Supabase Auth). Kept only if A5b still needs Auth fixtures; same guards |
+| `scripts/verify-staging-contract.mjs` (requires `encrypted_password` and `raw_user_meta_data->>'test_only'` in fixtures/cleanup, :26-33) | static checks | Adds checks: cleanup clears the auth ledgers for fixture ids only; role matrix uses `recruiter_api` + `app.session_hash` and rolls back | Fixture checks switch to `fixture_identities`; the production-ref, staging-ref, marker, no-delete-in-installer and not-in-migrations checks are unchanged |
+| `scripts/verify-staging-reset.mjs` (`v_fixture_profiles <> 7`, "reset must preserve auth.users/profiles", :43, :60-61) | static checks | Adds: the auth-ledger clean-up is scoped to fixture ids | Ownership via `fixture_identities`; "never delete non-fixture profiles" replaces the `auth.users` rule |
+| `scripts/check-hosted-fixtures.mjs` (scans the seed/cleanup scripts) | static checks | unchanged | Retired with the scripts, or unchanged if they are kept |
+| `pipeline/src/staging-sql-runner.ts` | target guard, actions, confirmations | Adds actions for the new staging scripts (same guard and confirmations) | Same |
+
+These are staging-only files (never in `supabase/migrations`), changed in the staging slice
+and reviewed with it. The M2 column applies only after Hunter closes the backout window.
+
+## 13 · Review response (Codex review of `85032d7`, 2026-10-21)
+
+| # | Finding | Change | Sections |
+|---|---|---|---|
+| 1 | Plain Node loses QQ's framework body cap | Streaming `readBodyLimited` enforced before collection/parsing, per-route limits, read deadline, signature before parse; T-BODY tests (chunked oversize, invalid signature, interrupted and slow uploads) | §4.3 |
+| 2 | Staging SQL is not unchanged | Inventory of fixtures, ownership registry, marker, reset, cleanup, role matrix, Auth fixture scripts, offline checks and runner: today / M1 / after M2; all production-refusal protections kept | §12.3, §12.5 |
+| 3 | Email events are Adapt, not Copy | Digest dependency omitted; uniqueness, recipient correlation and block-clear ordering kept | §11 |
+| 4 | Auth call count | Exactly 11 (listed); the earlier 12 counted a comment. Doc 14 corrected too | §12.1; doc 14 §4.2, E10 |
