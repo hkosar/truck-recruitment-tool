@@ -2,6 +2,8 @@
 
 Revision 2 (2026-10-21 UTC): review edits on IP trust, shutdown contract and SendGrid
 one-shot sends (§10).
+Revision 7 (2026-10-21 UTC): batch-parent locks, DNC serialization, frozen write sets and
+attribution constraints (§17.2, §17.4, §19).
 Revision 6 (2026-10-21 UTC): one global lock order including the business tables, compared
 with Quote-Queue design 8111f3c (C7, C8/D9); see §17.
 Revision 5 (2026-10-21 UTC): in-transaction authorization boundary, privileged-mutation
@@ -774,8 +776,11 @@ This app checked the same risk by evidence:
   over `supabase/migrations` finds only a comment and a function-owner check. Deactivation,
   demotion, email change and revocation therefore touch **no** business rows, and no business
   write needs to lock another person's profile.
-- **Business writes reference only the actor's own profile** (inserted as `created_by`,
-  `actor_id`, `user_id`, `dnc_set_by` or `status_changed_by`). Their implicit foreign-key
+- **Business writes reference only the actor's own profile, once the attribution columns are
+  constrained (§17.2 rule "Attribution columns").** Today's preserved SQL grants would let an
+  Editor write any profile id into `batches.created_by` (no column limit on `batches_update`,
+  `rls.sql:119`) or `carriers.dnc_set_by` (column grant, `rls.sql:95`). With the M1
+  constraints every attribution value is the actor's own id. Its implicit foreign-key
   `KEY SHARE` lock lands on a row the transaction already holds `FOR SHARE` (from
   `lock_and_validate`), so it adds no wait.
 - QQ puts business classes first (leads, then users). This app puts identity first. That is
@@ -805,40 +810,90 @@ This app checked the same risk by evidence:
 | A4 | email-block lock, then `internal.blocked_email_addresses`, `internal.email_events` | as QQ (block lock then rows) | webhook; M6 block clear |
 
 Rules:
-- **Implicit foreign-key locks.** Inserting a child row takes `FOR KEY SHARE` on its parent
-  (for example, a contact log on its carrier (B4) and batch (B1)). That is a "backwards" class,
-  so it is allowed only because `KEY SHARE` conflicts with nothing except a parent **delete or
-  key update**, and every deleting path takes the parent first and then cascades to the
-  children: deleting `batches` cascades to zones, members and activity and sets
-  `contact_logs.batch_id` to null (`20260720000600_batches.sql:27, 47, 62`;
-  `20260720000700_contact.sql:9`; `20260720000800_activity.sql:8`). No app path deletes
-  carriers. The pipeline's carrier cascades never run against identity rows. This is covered
-  by the tests below.
-- **Bodies adjusted to the order.** These are behaviour-preserving changes, permitted by the
-  offline contract check in addition to the `auth.uid()` swap:
-  - `refresh_batch` locks its batch row `FOR NO KEY UPDATE` **before** inserting members
-    (today it updates the batch after the inserts, `20260720001100_rpc.sql` refresh body).
-  - `bulk_set_status` first locks the target member rows with
-    `select … order by dot_number for no key update` and then updates them. Today a
-    multi-row `update … where dot_number = any(…)` locks in scan order, so two overlapping
-    bulk updates could deadlock with each other. That is an existing risk, fixed here.
-  - `set_do_not_contact` takes its one carrier (B4), then the suppressions (B5), then the
-    activity inserts (B6). That is already its order.
+- **Batch parent first for every member mutation.** Any transaction that inserts, updates or
+  deletes `batch_carriers` rows, or writes their activity rows, first locks the parent
+  `batches` row (B1), and only then the members (B3):
+  - status change (M9), promote (M8), recovery status (M16), member delete (`bc_delete`) and
+    direct member insert (`bc_insert`): `FOR KEY SHARE` on the batch. It conflicts only with a
+    batch delete (`FOR UPDATE`), so ordinary member work on the same batch runs concurrently.
+  - `bulk_set_status` (M10): `FOR KEY SHARE` on the batch, then the frozen member set (below).
+  - `refresh_batch` and member delete: refresh takes `FOR NO KEY UPDATE` on the batch (it
+    updates the batch); `bc_delete` takes `FOR SHARE`, which conflicts with refresh, so a
+    removal and a refresh of the same batch serialize (refresh rule below).
+  - `create_batch` inserts its own new batch first, so the parent precedes the members by
+    construction.
+  - Enforcement: the definer RPCs take the lock in their body. For policy writes, the server
+    route calls `internal.lock_batch_parent(batch_id, mode)` right after `lock_and_validate`,
+    and the `bc_*` write policies call the same function (volatile) in their `using`/`with
+    check`, so a direct SQL write also takes the parent lock **before** the member row is
+    locked (whether a policy function runs before the row lock is **[assume]**; T-AUTHZ
+    checks it with `pg_locks`, and if not, those policies are replaced by definer functions).
+  - The activity rows written by the member triggers (B6) then reference a batch the
+    transaction already holds, so their foreign-key lock adds no wait.
+- **Batch delete and the member-delete trigger.** `batches_delete` locks the batch
+  `FOR UPDATE` (B1). Its cascade deletes the members (B3), and `log_bc_delete`
+  (`activity.sql:40-45`) would insert a `carrier_removed` activity row referencing the batch
+  being deleted. M1 changes `log_bc_delete` to skip that insert when its parent batch is no
+  longer visible to the transaction (`if not exists (select 1 from public.batches where id =
+  old.batch_id) then return old; end if;`). Activity of a deleted batch is cascaded away
+  anyway. Whether today's batch delete fails with a foreign-key error when the batch has
+  members is **[assume]**; T-SQL records the current behaviour, and the guard makes it succeed.
+- **DNC versus contact logs: one carrier lock, ordered by lock grant.** Intended rule: a
+  contact log is accepted if and only if the carrier was contactable **when the log's carrier
+  lock was granted**. A DNC change granted later is ordered after the log. Implementation:
+  - The contact-log guard (`20260723020000_contact_logs_dnc_guard.sql`, today an unlocked read
+    at :23-31) is replaced in M1. It first locks the batch (`FOR KEY SHARE`, if `batch_id` is
+    set; B1), then `select … from carriers where dot_number = new.dot_number for share`
+    (B4), and then checks `do_not_contact` and the carrier-wide suppressions.
+  - Every DNC or suppression change takes `FOR NO KEY UPDATE` on that carrier **before**
+    touching it or its suppressions: `set_do_not_contact` (B4 then B5), and the
+    `suppress_insert`/`suppress_delete` policies for rows with a `dot_number` (through the
+    policy guard; value-only suppressions have no carrier and do not affect the guard).
+  - `FOR SHARE` conflicts with `FOR NO KEY UPDATE`, so: if the log locks first, the DNC change
+    waits and the log commits (contact before DNC, allowed). If the DNC change locks first,
+    the log waits, then re-reads the committed carrier under its lock, sees DNC, and is refused.
+  - The pipeline's carrier updates also take `FOR NO KEY UPDATE`, so they serialize with logs
+    on the same carrier for a moment (bounded by the app's `lock_timeout`; the app returns
+    "try again" if it is exceeded).
+- **Frozen write sets (no discovery retry).** Each set-based write writes **exactly** the rows
+  it locked, never the requested ids again:
+  - `bulk_set_status`: `with locked as (select dot_number from batch_carriers where batch_id =
+    $1 and dot_number = any($2) order by dot_number for no key update) update batch_carriers
+    bc set … from locked where bc.batch_id = $1 and bc.dot_number = locked.dot_number`. The
+    activity row records the locked set and its count. A requested member that is absent when
+    the locks are taken is simply not changed (the count returned tells the UI). A member
+    inserted afterwards is outside the set and untouched.
+  - `refresh_batch` rule: with the batch locked `FOR NO KEY UPDATE`, compute the matching set
+    once and insert with `on conflict do nothing`. It adds every currently matching carrier not
+    already a member when its insert runs. A member removed by a manager **before** the refresh
+    acquires the batch lock is re-added if it still matches; this is today's refresh semantics
+    (there is no "removed" marker), now deterministic because removal and refresh serialize on
+    the batch. A removal waiting behind the refresh runs after it and stays removed.
+  - The revision-6 "retry once if the re-read differs" rule is withdrawn for these RPCs: there is
+    no retry loop, so no retry case to get wrong.
+- **Attribution columns are constrained in M1** (closing the SQL surface the review found):
+  - `batches`: `recruiter_api` gets column `UPDATE` only on `(name, customer, job,
+    description, archived_at)`, and a `BEFORE UPDATE` trigger refuses any change to
+    `created_by` or `created_at` for every role except `service_role`.
+  - `carriers`: the `recruiter_api` column grant drops `do_not_contact`, `dnc_reason`,
+    `dnc_set_by` and `dnc_set_at`, keeping only the three `contact_*_override` columns. DNC
+    changes only through `set_do_not_contact`, which writes the actor's id.
+  - `batch_carriers`: column `UPDATE` only on `(status, promoted_at)`. The existing trigger
+    sets `status_changed_by`/`promoted_by` from `current_staff_id()`.
+  - `contact_suppressions`: `suppress_insert` adds `created_by = current_staff_id()`.
+  - `contact_logs.user_id`, `batch_activity.actor_id`, `batches.created_by` on insert:
+    already `= current_staff_id()` in their policies.
+  - So no app-role write can attach another person's profile id to a business row, and every
+    business-row foreign-key lock on `profiles` is on the actor's own row.
 - **Team operations take no business rows** (I1 → I2 → trigger A1 → A2 → A3), and business
-  writes take no other person's identity rows. So deactivation, demotion, email change and
-  revocation cannot form a cycle with batch, status, DNC, contact or comment writes.
+  writes take no other person's identity rows, so deactivation, demotion, email change and
+  revocation cannot form a cycle with batch, member, DNC, contact or comment writes.
 - **The pipeline** (`service_role`/direct `pg`) takes only B4 and the carrier satellites plus
-  `cargo_other_values` (B7) and `pipeline_runs`/`data_quality_reports`, never identity
-  classes, and in its own fixed order. It shares no class with identity, so it cannot join a
-  cycle with Team operations. Against app DNC writes it is single-class (B4) plus B7: it never
-  holds B7 and then waits on B4 while the app holds B4 and waits on B7 (the app takes B7 only in
-  `cov_update_mgr`, alone).
-- **Deadlock backstop.** `deadlock_timeout` stays the default; SQLSTATE 40P01 maps to the
-  generic retry outcome (never a 500) and is logged with the operation name, so a remaining
-  ordering bug is visible (as QQ C7).
-- **Retry-once discovery** (QQ C7 step 4) applies to operations whose lock set is computed from
-  reads. Here those are `bulk_set_status` (its member set) and `refresh_batch` (new members).
-  If the re-read under lock differs, roll back and retry once, then return "try again".
+  B7 and its own run tables, never identity classes. It never holds B7 while waiting on B4 for
+  a row the app holds (the app takes B7 only in `cov_update_mgr`, alone).
+- **Deadlock backstop:** SQLSTATE 40P01 maps to the generic retry outcome (never a 500) and is
+  logged with the operation name. Because `lock_timeout` (200 ms) can fire before deadlock
+  detection, tests assert the **intended outcome**, not merely the absence of 40P01.
 
 ### 17.3 D9 / C8 comparison (bounded pre-response work)
 
@@ -850,22 +905,33 @@ deadline instead of letting a late write finish, and it handles a lost commit ac
 explicitly. The host query-string logging for `/auth/verify` remains an **unresolved release
 gate** (T-HYG; QQ lists it as unverified too).
 
-### 17.4 Ordering and deadlock tests (added to T-AUTHZ; two real connections, interleavings forced with advisory-lock barriers at named points, not sleeps)
+### 17.4 Ordering and deadlock tests (added to T-AUTHZ; two real connections, interleavings forced with advisory-lock barriers at named points, not sleeps; generous `lock_timeout` in these tests so waits complete instead of timing out)
 
-| Case | Expected |
+Each case runs in both arrival orders and asserts the **final state** and each side's result.
+
+| Case | Expected result |
 |---|---|
-| Deactivate X ‖ X's status change (M9), both arrival orders | no 40P01; either the write is ordered first and stands, or it is refused |
-| Demote X ‖ X's `bulk_set_status` over 50 members | same |
-| Email change of X (window closed in the test DB) ‖ X's DNC set (M7) | same |
-| Revoke X's session (sign-out elsewhere) ‖ X's contact log (M14) | write refused if the revocation committed first |
-| Two overlapping `bulk_set_status` calls in opposite member order | no deadlock (sorted locking) |
-| `refresh_batch` ‖ `batches_delete` of the same batch | no deadlock; the refresh either finishes first or finds the batch gone |
-| Contact log insert ‖ `batches_delete` of its batch (FK `KEY SHARE` vs cascade) | no deadlock; the log keeps `batch_id` or gets null |
-| Status change ‖ `bc_delete` of the same member | no deadlock |
-| DNC set on carrier C ‖ contact log on C | no deadlock; the DNC guard decides by commit order |
-| Team edit A→B ‖ B→A (managers) | no deadlock (I1, then I2 ascending) |
-| Pipeline-style carrier upsert batch ‖ DNC set on one of those carriers | no deadlock; bounded waits |
-| Any 40P01 forced by a deliberately mis-ordered test transaction | mapped to the generic retry outcome and logged; never a 500 |
+| Deactivate X ‖ X's status change (M9) | write-first: status changed, then X deactivated and sessions revoked. Deactivate-first: the write is refused (`insufficient_privilege`), status unchanged |
+| Demote X ‖ X's `bulk_set_status` over 50 members | as above; bulk count = 50 or refusal; never a partial set |
+| Email change of X (window closed) ‖ X's DNC set (M7) | as above |
+| Revoke X's session ‖ X's contact log (M14) | log-first: log row exists. Revoke-first: refused, no row |
+| Status change on member m ‖ `batches_delete` of its batch | status-first: the change commits, then the batch and members are deleted. Delete-first: the status change finds no member (zero rows → "not found"), no error |
+| Promote ‖ `batches_delete` | same as above |
+| `bc_delete` of m ‖ `batches_delete` | both complete or the member delete finds nothing; no FK error; the batch is gone |
+| `batches_delete` of a batch with members | succeeds; no activity row references the deleted batch (the `log_bc_delete` guard); T-SQL also records whether it failed before M1 |
+| Contact log on carrier C ‖ DNC set on C | log-first: log committed, then DNC set. DNC-first: the log is refused by the guard, no row |
+| Contact log on C ‖ suppression insert (`channel='all'`, dot C) | same two outcomes |
+| Two overlapping `bulk_set_status` calls, opposite member order | both complete; final status = the later committer's; the activity counts match |
+| `bulk_set_status` on {a,b,c} while b is deleted **before** the locks | count = 2; b absent; no error |
+| `bulk_set_status` on {a,b,c} while d is inserted **after** the locks | d untouched; count = 3 |
+| `bulk_set_status` on {a,b,c} while b's delete waits on the lock | bulk updates b, then the delete removes it |
+| `refresh_batch` ‖ manager removes member m (m still matches) | removal-first: refresh re-adds m (documented rule). Refresh-first: the removal runs after it and m stays removed |
+| `refresh_batch` ‖ `refresh_batch` (same batch) | the second waits; the first adds n; the second adds 0 |
+| `refresh_batch` ‖ `batches_delete` | refresh-first: refresh completes, then the delete. Delete-first: refresh reports "batch not found" |
+| Team edit A→B ‖ B→A (managers) | one waits; both complete or one is refused by B10 / the last-manager rule; never a deadlock |
+| Pipeline-style carrier update batch ‖ DNC set on one of those carriers | both complete in lock order |
+| Editor tries to change `batches.created_by`, `carriers.dnc_set_by`, `do_not_contact` directly, or insert a suppression with another `created_by` | refused (permission or trigger) |
+| A deliberately mis-ordered test transaction forcing 40P01 | mapped to the generic retry outcome and logged; never a 500 |
 
 ## 18 · Review response (coordinator-relayed QQ 8111f3c, 2026-10-21)
 
@@ -875,3 +941,13 @@ gate** (T-HYG; QQ lists it as unverified too).
 | QQ deadlock lesson (users vs leads) | No ownership/reassignment path exists (evidence); Team ops take no business rows; implicit FK lock rule; two RPC bodies reordered (`refresh_batch`, `bulk_set_status`); future-reassignment rule | §17.1, §17.2 |
 | D9 | Compared with QQ C8; §14.4 matches and adds cancel/destroy and lost-ack handling; log redaction still an open gate | §17.3 |
 | Tests | Ordering and deadlock cases | §17.4 |
+
+## 19 · Review response (Codex review of `939033b`, 2026-10-21)
+
+| # | Finding | Change | Sections |
+|---|---|---|---|
+| 1 | Backward FK lock from a member trigger can cycle with a batch delete | Batch parent locked first for every member mutation (status, promote, bulk, recovery, member insert/delete) via RPC bodies, server routes and the `bc_*` policies; `log_bc_delete` skips activity for a batch being deleted | §17.2 |
+| 2 | DNC versus contact-log ordering unsupported | Rule: decided at carrier-lock grant. The guard locks the carrier `FOR SHARE`; DNC and suppression changes lock it `FOR NO KEY UPDATE` first; both interleavings tested | §17.2, §17.4 |
+| 3 | Discovery recheck needs a frozen write set | `bulk_set_status` writes exactly its locked rows; refresh rule defined; retry loop withdrawn; tests for members deleted before, inserted after, and waiting on the locks | §17.2, §17.4 |
+| 4 | Attribution columns writable via SQL | M1 constrains `batches` (column grant + immutable `created_by`), `carriers` (no DNC columns for the app role), `batch_carriers` (status, promoted_at only), suppressions (`created_by` = actor); denial tests | §17.1, §17.2, §17.4 |
+| — | Tests must assert outcomes | Every case states the final state per arrival order; tests use a long `lock_timeout` | §17.4 |
