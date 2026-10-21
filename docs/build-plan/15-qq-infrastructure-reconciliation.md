@@ -2,6 +2,9 @@
 
 Revision 2 (2026-10-21 UTC): review edits on IP trust, shutdown contract and SendGrid
 one-shot sends (§10).
+Revision 5 (2026-10-21 UTC): in-transaction authorization boundary, privileged-mutation
+inventory, uniform fail-closed admission and recovery ordering, after QQ's review of its design
+(findings F-1 to F-4, under revision in QQ, not completed fixes). See §14.
 Revision 4 (2026-10-21 UTC): streaming body limits (§4.3), staging SQL adaptation inventory
 (§12.5), email events marked Adapt, exact Auth call list (§12.1). See §13.
 Revision 3 (2026-10-21 UTC): checked against Quote-Queue's infrastructure map
@@ -377,6 +380,8 @@ of what GitHub or the live service runs. Quote-Queue's own fixes are under revie
 | `/auth/verify` log handling | unverified live (QQ defect D6) | **Release gate** T-HYG | — |
 | Handoff prose | `docs/BUILDER_HANDOFF.md` (Resend, three-role text stale; QQ defect D7) | **Not used** as a source without checking the code | — |
 | `recover:prod` | record-repair CLI | **Not used** as a sign-in fallback | — |
+| Roster edit authorization (QQ D8 / review F-1) | `lib/roster.ts` `attemptEdit` (~:737) uses an actor role captured **before** the write transaction | **Do not copy.** QQ's evidence is an in-memory probe, not a live exploit or a DB concurrency test, and nothing here was measured on this app. Here the actor is re-validated inside the write transaction from locked rows (§14.3) | — |
+| Pre-response DB call (review F-2) | unbounded bucket call before the response | **Do not copy.** Bounded and uniformly fail-closed (§14.4) | — |
 | Recovery codes | none in QQ | **New** (doc 14 §7), off by flag, policy centralized | — |
 | Keys, DB, sender, webhook key, API key, origin | per app | **Per app only**, never shared | Render env (names in §6) |
 
@@ -499,3 +504,184 @@ and reviewed with it. The M2 column applies only after Hunter closes the backout
 | 2 | Staging SQL is not unchanged | Inventory of fixtures, ownership registry, marker, reset, cleanup, role matrix, Auth fixture scripts, offline checks and runner: today / M1 / after M2; all production-refusal protections kept | §12.3, §12.5 |
 | 3 | Email events are Adapt, not Copy | Digest dependency omitted; uniqueness, recipient correlation and block-clear ordering kept | §11 |
 | 4 | Auth call count | Exactly 11 (listed); the earlier 12 counted a comment. Doc 14 corrected too | §12.1; doc 14 §4.2, E10 |
+
+---
+
+## 14 · In-transaction authorization boundary (QQ review F-1 to F-4)
+
+Quote-Queue's reviewer (thr_ih34gmismw) found its design 9c34608 **not ready**. Its findings
+are under revision in QQ and are **not** completed fixes. This section shows how this app
+avoids each one. Nothing here is measured; the tests in §14.6 are the evidence still to come
+(they need A3/A4).
+
+### 14.1 Privileged mutations (complete inventory)
+
+Every database write the app can cause, with the minimum role. The source is §12.1 plus the
+RLS write policies (`20260720001200_rls.sql:91-163`), which `recruiter_api` could reach even
+without a UI.
+
+| # | Mutation | Path | Min role | Notes |
+|---|---|---|---|---|
+| M1 | Team: edit name | `POST /api/team/edit` → `internal.team_update` | manager | B10: not self |
+| M2 | Team: change role (incl. promote/demote) | same | manager | B10: never self; last-manager rule under `roster_lock` |
+| M3 | Team: deactivate / reactivate | `POST /api/team/{deactivate,reactivate}` → `internal.team_set_active` | manager | B10 |
+| M4 | Team: change email | `internal.team_update` | manager | paused during the backout window (trigger) |
+| M5 | Team: add | `internal.team_add` | manager | disabled until M2 |
+| M6 | Team: revoke someone's recovery codes; clear an email block | `internal.team_recovery_revoke`, `internal.team_block_clear` | manager | audited |
+| M7 | DNC set / restore | `set_do_not_contact` RPC | edit | definer; writes carriers, suppressions, activity |
+| M8 | Promote | `POST /api/batch-carriers/promote` (UPDATE `batch_carriers.promoted_at`, policy `bc_update`) | edit | trigger logs the actor |
+| M9 | Status change (single) | `POST /api/batch-carriers/status` (`bc_update`) | edit | trigger logs the actor |
+| M10 | Bulk status | `bulk_set_status` RPC | edit | definer |
+| M11 | Create batch / refresh batch | `create_batch`, `refresh_batch` RPCs | edit | definer; zones and members |
+| M12 | Log export | `log_export` RPC | edit | definer |
+| M13 | Comment | `POST /api/batches/:id/comments` (`act_comment`) | edit | actor = session user |
+| M14 | Contact log | `POST /api/contact-logs` (`logs_insert`) | edit | DNC guard trigger |
+| M15 | Policy-only writes with no UI call today: `batches_update`/`batches_delete`, `zones_*`, `bc_insert`/`bc_delete`, `logs_delete`, `act_delete`, `suppress_insert`/`suppress_delete`, `carriers_update` (column-limited), `cov_update_mgr` | RLS | edit or manager | covered by the policy-level guard (§14.3) |
+| M16 | Recovery: single status change | `public.recovery_set_status` | edit (ordinary role ∩ matrix) | recovery session only |
+| M17 | Own session: sign out, activity ping | `internal.auth_session_revoke`, `auth_session_touch` | any valid session | own row only |
+| M18 | Own recovery set: enroll | `internal.recovery_enroll` | any active staff, fresh link session | §14.5 |
+
+`generate_contact_sheet` and the search/count/facet/member RPCs are reads (invoker, RLS).
+
+### 14.2 One lock order for every path
+
+1. `internal.roster_lock` (one row), taken only when the manager set may change (M2, M3, M5).
+2. `public.profiles` rows of **all** people involved (actor and target), in **ascending id**
+   order. The target is locked `FOR UPDATE`, the actor `FOR SHARE`. (When actor = target,
+   which only M17/M18 allow, `FOR UPDATE` once.)
+3. `internal.app_sessions` rows (the actor's own row `FOR SHARE`; the target's rows are
+   updated by the revocation trigger).
+4. `internal.signin_links` rows.
+5. `internal.recovery_sets` → `internal.recovery_codes` rows.
+
+The revocation trigger (doc 14 §5.3) runs inside the Team transaction **after** step 2, so it
+follows the same order. `auth_link_redeem` follows 2 → 3 → 4 (doc 14 §6.2). Recovery
+consumption follows 2 → 5 → 3 (§14.5), never 5 before 2.
+
+### 14.3 Re-validating the actor inside the write transaction
+
+`internal.require_actor(p_min_role user_role, p_kind text default 'link') returns uuid`,
+volatile, security definer, owned by the migration role:
+
+1. Resolve `app.session_hash` to a session id and user id (plain read).
+2. `select role, status, email from public.profiles where id = <user> for share` (step 2 of
+   the order; a concurrent role/status/email change holds `FOR UPDATE`, so this waits for it
+   and, under READ COMMITTED, then reads the **committed new** row).
+3. `select … from internal.app_sessions where id = <session> for share` (step 3; revocation
+   updates this row, so it serializes the same way).
+4. Validate **from the locked rows only**: session unrevoked, `expires_at` and
+   `absolute_expires_at` in the future, `email_at_issue = profiles.email`, status approved,
+   role ≥ `p_min_role`, kind = `p_kind`. Any failure → raise `insufficient_privilege` (a fixed
+   SQLSTATE that the server maps to 403/401 with no detail).
+5. Return the user id. A transaction-local note records "actor checked for role R" to skip
+   repeated work. The locks persist until commit regardless.
+
+Where it is called:
+- **First statement** of every protected server transaction (M1–M18), before any write. The
+  server's pre-transaction `validateAndRenewSession` (the QQ code) is kept only for routing and
+  UX, and **never** supplies the role for a write.
+- **Inside** every privileged definer RPC (M7, M10–M12, M16) and Team function (M1–M6),
+  replacing the current `if not coalesce(internal.can_edit(), false)` checks with
+  `perform internal.require_actor('edit')` / `('manager')`. A direct call by the
+  `recruiter_app` credential therefore gets the same lock and re-check.
+- **In every write policy** (insert/update/delete `with check`/`using` on M8, M9, M13–M15):
+  `internal.actor_can_write('edit')`, a volatile wrapper around `require_actor` returning a
+  boolean. Read policies keep the stable `(select internal.is_staff())`. Whether
+  `FOR SHARE` inside a function called from a policy behaves as intended on PG 15/16 is
+  **[assume]**; T-AUTHZ checks it directly with `pg_locks`.
+
+**Why a stale snapshot cannot win.** Take a demotion, deactivation or email change T on person
+X (by manager M), racing a protected write W by X:
+- **W locks X first:** T's `FOR UPDATE` on X waits until W commits. W's write is **ordered
+  before** the change. It stands, as a write made while X held the role (audited with actor
+  and time). There is no retroactive cancellation, and none is promised. T then commits and
+  revokes X's sessions and links.
+- **T locks X first:** W's `FOR SHARE` waits until T commits, then reads the new row, so W
+  fails at step 4. No write happens.
+- **T commits before W starts:** W's step 2 reads the new row and fails.
+- There is no path where T commits and W then writes using authority read before T: the only
+  authority W uses is read under the lock in W's own transaction. Revocation commits first →
+  W fails; W commits first → W precedes revocation.
+
+**Self-repromotion.** A demoted manager's in-flight Team call fails step 4 as soon as the
+demotion has committed (role ≠ manager under lock). B10 already refuses any change to one's own
+role or status. Two managers demoting each other serialize on `roster_lock`, and the
+last-manager rule is checked under it.
+
+**Deadlocks.** All paths take profiles in ascending id order before sessions, links and codes,
+and nothing takes a profile after a session, link or code lock. `deadlock_timeout` stays the
+default; a detected deadlock rolls back one transaction, and the server returns a generic retry
+error (no partial write).
+
+### 14.4 Pre-response work is bounded and uniformly fail-closed (F-2)
+
+- `POST /auth/request`: only the bucket transaction runs before the response (keyed hashes, no
+  user row is read or locked). Bounds: pool acquisition ≤ 250 ms
+  (`connectionTimeoutMillis`), `SET LOCAL lock_timeout = '200ms'`,
+  `statement_timeout = '400ms'`, and an overall 600 ms deadline (`Promise.race`). A late
+  result is ignored, and its client returns to the pool when the query ends. **Any** error or
+  timeout → the same generic 303 at the same envelope, no identity work, and the category is
+  logged (doc 14 §3.1, revised).
+- `POST /auth/recovery`: the same bounds and envelope. No profile lock before a valid code
+  (§14.5). Every rejection, including DB error or timeout, is the same generic failure page at
+  the envelope.
+- `GET /auth/verify`, `GET/POST /auth/confirm`: a DB error or timeout → the standard
+  fail-closed page ("This link was already used or has expired.") with the confirm cookies
+  cleared. The link is not consumed.
+- `/api/*`: a DB error → `503` JSON with no detail (signed-in context; no roster oracle).
+
+### 14.5 Recovery consumption and enrollment ordering (F-3, F-4)
+
+**Consumption** (`POST /auth/recovery`, after the anonymous checks of doc 14 §7.2):
+1. **Non-locking pre-check:** `select c.id, s.user_id from recovery_codes c join
+   recovery_sets s … join profiles p … where c.code_hash = $1 and lower(p.email) = $2 and
+   c.used_at is null and c.revoked_at is null and s.revoked_at is null and c.expires_at >
+   now()`. No row → record a failure in the email-hash-keyed counter and return the generic
+   failure. **No profile is locked on any wrong-code path.**
+2. Only after a valid code: lock the profile `FOR SHARE` (order step 2). The requester has
+   already proved possession of a valid code for that address, so this wait reveals nothing
+   new.
+3. `update recovery_codes set used_at = now() where id = $id and used_at is null and
+   revoked_at is null returning id` (step 5). Zero rows (a concurrent revocation or use won) →
+   generic failure.
+4. Re-validate the locked profile (active staff, ordinary role per §7.3) → insert
+   `app_sessions(kind='recovery', recovery_code_id = $id, …)` (unique, so one session per
+   code) → commit.
+
+This ordering satisfies `check (used_at is null or revoked_at is null)`: revocation updates only
+unused codes, and consumption only unrevoked ones, each under the same row lock.
+
+**Enrollment:** as doc 14 §7.2 Enrollment (revised): profile `FOR UPDATE` → session
+`FOR SHARE` → re-validate under lock → revoke the active set → insert the new set → commit.
+The `unique (user_id) where revoked_at is null` index on `recovery_sets` is the backstop: two
+concurrent enrollments serialize on the profile lock, and the second revokes the first set. If
+anything slips past, the index refuses a second active set.
+
+### 14.6 Tests (T-AUTHZ; two DB connections with `pg_sleep` and advisory-lock choreography; A3, plus A4 for the server paths)
+
+| Case | Expected |
+|---|---|
+| Role loss: X starts a protected write (holds `require_actor`), M demotes X | demotion waits; X's write commits first; then X's sessions are revoked; audit order matches |
+| Role loss, reverse: M's demotion holds X's row; X's write arrives | X waits, then fails with `insufficient_privilege`; no row written |
+| Same two orders for deactivation, and for email change (with the window closed in the test DB) | same |
+| Self-repromotion: manager X demoted while X's Team call (promote X, or promote Y) is in flight | refused when the demotion committed first; B10 refuses self-change in every order |
+| Two managers demote each other concurrently | serialized on `roster_lock`; the last-manager rule holds |
+| Direct `recruiter_app` SQL: writes through each policy and RPC without calling the server | `require_actor` runs (seen in `pg_locks`); stale/revoked sessions refused |
+| Recovery capability: recovery session calls `require_actor('edit')` paths, policy writes and normal RPCs | refused; `recovery_set_status` works only for ordinary edit/manager |
+| Recovery wrong code while another transaction holds the profile `FOR UPDATE` | returns at the envelope **without waiting** (no lock taken) |
+| Recovery consumption vs revocation, both orders | exactly one of "used + session" or "revoked + refused"; the check constraint is never violated |
+| Two concurrent enrollments | exactly one active set; the other set revoked or refused |
+| Slow or unavailable DB: pool exhausted, bucket row locked > 200 ms, `pg_sleep` > 400 ms, connection refused | `/auth/request` and `/auth/recovery` return the identical generic response at 900–1100 ms with no identity work; verify/confirm show the fail-closed page; `/api/*` returns 503 |
+| Deadlock probe: opposite-order Team edits on two profiles | no deadlock (ascending-id order) |
+
+## 15 · Review response (coordinator-relayed QQ findings, 2026-10-21)
+
+| Item | Change | Sections |
+|---|---|---|
+| (1) QQ D8 on the do-not-copy list | Added (and F-2) | §11 |
+| (2) Privileged-mutation inventory | M1–M18 | §14.1 |
+| (3) Re-validate session + actor role inside the write transaction | `require_actor` from locked rows: first statement, inside definer RPCs, in write policies | §14.3 |
+| (4) Lock order shared with demotion/deactivation/email change; committed-before ordering defined | §14.2 order; the "why a stale snapshot cannot win" cases; no retroactive cancellation | §14.2, §14.3 |
+| (5) F-2 bounded, uniform fail-closed, no identifiable lock before generic rejection | Bounds and responses; recovery locks only after a valid code | §14.4, §14.5; doc 14 §3.1 |
+| (6) F-3/F-4 recovery ordering and enrollment | Consumption order consistent with constraints; enrollment under the profile lock with a one-active-set index | §14.5; doc 14 §7.2 |
+| (7) Tests | T-AUTHZ table | §14.6 |

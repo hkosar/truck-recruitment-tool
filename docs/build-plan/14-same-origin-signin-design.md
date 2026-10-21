@@ -8,6 +8,8 @@ any code is written.
 "approved to implement — yes after edits"; 2 blockers, 5 should-fix). See §13.
 **Revision 3 (2026-10-21 UTC):** addresses the re-review of `7f8a918` (2 blockers,
 1 should-fix). See §14.
+**Revision 5 (2026-10-21 UTC):** in-transaction authorization, uniform fail-closed admission and
+recovery ordering, after QQ review findings F-1 to F-4; see doc 15 §14.
 **Revision 4 (2026-10-21 UTC):** addresses the review of `ecc2751` (2 blockers, 1 should-fix,
 all rollout/backout). See §15.
 
@@ -255,10 +257,12 @@ After the response (identity work), inside `ctx.waitUntil` (§6.4):
 10. Every failure in 7–9 is caught and logged as a category only (no address, no token, no
     link id in logs).
 
-**Honest failure handling.** If step 4 itself fails (database unreachable), the request gets a
-plain `503` "Sign-in is temporarily unavailable. Try again in a minute." for **every** address.
-Only anonymous work has run at that point, so this reveals nothing about the roster. [QQ] lets
-its route throw here (an uncaught 500), so this is the same behaviour with a calmer message.
+**Uniform fail-closed handling (revised; doc 15 §14.4).** Step 4 is bounded: pool acquisition
+≤ 250 ms, `lock_timeout` 200 ms, `statement_timeout` 400 ms, overall admission deadline 600 ms.
+If it fails or times out for **any** reason (database unreachable, pool exhausted, slow), the
+request gets the **same** generic 303 at the same envelope, and no identity work runs. Only the
+error category is logged. (This replaces the earlier plain-503 proposal: one response for every
+outcome. [QQ] lets its route throw here, which is QQ gap F-2 and is not copied.)
 After the response, failures cannot change what the person saw. They are recorded on the link
 row (`unknown` or `definite_failure`), and a human retries.
 
@@ -569,8 +573,11 @@ self-deactivation; the last active manager is protected under `internal.roster_l
 
 ## 6 · Concurrency and post-response execution (validation item (d))
 
-1. **Lock order everywhere:** `internal.roster_lock` (manager-set changes only) → `profiles`
-   row `FOR UPDATE` → link rows → session rows → recovery-code rows.
+1. **Lock order everywhere** (authoritative statement in doc 15 §14.2): `internal.roster_lock`
+   (manager-set changes only) → `profiles` rows in ascending id order (target `FOR UPDATE`,
+   actor `FOR SHARE`) → session rows → link rows → recovery sets/codes. Every protected write
+   re-validates the actor **inside** its transaction from rows locked in this order (doc 15
+   §14.3).
 2. **Claim vs roster change:** `auth_link_redeem` and every Team route lock the same profile row
    first. If the claim commits first, the change's trigger revokes the new session. If the
    change commits first, the link is revoked (or the person is no longer active) and the claim
@@ -614,11 +621,11 @@ everyday sign-in method.
 
 | Step | Rule |
 |---|---|
-| Enrollment | From the signed-in **Account** panel, any active staff member (policy option: managers only, D2) presses "Create recovery codes". Requires a `kind='link'` session created **≤ 15 minutes ago** (fresh email proof), plus CSRF. Generates **10 codes**, each 16 characters from a 32-symbol alphabet without look-alikes (80 bits), shown **once** with "Print" and "I saved them". Generating a new set revokes the old set. |
-| Storage | `internal.recovery_codes(id, user_id, set_id, code_hash unique, created_at, expires_at, used_at, revoked_at, revoked_reason)`. `code_hash = hmac(KEY_RATE, normalized code)`, keyed so a table read cannot be brute-forced offline. The raw code exists only in the one response that shows it (`no-store`) and is never logged. |
+| Enrollment | From the signed-in **Account** panel, any active staff member (policy option: managers only, D2) presses "Create recovery codes". **One transaction (doc 15 §14.5):** lock the actor's profile `FOR UPDATE` → lock the session `FOR SHARE` → re-validate under lock (link session, created ≤ 15 minutes ago, unrevoked, unexpired, profile active, email unchanged) → revoke the current active set and its unused codes (`regenerated`) → insert the new set and its 10 codes → commit. A partial unique index allows **one active set per person**, so concurrent enrollments serialize on the profile lock and the loser's set is revoked or refused. Codes: 16 characters from a 32-symbol alphabet without look-alikes (80 bits), shown **once** with "Print" and "I saved them". CSRF and strict Origin required |
+| Storage | `internal.recovery_sets(id, user_id, created_at, revoked_at, revoked_reason)` with `unique (user_id) where revoked_at is null`; `internal.recovery_codes(id, set_id, user_id, code_hash unique, created_at, expires_at, used_at, revoked_at, revoked_reason)` with `check (used_at is null or revoked_at is null)` (a code is used **or** revoked, never both). Revocation touches only `used_at is null`; consumption only `revoked_at is null`. `app_sessions.recovery_code_id unique references recovery_codes` (one session per code). `code_hash = hmac(KEY_RATE, normalized code)`. The raw code exists only in the one `no-store` response that shows it and is never logged |
 | Expiry | 180 days after creation (proposal). The Account panel shows remaining codes and the expiry. |
-| Use | `GET /signin/recovery` (not linked from `/signin`, so the decision-19 page stays identical) renders the form (email + code) and sets an **anonymous pre-session CSRF cookie** `__Host-tr_pre` (random 256-bit, `Secure; HttpOnly; SameSite=Strict; Path=/`, 30 min), with hidden field `pre_token = hmac(KEY_SESSIONS, "pre:" ‖ cookie)`. If the browser already has a valid session, the page redirects to `/` instead. `POST /auth/recovery`, **before any DB work and before any code is touched (review finding 1)**: (1) `Origin` **must be present** and equal `APP_ORIGIN` exactly. A missing, `null` or different Origin is refused, never falling back to `Host`. (2) `__Host-tr_pre` present and `pre_token` matches it in constant time. (3) **No valid `__Host-tr_session` already present.** A signed-in browser is never switched to another account; the victim's existing session and cookies are left untouched. Any failure in (1)–(3) → the generic failure page, no code consumed, no cookie set or cleared. Then: same 1000 ± 100 ms envelope; anonymous buckets; then **before** the response (it must decide whether to set a cookie), one transaction locks the profile row, checks active staff and the per-user failure ceilings, and matches an unused, unrevoked, unexpired code for that user. On success: mark it used, create a session `kind='recovery'`, clear `__Host-tr_pre`, set the session and app-CSRF cookies, 303 `/recovery`. Every failure class gets the single generic page "That didn't work. Check the address and code, or ask a manager." The envelope covers the DB work (target ≤ 600 ms; over → fail closed). Tests (T-REC): a cross-site form post with a valid attacker code (no Origin, foreign Origin, `null` Origin, missing or wrong pre-token) never consumes the code and never changes the victim's cookies; a same-site post while signed in is refused and the victim's session still works. |
-| Limits | Buckets as §5.5. Per user: 5 failed codes per hour, 10 per Chicago day, counted only after the profile lock. A wrong code never reveals whether the address exists. |
+| Use | `GET /signin/recovery` (not linked from `/signin`, so the decision-19 page stays identical) renders the form (email + code) and sets an **anonymous pre-session CSRF cookie** `__Host-tr_pre` (random 256-bit, `Secure; HttpOnly; SameSite=Strict; Path=/`, 30 min), with hidden field `pre_token = hmac(KEY_SESSIONS, "pre:" ‖ cookie)`. If the browser already has a valid session, the page redirects to `/` instead. `POST /auth/recovery`, **before any DB work and before any code is touched (review finding 1)**: (1) `Origin` **must be present** and equal `APP_ORIGIN` exactly. A missing, `null` or different Origin is refused, never falling back to `Host`. (2) `__Host-tr_pre` present and `pre_token` matches it in constant time. (3) **No valid `__Host-tr_session` already present.** A signed-in browser is never switched to another account; the victim's existing session and cookies are left untouched. Any failure in (1)–(3) → the generic failure page, no code consumed, no cookie set or cleared. Then: same 1000 ± 100 ms envelope; anonymous buckets; then **before** the response (it must decide whether to set a cookie), one transaction locks the profile row, checks active staff and the per-user failure ceilings, and matches an unused, unrevoked, unexpired code for that user. On success: mark it used, create a session `kind='recovery'`, clear `__Host-tr_pre`, set the session and app-CSRF cookies, 303 `/recovery`. Every failure class gets the single generic page "That didn't work. Check the address and code, or ask a manager." The envelope covers the DB work (target ≤ 600 ms; over → fail closed). Tests (T-REC): a cross-site form post with a valid attacker code (no Origin, foreign Origin, `null` Origin, missing or wrong pre-token) never consumes the code and never changes the victim's cookies; a same-site post while signed in is refused and the victim's session still works. **Consumption ordering is superseded by doc 15 §14.5** (non-locking pre-check; profile lock only after a valid code; consume; revalidate; session). |
+| Limits | Buckets as §5.5. Per-address failure ceilings (5 per hour, 10 per Chicago day) are keyed by `hmac(KEY_RATE, normalized email)`, **not** by user id, so counting a failure needs no user lookup and no lock. A wrong code never reveals whether the address exists, and never locks a profile (doc 15 §14.5) |
 | Session restrictions | `kind='recovery'`: absolute life **12 hours**, idle **1 hour** (kind-dependent renewal, §3.5). **Deny by default at the database:** no staff role, so every normal policy, view and RPC refuses (§4.1). Only the §7.3 matrix is reachable, enforced at **both** the Worker (route allow-list per session kind) and the DB (`recovery_*` functions check the kind and return explicit columns). There is no Team page, no identity/role/status change, no exports or contact sheet, no recovery-code view or regeneration (no recovery escalation), no adding staff and no indirect grants. This app has no templates. The UI shows a reduced recovery screen with a persistent banner: "Signed in with a recovery code — limited access until email sign-in works again." Hiding buttons is **not** relied on; T-REC calls every normal endpoint and RPC directly with a recovery session and expects refusal. |
 | Revocation | The §5.3 trigger (email/role/status change). Regenerating a set. Manager "Revoke recovery codes" on the Team page (needs a link session). Emergency sign-out (D1). |
 | Audit | `internal.auth_events(id, at, user_id null, kind, detail jsonb)` for: set created, code used, recovery failure (with keyed IP hash, no code), set revoked, emergency sign-out. Managers see recent recovery events on the Team page. A notice email ("a recovery code was used") is queued and sent when mail works. |
