@@ -1,6 +1,6 @@
-# 14 · Same-origin team sign-in — design for review (Gate 1)
+# 14 · Same-origin team sign-in — design (Gate 1 passed)
 
-Status: **design only. Nothing built, run, installed or touched live.** Written 2026-10-21 UTC on
+Status: **reviewed design (Gate 1 passed). The architecture is selected: the plain Node server of doc 15; the Worker-specific parts below are superseded.** Written 2026-10-21 UTC on
 local branch `auth/same-origin-signin` (from `docs/auth-spec-m0-signoff`, 9fc3425), by the
 sign-in implementation owner (thread thr_pn5gr4mx94). Needs independent security review before
 any code is written.
@@ -358,8 +358,12 @@ Mirrors [QQ] `:263-303`, `:360-436`.
   and background polling (the last must **not** extend it).
 - **Deliberate use only.** The server calls the touch **only** for:
   (a) a document navigation (`Sec-Fetch-Mode: navigate` + `Sec-Fetch-Dest: document`) with no
-  `Sec-Purpose`/`Purpose: prefetch` header; (b) a **submitted** mutation (`POST /api/*`
-  other than the ping itself); (c) `POST /api/session/activity`, the SPA activity ping.
+  `Sec-Purpose`/`Purpose: prefetch` header; (b) a **write operation on the explicit renewal
+  allowlist** (`app/server/http/activity.ts` `renewalReason`: the five write RPCs
+  `create_batch`, `refresh_batch`, `bulk_set_status`, `set_do_not_contact`, `log_export`, and
+  the named write routes). It is never "any POST": read-only RPCs and the DNC lookup are POSTs
+  too, and background queries (for example the batch list's polling, `BatchPage.tsx:66`) must
+  never renew either session kind; (c) `POST /api/session/activity`, the SPA activity ping.
 - **The activity ping** (revised 2026-10-21, coordinator item 3):
   - **When the SPA sends it:** only for actual deliberate use, i.e. an in-app navigation the
     person caused (a router transition triggered by a click, a keypress, or browser

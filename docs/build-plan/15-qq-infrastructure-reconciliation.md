@@ -17,8 +17,8 @@ Revision 3 (2026-10-21 UTC): checked against Quote-Queue's infrastructure map
 (`1f7cce2:docs/handoff/SIGNIN-2026-10-21-infra-map.md`). Adds the reuse table (§11) and the
 data-access and permission migration boundary inventory (§12).
 
-Status: **proposal for the coordinator (thr_z77w8egnyw). Nothing built, deployed, installed or
-configured.** Written 2026-10-21 UTC on local branch `auth/same-origin-signin` by the sign-in
+Status: **selected architecture** (coordinator decision 2026-10-21, status block below).
+Implementation proceeds slice by slice under approvals; nothing is deployed or configured. Written 2026-10-21 UTC on local branch `auth/same-origin-signin` by the sign-in
 owner (thr_pn5gr4mx94), after Hunter's clarification relayed by the coordinator: *"the process
 already works in Quote Queue, so however it is doing it should be used for the new
 implementations as far as infrastructure goes."*
@@ -52,7 +52,7 @@ forward unless a row below says otherwise.
 
 ## 1 · Plain-language summary (for Hunter)
 
-**Recommendation: run sign-in the way Quote-Queue does.** That means one small Node web server
+**Selected: run sign-in the way Quote-Queue does.** That means one small Node web server
 on Render (the hosting company both apps already use) that:
 
 - serves the Carrier Recruiter screens,
@@ -127,7 +127,7 @@ same design, a small stated change; **New** = no Quote-Queue counterpart.
 | C5 | SendGrid send | `lib/sendgrid.ts`, the canonical request in `app/auth/request/route.ts:390-430` | **Reuse** | Node server | Its own API key, restricted to Mail Send; `from` = the sender Hunter picks; `custom_args` `tr_source`/`tr_local_id`. **Each sign-in send is one-shot.** The custom key header (if kept) is diagnostic only; SendGrid does not deduplicate on it. An uncertain outcome (5xx, timeout, network error after transmission) is recorded as `unknown` and is **never** replayed automatically. Only the person's own new request mints a new link and a new send, under the normal ceilings. A 429 is recorded as not sent (QQ's `retryable_rejection`) and is likewise not auto-retried in the sign-in path |
 | C6 | SendGrid signed webhook + delivery ladder | `app/webhooks/sendgrid/route.ts`, migrations 0006/0007 | **Reuse** | Node server `/webhooks/sendgrid`; lattice trigger in Supabase | A **separate** Event Webhook in the same SendGrid account, pointing at this app with its own verification key. SendGrid has supported multiple Event Webhooks per account since May 2023; the per-plan cap (`max_allowed`) is **unverified** for TNBS's plan (owner check). Events whose `tr_source` is missing are ignored |
 | C7 | Post-response work | `after()` + `maxDuration = 60` | **Adapt** (departure D7) | Node server process | Plain Node with an explicit graceful-shutdown contract (§4.1) that tracks every accepted request **and** its continuation. The bounded response, the continuation and the shutdown drain are **proven by T-SHUTDOWN and T-TIME**, not assumed from QQ's `after()` or from Render. Same honesty as QQ: best effort plus human retry; a lost send leaves the link `pending` or `unknown` |
-| C8 | Client IP | `lib/request-ip.ts` | **Adapt after verification**: QQ's own header comment says the result depends on the specific proxy chain, including any extra CDN in front. That this app's chain matches QQ's is **unverified** | Render | Use QQ's extraction only after hosted test T-IP (§4.2) passes for this service's exact chain (custom domain, any CDN or proxy in front). Until then the 20/IP limit is **not** accepted as protection. If the chain differs, the extraction is pinned to the verified trusted hop |
+| C8 | Client IP | `lib/request-ip.ts` | **Adapt after verification**: QQ's own header comment says the result depends on the specific proxy chain, including any extra CDN in front. That this app's chain matches QQ's is **unverified** | Render | Use QQ's extraction only after hosted test T-IP (§4.2) passes for this service's exact chain (custom domain, any CDN or proxy in front). Until then the 20/IP limit is **not** accepted as protection. If the chain differs, the extraction is pinned to the verified trusted hop. A missing or unparseable IP never bypasses the IP ceiling: all such requests share **one** bounded unknown-IP bucket (same 20 per 15 minutes) and raise an operator alert (`app/server/auth/rate.ts` `ipBucketKey`) |
 | C9 | Config validated at boot | `lib/env.ts`, `instrumentation.ts` | **Reuse** | Render env vars | Names in §6 |
 | C10 | Migrations + roles | `scripts/migrate.ts`, Pre-Deploy Command, `qq_app`/`qq_migration` | **Adapt** | Supabase Postgres | This repo already has its own migration discipline (`supabase/migrations` + pinned checksum manifest, `scripts/verify-migration-baseline.mjs`). The new runtime login role `recruiter_app` is the `qq_app` equivalent. Migrations stay operator-applied per environment, with owner approval, as today; there is **no** automatic Pre-Deploy migration until Hunter decides otherwise |
 | C11 | First-user bootstrap | `scripts/bootstrap-prod.ts` | **Not needed** | — | Existing users and roles are preserved (no new first user). If no active manager exists at cutover, that is a decision for Hunter |
@@ -136,7 +136,7 @@ same design, a small stated change; **New** = no Quote-Queue counterpart.
 
 ---
 
-## 4 · Recommended shape (replaces doc 14 §2.1–2.4 if the coordinator accepts it)
+## 4 · Selected shape (replaces doc 14 §2.1–2.4)
 
 ```
 Browser ──HTTPS──▶ Render web service "recruiter-web" (Node 22, plain `node:http`)
@@ -264,9 +264,14 @@ reads a body, before any collection or parsing:
   `/api/*` 256 KiB; `/webhooks/sendgrid` 1 MiB.
 - A declared `Content-Length` above the limit is rejected before reading. Without one
   (chunked), bytes are counted **as chunks arrive**; the moment the running total exceeds the
-  limit, reading stops, the socket is destroyed after a `413` (or, on the auth routes, the
-  normal generic envelope with no identity work, matching QQ's "malformed body = invalid
-  email" rule), and nothing is buffered beyond the limit.
+  limit, reading stops (backpressure pauses the socket; nothing is buffered beyond the
+  limit). The reader never destroys the request, because destroying a Node request destroys the
+  socket before any response. The handler then sends the bounded response with
+  `Connection: close` (a `413`, or, on the auth routes, the normal generic envelope with no
+  identity work, matching QQ's "malformed body = invalid email" rule) and closes the
+  connection only after the response is flushed (`app/server/http/respond.ts`
+  `respondThenClose`). The real-HTTP test for this (`respond.http.test.ts`) is written and
+  runs once A4 allows a local server.
 - A per-request read deadline (10 s) and the server's `requestTimeout`/`headersTimeout` stop
   slow uploads. An aborted or erroring stream is treated as an empty body, with no partial
   parse.
@@ -290,7 +295,7 @@ auth envelope is unchanged).
 
 ---
 
-## 5 · Departures from Quote-Queue that remain (each a proposal for the coordinator)
+## 5 · Departures from Quote-Queue that remain (reviewed; D8/D10-dependent items remain unapproved proposals)
 
 | # | Departure | Evidence | Why QQ's way can't fit as-is | Minimal adaptation | Effect on staff / security / testing |
 |---|---|---|---|---|---|
@@ -407,8 +412,8 @@ of what GitHub or the live service runs. Quote-Queue's own fixes are under revie
 | Client IP | `lib/request-ip.ts` `getClientIp` :44 | **Adapt after T-IP** (§4.2) | `server/http/ip.ts` |
 | Security headers | `middleware.ts` :53-165 | **Adapt**: every redirect is built from `APP_BASE_URL`, never from the request URL (QQ defect D4) | `server/http/headers.ts` |
 | SendGrid seam + mock | `lib/sendgrid.ts` `sendCanonical` :226-227, `getEmailAdapter` :561; `lib/sendgrid.mock.ts` | **Copy**: tracking-off guard kept; one-shot; the diagnostic header is not idempotency; uncertain → `unknown`, never replayed. Config errors never echo values or parse text (QQ defect D3) | `server/mail/*` |
-| Webhook | `app/webhooks/sendgrid/route.ts`: signature :356-420, cap :383, mapping :681-705, `applyAuthSendEvidence` :973-1027, recipient re-check :869-905 | **Copy logic**; own key; `tr_source` required. Before reuse, re-validate: the meaning of negative events (`bounce` blocked vs hard, `dropped` reasons, `spamreport`, `unsubscribe`), recipient correlation, and replay via the unique `sg_event_id`. No freshness window, as in QQ (flagged unconfirmed there) | `server/routes/webhook.ts` |
-| Retention | `scripts/retention.ts` (buckets 48 h; tokens/sessions 30 days past end; events 180 days) | **Copy logic**; runs as `recruiter_maintenance`. Host: one nightly step. Where it runs (a step in the existing Render cron, or its own cron at the $1/mo floor, 04-costs §7 rule 6) is an owner choice | `server/scripts/retention.ts` |
+| Webhook | `app/webhooks/sendgrid/route.ts`: signature :356-420, cap :383, mapping :681-705, `applyAuthSendEvidence` :973-1027, recipient re-check :869-905 | **Copy logic**; own key; `tr_source` required. The drop **reason** and the event **sg_message_id** are kept; the message id fills once and a conflicting one is rejected **before** any delivery or block update; a drop blocks the recipient only for QQ's recipient-specific reasons (quota or configuration drops never do), enforced in the server and again in SQL. Before reuse, re-validate: the meaning of negative events (`bounce` blocked vs hard, `dropped` reasons, `spamreport`, `unsubscribe`), recipient correlation, and replay via the unique `sg_event_id`. No freshness window, as in QQ (flagged unconfirmed there) | `server/routes/webhook.ts` |
+| Retention | `scripts/retention.ts` (buckets 48 h; tokens/sessions 30 days past end; events 180 days) | **Copy logic**; runs as `recruiter_maintenance`, as a step in the existing nightly pipeline job (§23) | `server/scripts/retention.ts`, invoked by the pipeline's nightly command |
 | Sign-in/confirm look | `app/signin/page.tsx`, `signin.css`, confirm page CSS | **Copy** (decisions 19/35): "CARRIER RECRUITER"; badge is byte-identical (doc 14 E11) | server-rendered pages |
 | Timing test | `tests/auth-request.test.ts:433-434` allows 850–3000 ms (QQ defect D5) | **Not copied**: the acceptance band is 900–1100 ms | T-TIME |
 | `/auth/verify` log handling | unverified live (QQ defect D6) | **Release gate** T-HYG | — |
@@ -1021,7 +1026,7 @@ Each case runs in both arrival orders and asserts the **final state** and each s
 | 3 | SPA activity ping | Doc 14 §3.5: deliberate navigation only; never timers, prefetch, focus or refetch; session + strict Origin + CSRF; throttle 1 per session per 60 s (DB renewal 5 min link / 1 min recovery); tests |
 | 4 | D8 and D10 are unapproved proposals; RLS re-keying and L1 stay reviewed gates; data preserved | Status block; doc 14 D8/D10 rows, §5.4, §11.5 |
 | 5 | Costs and connectivity | Render pricing and minimal costs to verify before any hosting approval; pooler custom-role support to verify from docs before claiming the add-on; SendGrid unverified and later-gated (§1, §4, §8) |
-| 6 | QQ 8111f3c C7/D9 and full-set lock order | Confirmed reflected at `de3486e`: one global class order with identity first and business classes (§17.2); lock sets taken before validation; validation under locks (§14.2); frozen sets (§17.2); bounded, uniformly fail-closed pre-response work (§14.4, §17.3) |
+| 6 | QQ 8111f3c C7/D9 and full-set lock order | Reflected, with one stated difference (reconciled after the focused review): the **identity** lock set (roster, profiles, own session) is taken complete and validated under those locks (§14.2); **business** locks come after that validation, in the §17.2 class order, and after any business-lock wait the session is re-checked (`internal.recheck_session()`, because a held session row cannot be revoked but can expire while waiting). QQ takes its complete set (business first) before validating; here identity-first is safe because no business row is used to discover identity (§17.1). Frozen sets (§17.2); bounded, uniformly fail-closed pre-response work (§14.4, §17.3) |
 
 ## 22 · Implementation status (dependency-free slices, 2026-10-21)
 
@@ -1038,15 +1043,57 @@ database yet (that waits for the coordinator's focused review and approvals A2�
 | SPA activity ping (not wired) | `app/src/lib/activity.ts` | `activity.test.ts` (5) |
 | M1 migration (pending), backout, credential retirement, snapshot, L1 | `supabase/pending/`, `supabase/backout/`, `supabase/rollout/` | `scripts/verify-auth-migration-contract.mjs` (text checks; mutation-tested) |
 
-**Deviation from Quote-Queue found while building (for review):** QQ records a SendGrid `429`
-as `unknown` (its request route maps only accepted / definite / everything else to unknown).
-Here a `429` is a **definite failure**, because it proves the message was not accepted. So the
-person may retry at once: the minute ceiling and the courtesy are bypassed, while the hour and
-day ceilings still apply. The same applies to `400/401/403` and to connection failures before
-transmission. `5xx`, timeouts and errors after transmission stay `unknown` and are never
-replayed (`app/server/mail/adapter.ts` `sendStatusFor`).
+**Send-outcome mapping (reverted to Quote-Queue's, manager decision 2026-10-21):** a SendGrid
+`429`, a `400/401/403` and a connection failure before sending are provider-side problems, not
+recipient failures. They are recorded as `unknown`, unlock no immediate retry, never block the
+recipient, and raise an operator alert (`operatorAlertFor`). Only a recipient-specific refusal
+is a definite failure (`app/server/mail/adapter.ts` `sendStatusFor`). The earlier departure was
+withdrawn; it is not proposed further.
 
 **Not built yet (needs approvals or the focused review):** the Node server and its routes, `pg`
 wiring, the SPA data-layer port and removal of the Supabase screens, the staging SQL
 adaptations (§12.5), executing any SQL (A3), local server runs (A4), hosted probes and log
 gates (A5a/A5b/A7).
+
+## 23 · Retention placement (engineering call, coordinator guidance 2026-10-21)
+
+**Decision: a step in the existing nightly pipeline job** (`render.yaml` cron `pipeline`,
+`0 9 * * *` UTC), not a separate job. A separate job would add a Render cron service with its
+own $1/month minimum (`04-costs.md:38`, rule 6 "one Render cron service, not several"), and
+nothing requires it.
+
+How it stays least-privilege and isolated:
+- **Its own role and its own connection.** The step connects with a separate
+  `MAINTENANCE_DATABASE_URL` for the `recruiter_maintenance` login role (M1 grants it only
+  `select, delete` on the five sign-in ledgers: buckets, links, sessions, email events,
+  recovery failures). It never uses the pipeline's service-role key or `SUPABASE_DB_URL`. The
+  pipeline's own access is not widened, and service-role security is not changed: no grant to
+  `service_role` changes for retention.
+- **The pipeline does not gain the app's power.** `recruiter_maintenance` cannot read
+  profiles, business tables or session tokens beyond the ledgers it prunes. It cannot mint
+  links or sessions (no execute on the sign-in functions).
+- **Failure isolation.** The step runs **after** the nightly sync, in its own `try`, with
+  `statement_timeout` and a row cap per statement. A retention failure is logged and alerted,
+  but never fails or rolls back the pipeline run, and a pipeline failure skips retention for
+  that night (the next night catches up; nothing depends on exact timing).
+- **Schedule.** Nightly at the pipeline's existing time. The QQ windows (48 hours, 30 days,
+  180 days) are much longer than a day, so the hour does not matter.
+- **What this changes, and who must approve it.** The pipeline's code and its Render
+  environment gain one secret name (`MAINTENANCE_DATABASE_URL`). This is a change to the
+  pipeline service's configuration, approved with the rollout. Until then retention is not
+  wired, and the ledgers only grow (slowly, a few rows per sign-in).
+
+Not built yet: the retention script and the pipeline hook (they need `pg` in a server context
+and the pipeline change; the pipeline already depends on `pg`).
+
+## 24 · Review response (focused review of `2fdbe08` and early code, 2026-10-21)
+
+| # | Finding | Change | Where |
+|---|---|---|---|
+| 1 | Renewal must not be "any POST" | Explicit allowlist (`renewalReason`): five write RPCs and named write routes; read-only RPC POSTs, the DNC lookup, prefetches and background reads never renew, for either session kind; tests | `app/server/http/activity.ts`; doc 14 §3.5 |
+| 2 | Body reader destroyed the socket before responding | The reader never destroys; `respondThenClose` sends the bounded response with `Connection: close` and closes after flush; real-HTTP tests written, skipped until A4 | `app/server/http/body.ts`, `respond.ts`, `respond.http.test.ts`; §4.3 |
+| 3 | Webhook evidence lost | Reason and message id kept; QQ recipient-reason allowlist for blocks (server and SQL); message-id fill-or-mismatch rejected before any update | `app/server/mail/webhook.ts`; M1 `auth_apply_send_evidence`; §11 |
+| 4 | Unknown IP bypassed the IP ceiling | One shared bounded unknown-IP bucket + operator alert (chosen over refusing all identity work, which would silently lock everyone out on a proxy misconfiguration) | `app/server/auth/rate.ts`; §3 C8 |
+| 5 | C7 wording vs sequence | Wording reconciled (identity set complete before validation; business locks after; QQ difference stated); `recheck_session()` after every business-lock wait, contract-checked | §21 item 6; M1 |
+| 6 | Manager decision: revert the 429/config/pre-send departure | Reverted to QQ: `unknown`, unlocks nothing, never blocks, operator alert; not proposed further | `app/server/mail/adapter.ts`; §22 |
+| — | Coordinator guidance | Retention as a step in the existing nightly pipeline job with its own least-privilege role (§23); architecture described as selected throughout | §23; status lines of docs 14/15 |
