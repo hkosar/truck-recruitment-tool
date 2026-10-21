@@ -574,8 +574,9 @@ self-deactivation; the last active manager is protected under `internal.roster_l
 ## 6 · Concurrency and post-response execution (validation item (d))
 
 1. **Lock order everywhere** (authoritative statement in doc 15 §14.2): `internal.roster_lock`
-   (manager-set changes only) → `profiles` rows in ascending id order (targets `FOR UPDATE`,
-   actor `FOR SHARE`) → session rows → link rows → recovery sets/codes. Every protected write
+   (manager-set changes only) → `profiles` rows in ascending id order (targets `FOR NO KEY
+   UPDATE`, actor `FOR SHARE`) → the actor's session → business rows → other sessions → link
+   rows → recovery sets/codes (full class table: doc 15 §17.2). Every protected write
    re-validates the actor **inside** its transaction from rows locked in this order (doc 15
    §14.2, executed by `internal.lock_and_validate`).
 2. **Claim vs roster change:** `auth_link_redeem` and every Team route lock the same profile row

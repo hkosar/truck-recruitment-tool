@@ -2,6 +2,8 @@
 
 Revision 2 (2026-10-21 UTC): review edits on IP trust, shutdown contract and SendGrid
 one-shot sends (§10).
+Revision 6 (2026-10-21 UTC): one global lock order including the business tables, compared
+with Quote-Queue design 8111f3c (C7, C8/D9); see §17.
 Revision 5 (2026-10-21 UTC): in-transaction authorization boundary, privileged-mutation
 inventory, uniform fail-closed admission and recovery ordering, after QQ's review of its design
 (findings F-1 to F-4, under revision in QQ, not completed fixes). See §14.
@@ -585,8 +587,9 @@ and it runs before any other lock in the transaction:
 1. If `p_roster`: `select … from internal.roster_lock for update`.
 2. Resolve `app.session_hash` to (session id, actor id) with a plain read (no lock).
 3. Let `P` = sorted distinct (`{actor}` ∪ `p_targets`), ascending by id. For each id in
-   order, take its **final** mode at once: `FOR UPDATE` if the id is a target, otherwise
-   `FOR SHARE`. (Actor = target, as in enrollment, takes `FOR UPDATE` once.) There is never a
+   order, take its **final** mode at once: `FOR NO KEY UPDATE` if the id is a target (the id
+   never changes, and this mode does not block other transactions' foreign-key checks on
+   that profile), otherwise `FOR SHARE`. (Actor = target, as in enrollment, takes `FOR UPDATE` once.) There is never a
    lock upgrade.
 4. Lock the actor's session row in its final mode: `FOR UPDATE` when the operation updates it
    (M17), otherwise `FOR SHARE`.
@@ -601,9 +604,9 @@ and it runs before any other lock in the transaction:
 6. Record in a transaction-local setting (session id, actor, role, kind, set of locked ids
    and modes).
 
-Later locks in the same transaction follow: other people's sessions (via the revocation
-trigger), then links, then recovery sets and codes. Nothing takes a profile or roster lock
-after step 6.
+Later locks in the same transaction follow the global order in §17.2: business rows (classes
+B1–B7), then other people's sessions (revocation trigger), links, and recovery sets and
+codes. Nothing takes a profile or roster lock after step 6.
 
 Who calls it:
 - **Team functions** (M1–M6): one call with `p_roster = true` for M2, M3 and M5,
@@ -746,3 +749,129 @@ anything slips past, the index refuses a second active set.
 | 3 | "require_actor first" conflicts with the lock order | One executable sequence `lock_and_validate`: roster → all profiles ascending in final modes → session → validate; used by Team functions, definer RPCs and policies; no upgrades; incompatible re-entry raises | §14.2 |
 | 4 | Ignoring a late result doesn't stop the transaction | Server-side timeouts; cancel + destroy the connection before COMMIT; success only on an acknowledged COMMIT; lost-ack handling per route; tests for late consumption, stalled transport, lost ack | §14.4, §14.6 |
 | 5 | Session kind per operation | Kinds column per operation (M16 recovery only, M17 both, M18 fresh link) | §14.1 |
+
+---
+
+## 17 · Global lock order including business tables (QQ 8111f3c C7, C8/D9)
+
+Quote-Queue's corrected design (8111f3c) passed independent **design** review. Its code is
+**not** fixed or tested, so nothing here relies on QQ source as repaired, and a design pass is
+not test evidence.
+
+### 17.1 What QQ C7 found and how it applies here
+
+QQ C7 requires authorization to be checked **under the operation's complete lock set**, taken
+in one global class order, with the actor's rows as ordinary members of that set. QQ found a
+real ordering conflict in its code: deactivation locks `users` and then the person's leads,
+while Reassign locks the lead and then `users`. That is a wait cycle.
+
+This app checked the same risk by evidence:
+- **No ownership or reassignment path exists.** Profiles are referenced by business rows only as
+  **attribution**: `batches.created_by`, `batch_activity.actor_id`, `contact_logs.user_id`,
+  `carriers.dnc_set_by`, `contact_suppressions.created_by`,
+  `batch_carriers.status_changed_by/promoted_by`, `profiles.approved_by`. None has an
+  `ON DELETE` action, and profiles are never deleted. `grep -i "owner|assign|reassign"`
+  over `supabase/migrations` finds only a comment and a function-owner check. Deactivation,
+  demotion, email change and revocation therefore touch **no** business rows, and no business
+  write needs to lock another person's profile.
+- **Business writes reference only the actor's own profile** (inserted as `created_by`,
+  `actor_id`, `user_id`, `dnc_set_by` or `status_changed_by`). Their implicit foreign-key
+  `KEY SHARE` lock lands on a row the transaction already holds `FOR SHARE` (from
+  `lock_and_validate`), so it adds no wait.
+- QQ puts business classes first (leads, then users). This app puts identity first. That is
+  safe because no path discovers identity rows from business rows. If a future feature adds
+  ownership (for example, assigning batches to a person), its reassignment must discover the
+  people from the request without locks, lock profiles first (§17.2 I2), then the business
+  rows, and re-check that the discovered set is unchanged (QQ C7 step 4: retry once, then the
+  generic "try again").
+
+### 17.2 The one global order (classes in this order; a transaction skips classes it doesn't need; rows ascending within a class)
+
+| Class | Rows | Mode | Taken by |
+|---|---|---|---|
+| I1 | `internal.roster_lock` | FOR UPDATE | M2, M3, M5 |
+| I2 | `public.profiles`, ascending id (actor and targets) | targets FOR NO KEY UPDATE; actor FOR SHARE; once, final mode | `lock_and_validate`; link redeem; recovery consumption/enrollment |
+| I3 | the actor's own `internal.app_sessions` row | FOR SHARE (FOR UPDATE for M17) | `lock_and_validate` |
+| B1 | `public.batches`, ascending id | FOR NO KEY UPDATE when updated; FOR UPDATE when deleted | M11 (refresh), `batches_update`/`batches_delete` |
+| B2 | `public.batch_zones`, ascending id | row locks of update/delete | M11, zone policies |
+| B3 | `public.batch_carriers`, ascending (batch_id, dot_number) | FOR NO KEY UPDATE | M8, M9, M10, M16, `bc_delete` |
+| B4 | `public.carriers`, ascending dot_number | FOR NO KEY UPDATE | M7 (DNC), `carriers_update` |
+| B5 | `public.contact_suppressions`, ascending (dot_number, channel) | row locks | M7, `suppress_*` |
+| B6 | `public.contact_logs`, `public.batch_activity` (insert; deletes ascending id) | row locks | M13, M14, activity triggers, manager deletes |
+| B7 | `public.cargo_other_values`, ascending value | FOR NO KEY UPDATE | `cov_update_mgr` |
+| A1 | other people's `internal.app_sessions` rows | updated by the revocation trigger | M1–M4 (Team) |
+| A2 | `internal.signin_links` | row locks | link redeem; revocation; mint (post-response) |
+| A3 | `internal.recovery_sets` → `internal.recovery_codes` | row locks | recovery; revocation; enrollment |
+| A4 | email-block lock, then `internal.blocked_email_addresses`, `internal.email_events` | as QQ (block lock then rows) | webhook; M6 block clear |
+
+Rules:
+- **Implicit foreign-key locks.** Inserting a child row takes `FOR KEY SHARE` on its parent
+  (for example, a contact log on its carrier (B4) and batch (B1)). That is a "backwards" class,
+  so it is allowed only because `KEY SHARE` conflicts with nothing except a parent **delete or
+  key update**, and every deleting path takes the parent first and then cascades to the
+  children: deleting `batches` cascades to zones, members and activity and sets
+  `contact_logs.batch_id` to null (`20260720000600_batches.sql:27, 47, 62`;
+  `20260720000700_contact.sql:9`; `20260720000800_activity.sql:8`). No app path deletes
+  carriers. The pipeline's carrier cascades never run against identity rows. This is covered
+  by the tests below.
+- **Bodies adjusted to the order.** These are behaviour-preserving changes, permitted by the
+  offline contract check in addition to the `auth.uid()` swap:
+  - `refresh_batch` locks its batch row `FOR NO KEY UPDATE` **before** inserting members
+    (today it updates the batch after the inserts, `20260720001100_rpc.sql` refresh body).
+  - `bulk_set_status` first locks the target member rows with
+    `select … order by dot_number for no key update` and then updates them. Today a
+    multi-row `update … where dot_number = any(…)` locks in scan order, so two overlapping
+    bulk updates could deadlock with each other. That is an existing risk, fixed here.
+  - `set_do_not_contact` takes its one carrier (B4), then the suppressions (B5), then the
+    activity inserts (B6). That is already its order.
+- **Team operations take no business rows** (I1 → I2 → trigger A1 → A2 → A3), and business
+  writes take no other person's identity rows. So deactivation, demotion, email change and
+  revocation cannot form a cycle with batch, status, DNC, contact or comment writes.
+- **The pipeline** (`service_role`/direct `pg`) takes only B4 and the carrier satellites plus
+  `cargo_other_values` (B7) and `pipeline_runs`/`data_quality_reports`, never identity
+  classes, and in its own fixed order. It shares no class with identity, so it cannot join a
+  cycle with Team operations. Against app DNC writes it is single-class (B4) plus B7: it never
+  holds B7 and then waits on B4 while the app holds B4 and waits on B7 (the app takes B7 only in
+  `cov_update_mgr`, alone).
+- **Deadlock backstop.** `deadlock_timeout` stays the default; SQLSTATE 40P01 maps to the
+  generic retry outcome (never a 500) and is logged with the operation name, so a remaining
+  ordering bug is visible (as QQ C7).
+- **Retry-once discovery** (QQ C7 step 4) applies to operations whose lock set is computed from
+  reads. Here those are `bulk_set_status` (its member set) and `refresh_batch` (new members).
+  If the re-read under lock differs, roll back and retry once, then return "try again".
+
+### 17.3 D9 / C8 comparison (bounded pre-response work)
+
+QQ C8: pool checkout with a connection timeout; the bucket transaction with `SET LOCAL
+statement_timeout` and `lock_timeout` inside the envelope; a response timer independent of the
+bucket write; fail closed (no identity work, identical 303, sanitized log). This app's §14.4
+matches on every point, and goes further: it cancels and destroys the connection at the
+deadline instead of letting a late write finish, and it handles a lost commit acknowledgement
+explicitly. The host query-string logging for `/auth/verify` remains an **unresolved release
+gate** (T-HYG; QQ lists it as unverified too).
+
+### 17.4 Ordering and deadlock tests (added to T-AUTHZ; two real connections, interleavings forced with advisory-lock barriers at named points, not sleeps)
+
+| Case | Expected |
+|---|---|
+| Deactivate X ‖ X's status change (M9), both arrival orders | no 40P01; either the write is ordered first and stands, or it is refused |
+| Demote X ‖ X's `bulk_set_status` over 50 members | same |
+| Email change of X (window closed in the test DB) ‖ X's DNC set (M7) | same |
+| Revoke X's session (sign-out elsewhere) ‖ X's contact log (M14) | write refused if the revocation committed first |
+| Two overlapping `bulk_set_status` calls in opposite member order | no deadlock (sorted locking) |
+| `refresh_batch` ‖ `batches_delete` of the same batch | no deadlock; the refresh either finishes first or finds the batch gone |
+| Contact log insert ‖ `batches_delete` of its batch (FK `KEY SHARE` vs cascade) | no deadlock; the log keeps `batch_id` or gets null |
+| Status change ‖ `bc_delete` of the same member | no deadlock |
+| DNC set on carrier C ‖ contact log on C | no deadlock; the DNC guard decides by commit order |
+| Team edit A→B ‖ B→A (managers) | no deadlock (I1, then I2 ascending) |
+| Pipeline-style carrier upsert batch ‖ DNC set on one of those carriers | no deadlock; bounded waits |
+| Any 40P01 forced by a deliberately mis-ordered test transaction | mapped to the generic retry outcome and logged; never a 500 |
+
+## 18 · Review response (coordinator-relayed QQ 8111f3c, 2026-10-21)
+
+| Item | Change | Sections |
+|---|---|---|
+| C7 global order across all privileged routes | Identity classes I1–I3, business classes B1–B7, auth-ledger classes A1–A4, with modes and owners; targets now `FOR NO KEY UPDATE` | §14.2, §17.2 |
+| QQ deadlock lesson (users vs leads) | No ownership/reassignment path exists (evidence); Team ops take no business rows; implicit FK lock rule; two RPC bodies reordered (`refresh_batch`, `bulk_set_status`); future-reassignment rule | §17.1, §17.2 |
+| D9 | Compared with QQ C8; §14.4 matches and adds cancel/destroy and lost-ack handling; log redaction still an open gate | §17.3 |
+| Tests | Ordering and deadlock cases | §17.4 |
