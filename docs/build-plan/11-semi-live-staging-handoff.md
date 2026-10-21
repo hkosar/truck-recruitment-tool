@@ -69,6 +69,8 @@ All three SQL files run only through the staging SQL runner. Do not paste them i
 - requires the action's confirmation phrase typed on the command line;
 - without --execute, only prints that the target was verified, and never prints the connection string, password, or host.
 
+The pipeline itself refuses to write to the staging project unless PIPELINE_ALLOW_STAGING_WRITES=true is set in addition to listing staging in PIPELINE_ALLOWED_DEV_REFS (which is now empty by default), so real FMCSA data cannot land in staging silently.
+
 The reset:
 
 - requires the runner-verified staging project and the staging identity marker in the connected database, naming that same project;
@@ -88,7 +90,7 @@ The reset is an operator-run maintenance action, not a browser button. That avoi
 
 ### What "fixture-owned" means
 
-The staging-only table staging_identity.fixture_rows lists, by key, every carrier, batch, and cargo value the fixture set owns. The reset adds its own rows to it. When the marker is first installed, everything already in the staging database is adopted into that list once, which is safe only because the runner has verified the connection is the staging project, whose contents are fictional by policy.
+The staging-only table staging_identity.fixture_rows lists, by key, every carrier, batch, and cargo value the fixture set owns. The reset adds its own rows to it. When the marker is first installed, existing rows are registered only if every one of them is provably part of the deterministic fictional baseline the reset generates: carriers must match the generator's exact fingerprint (derived DOT numbers and row hashes, reserved 555-01xx phone numbers, example.invalid email addresses); batches must be the two baseline batches created by their fixture identities; cargo values, contact logs, batch members, and batch activity must match what the reset writes; and there must be no contact suppressions. If anything else exists (for example real carriers loaded by a pipeline run, or batches, notes, status changes, or do-not-contact changes made during a review session), the installer refuses and lists how many rows of each kind it did not recognise. Nothing is adopted on trust.
 
 ### One-time step before the new reset or cleanup will run
 
@@ -101,7 +103,7 @@ The staging identity marker is a one-row table, staging_identity.marker, that ex
    `npm --prefix pipeline run staging:sql -- --action=install-marker --confirm="INSTALL TNBS STAGING IDENTITY MARKER"`
    Expect a line containing staging-sql.verified and then staging-sql.plan_only. If it prints staging-sql.refused instead, stop and report the message.
 5. Run it for real by adding --execute to the same command.
-6. Expect staging-sql.done. The installer refuses if the marker already exists or if any profile is neither a fixture identity nor Hunter's staging login. If it refuses, stop and report the message; do not edit the file to force it.
+6. Expect staging-sql.done. The installer refuses if the marker already exists, if any profile is neither a fixture identity nor Hunter's staging login, or if any business row is not part of the fictional baseline; that last refusal lists counts per kind (carriers, batches, cargo values, contact logs, contact suppressions, batch members, batch activity, carrier do-not-contact changes). If it refuses, stop and report the whole message to Hunter; do not edit the file to force it. There is currently no approved way to adopt rows outside the baseline.
 
 ### Running the reset afterwards
 
