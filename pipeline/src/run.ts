@@ -222,6 +222,7 @@ async function main(): Promise<void> {
   verifyPipelineTarget({
     environment: config.PIPELINE_ENV,
     supabaseUrl: config.SUPABASE_URL,
+    supabaseDbUrl: config.SUPABASE_DB_URL,
     allowedDevRefs: config.PIPELINE_ALLOWED_DEV_REFS,
   });
   const ctx = createPipelineContext(config, args.command);

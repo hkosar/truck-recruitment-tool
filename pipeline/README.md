@@ -43,7 +43,7 @@ the source of truth for what's required vs optional/defaulted):
 |---|---|---|
 | `SUPABASE_URL` | yes | Project URL |
 | `SUPABASE_SERVICE_ROLE_KEY` | yes | service_role, not anon — this pipeline bypasses RLS by design |
-| `SUPABASE_DB_URL` | yes | Direct Postgres connection string, **session pooler** (port 5432) — needed for `COPY`/staging/bulk upserts; not runnable via PostgREST alone |
+| `SUPABASE_DB_URL` | yes | Direct Postgres connection string, **session pooler** (port 5432) — needed for `COPY`/staging/bulk upserts; not runnable via PostgREST alone. Must name the same project as `SUPABASE_URL` (host `db.<ref>.supabase.co` or pooler user `postgres.<ref>`); the target guard refuses to start otherwise |
 | `SOCRATA_APP_TOKEN` | yes | Free token from dev.socrata.com/register — lifts anonymous throttling to 1,000 req/hr |
 | `RESEND_API_KEY` | no | Optional until M7 and a sending domain are configured; enables failure-email alerting |
 | `ALERT_EMAIL` | no | Set together with `RESEND_API_KEY`; Render's native cron failure notification is used otherwise |

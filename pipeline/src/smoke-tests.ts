@@ -33,6 +33,7 @@ test('pipeline target guard requires exact production and allowlisted developmen
     verifyPipelineTarget({
       environment: 'prod',
       supabaseUrl: `https://${RECORDED_PROJECT_REFS.production}.supabase.co`,
+      supabaseDbUrl: `postgresql://postgres.${RECORDED_PROJECT_REFS.production}:redacted@aws-0-us-east-2.pooler.supabase.com:5432/postgres`,
     }),
     { projectRef: RECORDED_PROJECT_REFS.production, environment: 'prod' }
   );
@@ -40,6 +41,7 @@ test('pipeline target guard requires exact production and allowlisted developmen
     verifyPipelineTarget({
       environment: 'dev',
       supabaseUrl: `https://${RECORDED_PROJECT_REFS.staging}.supabase.co`,
+      supabaseDbUrl: `postgresql://postgres.${RECORDED_PROJECT_REFS.staging}:redacted@aws-0-us-east-2.pooler.supabase.com:5432/postgres`,
       allowedDevRefs: [RECORDED_PROJECT_REFS.staging],
     }),
     { projectRef: RECORDED_PROJECT_REFS.staging, environment: 'dev' }
@@ -48,6 +50,7 @@ test('pipeline target guard requires exact production and allowlisted developmen
     () => verifyPipelineTarget({
       environment: 'dev',
       supabaseUrl: `https://${RECORDED_PROJECT_REFS.production}.supabase.co`,
+      supabaseDbUrl: `postgresql://postgres.${RECORDED_PROJECT_REFS.production}:redacted@aws-0-us-east-2.pooler.supabase.com:5432/postgres`,
       allowedDevRefs: [RECORDED_PROJECT_REFS.production],
     }),
     /refuses the production/
@@ -56,6 +59,7 @@ test('pipeline target guard requires exact production and allowlisted developmen
     () => verifyPipelineTarget({
       environment: 'prod',
       supabaseUrl: `https://${RECORDED_PROJECT_REFS.staging}.supabase.co`,
+      supabaseDbUrl: `postgresql://postgres.${RECORDED_PROJECT_REFS.staging}:redacted@aws-0-us-east-2.pooler.supabase.com:5432/postgres`,
     }),
     /requires the production Carrier Recruiter ref/
   );
@@ -63,10 +67,67 @@ test('pipeline target guard requires exact production and allowlisted developmen
     () => verifyPipelineTarget({
       environment: 'dev',
       supabaseUrl: 'https://fwmsyfndwgmvmbxaagzu.supabase.co',
+      supabaseDbUrl: 'postgresql://postgres.fwmsyfndwgmvmbxaagzu:redacted@aws-0-us-east-2.pooler.supabase.com:5432/postgres',
       allowedDevRefs: [RECORDED_PROJECT_REFS.staging],
     }),
     /not in PIPELINE_ALLOWED_DEV_REFS/
   );
+});
+
+test('pipeline target guard binds SUPABASE_DB_URL to the same approved project as SUPABASE_URL', () => {
+  const { production, staging } = RECORDED_PROJECT_REFS;
+  const apiUrl = (ref: string) => `https://${ref}.supabase.co`;
+  const poolerUrl = (ref: string) => `postgresql://postgres.${ref}:redacted@aws-0-us-east-2.pooler.supabase.com:5432/postgres`;
+  const directUrl = (ref: string) => `postgresql://postgres:redacted@db.${ref}.supabase.co:5432/postgres`;
+
+  // Matching pairs pass for both supported connection-string shapes.
+  for (const dbUrl of [poolerUrl(staging), directUrl(staging)]) {
+    assert.deepEqual(
+      verifyPipelineTarget({ environment: 'dev', supabaseUrl: apiUrl(staging), supabaseDbUrl: dbUrl, allowedDevRefs: [staging] }),
+      { projectRef: staging, environment: 'dev' }
+    );
+  }
+  assert.deepEqual(
+    verifyPipelineTarget({ environment: 'prod', supabaseUrl: apiUrl(production), supabaseDbUrl: poolerUrl(production) }),
+    { projectRef: production, environment: 'prod' }
+  );
+
+  // Staging API settings + production bulk-write connection must be refused (Codex finding 2).
+  for (const dbUrl of [poolerUrl(production), directUrl(production)]) {
+    assert.throws(
+      () => verifyPipelineTarget({ environment: 'dev', supabaseUrl: apiUrl(staging), supabaseDbUrl: dbUrl, allowedDevRefs: [staging] }),
+      /SUPABASE_DB_URL .* does not match SUPABASE_URL/
+    );
+  }
+  // And the reverse: production API settings with a staging bulk connection.
+  assert.throws(
+    () => verifyPipelineTarget({ environment: 'prod', supabaseUrl: apiUrl(production), supabaseDbUrl: poolerUrl(staging) }),
+    /SUPABASE_DB_URL .* does not match SUPABASE_URL/
+  );
+
+  // Connection strings whose project cannot be established are refused, never assumed.
+  for (const dbUrl of [
+    'postgresql://postgres:redacted@localhost:5432/postgres',
+    'postgresql://postgres:redacted@aws-0-us-east-2.pooler.supabase.com:5432/postgres',
+    `postgresql://postgres.${staging}:redacted@db.${production}.supabase.co:5432/postgres`,
+    `postgresql://postgres.${staging}:redacted@db.${staging}.supabase.co.evil.example:5432/postgres`,
+  ]) {
+    assert.throws(
+      () => verifyPipelineTarget({ environment: 'dev', supabaseUrl: apiUrl(staging), supabaseDbUrl: dbUrl, allowedDevRefs: [staging] }),
+      /SUPABASE_DB_URL/
+    );
+  }
+
+  // The database connection string is required, and errors never echo its password.
+  assert.throws(
+    () => verifyPipelineTarget({ environment: 'dev', supabaseUrl: apiUrl(staging), supabaseDbUrl: '', allowedDevRefs: [staging] }),
+    /SUPABASE_DB_URL/
+  );
+  try {
+    verifyPipelineTarget({ environment: 'dev', supabaseUrl: apiUrl(staging), supabaseDbUrl: poolerUrl(production), allowedDevRefs: [staging] });
+  } catch (error) {
+    assert.doesNotMatch(String(error), /redacted/);
+  }
 });
 
 test('Socrata defaults to memory-safe 10k pages', async () => {
