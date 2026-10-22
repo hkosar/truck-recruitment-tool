@@ -1223,7 +1223,7 @@ session restrictions. Account, identity, phone and role administration stays blo
 recovery (the team functions accept link sessions only: M1
 `lock_and_validate(array['manager']…, array['link'] …)`, lines 1304, 1346, 1378, 1407, 1659); a
 future centrally designated action may use a fresh, separate SMS confirmation (§27); emergency
-sign-out stays a manager link-session action (§29).
+sign-out stays a manager action from a link session only (§29).
 
 ## 29 · Emergency sign-out cancels unused codes (Hunter decision, 2026-10-21)
 
