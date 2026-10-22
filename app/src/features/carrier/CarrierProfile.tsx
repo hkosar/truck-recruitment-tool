@@ -13,7 +13,7 @@ import type { Database } from '../../types/database';
 import { WARNING_META } from '../../lib/warnings';
 import { DISPOSITIONS_BY_CHANNEL } from '../../types/domain';
 import type { Channel, ContactDisposition, WarningCode } from '../../types/domain';
-import { cargoFlagLabels, confirmCopy, filterTimeline, TIMELINE_FILTERS, timelineCounts } from './carrierLogic';
+import { cargoFlagLabels, confirmCopy, dncRequest, filterTimeline, TIMELINE_FILTERS, timelineCounts } from './carrierLogic';
 import type { ConfirmKind, TimelineFilter } from './carrierLogic';
 import { ConfirmDialog } from './ConfirmDialog';
 
@@ -63,7 +63,7 @@ export default function CarrierProfile() {
 
   const query = useQuery({ queryKey: queryKeys.carrier(dot), queryFn: () => loadCarrier(dot), enabled: Number.isSafeInteger(dot) && dot > 0 });
   const dncMutation = useMutation({
-    mutationFn: async () => { const on = isGloballyDnc(query.data?.carrier, query.data?.suppressions); return setDoNotContact(dot, !on, on ? null : 'Set from carrier profile'); },
+    mutationFn: async (request: { dot: number; on: boolean; reason: string | null }) => setDoNotContact(request.dot, request.on, request.reason),
     onSuccess: async () => { setMessage('Contact preference updated.'); await queryClient.invalidateQueries({ queryKey: queryKeys.carrier(dot) }); },
     onError: (error) => setMessage(error instanceof Error ? error.message : 'DNC update failed.'),
   });
@@ -117,7 +117,7 @@ export default function CarrierProfile() {
   return (
     <div className="mx-auto max-w-[1500px] space-y-4">
       {message ? <div className="border border-info bg-info-tint px-4 py-3 text-sm text-info">{message}</div> : null}
-      {confirm ? <ConfirmDialog copy={confirmCopy(confirm, carrier.legal_name, dot)} pending={confirm === 'promote' ? promoteMutation.isPending : dncMutation.isPending} onCancel={() => setConfirm(null)} onConfirm={() => { const mutation = confirm === 'promote' ? promoteMutation : dncMutation; mutation.mutate(undefined, { onSettled: () => setConfirm(null) }); }} /> : null}
+      {confirm ? <ConfirmDialog copy={confirmCopy(confirm, carrier.legal_name, dot)} pending={confirm === 'promote' ? promoteMutation.isPending : dncMutation.isPending} onCancel={() => setConfirm(null)} onConfirm={() => { const done = { onSettled: () => setConfirm(null) }; if (confirm === 'promote') promoteMutation.mutate(undefined, done); else dncMutation.mutate(dncRequest(confirm, dot), done); }} /> : null}
       <header className={`border border-border bg-surface p-5 ${warningReasons.length ? 'bg-row-warning' : ''}`}><div className="flex flex-wrap items-start justify-between gap-5"><div><div className="flex flex-wrap items-center gap-2"><h1 className="text-2xl font-extrabold tracking-[-0.02em]">{carrier.legal_name}</h1>{carrier.status_code === 'A' ? <span className="rounded-full bg-good-tint px-2 py-1 text-[10px] font-bold text-good">Active</span> : <span className="rounded-full bg-crit-tint px-2 py-1 text-[10px] font-bold text-crit">Inactive</span>}{dnc ? <span className="rounded-full bg-st-dnc-tint px-2 py-1 text-[10px] font-bold text-st-dnc">Do not contact</span> : null}</div>{carrier.dba_name ? <div className="mt-1 text-sm font-semibold text-text-muted">DBA {carrier.dba_name}</div> : null}<div className="mt-2 font-mono text-sm">USDOT {carrier.dot_number}</div><div className="mt-2 text-xs text-text-muted">{carrier.entity_type || 'Entity type unavailable'} · {carrier.classdef || 'Classification unavailable'} · {carrier.carrier_operation || 'Operation unavailable'} · {fmtInt(carrier.power_units)} power units · {fmtInt(carrier.total_drivers)} drivers</div><div className="mt-1 text-xs text-text-muted">{[carrier.phy_street, carrier.phy_city, carrier.phy_state, carrier.phy_zip].filter(Boolean).join(', ') || 'Physical address unavailable'}</div></div>{canEdit ? <div className="flex flex-wrap gap-2">{batchId && !currentMembership?.promoted_at ? <button type="button" disabled={promoteMutation.isPending} onClick={() => setConfirm('promote')} className="bg-accent px-3 py-2 text-xs font-bold text-accent-ink">Mark as Promoted</button> : currentMembership?.promoted_at ? <span className="bg-good-tint px-3 py-2 text-xs font-bold text-good">Promoted</span> : null}<button type="button" disabled={dncMutation.isPending} onClick={() => setConfirm(dnc ? 'dnc-restore' : 'dnc-set')} className={`border px-3 py-2 text-xs font-bold ${dnc ? 'border-good text-good' : 'border-crit text-crit'}`}>{dnc ? 'Restore contact' : 'Set global DNC'}</button></div> : null}</div>{warningReasons.length ? <div className="mt-4 flex flex-wrap gap-1.5">{warningReasons.map((reason) => <span key={reason} className="rounded-full bg-crit-tint px-2 py-1 text-[10px] font-bold text-crit">{WARNING_META[reason as WarningCode]?.label ?? reason}</span>)}</div> : null}</header>
 
       <div className="grid gap-4 lg:grid-cols-[340px_minmax(0,1fr)]">

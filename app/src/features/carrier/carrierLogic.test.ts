@@ -1,5 +1,5 @@
 import { describe, expect, it } from 'vitest';
-import { cargoFlagLabels, confirmCopy, filterTimeline, timelineCounts } from './carrierLogic';
+import { canDismiss, cargoFlagLabels, confirmCopy, dncRequest, filterTimeline, timelineCounts } from './carrierLogic';
 
 const logs = [{ id: 1, channel: 'call' }, { id: 2, channel: 'email' }, { id: 3, channel: 'call' }, { id: 4, channel: 'mail' }];
 
@@ -40,5 +40,26 @@ describe('confirmCopy', () => {
     const p = confirmCopy('promote', 'ACME', 1234567);
     expect(p.body).toContain('USDOT 1234567');
     expect(p.body).toContain('Nothing is sent');
+  });
+});
+
+describe('dncRequest', () => {
+  // The dialog kind is fixed when it opens. A cache refresh in between (someone else set DNC)
+  // must not change what is sent: the request depends only on the confirmed kind and the dot.
+  it('set always sends on=true with a reason, whatever the cache later says', () => {
+    expect(dncRequest('dnc-set', 42)).toEqual({ dot: 42, on: true, reason: 'Set from carrier profile' });
+  });
+  it('restore always sends on=false with no reason', () => {
+    expect(dncRequest('dnc-restore', 42)).toEqual({ dot: 42, on: false, reason: null });
+  });
+  it('carries the carrier id it was given', () => {
+    expect(dncRequest('dnc-set', 7).dot).toBe(7);
+  });
+});
+
+describe('canDismiss', () => {
+  it('blocks Escape / backdrop dismissal while a request is pending', () => {
+    expect(canDismiss(true)).toBe(false);
+    expect(canDismiss(false)).toBe(true);
   });
 });

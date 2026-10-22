@@ -46,3 +46,13 @@ export function timelineCounts(logs: { channel: string }[]): Record<TimelineFilt
   for (const log of logs) if (log.channel === 'call' || log.channel === 'text' || log.channel === 'email') counts[log.channel] += 1;
   return counts;
 }
+
+/** Explicit request for the DNC call, fixed when the dialog opens and never re-derived from cached data. */
+export function dncRequest(kind: 'dnc-set' | 'dnc-restore', dot: number): { dot: number; on: boolean; reason: string | null } {
+  return kind === 'dnc-set' ? { dot, on: true, reason: 'Set from carrier profile' } : { dot, on: false, reason: null };
+}
+
+/** Escape / backdrop click may close the dialog only while no request is in flight. */
+export function canDismiss(pending: boolean): boolean {
+  return !pending;
+}
