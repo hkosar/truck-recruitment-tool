@@ -51,6 +51,7 @@ the source of truth for what's required vs optional/defaulted):
 | `PIPELINE_ENV` | no | `dev` (default) / `prod` — enforces the exact project-ref target and labels logs/run metadata |
 | `PIPELINE_ALLOWED_DEV_REFS` | for dev | Comma-separated explicit dev/staging refs; empty by default; production is always refused in dev mode |
 | `PIPELINE_ALLOW_STAGING_WRITES` | no | `false` (default) / `true` — the shared staging project (fictional fixtures only) is refused unless this is `true` and staging is also allowlisted |
+| `PIPELINE_NIGHTLY_SAFETY` | no | `off` (default) / `dry-run` / `on` — after the nightly chain, run `sync-safety` once per monthly window (opens 00:00 UTC on the 5th; a failure retries the next night). `dry-run` validates the full source and saves nothing to `carrier_safety`. See `src/nightly-safety.ts` |
 
 `QCMOBILE_WEBKEY` is deliberately **not** an env var here — per `01-architecture.md`
 reconciliation amendment #16, QCMobile per-carrier lookups are a Supabase **Edge Function**
@@ -105,7 +106,7 @@ the free dev project keeps synthetic seed data only.
 | Render Cron Job | Schedule | Command |
 |---|---|---|
 | `pipeline-nightly` | `0 9 * * *` (~4am CDT, after FMCSA's overnight refresh — Part B §7 R7 flags this hour as needing a week of observation to confirm/shift) | `tsx src/run.ts nightly` |
-| `pipeline-monthly-safety` | `0 8 5 * *` | `tsx src/run.ts monthly` |
+| `pipeline-monthly-safety` | `0 8 5 * *` | `tsx src/run.ts monthly` — or, with the single-cron setup in `render.yaml`, set `PIPELINE_NIGHTLY_SAFETY=on` and the nightly run carries it once per window |
 | `pipeline-backfill` | manual ("Run Job" button only — never scheduled) | `tsx src/run.ts backfill` |
 
 Nightly chain ceiling is **60 minutes** (`01-architecture.md` reconciliation amendment #20);

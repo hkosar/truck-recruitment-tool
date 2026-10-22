@@ -17,6 +17,7 @@ import {
 } from './sources/safety.js';
 import { parse as parsePgConnectionString } from 'pg-connection-string';
 import { RECORDED_PROJECT_REFS, parseSupabaseDbTarget, verifyPipelineTarget } from './target-guard.js';
+import { buildLastSafetySuccessSql, isSafetyDue, safetyWindowStart } from './nightly-safety.js';
 
 type Test = { name: string; run: () => void | Promise<void> };
 const tests: Test[] = [];
@@ -427,6 +428,41 @@ test('location candidate queue excludes already-attempted no-match addresses', (
   const { sql } = buildCandidateQuery(100);
   assert.match(sql, /where geocode_addr_hash is distinct from address_hash/i);
   assert.doesNotMatch(sql, /geom is null or/i);
+});
+
+test('nightly safety is off by default and only accepts off, dry-run or on', () => {
+  const env = {
+    SUPABASE_URL: 'https://abcdefghijklmnopqrst.supabase.co',
+    SUPABASE_SERVICE_ROLE_KEY: 'x'.repeat(40),
+    SOCRATA_APP_TOKEN: 'test-token',
+    SUPABASE_DB_URL: 'postgresql://postgres:redacted@db.abcdefghijklmnopqrst.supabase.co:5432/postgres',
+  } as NodeJS.ProcessEnv;
+  assert.equal(loadConfig(env).PIPELINE_NIGHTLY_SAFETY, 'off');
+  assert.equal(loadConfig({ ...env, PIPELINE_NIGHTLY_SAFETY: 'dry-run' }).PIPELINE_NIGHTLY_SAFETY, 'dry-run');
+  assert.equal(loadConfig({ ...env, PIPELINE_NIGHTLY_SAFETY: 'on' }).PIPELINE_NIGHTLY_SAFETY, 'on');
+  assert.throws(() => loadConfig({ ...env, PIPELINE_NIGHTLY_SAFETY: 'true' }), /PIPELINE_NIGHTLY_SAFETY/);
+});
+
+test('nightly safety runs once per monthly window that opens on the 5th (UTC)', () => {
+  const at = (iso: string) => new Date(iso);
+  assert.equal(safetyWindowStart(at('2026-10-22T09:00:00Z')).toISOString(), '2026-10-05T00:00:00.000Z');
+  assert.equal(safetyWindowStart(at('2026-10-05T00:00:00Z')).toISOString(), '2026-10-05T00:00:00.000Z');
+  assert.equal(safetyWindowStart(at('2026-10-04T23:59:59Z')).toISOString(), '2026-09-05T00:00:00.000Z');
+  assert.equal(safetyWindowStart(at('2027-01-03T09:00:00Z')).toISOString(), '2026-12-05T00:00:00.000Z');
+
+  assert.equal(isSafetyDue(at('2026-10-22T09:00:00Z'), null), true, 'first ever run is due immediately');
+  assert.equal(isSafetyDue(at('2026-10-22T09:00:00Z'), at('2026-10-21T09:20:00Z')), false);
+  assert.equal(isSafetyDue(at('2026-11-04T09:00:00Z'), at('2026-10-21T09:20:00Z')), false);
+  assert.equal(isSafetyDue(at('2026-11-05T09:00:00Z'), at('2026-10-21T09:20:00Z')), true);
+});
+
+test('nightly safety counts only full runs of the reviewed source, and dry runs only in dry-run mode', () => {
+  const sql = buildLastSafetySuccessSql();
+  assert.match(sql, /step = 'sync-safety'/);
+  assert.match(sql, /status = 'success'/);
+  assert.match(sql, /meta \? 'datasetIds'/);
+  assert.match(sql, /meta->'pages' is null/);
+  assert.match(sql, /\$1::boolean or coalesce\(meta->>'dryRun', 'false'\) <> 'true'/);
 });
 
 let failed = 0;

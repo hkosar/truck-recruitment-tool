@@ -10,11 +10,14 @@ import { runGeocode } from './geocode.js';
 import { runFacets } from './facets.js';
 import { runDqReport } from './dq-report.js';
 import { verifyPipelineTarget } from './target-guard.js';
+import { decideNightlySafety } from './nightly-safety.js';
 
 /**
  * Entry point: `tsx src/run.ts <nightly|monthly|backfill|STEP_NAME> [--from=step] [--pages=N]
  * [--batches=N]` (Part B §6.1/§6.4). Chain order matches Part B §2.1 exactly:
  *   nightly  = sync-census -> sync-authority -> sync-insurance -> cargo-facets -> geocode -> dq-report
+ *              [-> sync-safety as job 'monthly', once per monthly window, only when
+ *               PIPELINE_NIGHTLY_SAFETY is 'dry-run' or 'on'; see nightly-safety.ts]
  *   monthly  = sync-safety
  *   backfill = sync-census(full) -> sync-authority -> sync-insurance -> sync-safety
  *              -> geocode(all) -> cargo-facets -> dq-report
@@ -137,6 +140,8 @@ const STEP_RUNNERS: Record<PipelineStep, StepRunner> = {
         ratingRowsRead: r.ratingRowsRead,
         dryRun: r.dryRun,
         validation: r.validation,
+        // A page cap marks a partial smoke run; nightly-safety.ts never counts it as the monthly sync.
+        ...(args.pages ? { pages: args.pages } : {}),
       },
     };
   },
@@ -216,6 +221,43 @@ async function runChain(
   ctx.log.info('chain.complete', { job, steps: toRun });
 }
 
+/** Runs after the nightly chain has finished, so a safety failure can never block or skip
+ *  the existing nightly steps. A failure still fails the process (Render alert + pipeline_runs). */
+async function runNightlySafety(ctx: PipelineContext, socrata: SocrataClient, args: CliArgs): Promise<void> {
+  const decision = await decideNightlySafety(ctx, ctx.config.PIPELINE_NIGHTLY_SAFETY);
+  ctx.log.info('nightly.safety_decision', { mode: ctx.config.PIPELINE_NIGHTLY_SAFETY, ...decision });
+  if (!decision.run) return;
+  await runStep(ctx, socrata, 'monthly', 'sync-safety', { ...args, dryRun: decision.dryRun || args.dryRun });
+}
+
+/** Dispatches a parsed command against an already verified context (main() runs the target
+ *  guard first). Exported for the local database harness. */
+export async function runCommand(ctx: PipelineContext, socrata: SocrataClient, args: CliArgs): Promise<void> {
+  switch (args.command) {
+    case 'nightly':
+      await runChain(ctx, socrata, 'nightly', NIGHTLY_STEPS, args);
+      await runNightlySafety(ctx, socrata, args);
+      break;
+    case 'monthly':
+      await runChain(ctx, socrata, 'monthly', MONTHLY_STEPS, args);
+      break;
+    case 'backfill':
+      await runChain(ctx, socrata, 'backfill', BACKFILL_STEPS, args);
+      break;
+    default:
+      // Single-step invocation for local dev/debugging (e.g. `tsx src/run.ts sync-census
+      // --pages=1`) -- distinct from `nightly --from=X`, which runs X through the end of
+      // the chain rather than isolating exactly one step. Logged under job='nightly' since
+      // PipelineJob has no 'adhoc' member (see runs.ts) -- meta.adhoc marks it explicitly
+      // so a pipeline_runs reader isn't misled into thinking a full nightly chain ran.
+      if (!isPipelineStep(args.command)) {
+        throw new Error(`Unknown command "${args.command}". ${usage()}`);
+      }
+      ctx.log.warn('run.adhoc_step', { step: args.command });
+      await runStep(ctx, socrata, 'nightly', args.command, args, true);
+  }
+}
+
 async function main(): Promise<void> {
   const args = parseArgs(process.argv.slice(2));
   const config = loadConfig();
@@ -230,28 +272,7 @@ async function main(): Promise<void> {
   const socrata = new SocrataClient({ appToken: config.SOCRATA_APP_TOKEN, log: ctx.log });
 
   try {
-    switch (args.command) {
-      case 'nightly':
-        await runChain(ctx, socrata, 'nightly', NIGHTLY_STEPS, args);
-        break;
-      case 'monthly':
-        await runChain(ctx, socrata, 'monthly', MONTHLY_STEPS, args);
-        break;
-      case 'backfill':
-        await runChain(ctx, socrata, 'backfill', BACKFILL_STEPS, args);
-        break;
-      default:
-        // Single-step invocation for local dev/debugging (e.g. `tsx src/run.ts sync-census
-        // --pages=1`) -- distinct from `nightly --from=X`, which runs X through the end of
-        // the chain rather than isolating exactly one step. Logged under job='nightly' since
-        // PipelineJob has no 'adhoc' member (see runs.ts) -- meta.adhoc marks it explicitly
-        // so a pipeline_runs reader isn't misled into thinking a full nightly chain ran.
-        if (!isPipelineStep(args.command)) {
-          throw new Error(`Unknown command "${args.command}". ${usage()}`);
-        }
-        ctx.log.warn('run.adhoc_step', { step: args.command });
-        await runStep(ctx, socrata, 'nightly', args.command, args, true);
-    }
+    await runCommand(ctx, socrata, args);
   } finally {
     await closePipelineContext(ctx);
   }

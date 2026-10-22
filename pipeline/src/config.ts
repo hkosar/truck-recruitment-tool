@@ -87,6 +87,10 @@ const EnvSchema = z.object({
     .enum(['true', 'false'], { message: 'PIPELINE_ALLOW_STAGING_WRITES must be "true" or "false"' })
     .default('false')
     .transform((value) => value === 'true'),
+  /** Monthly safety snapshot inside the nightly cron (nightly-safety.ts): 'off' (default,
+   *  nightly never touches safety), 'dry-run' (validate only, nothing saved to
+   *  carrier_safety) or 'on' (real write once per monthly window). */
+  PIPELINE_NIGHTLY_SAFETY: z.enum(['off', 'dry-run', 'on']).default('off'),
 });
 
 export type Config = z.infer<typeof EnvSchema>;
