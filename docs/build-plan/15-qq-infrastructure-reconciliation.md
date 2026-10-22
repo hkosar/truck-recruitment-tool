@@ -1310,3 +1310,31 @@ page consequence text, keyboard and mouse `<Link>` navigation each pinged once, 
 or idle, unconfirmed sign-out page then a successful retry (session revoked `signed_out` in the
 database); backout rehearsal identical after normalization. Recovery-code enrollment and
 consumption races stay text-checked only while the feature is held.
+
+## 31 · Test-database isolation per run (load-generator clash, 2026-10-22)
+
+**What happened.** In the first load scenario three generators ran the store suite
+(`pg.db.test.ts`) at the same time on ONE database (`tr_signin_load_store`): the names were derived
+per suite, not per process. Every overlapping iteration failed (19 failures in total, all in that
+file; the iterations that ran alone passed). The suite uses fixed fixture rows and changes global
+state: `resetEditor()` resets statuses and deletes the editor's links; emergency sign-out revokes
+every staff session; the role-loss tests demote the editor (revocation reason `role_changed`); some
+tests hold locks for about a second. The failure details match: a committed status read back as
+`new`; `NotPermitted` instead of `OutcomeUnknown` because the editor session had been revoked or
+demoted by another copy; a link revoked as `role_changed`; `lastMinute: 2`; missing link rows;
+lock timeouts. Those failures were missing from the first load report; they are inventoried in
+full in the owner's `gate2-load/generator-failures-inventory.txt`.
+
+**Fix.** Suite databases are `<base>_<run id>_<suite>`. `A3_RUN_ID` is required whenever the A3
+settings are present. The owned builder creates a run's databases (`--run <id>`) and drops them
+(`--drop-run <id>`). Each suite also holds an exclusive advisory-lock claim on its database for its
+whole duration (`app/server/testing/test-db.ts`; enforced by `test-db.test.ts`).
+
+**Measured on a new cluster.**
+- Two copies of the store suite started together with the same run id: one passed 18/18, the other
+  refused to start (`test database tr_signin_test_x1_store is in use by another run`).
+- App verify with the A3 settings: 184/184. App verify without them: 148 passed, 36 skipped.
+  Database suites: 26/26.
+- Three generators (run ids g1, g2, g3), 6 iterations each, all concurrent: all 18 iterations
+  passed 174 with 10 skipped. Eight measured HTTP runs (run id m1) at the same time: 10/10 each,
+  4.7–6.1 s, CPU 11–50 %.
