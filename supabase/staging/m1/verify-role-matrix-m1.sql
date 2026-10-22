@@ -226,7 +226,8 @@ select pg_temp.record_count('editor-recovery', 'select carriers', $$select count
 select pg_temp.record_count('editor-recovery', 'select own profile', $$select count(*) from public.profiles$$, false);
 select pg_temp.record_denied('editor-recovery', 'execute create_batch', $$select public.create_batch('AUTHZ PROBE',null,null,null,'{}'::jsonb)$$);
 select pg_temp.record_denied('editor-recovery', 'insert contact log', $$insert into public.contact_logs(dot_number,user_id,channel,disposition) values(1400001,'71000000-0000-4000-8000-000000000002','call','connected')$$);
-select pg_temp.record_denied('editor-recovery', 'execute generate_contact_sheet', $$select * from public.generate_contact_sheet((select id from public.batches limit 1), null)$$);
+-- generate_contact_sheet is an invoker read under RLS: for a recovery session the denial is 0 rows.
+select pg_temp.record_count('editor-recovery', 'execute generate_contact_sheet (0 rows)', $$select count(*) from public.generate_contact_sheet((select id from public.batches limit 1), null)$$, false);
 select pg_temp.as_session('probe-editor-recovery');
 savepoint r1;
 select pg_temp.record_allowed('editor-recovery', 'recovery_set_status',
