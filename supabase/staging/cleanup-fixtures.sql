@@ -14,6 +14,13 @@
 --   3. The confirmation phrase app.staging_cleanup_confirmation.
 -- After the scoped deletes, the transaction is refused if anything not fixture-owned still
 -- references a fixture identity.
+--
+-- After M1b (D8, approved 2026-10-22) public.profiles no longer cascades from auth.users, so the
+-- fixture profiles are deleted explicitly, by id, after their Auth users; profiles left orphaned
+-- by an earlier cleanup are picked up only by their fixed fixture ids (profile-fixtures.sql), the
+-- fixture domain and the absence of an Auth user. Profiles are never deleted broadly. Run
+-- supabase/staging/m1/cleanup-auth-ledgers-m1.sql first once M1 is applied; this file refuses
+-- while sign-in ledger rows still reference a fixture identity.
 
 begin;
 
@@ -51,7 +58,15 @@ select id from auth.users
 where raw_user_meta_data->>'test_run_id' = 'stg-db-20260723-0042'
   and raw_user_meta_data->>'test_only' = 'true'
   and email like '%@tnbs-recruiter.example.invalid'
-  and encrypted_password is null;
+  and encrypted_password is null
+union
+select p.id from public.profiles p
+where p.id in ('71000000-0000-4000-8000-000000000001', '71000000-0000-4000-8000-000000000002',
+               '71000000-0000-4000-8000-000000000003', '71000000-0000-4000-8000-000000000004',
+               '71000000-0000-4000-8000-000000000005', '71000000-0000-4000-8000-000000000006',
+               '71000000-0000-4000-8000-000000000007')
+  and p.email like '%@tnbs-recruiter.example.invalid'
+  and not exists (select 1 from auth.users u where u.id = p.id);
 
 delete from public.contact_logs
 where dot_number in (select dot_number from tmp_cleanup_carriers);
@@ -81,11 +96,36 @@ set approved_by = null
 where approved_by in (select id from tmp_cleanup_users);
 select set_config('request.jwt.claims', '{}', true);
 
+-- A fixture identity's own unverified mobile (M1b) goes with it.
+do $mobile$
+begin
+  if to_regclass('internal.staff_mobile_unverified') is not null then
+    execute 'delete from internal.staff_mobile_unverified where user_id in (select id from tmp_cleanup_users)';
+  end if;
+end
+$mobile$;
+
 -- Refuse if anything that is not fixture-owned still points at a fixture identity.
 do $$
 declare
   v_refs bigint;
+  v_more bigint;
+  v_ledger bigint := 0;
 begin
+  -- Sign-in ledgers (M1) are cleaned by supabase/staging/m1/cleanup-auth-ledgers-m1.sql first.
+  if to_regclass('internal.app_sessions') is not null then
+    execute $q$
+      select (select count(*) from internal.app_sessions where user_id in (select id from tmp_cleanup_users))
+           + (select count(*) from internal.signin_links where user_id in (select id from tmp_cleanup_users))
+           + (select count(*) from internal.recovery_codes where user_id in (select id from tmp_cleanup_users))
+           + (select count(*) from internal.recovery_sets where user_id in (select id from tmp_cleanup_users))
+           + (select count(*) from internal.auth_events where user_id in (select id from tmp_cleanup_users))
+           + (select count(*) from internal.blocked_email_addresses where cleared_by in (select id from tmp_cleanup_users))
+    $q$ into v_ledger;
+  end if;
+  if v_ledger <> 0 then
+    raise exception 'staging cleanup refused: % sign-in ledger row(s) still reference fixture identities; run supabase/staging/m1/cleanup-auth-ledgers-m1.sql first', v_ledger;
+  end if;
   select
     (select count(*) from public.batches where created_by in (select id from tmp_cleanup_users))
   + (select count(*) from public.contact_logs where user_id in (select id from tmp_cleanup_users))
@@ -95,6 +135,12 @@ begin
   + (select count(*) from public.carriers where dnc_set_by in (select id from tmp_cleanup_users))
   + (select count(*) from public.contact_suppressions where created_by in (select id from tmp_cleanup_users))
   into v_refs;
+  -- M1b: a mobile a fixture identity entered for someone who is NOT a fixture is not fixture-owned.
+  if to_regclass('internal.staff_mobile_unverified') is not null then
+    execute 'select count(*) from internal.staff_mobile_unverified where entered_by in (select id from tmp_cleanup_users) and (user_id in (select id from tmp_cleanup_users)) is not true'
+      into v_more;
+    v_refs := v_refs + v_more;
+  end if;
   if v_refs <> 0 then
     raise exception 'staging cleanup refused: % row(s) that are not registered fixtures still reference fixture identities', v_refs;
   end if;
@@ -103,5 +149,19 @@ $$;
 
 delete from auth.users
 where id in (select id from tmp_cleanup_users);
+-- After M1b the profiles do not cascade: remove the fixture profiles explicitly, by id (before
+-- M1b the cascade has already removed them and this deletes nothing).
+delete from public.profiles
+where id in (select id from tmp_cleanup_users);
+
+-- Nothing of the fixture identities may remain (no orphan profile, no Auth user).
+do $$
+begin
+  if exists (select 1 from public.profiles where id in (select id from tmp_cleanup_users))
+     or exists (select 1 from auth.users where id in (select id from tmp_cleanup_users)) then
+    raise exception 'staging cleanup refused: fixture identities would remain after cleanup';
+  end if;
+end
+$$;
 
 commit;

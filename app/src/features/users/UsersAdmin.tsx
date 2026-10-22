@@ -58,11 +58,14 @@ export default function UsersAdmin() {
   });
   // Task D: a manager adds a person. Nothing is emailed now; the person signs in by requesting a
   // link with this address. The mobile is optional, stored unverified and never used to sign in.
+  // The submitted values are captured at submit and passed as the mutation's variables, so the
+  // notice always names what was actually added; the fields are disabled while the add runs.
   const addPerson = useMutation({
-    mutationFn: () => apiPost<{ id: string }>('/api/team/add', { ...draft, mobile: draft.mobile.trim() === '' ? null : draft.mobile }),
-    onSuccess: () => {
+    mutationFn: (submitted: typeof draft) =>
+      apiPost<{ id: string }>('/api/team/add', { ...submitted, mobile: submitted.mobile.trim() === '' ? null : submitted.mobile }),
+    onSuccess: (_result, submitted) => {
       setMessage(null);
-      setNotice(`Added ${draft.full_name.trim()}. They can sign in now by entering ${draft.email.trim().toLowerCase()} on the sign-in page; no email has been sent.`);
+      setNotice(`Added ${submitted.full_name.trim()}. They can sign in now by entering ${submitted.email.trim().toLowerCase()} on the sign-in page; no email has been sent.`);
       setDraft({ full_name: '', email: '', role: 'edit', mobile: '' });
       void refresh();
     },
@@ -107,9 +110,10 @@ export default function UsersAdmin() {
               className="mt-3 grid grid-cols-1 gap-3 md:grid-cols-[1.2fr_1.4fr_0.8fr_1fr_auto] md:items-end"
               onSubmit={(e) => {
                 e.preventDefault();
-                addPerson.mutate();
+                addPerson.mutate({ ...draft });
               }}
             >
+              <fieldset disabled={addPerson.isPending} className="contents">
               <label className="text-xs font-bold text-text-muted">Name
                 <input required maxLength={200} value={draft.full_name} onChange={(e) => setDraft({ ...draft, full_name: e.target.value })} className={`mt-1 block w-full ${field}`} />
               </label>
@@ -125,6 +129,7 @@ export default function UsersAdmin() {
                 <input type="tel" maxLength={32} value={draft.mobile} onChange={(e) => setDraft({ ...draft, mobile: e.target.value })} className={`mt-1 block w-full ${field}`} />
               </label>
               <button type="submit" disabled={busy} className="border border-accent bg-accent px-4 py-2 text-xs font-bold text-white disabled:opacity-50">Add person</button>
+              </fieldset>
             </form>
             <p className="mt-2 text-xs text-text-subtle">
               No email is sent when you add someone. They sign in by entering their address on the sign-in page. The mobile number is stored unverified and is not used to sign in.

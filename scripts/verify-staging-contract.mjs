@@ -32,6 +32,34 @@ if (!fixture.includes('stg-db-20260723-0042') || !cleanup.includes('stg-db-20260
 if (!cleanup.includes("raw_user_meta_data->>'test_only' = 'true'")) {
   failures.push('cleanup must require test_only metadata');
 }
+// After M1b (D8) profiles no longer cascade from auth.users: the cleanup removes the fixture
+// profiles explicitly and only by fixture id, covers profiles orphaned by an earlier run only via
+// the fixed fixture ids + domain + no Auth user, checks the M1 ledgers and the M1b mobile table,
+// and verifies that nothing of the fixture identities remains.
+{
+  const c = cleanup.replace(/\r\n/g, '\n').split('\n').map((l) => l.replace(/--.*$/, '')).join('\n');
+  const profileDeletes = c.match(/delete from public\.profiles[\s\S]*?;/g) ?? [];
+  if (profileDeletes.length !== 1 || !/^delete from public\.profiles\s+where id in \(select id from tmp_cleanup_users\);$/.test(profileDeletes[0])) {
+    failures.push('cleanup must delete profiles exactly once, only "where id in (select id from tmp_cleanup_users)"');
+  }
+  const authDelete = c.indexOf('delete from auth.users');
+  if (profileDeletes.length && c.indexOf(profileDeletes[0]) < authDelete) failures.push('cleanup must delete the fixture profiles after their Auth users');
+  const fixtureIds = [1, 2, 3, 4, 5, 6, 7].map((n) => `'71000000-0000-4000-8000-00000000000${n}'`);
+  const orphanSelect = /union\s+select p\.id from public\.profiles p[\s\S]*?;/.exec(c)?.[0] ?? '';
+  if (!fixtureIds.every((id) => orphanSelect.includes(id)) || !orphanSelect.includes("p.email like '%@tnbs-recruiter.example.invalid'")
+      || !orphanSelect.includes('not exists (select 1 from auth.users u where u.id = p.id)')) {
+    failures.push('cleanup may pick up orphaned fixture profiles only by the fixed fixture ids, the fixture domain and a missing Auth user');
+  }
+  if (!c.includes("to_regclass('internal.staff_mobile_unverified')") || !c.includes('entered_by in (select id from tmp_cleanup_users)')) {
+    failures.push('cleanup must include internal.staff_mobile_unverified (M1b) in its dependency checks');
+  }
+  if (!c.includes('internal.app_sessions where user_id in (select id from tmp_cleanup_users)') || !c.includes('run supabase/staging/m1/cleanup-auth-ledgers-m1.sql first')) {
+    failures.push('cleanup must refuse while sign-in ledger rows reference fixture identities');
+  }
+  if (!c.includes("raise exception 'staging cleanup refused: fixture identities would remain after cleanup'")) {
+    failures.push('cleanup must verify that no fixture profile or Auth user remains');
+  }
+}
 if (!roleMatrix.includes("'failures'") || !roleMatrix.includes('rollback;')) {
   failures.push('role matrix must report failures and roll back every probe');
 }
