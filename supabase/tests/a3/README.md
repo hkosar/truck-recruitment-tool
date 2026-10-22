@@ -1,7 +1,17 @@
-# A3 database tests (written, NOT run)
+# A3 database tests (local throwaway cluster only)
 
-These run only in the approved throwaway PostgreSQL cluster (approval A3: loopback, port 55432,
-data under the sign-in owner's thread storage, deleted afterwards). They need a Supabase shim
+These run only in the approved throwaway PostgreSQL cluster (approval A3): loopback only, on a
+port checked free beforehand (**never 55432**, which another process holds and must not be
+stopped), in a new task-owned directory under the sign-in owner's thread storage that is
+refused if it already exists, stopped with `pg_ctl -D <owned data dir> stop -m fast` and
+deleted afterwards. PIDs, parent PID, start time, port and directory are recorded in the
+owner's `a3-ownership.md`. Build the database with
+
+    A3_PGPASSWORD=... node scripts/a3-build-test-db.mjs --owner-dir <task dir> --port <port> --db tr_signin_test
+
+The builder refuses unless `<task dir>/A3_TASK_OWNED` holds the task's token, the server on
+`<port>` reports `<task dir>/data` as its data directory, and any existing database carries
+the matching ownership comment (it never uses `DROP … FORCE`). They need a Supabase shim
 (roles `anon`, `authenticated`, `service_role`; schema `auth` with `users` and the `uid()`,
 `role()` and `jwt()` functions) plus the migrations without PostGIS, then
 `supabase/pending/M1_same_origin_signin.sql`. Never run them against staging or production.

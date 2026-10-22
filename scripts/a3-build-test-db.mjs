@@ -1,10 +1,17 @@
 #!/usr/bin/env node
 // A3 ONLY: builds a disposable test database inside the task-owned throwaway cluster.
 // Usage (password from the environment, never printed):
-//   A3_PGPASSWORD=... node scripts/a3-build-test-db.mjs --port 55473 --db tr_signin_test [--no-m1] [--snapshot out.json]
+//   A3_PGPASSWORD=... node scripts/a3-build-test-db.mjs --owner-dir <task dir> --port <n> --db tr_<name> [--no-m1] [--snapshot out.json]
 // Steps: (re)create the database; Supabase shim; the 20 migrations with recorded PostGIS
 // substitutions; staging profile fixtures; A3 business fixtures; optionally a snapshot; M1.
-// Refuses any host other than 127.0.0.1 and any database name not starting with "tr_".
+//
+// Ownership before anything destructive (Gate 2 review finding 8):
+//   1. loopback host and a "tr_" database name only;
+//   2. <owner-dir>/A3_TASK_OWNED must hold the task's random ownership token;
+//   3. the server on --port must report data_directory == <owner-dir>/data (cluster identity);
+//   4. an existing database is dropped only if its comment is "a3-task-owned:<token>", and
+//      without FORCE (a database with other connections is refused, not cut off).
+// A new database gets that comment, so only this task's own builds can ever replace it.
 
 import { createRequire } from 'node:module';
 import { readFileSync, readdirSync, writeFileSync } from 'node:fs';
@@ -21,10 +28,24 @@ const args = Object.fromEntries(process.argv.slice(2).reduce((acc, a, i, all) =>
 const port = Number(args.port);
 const dbName = args.db ?? 'tr_signin_test';
 const password = process.env.A3_PGPASSWORD;
-if (!password || !Number.isInteger(port) || !/^tr_[a-z0-9_]+$/.test(dbName)) {
-  console.error('usage: A3_PGPASSWORD=... node scripts/a3-build-test-db.mjs --port <n> --db tr_<name>');
+if (!password || !Number.isInteger(port) || !/^tr_[a-z0-9_]+$/.test(dbName) || !args['owner-dir']) {
+  console.error('usage: A3_PGPASSWORD=... node scripts/a3-build-test-db.mjs --owner-dir <task dir> --port <n> --db tr_<name>');
   process.exit(2);
 }
+const ownerDir = resolve(args['owner-dir']);
+let ownerToken;
+try {
+  ownerToken = readFileSync(join(ownerDir, 'A3_TASK_OWNED'), 'utf8').trim();
+} catch {
+  ownerToken = '';
+}
+if (!/^[A-Za-z0-9_-]{22,}$/.test(ownerToken)) {
+  console.error(`REFUSED: ${join(ownerDir, 'A3_TASK_OWNED')} is missing or not an ownership token`);
+  process.exit(3);
+}
+const OWNER_COMMENT = `a3-task-owned:${ownerToken}`;
+const normPath = (p) => p.replace(/\\/g, '/').replace(/\/+$/, '').toLowerCase();
+const samePath = (a, b) => normPath(a) === normPath(b);
 const conn = (database) => ({ host: '127.0.0.1', port, user: 'tr_test_admin', password, database });
 
 const TRANSFORMS = [
@@ -40,8 +61,23 @@ const TRANSFORMS = [
 async function main() {
   const admin = new pg.Client(conn('postgres'));
   await admin.connect();
-  await admin.query(`drop database if exists ${dbName} with (force)`);
+  const dataDir = (await admin.query("select setting from pg_settings where name = 'data_directory'")).rows[0]?.setting ?? '';
+  if (!samePath(dataDir, join(ownerDir, 'data'))) {
+    await admin.end();
+    console.error(`REFUSED: the server on port ${port} is not the task-owned cluster (its data directory differs from --owner-dir)`);
+    process.exit(3);
+  }
+  const existing = await admin.query("select shobj_description(oid, 'pg_database') as comment from pg_database where datname = $1", [dbName]);
+  if (existing.rowCount) {
+    if (existing.rows[0].comment !== OWNER_COMMENT) {
+      await admin.end();
+      console.error(`REFUSED: database ${dbName} exists without this task's ownership comment; not dropping it`);
+      process.exit(3);
+    }
+    await admin.query(`drop database ${dbName}`);
+  }
   await admin.query(`create database ${dbName}`);
+  await admin.query(`comment on database ${dbName} is '${OWNER_COMMENT}'`);
   await admin.end();
 
   const db = new pg.Client(conn(dbName));
