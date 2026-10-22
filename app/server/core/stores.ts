@@ -4,6 +4,7 @@
 
 import type { SendStatus } from '../auth/ladder';
 import type { SessionKind, UserRole, UserStatus } from '../auth/identity';
+import type { AddPersonStore } from '../team/add-person';
 
 export interface MintState {
   userId: string;
@@ -78,7 +79,7 @@ export interface ContactLogInput {
 }
 
 /** Every signed-in data operation. `s` is the session hash for the transaction. */
-export interface DataStore {
+export interface DataStore extends AddPersonStore {
   rpc(s: string, name: string, args: Record<string, unknown>): Promise<unknown>;
   batchDetail(s: string, batchId: string): Promise<unknown>;
   batchActivity(s: string, batchId: string, limit: number): Promise<unknown[]>;

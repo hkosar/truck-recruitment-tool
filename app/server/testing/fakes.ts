@@ -7,6 +7,7 @@ import type { AuthStore, ContactLogInput, DataStore, MintState, SendEvidence, Se
 import type { AppRequest } from '../core/types';
 import { readBodyLimited } from '../http/body';
 import { parseCookieHeader } from '../auth/cookies';
+import type { AddPersonInput } from '../team/add-person';
 
 export interface FakePerson {
   id: string;
@@ -146,6 +147,7 @@ export class FakeDataStore implements DataStore {
   async teamUpdate(s: string, t: string, n: string | null, r: UserRole | null, e: string | null) { this.rec('teamUpdate', s, t, n, r, e); }
   async teamSetActive(s: string, t: string, a: boolean) { this.rec('teamSetActive', s, t, a); }
   async teamSignEveryoneOut(s: string) { this.rec('teamSignEveryoneOut', s); return 3; }
+  async teamAddPerson(s: string, input: AddPersonInput) { this.rec('teamAddPerson', s, input); return '99999999-9999-4999-8999-999999999999'; }
 }
 
 /** Builds an AppRequest without any network. */

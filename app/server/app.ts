@@ -40,6 +40,7 @@ import { operatorAlertFor, sendStatusFor, type MailAdapter } from './mail/adapte
 import { evidenceFor, parseEvents, SIGNATURE_HEADER, TIMESTAMP_HEADER, verifySendGridSignature } from './mail/webhook';
 import { renderConfirm, renderSignInForm, renderSignInSent, renderSignOutFailed, renderStale, signInPageHeaders } from './pages/signin';
 import { recoveryRouteAllowed } from './recovery/matrix';
+import { ADD_PERSON_PATH, handleAddPerson } from './team/add-person';
 
 export interface AppConfig {
   appOrigin: string;
@@ -494,6 +495,7 @@ export function createApp(deps: AppDeps): (req: AppRequest) => Promise<AppRespon
       return json(200, await data.dncLookup(s, body.dots.map(int)));
     }
     if (method === 'GET' && path === '/api/team') return json(200, await data.teamList(s));
+    if (method === 'POST' && path === ADD_PERSON_PATH) return handleAddPerson(await readJson(req), s, data, json);
     if (method === 'POST' && path === '/api/team/edit') {
       const body = obj(await readJson(req));
       await data.teamUpdate(s, uuid(body.id), text(body.full_name, 200), roleOrNull(body.role), text(body.email, 320));

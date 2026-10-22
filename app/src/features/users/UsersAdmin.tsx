@@ -1,7 +1,7 @@
 import { useMutation, useQuery, useQueryClient } from '@tanstack/react-query';
 import { useState } from 'react';
 import { useSession } from '../../app/guards';
-import { apiGet, apiPost } from '../../lib/api';
+import { ApiError, apiGet, apiPost } from '../../lib/api';
 import { fmtRel } from '../../lib/format';
 import { queryKeys } from '../../lib/queryKeys';
 import type { UserRole } from '../../types/domain';
@@ -28,10 +28,19 @@ function isLegacy(member: TeamMember): boolean {
   return member.status === 'pending' || member.role === 'guest';
 }
 
+/** Add-person refusals, in plain words (the server answers with fixed codes only). */
+function addPersonError(error: unknown): string {
+  if (error instanceof ApiError && error.code === 'conflict') return 'That email address already belongs to someone on the team. A deactivated person can be reactivated instead.';
+  if (error instanceof ApiError && error.code === 'invalid') return 'Check the name, the email address, the role and the mobile number (mobile is optional).';
+  return error instanceof Error ? error.message : 'Adding the person failed.';
+}
+
 export default function UsersAdmin() {
   const { userId } = useSession();
   const queryClient = useQueryClient();
   const [message, setMessage] = useState<string | null>(null);
+  const [notice, setNotice] = useState<string | null>(null);
+  const [draft, setDraft] = useState({ full_name: '', email: '', role: 'edit' as 'manager' | 'edit' | 'view', mobile: '' });
   const query = useQuery({ queryKey: queryKeys.users(), queryFn: () => apiGet<TeamMember[]>('/api/team'), staleTime: 15_000 });
 
   const refresh = () => queryClient.invalidateQueries({ queryKey: queryKeys.users() });
@@ -47,6 +56,21 @@ export default function UsersAdmin() {
     onSuccess: refresh,
     onError,
   });
+  // Task D: a manager adds a person. Nothing is emailed now; the person signs in by requesting a
+  // link with this address. The mobile is optional, stored unverified and never used to sign in.
+  const addPerson = useMutation({
+    mutationFn: () => apiPost<{ id: string }>('/api/team/add', { ...draft, mobile: draft.mobile.trim() === '' ? null : draft.mobile }),
+    onSuccess: () => {
+      setMessage(null);
+      setNotice(`Added ${draft.full_name.trim()}. They can sign in now by entering ${draft.email.trim().toLowerCase()} on the sign-in page; no email has been sent.`);
+      setDraft({ full_name: '', email: '', role: 'edit', mobile: '' });
+      void refresh();
+    },
+    onError: (error) => {
+      setNotice(null);
+      setMessage(addPersonError(error));
+    },
+  });
   const signEveryoneOut = useMutation({
     mutationFn: () => apiPost<{ revoked: number }>('/api/team/sign-everyone-out', {}),
     // Every session ends, including this one: a full navigation shows the sign-in page, which
@@ -58,13 +82,15 @@ export default function UsersAdmin() {
   const members = query.data ?? [];
   const staff = members.filter((m) => !isLegacy(m));
   const legacy = members.filter(isLegacy);
-  const busy = setRole.isPending || setActive.isPending || signEveryoneOut.isPending;
+  const busy = setRole.isPending || setActive.isPending || signEveryoneOut.isPending || addPerson.isPending;
+  const field = 'border border-border-strong bg-surface px-2 py-1.5 text-sm';
 
   return (
     <div className="mx-auto max-w-[1300px] space-y-5">
       <h1 className="text-xl font-extrabold tracking-[-0.02em]">Team</h1>
 
-      {message ? <div className="border border-crit bg-crit-tint p-3 text-sm text-crit">{message}</div> : null}
+      {message ? <div role="alert" className="border border-crit bg-crit-tint p-3 text-sm text-crit">{message}</div> : null}
+      {notice ? <div role="status" className="border border-good bg-good-tint p-3 text-sm text-good">{notice}</div> : null}
       {query.isPending ? <div className="h-64 animate-pulse border border-border bg-surface" /> : null}
       {query.isError ? (
         <section className="border border-crit bg-crit-tint p-5">
@@ -75,6 +101,36 @@ export default function UsersAdmin() {
 
       {!query.isPending && !query.isError ? (
         <>
+          <section className="border border-border bg-surface p-4">
+            <h2 className="text-[11px] font-extrabold uppercase tracking-[0.08em] text-text-muted">Add a person</h2>
+            <form
+              className="mt-3 grid grid-cols-1 gap-3 md:grid-cols-[1.2fr_1.4fr_0.8fr_1fr_auto] md:items-end"
+              onSubmit={(e) => {
+                e.preventDefault();
+                addPerson.mutate();
+              }}
+            >
+              <label className="text-xs font-bold text-text-muted">Name
+                <input required maxLength={200} value={draft.full_name} onChange={(e) => setDraft({ ...draft, full_name: e.target.value })} className={`mt-1 block w-full ${field}`} />
+              </label>
+              <label className="text-xs font-bold text-text-muted">Email
+                <input required type="email" maxLength={320} value={draft.email} onChange={(e) => setDraft({ ...draft, email: e.target.value })} className={`mt-1 block w-full ${field}`} />
+              </label>
+              <label className="text-xs font-bold text-text-muted">Role
+                <select value={draft.role} onChange={(e) => setDraft({ ...draft, role: e.target.value as 'manager' | 'edit' | 'view' })} className={`mt-1 block w-full ${field}`}>
+                  <option value="manager">Manager</option><option value="edit">Editor</option><option value="view">Viewer</option>
+                </select>
+              </label>
+              <label className="text-xs font-bold text-text-muted">Mobile (optional)
+                <input type="tel" maxLength={32} value={draft.mobile} onChange={(e) => setDraft({ ...draft, mobile: e.target.value })} className={`mt-1 block w-full ${field}`} />
+              </label>
+              <button type="submit" disabled={busy} className="border border-accent bg-accent px-4 py-2 text-xs font-bold text-white disabled:opacity-50">Add person</button>
+            </form>
+            <p className="mt-2 text-xs text-text-subtle">
+              No email is sent when you add someone. They sign in by entering their address on the sign-in page. The mobile number is stored unverified and is not used to sign in.
+            </p>
+          </section>
+
           <section className="overflow-x-auto border border-border bg-surface">
             <header className="border-b border-border bg-th-bg px-4 py-3 text-[11px] font-extrabold uppercase tracking-[0.08em] text-text-muted">Staff</header>
             <table className="w-full min-w-[760px] border-collapse text-[13px]">
