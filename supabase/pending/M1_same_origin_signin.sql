@@ -1410,24 +1410,32 @@ declare
   v_sets     int;
   v_codes    int;
 begin
+  -- Staff only (Gate 2 review N3): staff = role manager, edit or view, whatever the status
+  -- (a disabled staff account's leftovers are cancelled too). Non-staff = role guest (legacy
+  -- guest and pending rows); this app never issues them credentials, and any such rows are
+  -- left exactly as they are.
   -- All active staff sessions, normal and recovery, the actor's own included.
   update internal.app_sessions
      set revoked_at = clock_timestamp(), revoked_reason = 'emergency_sign_out'
-   where revoked_at is null;
+   where revoked_at is null
+     and user_id in (select p.id from public.profiles p where p.role in ('manager', 'edit', 'view'));
   get diagnostics v_sessions = row_count;
   -- All unused sign-in links (used links stay as they are, for audit).
   update internal.signin_links
      set revoked_at = clock_timestamp(), revoked_reason = 'emergency_sign_out'
-   where used_at is null and revoked_at is null;
+   where used_at is null and revoked_at is null
+     and user_id in (select p.id from public.profiles p where p.role in ('manager', 'edit', 'view'));
   get diagnostics v_links = row_count;
   -- All unused recovery credentials (held feature; used codes stay as they are).
   update internal.recovery_sets
      set revoked_at = clock_timestamp(), revoked_reason = 'emergency_sign_out'
-   where revoked_at is null;
+   where revoked_at is null
+     and user_id in (select p.id from public.profiles p where p.role in ('manager', 'edit', 'view'));
   get diagnostics v_sets = row_count;
   update internal.recovery_codes
      set revoked_at = clock_timestamp(), revoked_reason = 'emergency_sign_out'
-   where used_at is null and revoked_at is null;
+   where used_at is null and revoked_at is null
+     and user_id in (select p.id from public.profiles p where p.role in ('manager', 'edit', 'view'));
   get diagnostics v_codes = row_count;
   insert into internal.auth_events (user_id, kind, detail)
   values (v_actor, 'emergency_sign_out', jsonb_build_object(

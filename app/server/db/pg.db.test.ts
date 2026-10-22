@@ -165,8 +165,37 @@ describe.skipIf(!enabled)('A3 database: stores, permissions, concurrency, deadli
       [VIEWER, recoveryHash, usedCode],
     );
     const mg = await session(MANAGER);
+    // Non-staff (role guest: the legacy guest and pending fixtures) hold credentials here only
+    // because the test inserts them directly; the app never issues them any. Staff scope
+    // (Gate 2 review N3) must leave them exactly as they are. A disabled STAFF account is staff.
+    const id = async (email: string) => (await adminQuery('select id from public.profiles where email = $1', [email])).rows[0].id as string;
+    const GUEST = await id('guest@tnbs-recruiter.example.invalid');
+    const PENDING = await id('pending@tnbs-recruiter.example.invalid');
+    const DISABLED = await id('disabled@tnbs-recruiter.example.invalid');
+    const guestSession = await session(GUEST);
+    const pendingSession = await session(PENDING);
+    await unusedLink(GUEST, `eso-guest-link-${t}`);
+    await unusedLink(PENDING, `eso-pending-link-${t}`);
+    await unusedLink(DISABLED, `eso-disabled-link-${t}`);
+    const guestSet = (await adminQuery('insert into internal.recovery_sets (user_id) values ($1) returning id', [GUEST])).rows[0].id;
+    await adminQuery(
+      `insert into internal.recovery_codes (set_id, user_id, code_hash, expires_at) values ($1, $2, $3, now() + interval '180 days')`,
+      [guestSet, GUEST, `eso-guest-code-${t}`],
+    );
 
     expect(await data.teamSignEveryoneOut(mg)).toBeGreaterThanOrEqual(2);
+
+    for (const hash of [guestSession, pendingSession]) {
+      expect((await adminQuery('select revoked_at from internal.app_sessions where token_hash = $1', [hash])).rows[0].revoked_at).toBeNull();
+    }
+    for (const hash of [`eso-guest-link-${t}`, `eso-pending-link-${t}`]) expect(await linkRow(hash)).toMatchObject({ used_at: null, revoked_at: null });
+    expect((await adminQuery('select revoked_at from internal.recovery_sets where id = $1', [guestSet])).rows[0].revoked_at).toBeNull();
+    expect((await adminQuery('select revoked_at from internal.recovery_codes where code_hash = $1', [`eso-guest-code-${t}`])).rows[0].revoked_at).toBeNull();
+    expect(await linkRow(`eso-disabled-link-${t}`)).toMatchObject({ used_at: null, revoked_reason: 'emergency_sign_out' });
+    // Leave no live non-staff credentials behind for later tests.
+    await adminQuery(`update internal.app_sessions set revoked_at = now(), revoked_reason = 'test_reset' where token_hash = any($1) and revoked_at is null`, [[guestSession, pendingSession]]);
+    await adminQuery(`update internal.recovery_codes set revoked_at = now(), revoked_reason = 'test_reset' where set_id = $1 and used_at is null and revoked_at is null`, [guestSet]);
+    await adminQuery(`update internal.recovery_sets set revoked_at = now(), revoked_reason = 'test_reset' where id = $1 and revoked_at is null`, [guestSet]);
 
     expect(await linkRow(`eso-unused-${t}`)).toMatchObject({ used_at: null, revoked_reason: 'emergency_sign_out' });
     const used = await linkRow(`eso-used-${t}`);

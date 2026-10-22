@@ -290,15 +290,20 @@ if (!eso) fail('M1: team_sign_everyone_out missing');
 else {
   if (!eso.includes("internal.lock_and_validate(array['manager']::user_role[], array['link'], '{}', true)")) fail('M1: emergency sign-out must be manager-only (link session) and hold the roster lock (p_roster = true)');
   const code = stripComments(eso);
-  const upd = /update internal\.app_sessions[\s\S]*?;/.exec(code)?.[0] ?? '';
-  if (!/where revoked_at is null;/.test(upd) || /user_id/.test(upd)) fail('M1: emergency sign-out must revoke every live session, with no user filter');
+  // Staff only (Gate 2 review N3): staff = role manager/edit/view, whatever the status;
+  // non-staff = role guest (legacy guest and pending rows), left untouched. Exactly this filter:
+  // nothing narrower (a user or actor filter, which would spare someone) and nothing missing.
+  const STAFF_FILTER = "\n     and user_id in (select p.id from public.profiles p where p.role in ('manager', 'edit', 'view'));";
   for (const [table, where] of [
-    ['signin_links', 'where used_at is null and revoked_at is null;'],
-    ['recovery_sets', 'where revoked_at is null;'],
-    ['recovery_codes', 'where used_at is null and revoked_at is null;'],
+    ['app_sessions', 'where revoked_at is null'],
+    ['signin_links', 'where used_at is null and revoked_at is null'],
+    ['recovery_sets', 'where revoked_at is null'],
+    ['recovery_codes', 'where used_at is null and revoked_at is null'],
   ]) {
     const u = new RegExp(`update internal\\.${table}[\\s\\S]*?;`).exec(code)?.[0] ?? '';
-    if (!u.includes(where) || /user_id/.test(u) || !u.includes("'emergency_sign_out'")) fail(`M1: emergency sign-out must cancel every unused ${table} row (${where}), with no user filter`);
+    if (!u.endsWith(where + STAFF_FILTER) || (u.match(/user_id/g) ?? []).length !== 1 || !u.includes("'emergency_sign_out'")) {
+      fail(`M1: emergency sign-out must cancel every ${table} row (${where}) of staff only (role manager/edit/view), with no other user filter`);
+    }
   }
   if (!eso.includes("'emergency_sign_out'") || !eso.includes('insert into internal.auth_events')) fail('M1: emergency sign-out must write an actor audit row');
 }
