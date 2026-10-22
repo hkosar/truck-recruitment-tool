@@ -17,7 +17,7 @@ import {
 } from './sources/safety.js';
 import { parse as parsePgConnectionString } from 'pg-connection-string';
 import { RECORDED_PROJECT_REFS, parseSupabaseDbTarget, verifyPipelineTarget } from './target-guard.js';
-import { buildLastSafetySuccessSql, isSafetyDue, safetyWindowStart } from './nightly-safety.js';
+import { buildLastSafetySuccessSql, isSafetyDue, parseReloadAfter, safetyWindowStart } from './nightly-safety.js';
 
 type Test = { name: string; run: () => void | Promise<void> };
 const tests: Test[] = [];
@@ -401,8 +401,71 @@ test('safety upsert leaves crash inputs untouched until crash event keys are ver
   assert.doesNotMatch(sql, /crash_total_24mo|crash_fatal_24mo|crash_injury_24mo|crash_tow_24mo/);
   assert.match(sql, /driver_oos_rate/);
   assert.match(sql, /vehicle_oos_rate/);
-  assert.match(sql, /safety_rating = coalesce\(excluded\.safety_rating, public\.carrier_safety\.safety_rating\)/i);
   assert.match(sql, /on conflict \(dot_number\) do update/i);
+  // Rating and date are reconciled together: rated -> source; active Texas but absent from the
+  // complete source -> confirmed unrated (NULL); outside that population -> unavailable (kept).
+  assert.match(sql, /case when rated then r_rating when in_rating_population then null else e_rating end as safety_rating,/);
+  assert.match(sql, /case when rated then r_date   when in_rating_population then null else e_date   end as safety_rating_date/);
+  // Ratings are keyed independently of AB/C rows.
+  assert.match(sql, /select dot_number from staging_safety_ratings/);
+  // Unchanged rows are not rewritten, so rowCount counts real changes only.
+  assert.match(sql, /where \(public\.carrier_safety\.snapshot_month, .*public\.carrier_safety\.safety_rating_date\)\s+is distinct from \(excluded\.snapshot_month, .*excluded\.safety_rating_date\)/s);
+  assert.doesNotMatch(sql, /last_synced_at\) is distinct/);
+});
+
+test('SUPABASE_DB_URL allows only benign query parameters, mapped like the pg driver', () => {
+  const { production, staging } = RECORDED_PROJECT_REFS;
+  const base = `postgresql://postgres.${production}:redacted@aws-0-us-east-2.pooler.supabase.com:5432/postgres`;
+  const prodGuard = (dbUrl: string) =>
+    verifyPipelineTarget({ environment: 'prod', supabaseUrl: `https://${production}.supabase.co`, supabaseDbUrl: dbUrl });
+
+  // No parameters: the pool keeps its existing default (TLS without verification).
+  assert.equal(parseSupabaseDbTarget(base).ssl, undefined);
+  // Each supported sslmode is accepted and mapped exactly as pg-connection-string maps it.
+  for (const mode of ['disable', 'prefer', 'require', 'verify-ca', 'verify-full', 'no-verify']) {
+    const url = `${base}?sslmode=${mode}`;
+    assert.deepEqual(prodGuard(url), { projectRef: production, environment: 'prod' }, `sslmode=${mode}`);
+    const driverSsl = parsePgConnectionString(url).ssl;
+    const expected = driverSsl === false ? false : { ...(driverSsl as object) };
+    assert.deepEqual(parseSupabaseDbTarget(url).ssl, expected, `sslmode=${mode} maps like the driver`);
+  }
+  const target = parseSupabaseDbTarget(`${base}?sslmode=require&application_name=tnbs-pipeline&pgbouncer=true&connect_timeout=10`);
+  assert.deepEqual(target.ssl, {});
+  assert.equal(target.applicationName, 'tnbs-pipeline');
+  assert.equal(target.host, 'aws-0-us-east-2.pooler.supabase.com');
+  assert.equal(target.user, `postgres.${production}`);
+  assert.equal(target.port, 5432);
+  assert.equal(target.database, 'postgres');
+  prodGuard(`${base}?pgbouncer=false`);
+  prodGuard(`${base}?connect_timeout=5`);
+
+  // Every key that can redirect or reconfigure the connection is refused by name.
+  for (const key of [
+    'host', 'hostaddr', 'port', 'user', 'password', 'dbname', 'database', 'options', 'service',
+    'sslcert', 'sslkey', 'sslrootcert', 'sslpassword', 'ssl', 'uselibpqcompat', 'client_encoding',
+    'replication', 'target_session_attrs', 'fallback_application_name', 'sslnegotiation', 'unknown_key',
+  ]) {
+    assert.throws(() => prodGuard(`${base}?${key}=x`), new RegExp(`query parameter "${key}" is not allowed`), key);
+    assert.throws(() => prodGuard(`${base}?sslmode=require&${key}=x`), /is not allowed/, `${key} after sslmode`);
+  }
+  // Unsupported values, duplicates and fragments are refused; values are never echoed.
+  for (const [url, pattern] of [
+    [`${base}?sslmode=bogus`, /"sslmode" has an unsupported value/],
+    [`${base}?sslmode=`, /"sslmode" has an unsupported value/],
+    [`${base}?application_name=a;b`, /"application_name" has an unsupported value/],
+    [`${base}?pgbouncer=yes`, /"pgbouncer" has an unsupported value/],
+    [`${base}?connect_timeout=-1`, /"connect_timeout" has an unsupported value/],
+    [`${base}?sslmode=require&sslmode=disable`, /appears more than once/],
+    [`${base}#sslmode=require`, /fragment/],
+  ] as Array<[string, RegExp]>) {
+    assert.throws(() => prodGuard(url), pattern, url.replace(/:redacted@/, ':***@'));
+    try { prodGuard(url); } catch (error) { assert.doesNotMatch(String(error), /bogus|redacted|a;b/); }
+  }
+  // The project checks still apply with allowed parameters present.
+  assert.throws(
+    () => prodGuard(`postgresql://postgres.${staging}:redacted@aws-0-us-east-2.pooler.supabase.com:5432/postgres?sslmode=require`),
+    /does not match SUPABASE_URL/
+  );
 });
 
 test('Census geocoder classifies gateway and overload responses as retryable', () => {
@@ -463,6 +526,25 @@ test('nightly safety counts only full runs of the reviewed source, and dry runs 
   assert.match(sql, /meta \? 'datasetIds'/);
   assert.match(sql, /meta->'pages' is null/);
   assert.match(sql, /\$1::boolean or coalesce\(meta->>'dryRun', 'false'\) <> 'true'/);
+});
+
+test('a deliberate reload override ignores earlier successes, is one-shot, and refuses future times', () => {
+  const sql = buildLastSafetySuccessSql();
+  assert.match(sql, /\$2::timestamptz is null or finished_at > \$2::timestamptz/);
+  const now = new Date('2026-11-06T16:00:00Z');
+  assert.equal(parseReloadAfter(undefined, now), null);
+  assert.equal(parseReloadAfter('2026-11-06T15:00:00Z', now)?.toISOString(), '2026-11-06T15:00:00.000Z');
+  assert.throws(() => parseReloadAfter('2026-11-07T00:00:00Z', now), /in the future/);
+  const env = {
+    SUPABASE_URL: 'https://abcdefghijklmnopqrst.supabase.co',
+    SUPABASE_SERVICE_ROLE_KEY: 'x'.repeat(40),
+    SOCRATA_APP_TOKEN: 'test-token',
+    SUPABASE_DB_URL: 'postgresql://postgres:redacted@db.abcdefghijklmnopqrst.supabase.co:5432/postgres',
+  } as NodeJS.ProcessEnv;
+  assert.equal(loadConfig(env).PIPELINE_SAFETY_RELOAD_AFTER, undefined);
+  assert.equal(loadConfig({ ...env, PIPELINE_SAFETY_RELOAD_AFTER: '2026-11-06T15:00:00Z' }).PIPELINE_SAFETY_RELOAD_AFTER, '2026-11-06T15:00:00Z');
+  assert.throws(() => loadConfig({ ...env, PIPELINE_SAFETY_RELOAD_AFTER: 'yesterday' }), /PIPELINE_SAFETY_RELOAD_AFTER/);
+  assert.equal(loadConfig({ ...env, PIPELINE_SAFETY_RELOAD_AFTER: '' }).PIPELINE_SAFETY_RELOAD_AFTER, undefined);
 });
 
 let failed = 0;

@@ -91,6 +91,16 @@ const EnvSchema = z.object({
    *  nightly never touches safety), 'dry-run' (validate only, nothing saved to
    *  carrier_safety) or 'on' (real write once per monthly window). */
   PIPELINE_NIGHTLY_SAFETY: z.enum(['off', 'dry-run', 'on']).default('off'),
+  /** Deliberate reload after a rollback: sync-safety successes that finished at or before this
+   *  UTC time no longer count, so the next nightly reloads the month once (nightly-safety.ts).
+   *  ISO 8601 with offset, e.g. 2026-11-06T15:00:00Z; must not be in the future. */
+  PIPELINE_SAFETY_RELOAD_AFTER: z.preprocess(
+    (value) => (typeof value === 'string' && value.trim() === '' ? undefined : value),
+    z
+      .string()
+      .datetime({ offset: true, message: 'PIPELINE_SAFETY_RELOAD_AFTER must be an ISO 8601 time such as 2026-11-06T15:00:00Z' })
+      .optional()
+  ),
 });
 
 export type Config = z.infer<typeof EnvSchema>;

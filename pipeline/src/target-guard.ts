@@ -40,6 +40,36 @@ export interface SupabaseDbTarget {
   user: string;
   password: string;
   database: string;
+  /** TLS setting for pg, mapped from an allowed `sslmode` exactly as pg-connection-string
+   *  (non-libpq-compat mode) would; undefined when the URL has no sslmode. */
+  ssl?: false | { rejectUnauthorized?: boolean };
+  applicationName?: string;
+}
+
+/**
+ * Query parameters a SUPABASE_DB_URL may carry. Anything else is refused by name (never by
+ * value): pg's connection-string parser lets keys such as host, hostaddr, port, user,
+ * dbname/database, options, service, client_encoding or sslcert/sslkey/sslrootcert override or
+ * redirect the connection, and an unknown key could be a new one. Allowed keys only tune TLS or
+ * labelling; they cannot change which server, database or role is used.
+ */
+export const DB_URL_SSLMODES = ['disable', 'prefer', 'require', 'verify-ca', 'verify-full', 'no-verify'] as const;
+export const DB_URL_ALLOWED_PARAMS = {
+  /** Mapped into pool.ssl (see sslFromMode). */
+  sslmode: (v: string) => (DB_URL_SSLMODES as readonly string[]).includes(v),
+  /** Mapped into pool.application_name. */
+  application_name: (v: string) => /^[A-Za-z0-9 ._-]{1,63}$/.test(v),
+  /** Accepted and ignored: node-postgres has no use for them (Prisma / libpq-only options). */
+  pgbouncer: (v: string) => v === 'true' || v === 'false',
+  connect_timeout: (v: string) => /^\d{1,4}$/.test(v),
+} as const;
+
+/** pg-connection-string 2.x without uselibpqcompat: disable -> no TLS; prefer/require/verify-ca/
+ *  verify-full -> TLS with certificate verification; no-verify -> TLS without verification. */
+function sslFromMode(mode: string): false | { rejectUnauthorized?: boolean } {
+  if (mode === 'disable') return false;
+  if (mode === 'no-verify') return { rejectUnauthorized: false };
+  return {};
 }
 
 /**
@@ -65,8 +95,22 @@ export function parseSupabaseDbTarget(rawDbUrl: string): SupabaseDbTarget {
   if (url.protocol !== 'postgres:' && url.protocol !== 'postgresql:') {
     throw new Error('SUPABASE_DB_URL must be a postgres:// connection string');
   }
-  if (url.search !== '' || url.hash !== '') {
-    throw new Error('SUPABASE_DB_URL must not contain query parameters or a fragment (they can override the connection target)');
+  if (url.hash !== '') {
+    throw new Error('SUPABASE_DB_URL must not contain a fragment');
+  }
+  const params = new Map<string, string>();
+  for (const [key, value] of url.searchParams) {
+    if (!Object.prototype.hasOwnProperty.call(DB_URL_ALLOWED_PARAMS, key)) {
+      throw new Error(
+        `SUPABASE_DB_URL query parameter "${key}" is not allowed (only ${Object.keys(DB_URL_ALLOWED_PARAMS).join(', ')}); ` +
+          'other query parameters can override the connection target'
+      );
+    }
+    if (params.has(key)) throw new Error(`SUPABASE_DB_URL query parameter "${key}" appears more than once`);
+    if (!DB_URL_ALLOWED_PARAMS[key as keyof typeof DB_URL_ALLOWED_PARAMS](value)) {
+      throw new Error(`SUPABASE_DB_URL query parameter "${key}" has an unsupported value`);
+    }
+    params.set(key, value);
   }
   const host = url.hostname.toLowerCase();
   if (!/^[a-z0-9.-]+$/.test(host)) {
@@ -104,7 +148,17 @@ export function parseSupabaseDbTarget(rawDbUrl: string): SupabaseDbTarget {
   if (!PROJECT_REF_PATTERN.test(projectRef)) {
     throw new Error('SUPABASE_DB_URL contains an invalid project ref');
   }
-  return { projectRef, host, port, user, password, database };
+  const sslmode = params.get('sslmode');
+  return {
+    projectRef,
+    host,
+    port,
+    user,
+    password,
+    database,
+    ...(sslmode !== undefined ? { ssl: sslFromMode(sslmode) } : {}),
+    ...(params.has('application_name') ? { applicationName: params.get('application_name') } : {}),
+  };
 }
 
 /**

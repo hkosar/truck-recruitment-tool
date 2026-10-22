@@ -43,7 +43,7 @@ the source of truth for what's required vs optional/defaulted):
 |---|---|---|
 | `SUPABASE_URL` | yes | Project URL |
 | `SUPABASE_SERVICE_ROLE_KEY` | yes | service_role, not anon — this pipeline bypasses RLS by design |
-| `SUPABASE_DB_URL` | yes | Direct Postgres connection string, **session pooler** (port 5432) — needed for `COPY`/staging/bulk upserts; not runnable via PostgREST alone. Must name the same project as `SUPABASE_URL` (host `db.<ref>.supabase.co` or pooler user `postgres.<ref>`); the target guard refuses to start otherwise |
+| `SUPABASE_DB_URL` | yes | Direct Postgres connection string, **session pooler** (port 5432) — needed for `COPY`/staging/bulk upserts; not runnable via PostgREST alone. Must name the same project as `SUPABASE_URL` (host `db.<ref>.supabase.co` or pooler user `postgres.<ref>`); the target guard refuses to start otherwise. Query parameters: only `sslmode` (disable, prefer, require, verify-ca, verify-full, no-verify; mapped as the pg driver maps it), `application_name`, and the ignored `pgbouncer` / `connect_timeout` are accepted; any other key (host, hostaddr, port, user, dbname, options, service, ssl* files, ...) is refused by name |
 | `SOCRATA_APP_TOKEN` | yes | Free token from dev.socrata.com/register — lifts anonymous throttling to 1,000 req/hr |
 | `RESEND_API_KEY` | no | Optional until M7 and a sending domain are configured; enables failure-email alerting |
 | `ALERT_EMAIL` | no | Set together with `RESEND_API_KEY`; Render's native cron failure notification is used otherwise |
@@ -52,6 +52,7 @@ the source of truth for what's required vs optional/defaulted):
 | `PIPELINE_ALLOWED_DEV_REFS` | for dev | Comma-separated explicit dev/staging refs; empty by default; production is always refused in dev mode |
 | `PIPELINE_ALLOW_STAGING_WRITES` | no | `false` (default) / `true` — the shared staging project (fictional fixtures only) is refused unless this is `true` and staging is also allowlisted |
 | `PIPELINE_NIGHTLY_SAFETY` | no | `off` (default) / `dry-run` / `on` — after the nightly chain, run `sync-safety` once per monthly window (opens 00:00 UTC on the 5th; a failure retries the next night). `dry-run` validates the full source and saves nothing to `carrier_safety`. See `src/nightly-safety.ts` |
+| `PIPELINE_SAFETY_RELOAD_AFTER` | no | Unset by default. ISO time (e.g. `2026-11-06T15:00:00Z`, not in the future): safety successes that finished at or before it stop counting, so the next nightly reloads the month once. Used after a rollback; see "Safety rollback" |
 
 `QCMOBILE_WEBKEY` is deliberately **not** an env var here — per `01-architecture.md`
 reconciliation amendment #16, QCMobile per-carrier lookups are a Supabase **Edge Function**
@@ -100,6 +101,26 @@ ratings are the only live-verified inputs enabled now. Every step prints the sam
 carriers (~150-220k rows), and per amendment #13 / `00-master-plan.md` M2.7, the real-data
 backfill is meant to run once, deliberately, against the **production** Supabase Pro project —
 the free dev project keeps synthetic seed data only.
+
+## Safety rollback (carrier_safety)
+
+Do the steps in this order; never skip step 2.
+
+1. **Stop the writer.** Render -> `pipeline` -> Environment: set `PIPELINE_NIGHTLY_SAFETY=off` -> Save.
+   If `PIPELINE_COMMAND` was changed for a manual safety run, set it back to `nightly`.
+2. **Confirm nothing is running.** A new deploy does not stop a run already in progress.
+   In Render, the `pipeline` service must show no run in progress, and this must return 0 rows:
+   `select id, job, started_at from public.pipeline_runs where step = 'sync-safety' and status = 'running';`
+   If a run is in progress, wait for it to finish (or cancel it in Render), then check again.
+3. **Empty the table** (valid because carrier_safety held 0 rows before the first write):
+   `delete from public.carrier_safety;` Keep `pipeline_runs` untouched -- it is the audit trail.
+4. **Optional code rollback:** point the cron's branch back to the previous release.
+5. **Later, to reload deliberately:** set `PIPELINE_SAFETY_RELOAD_AFTER` to the UTC time of step 3
+   and `PIPELINE_NIGHTLY_SAFETY=on`. The next nightly ignores the earlier successes and reloads
+   the month once; afterwards the normal once-per-window rule applies. The setting may stay.
+
+A startup refusal (wrong project, disallowed `SUPABASE_DB_URL` parameter) logs
+`pipeline.startup_refused` and `pipeline.fatal`, writes nothing, and exits 1 so Render marks the run failed.
 
 ## Render cron schedules (Part B §6.3; times UTC, owner is US Central)
 

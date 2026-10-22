@@ -1,5 +1,5 @@
 import { loadConfig } from './config.js';
-import { closePipelineContext, createPipelineContext, type PipelineContext } from './db.js';
+import { closePipelineContext, createLogger, createPipelineContext, type PipelineContext } from './db.js';
 import { SocrataClient } from './socrata.js';
 import { finishRun, startRun, type PipelineJob, type PipelineStep, type RunTotals } from './runs.js';
 import { syncCensus } from './sources/census.js';
@@ -138,6 +138,7 @@ const STEP_RUNNERS: Record<PipelineStep, StepRunner> = {
       meta: {
         datasetIds: r.datasetIds,
         ratingRowsRead: r.ratingRowsRead,
+        plan: r.plan,
         dryRun: r.dryRun,
         validation: r.validation,
         // A page cap marks a partial smoke run; nightly-safety.ts never counts it as the monthly sync.
@@ -262,13 +263,26 @@ export async function runCommand(ctx: PipelineContext, socrata: SocrataClient, a
 async function main(): Promise<void> {
   const args = parseArgs(process.argv.slice(2));
   const config = loadConfig();
-  verifyPipelineTarget({
-    environment: config.PIPELINE_ENV,
-    supabaseUrl: config.SUPABASE_URL,
-    supabaseDbUrl: config.SUPABASE_DB_URL,
-    allowedDevRefs: config.PIPELINE_ALLOWED_DEV_REFS,
-    allowStagingWrites: config.PIPELINE_ALLOW_STAGING_WRITES,
-  });
+  try {
+    verifyPipelineTarget({
+      environment: config.PIPELINE_ENV,
+      supabaseUrl: config.SUPABASE_URL,
+      supabaseDbUrl: config.SUPABASE_DB_URL,
+      allowedDevRefs: config.PIPELINE_ALLOWED_DEV_REFS,
+      allowStagingWrites: config.PIPELINE_ALLOW_STAGING_WRITES,
+    });
+  } catch (err) {
+    // Never a silent skip: one explicit line, then rethrow so pipeline.fatal is logged and the
+    // process exits 1 (Render marks the run failed and sends its failure notification). The
+    // guard's messages never contain the connection string or password.
+    createLogger(args.command).error('pipeline.startup_refused', {
+      command: args.command,
+      reason: err instanceof Error ? err.message : String(err),
+      effect: 'No step ran and nothing was written (no pipeline_runs row). This run is marked failed.',
+      fix: 'Check PIPELINE_ENV, SUPABASE_URL and SUPABASE_DB_URL in the Render Environment tab (see pipeline/README.md).',
+    });
+    throw err;
+  }
   const ctx = createPipelineContext(config, args.command);
   const socrata = new SocrataClient({ appToken: config.SOCRATA_APP_TOKEN, log: ctx.log });
 

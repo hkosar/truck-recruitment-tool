@@ -144,9 +144,7 @@ create temp table staging_safety (
   driver_insp_24mo int not null,
   driver_oos_24mo int not null,
   vehicle_insp_24mo int not null,
-  vehicle_oos_24mo int not null,
-  safety_rating text,
-  safety_rating_date date
+  vehicle_oos_24mo int not null
 ) on commit drop;
 create temp table staging_safety_ratings (
   dot_number bigint primary key,
@@ -156,51 +154,117 @@ create temp table staging_safety_ratings (
   `.trim();
 }
 
-export function buildUpsertSql(): string {
+/** Business fields compared to decide whether a row really changed (last_synced_at excluded). */
+const SAFETY_BUSINESS_FIELDS = [
+  'snapshot_month',
+  'inspections_24mo',
+  'driver_insp_24mo',
+  'driver_oos_24mo',
+  'vehicle_insp_24mo',
+  'vehicle_oos_24mo',
+  'driver_oos_rate',
+  'vehicle_oos_rate',
+  'safety_rating',
+  'safety_rating_date',
+] as const;
+
+/**
+ * The month's target rows, computed from staging plus the current table. `$1` is true only
+ * when every AB/C page was read (no --pages cap).
+ *
+ * Keys = SMS rows + validated Census ratings + existing carrier_safety rows, limited to
+ * carriers we hold (FK). Per key:
+ *   - inspections: from this month's SMS row; if absent and the SMS pull was complete, NULL
+ *     (no current SMS record -- unknown, never zero); if absent from a capped pull, unchanged.
+ *   - rating/date, always reconciled together, from the complete Census rating pull:
+ *       rated in the source                            -> that rating and date;
+ *       carrier is active Texas (the queried population) but not rated -> confirmed unrated: NULL, NULL;
+ *       carrier is outside the queried population      -> unavailable: existing rating and date kept.
+ * A rated carrier with no AB/C row therefore still gets a row (NULL inspection inputs).
+ */
+function buildSafetyTargetCte(): string {
   return `
-insert into public.carrier_safety (
-  dot_number,
-  snapshot_month,
-  inspections_24mo,
-  driver_insp_24mo,
-  driver_oos_24mo,
-  vehicle_insp_24mo,
-  vehicle_oos_24mo,
-  driver_oos_rate,
-  vehicle_oos_rate,
-  safety_rating,
-  safety_rating_date,
-  last_synced_at
-)
-select
-  sc.dot_number,
-  date_trunc('month', current_date)::date,
-  sc.inspections_24mo,
-  sc.driver_insp_24mo,
-  sc.driver_oos_24mo,
-  sc.vehicle_insp_24mo,
-  sc.vehicle_oos_24mo,
-  case when sc.driver_insp_24mo = 0 then null
-       else round((sc.driver_oos_24mo::numeric / sc.driver_insp_24mo::numeric) * 100, 2) end,
-  case when sc.vehicle_insp_24mo = 0 then null
-       else round((sc.vehicle_oos_24mo::numeric / sc.vehicle_insp_24mo::numeric) * 100, 2) end,
-  sc.safety_rating,
-  sc.safety_rating_date,
-  now()
-from staging_safety sc
-where exists (select 1 from public.carriers c where c.dot_number = sc.dot_number)
+with keys as (
+  select dot_number from staging_safety
+  union
+  select dot_number from staging_safety_ratings
+  union
+  select dot_number from public.carrier_safety
+),
+src as (
+  select
+    k.dot_number,
+    s.dot_number is not null as in_sms,
+    r.dot_number is not null as rated,
+    coalesce(c.phy_state = 'TX' and c.status_code = 'A', false) as in_rating_population,
+    s.inspections_24mo as s_insp, s.driver_insp_24mo as s_dinsp, s.driver_oos_24mo as s_doos,
+    s.vehicle_insp_24mo as s_vinsp, s.vehicle_oos_24mo as s_voos,
+    r.safety_rating as r_rating, r.safety_rating_date as r_date,
+    e.snapshot_month as e_month,
+    e.inspections_24mo as e_insp, e.driver_insp_24mo as e_dinsp, e.driver_oos_24mo as e_doos,
+    e.vehicle_insp_24mo as e_vinsp, e.vehicle_oos_24mo as e_voos,
+    e.safety_rating as e_rating, e.safety_rating_date as e_date
+  from keys k
+  join public.carriers c on c.dot_number = k.dot_number
+  left join staging_safety s on s.dot_number = k.dot_number
+  left join staging_safety_ratings r on r.dot_number = k.dot_number
+  left join public.carrier_safety e on e.dot_number = k.dot_number
+),
+counts as (
+  select
+    dot_number, in_sms, rated, in_rating_population, e_rating,
+    case when in_sms or $1::boolean then date_trunc('month', current_date)::date
+         else coalesce(e_month, date_trunc('month', current_date)::date) end as snapshot_month,
+    case when in_sms then s_insp  when $1::boolean then null else e_insp  end as inspections_24mo,
+    case when in_sms then s_dinsp when $1::boolean then null else e_dinsp end as driver_insp_24mo,
+    case when in_sms then s_doos  when $1::boolean then null else e_doos  end as driver_oos_24mo,
+    case when in_sms then s_vinsp when $1::boolean then null else e_vinsp end as vehicle_insp_24mo,
+    case when in_sms then s_voos  when $1::boolean then null else e_voos  end as vehicle_oos_24mo,
+    case when rated then r_rating when in_rating_population then null else e_rating end as safety_rating,
+    case when rated then r_date   when in_rating_population then null else e_date   end as safety_rating_date
+  from src
+),
+target as (
+  select
+    counts.*,
+    case when coalesce(driver_insp_24mo, 0) = 0 then null
+         else round((driver_oos_24mo::numeric / driver_insp_24mo::numeric) * 100, 2) end as driver_oos_rate,
+    case when coalesce(vehicle_insp_24mo, 0) = 0 then null
+         else round((vehicle_oos_24mo::numeric / vehicle_insp_24mo::numeric) * 100, 2) end as vehicle_oos_rate
+  from counts
+)`.trim();
+}
+
+/** Writes only rows whose business fields differ, so rowCount is the number really changed. */
+export function buildUpsertSql(): string {
+  const cols = ['dot_number', ...SAFETY_BUSINESS_FIELDS];
+  return `
+${buildSafetyTargetCte()}
+insert into public.carrier_safety (${cols.join(', ')}, last_synced_at)
+select ${cols.join(', ')}, now() from target
 on conflict (dot_number) do update set
-  snapshot_month = excluded.snapshot_month,
-  inspections_24mo = excluded.inspections_24mo,
-  driver_insp_24mo = excluded.driver_insp_24mo,
-  driver_oos_24mo = excluded.driver_oos_24mo,
-  vehicle_insp_24mo = excluded.vehicle_insp_24mo,
-  vehicle_oos_24mo = excluded.vehicle_oos_24mo,
-  driver_oos_rate = excluded.driver_oos_rate,
-  vehicle_oos_rate = excluded.vehicle_oos_rate,
-  safety_rating = coalesce(excluded.safety_rating, public.carrier_safety.safety_rating),
-  safety_rating_date = coalesce(excluded.safety_rating_date, public.carrier_safety.safety_rating_date),
-  last_synced_at = excluded.last_synced_at;
+  ${SAFETY_BUSINESS_FIELDS.map((f) => `${f} = excluded.${f}`).join(', ')},
+  last_synced_at = excluded.last_synced_at
+where (${SAFETY_BUSINESS_FIELDS.map((f) => `public.carrier_safety.${f}`).join(', ')})
+  is distinct from (${SAFETY_BUSINESS_FIELDS.map((f) => `excluded.${f}`).join(', ')});
+  `.trim();
+}
+
+/** Read-only preview of what the upsert would do (used by dry runs and as run evidence). */
+export function buildPlanSql(): string {
+  return `
+${buildSafetyTargetCte()}
+select
+  count(*)::int as target_rows,
+  count(*) filter (where e.dot_number is null)::int as would_insert,
+  count(*) filter (where e.dot_number is not null and
+    (${SAFETY_BUSINESS_FIELDS.map((f) => `e.${f}`).join(', ')})
+    is distinct from (${SAFETY_BUSINESS_FIELDS.map((f) => `t.${f}`).join(', ')}))::int as would_update,
+  count(*) filter (where t.rated and not t.in_sms)::int as rating_only_rows,
+  count(*) filter (where t.e_rating is not null and t.safety_rating is null)::int as ratings_cleared_confirmed_unrated,
+  count(*) filter (where not t.rated and not t.in_rating_population and t.safety_rating is not null)::int as ratings_kept_unavailable
+from target t
+left join public.carrier_safety e on e.dot_number = t.dot_number
   `.trim();
 }
 
@@ -318,7 +382,10 @@ export interface SafetySyncOptions {
 export interface SafetySyncResult {
   datasetIds: readonly string[];
   rowsRead: number;
+  /** Rows inserted or whose business fields changed (unchanged rows are not rewritten). */
   rowsUpserted: number;
+  /** Read-only preview computed before the write: target rows, would_insert, would_update, ... */
+  plan: Record<string, unknown>;
   ratingRowsRead: number;
   dryRun: boolean;
   validation: Record<string, unknown>;
@@ -368,8 +435,6 @@ export async function syncSafety(
             row.driverOos,
             row.vehicleInspections,
             row.vehicleOos,
-            null,
-            null,
           ];
         });
         await bulkInsert(
@@ -382,8 +447,6 @@ export async function syncSafety(
             'driver_oos_24mo',
             'vehicle_insp_24mo',
             'vehicle_oos_24mo',
-            'safety_rating',
-            'safety_rating_date',
           ],
           rows,
           1_000
@@ -395,9 +458,10 @@ export async function syncSafety(
 
     // Ratings are sparse (~3.7k active Texas carriers), so a filtered Census pull is far cheaper
     // than per-DOT requests. It is paged and checked against an independent filtered count so a
-    // capped or truncated response can never silently drop a rating. Stage and validate the
-    // entire set, then join it onto safety rows. Rated carriers without an AB/C SMS row remain honestly absent
-    // from carrier_safety rather than creating an inspection snapshot with invented zero totals.
+    // capped or truncated response can never silently drop a rating. The complete validated set
+    // is staged on its own and reconciled in buildSafetyTargetCte(): a rated carrier with no AB/C
+    // row still gets its rating (inspection inputs NULL, never invented zeros), and an active
+    // Texas carrier missing from the complete set is confirmed unrated.
     const ratingRows = await fetchCompleteSafetyRatings(socrata, pageSize);
     ratingRowsRead = ratingRows.length;
     const validatedRatings = ratingRows.map((row) => {
@@ -416,13 +480,6 @@ export async function syncSafety(
       validatedRatings,
       2_000
     );
-    await client.query(`
-      update staging_safety s
-      set safety_rating = r.safety_rating,
-          safety_rating_date = r.safety_rating_date
-      from staging_safety_ratings r
-      where r.dot_number = s.dot_number
-    `);
 
     const expectedRows = Array.from(sourceRowCounts.values()).reduce(
       (sum, count) => sum + (options.maxPages ? Math.min(count, options.maxPages * pageSize) : count),
@@ -449,7 +506,6 @@ export async function syncSafety(
         count(*) filter (where driver_insp_24mo > inspections_24mo or vehicle_insp_24mo > inspections_24mo)::int as invalid_inspection_totals,
         min(inspections_24mo)::int as min_inspections,
         max(inspections_24mo)::int as max_inspections,
-        count(*) filter (where safety_rating is not null)::int as rated_rows,
         (select count(*)::int from staging_safety_ratings) as source_rating_rows
       from staging_safety
     `);
@@ -464,9 +520,11 @@ export async function syncSafety(
       throw new Error(`Safety staging validation failed: ${JSON.stringify(validation)}`);
     }
 
-    if (options.dryRun) return { rowsUpserted: 0, validation };
-    const upsert = await client.query(buildUpsertSql());
-    return { rowsUpserted: upsert.rowCount ?? 0, validation };
+    const smsComplete = !options.maxPages;
+    const plan = (await client.query(buildPlanSql(), [smsComplete])).rows[0] ?? {};
+    if (options.dryRun) return { rowsUpserted: 0, validation, plan };
+    const upsert = await client.query(buildUpsertSql(), [smsComplete]);
+    return { rowsUpserted: upsert.rowCount ?? 0, validation, plan };
   });
 
   ctx.log.info(options.dryRun ? 'sync-safety.dry_run_validated' : 'sync-safety.done', {
@@ -474,6 +532,7 @@ export async function syncSafety(
     rowsRead,
     ratingRowsRead,
     rowsUpserted: result.rowsUpserted,
+    plan: result.plan,
     pages: pageCount,
     validation: {
       ...result.validation,
@@ -486,6 +545,7 @@ export async function syncSafety(
     datasetIds: SAFETY_DATASET_IDS,
     rowsRead,
     rowsUpserted: result.rowsUpserted,
+    plan: result.plan,
     ratingRowsRead,
     dryRun: options.dryRun ?? false,
     validation: {

@@ -88,7 +88,10 @@ export function createPgPool(config: Config): PgPool {
     // (`ssl: { ca: fs.readFileSync(...), rejectUnauthorized: true }`) once real credentials
     // exist and this has been verified against the actual pooler endpoint -- don't leave
     // this relaxed by default forever, just for the skeleton.
-    ssl: { rejectUnauthorized: false },
+    // An allowed `sslmode` in SUPABASE_DB_URL wins, mapped exactly as pg itself did when the
+    // pool was built from the raw string (connection-string values overrode this default).
+    ssl: target.ssl ?? { rejectUnauthorized: false },
+    ...(target.applicationName ? { application_name: target.applicationName } : {}),
   });
 }
 

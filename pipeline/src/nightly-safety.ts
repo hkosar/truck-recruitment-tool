@@ -12,6 +12,11 @@ import type { PipelineContext } from './db.js';
  * "0 8 5 * *"). Safety is due when no qualifying success has finished since the window opened,
  * so a failed attempt retries the next night instead of waiting a month, and switching to 'on'
  * for the first time runs on the very next nightly.
+ *
+ * Deliberate reload (after a rollback emptied carrier_safety): set PIPELINE_SAFETY_RELOAD_AFTER
+ * to the time of the rollback. Successes that finished at or before it stop counting, so the next
+ * nightly reloads once; that new success is later than the setting, so it is naturally one-shot.
+ * pipeline_runs is never edited or deleted for this -- it stays the audit trail.
  */
 export type NightlySafetyMode = 'off' | 'dry-run' | 'on';
 
@@ -44,13 +49,29 @@ where step = 'sync-safety'
   and meta ? 'datasetIds'
   and meta->'pages' is null
   and ($1::boolean or coalesce(meta->>'dryRun', 'false') <> 'true')
+  and ($2::timestamptz is null or finished_at > $2::timestamptz)
   `.trim();
 }
 
-export async function findLastSafetySuccess(ctx: PipelineContext, includeDryRuns: boolean): Promise<Date | null> {
-  const result = await ctx.pg.query(buildLastSafetySuccessSql(), [includeDryRuns]);
+export async function findLastSafetySuccess(
+  ctx: PipelineContext,
+  includeDryRuns: boolean,
+  reloadAfter: Date | null = null
+): Promise<Date | null> {
+  const result = await ctx.pg.query(buildLastSafetySuccessSql(), [includeDryRuns, reloadAfter?.toISOString() ?? null]);
   const value = result.rows[0]?.last_success_at as Date | string | null | undefined;
   return value ? new Date(value) : null;
+}
+
+/** A future value would make every nightly reload until then, so it is refused loudly. */
+export function parseReloadAfter(value: string | undefined, now: Date): Date | null {
+  if (!value) return null;
+  const at = new Date(value);
+  if (Number.isNaN(at.getTime())) throw new Error('PIPELINE_SAFETY_RELOAD_AFTER is not a valid time');
+  if (at.getTime() > now.getTime()) {
+    throw new Error(`PIPELINE_SAFETY_RELOAD_AFTER (${at.toISOString()}) is in the future; set it to the rollback time`);
+  }
+  return at;
 }
 
 export interface NightlySafetyDecision {
@@ -66,9 +87,14 @@ export async function decideNightlySafety(
 ): Promise<NightlySafetyDecision> {
   if (mode === 'off') return { run: false, dryRun: false, reason: 'PIPELINE_NIGHTLY_SAFETY=off' };
   const dryRun = mode === 'dry-run';
-  const last = await findLastSafetySuccess(ctx, dryRun);
+  const reloadAfter = parseReloadAfter(ctx.config.PIPELINE_SAFETY_RELOAD_AFTER, now);
+  const last = await findLastSafetySuccess(ctx, dryRun, reloadAfter);
   if (!isSafetyDue(now, last)) {
     return { run: false, dryRun, reason: `already succeeded at ${last?.toISOString()} in this monthly window` };
   }
-  return { run: true, dryRun, reason: last ? `last success ${last.toISOString()} is before this window` : 'no prior success' };
+  return { run: true, dryRun, reason: last
+      ? `last success ${last.toISOString()} is before this window`
+      : reloadAfter
+        ? `no qualifying success after PIPELINE_SAFETY_RELOAD_AFTER=${reloadAfter.toISOString()}`
+        : 'no prior success' };
 }
