@@ -55,11 +55,11 @@ describe.skipIf(!enabled)('A3 database readiness for sign-in admission', () => {
   it('after idle eviction the keep-warm timer reopens connections, so the pool is never cold', async () => {
     const cold = db({ max: 4, idleTimeoutMillis: 150 });
     await new PgAuthStore(cold).bucketHit('request', `cold-${Date.now()}`, 'cold', BUDGET);
-    await sleep(600);
-    expect(cold.poolCounts.total).toBe(0); // without keep-warm: evicted, the next admission must connect
+    // Without keep-warm the idle connection is evicted: the next admission would have to connect.
+    await waitFor('the unwarmed pool is empty after idle eviction', () => cold.poolCounts.total === 0);
     const warm = db({ max: 4, idleTimeoutMillis: 150, minWarm: 2, keepWarmIntervalMs: 100 });
     await warm.warm();
-    await sleep(600);
+    await sleep(600); // an observation window of four idle timeouts: the pool must stay warm throughout
     expect(warm.poolCounts.total).toBeGreaterThanOrEqual(2);
     expect(await admit(new PgAuthStore(warm))).toBeLessThan(BUDGET);
   });
@@ -70,14 +70,13 @@ describe.skipIf(!enabled)('A3 database readiness for sign-in admission', () => {
     // Pool of 2; one slot held by a running transaction. Warm-up wants 2 more: one acquisition gets
     // the free slot (slow warm query), the other times out waiting. Neither may be stranded.
     const d = new Database({ connectionString: APP_URL!, max: 2, connectionTimeoutMillis: 300, minWarm: 3, warmSql: 'select pg_sleep(0.6)' });
-    const holder = d.transaction({ lockTimeoutMs: 5_000, statementTimeoutMs: 5_000, deadlineMs: 5_000 }, (tx) => tx.query('select pg_sleep(1.2)'));
-    await sleep(100);
+    const holder = holdConnection(d, 1.2);
+    await holder.inside;
+    await waitFor('the holder has its connection', allHeld(d, 1));
     const warmed = await d.warm().then((n) => ({ ok: true, n }), (e: Error) => ({ ok: false, n: -1, e: e.message }));
     expect(warmed.ok).toBe(true); // the successful acquisition counts; the timed-out one is reported, not fatal
-    await holder;
-    await sleep(100);
-    const c = d.poolCounts;
-    expect(c.total - c.idle).toBe(0); // nothing still checked out by the warm-up
+    expect(await holder.outcome).toBe('ok');
+    await waitFor('nothing still checked out by the warm-up', allHeld(d, 0));
     expect(await closesWithin(d, 3_000)).toBe(true);
   });
 
@@ -86,66 +85,96 @@ describe.skipIf(!enabled)('A3 database readiness for sign-in admission', () => {
     const t0 = performance.now();
     await expect(d.warm()).rejects.toBeTruthy();
     expect(performance.now() - t0).toBeLessThan(2_000);
-    await sleep(100);
-    expect(d.poolCounts.total - d.poolCounts.idle).toBe(0);
+    await waitFor('the timed-out client is destroyed, not returned', allHeld(d, 0));
     expect(await closesWithin(d, 3_000)).toBe(true);
   });
 
+  // Contention is created explicitly, never assumed from a sleep (flaky 2 in 8 elsewhere):
+  // holdConnection resolves `inside` only once its connection is checked out and its transaction
+  // has started, and its outcome is captured immediately (no unhandled rejection if a holder fails
+  // before the test reaches its end). waitFor polls a pool condition with a bound instead of
+  // sleeping a guessed time.
+  function holdConnection(d: Database, seconds: number) {
+    let entered!: () => void;
+    const inside = new Promise<void>((resolve) => {
+      entered = resolve;
+    });
+    const outcome = d
+      .transaction({ lockTimeoutMs: 10_000, statementTimeoutMs: 10_000, deadlineMs: 15_000 }, async (tx) => {
+        entered();
+        await tx.query(`select pg_sleep(${seconds})`);
+      })
+      .then(() => 'ok' as const, (err: unknown) => err);
+    return { inside, outcome };
+  }
+  async function waitFor(what: string, condition: () => boolean, ms = 5_000) {
+    const until = performance.now() + ms;
+    while (!condition()) {
+      if (performance.now() > until) throw new Error(`timed out waiting for: ${what}`);
+      await sleep(10);
+    }
+  }
+  const allHeld = (d: Database, n: number) => () => d.poolCounts.total - d.poolCounts.idle === n;
+
   // Manager decision on the Gate 2 load failures: ordinary requests wait tolerantly for a
   // connection; only the sign-in admission check keeps its tight limit; both fail closed with a signal.
-  const holdOne = (d: Database, seconds: number) =>
-    d.transaction({ lockTimeoutMs: 5_000, statementTimeoutMs: 5_000, deadlineMs: 5_000 }, (tx) => tx.query(`select pg_sleep(${seconds})`));
-
   it('ordinary requests wait through pool contention (tolerant limit) instead of failing after 250 ms', async () => {
     const signals: string[] = [];
     const d = db({ max: 1, connectionTimeoutMillis: 5_000, label: 'data', onAcquireFailure: (l) => signals.push(l) });
-    const busy = holdOne(d, 1.5);
-    await sleep(100);
+    const holder = holdConnection(d, 1.5);
+    await holder.inside;
+    await waitFor('the only connection is checked out', allHeld(d, 1));
     const t0 = performance.now();
     const r = await d.transaction({ deadlineMs: 2_000 }, (tx) => tx.query<{ ok: number }>('select 1 as ok'));
     const waited = performance.now() - t0;
     expect(r.rows[0].ok).toBe(1);
     expect(waited).toBeGreaterThan(1_000); // it really waited for the busy connection
     expect(signals).toEqual([]);
-    await busy;
+    expect(await holder.outcome).toBe('ok');
   });
 
   it('the admission check keeps its tight limit on the same busy pool, signals, and leaks nothing', async () => {
     const signals: string[] = [];
     const d = db({ max: 1, connectionTimeoutMillis: 5_000, label: 'auth', onAcquireFailure: (l) => signals.push(l) });
-    const busy = holdOne(d, 1.5);
-    await sleep(100);
+    const holder = holdConnection(d, 1.5);
+    await holder.inside;
+    await waitFor('the only connection is checked out', allHeld(d, 1));
     const t0 = performance.now();
     await expect(new PgAuthStore(d).bucketHit('request', `tight-${Date.now()}`, 'tight', BUDGET)).rejects.toBeInstanceOf(UnavailableError);
     expect(performance.now() - t0).toBeLessThan(BUDGET);
     expect(signals).toEqual(['auth']);
-    await busy;
-    await sleep(200); // the connection that arrived after the admission limit is released, not leaked
-    expect(d.poolCounts.total - d.poolCounts.idle).toBe(0);
+    expect(await holder.outcome).toBe('ok');
+    // The connection that arrived after the admission limit is released, not leaked.
+    await waitFor('no connection left checked out', allHeld(d, 0));
   });
 
   it('beyond the tolerant limit an ordinary request still fails closed (Unavailable -> 503) with a signal', async () => {
     const signals: string[] = [];
     const d = db({ max: 1, connectionTimeoutMillis: 600, label: 'data', onAcquireFailure: (l) => signals.push(l) });
-    const busy = holdOne(d, 1.5);
-    await sleep(100);
+    const holder = holdConnection(d, 1.5);
+    await holder.inside;
+    await waitFor('the only connection is checked out', allHeld(d, 1));
     await expect(d.transaction({ deadlineMs: 2_000 }, (tx) => tx.query('select 1'))).rejects.toBeInstanceOf(UnavailableError);
     expect(signals).toEqual(['data']);
-    await busy;
+    expect(await holder.outcome).toBe('ok');
   });
 
   it('contention: a saturated shared pool fails admission; the separate sign-in pool admits within the budget', async () => {
-    const hold = (d: Database) => d.transaction({ lockTimeoutMs: 5_000, statementTimeoutMs: 5_000, deadlineMs: 5_000 }, (tx) => tx.query('select pg_sleep(1.5)'));
+    // A shared pool of 2, both connections demonstrably checked out, refuses admission.
     const shared = db({ max: 2, connectionTimeoutMillis: 250 });
-    const busy = [hold(shared), hold(shared)];
-    await sleep(100);
+    const sharedHolders = [holdConnection(shared, 2), holdConnection(shared, 2)];
+    await Promise.all(sharedHolders.map((h) => h.inside));
+    await waitFor('both shared connections checked out', allHeld(shared, 2));
     await expect(new PgAuthStore(shared).bucketHit('request', `shared-${Date.now()}`, 'shared', BUDGET)).rejects.toBeInstanceOf(UnavailableError);
+    // The separate sign-in pool, warmed and verified idle, admits while the data pool is saturated.
     const authDb = db({ max: 4, connectionTimeoutMillis: 400, minWarm: 2 });
-    await authDb.warm();
+    expect(await authDb.warm()).toBeGreaterThanOrEqual(2);
+    await waitFor('the sign-in pool has idle warm connections', () => authDb.poolCounts.idle >= 2);
     const dataDb = db({ max: 2 });
-    const busy2 = [hold(dataDb), hold(dataDb)];
-    await sleep(100);
+    const dataHolders = [holdConnection(dataDb, 2), holdConnection(dataDb, 2)];
+    await Promise.all(dataHolders.map((h) => h.inside));
+    await waitFor('both data connections checked out', allHeld(dataDb, 2));
     expect(await admit(new PgAuthStore(authDb))).toBeLessThan(BUDGET);
-    await Promise.all([...busy, ...busy2]);
+    for (const h of [...sharedHolders, ...dataHolders]) expect(await h.outcome).toBe('ok');
   });
 });
