@@ -13,7 +13,8 @@
 --     approved throwaway test database (approval A3) and reviewed.
 --   * Applying it to staging or production is a reviewed migration gate with an owner "go".
 --   * Preserves every existing row. Changes no profile id, email, role or status. Keeps the
---     profiles -> auth.users foreign key (dropping it is the UNAPPROVED proposal D8, "M2").
+--     profiles -> auth.users foreign key; dropping it is D8 (APPROVED 2026-10-22), done
+--     separately in supabase/pending/M1b_add_person.sql, applied after this file.
 --   * Creates the login roles WITHOUT passwords; the operator sets them out of band.
 --   * Recovery codes are created but DISABLED (internal.recovery_policy.enabled = false)
 --     until the cross-app policy decision D2.

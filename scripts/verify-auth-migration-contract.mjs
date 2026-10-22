@@ -16,8 +16,10 @@ const M1_PATH = ['supabase', 'pending', 'M1_same_origin_signin.sql'];
 const BACKOUT_PATH = ['supabase', 'backout', 'M1-backout.sql'];
 const RETIRE_PATH = ['supabase', 'backout', 'retire-app-credentials.sql'];
 const L1_PATH = ['supabase', 'rollout', 'L1-close-legacy-auth.sql'];
+const M1B_PATH = ['supabase', 'pending', 'M1b_add_person.sql'];
+const M1B_BACKOUT_PATH = ['supabase', 'backout', 'M1b-backout.sql'];
 
-for (const p of [M1_PATH, BACKOUT_PATH, RETIRE_PATH, L1_PATH, ['supabase', 'backout', 'pre-cutover-snapshot.sql']]) {
+for (const p of [M1_PATH, BACKOUT_PATH, RETIRE_PATH, L1_PATH, M1B_PATH, M1B_BACKOUT_PATH, ['supabase', 'backout', 'pre-cutover-snapshot.sql']]) {
   if (!existsSync(join(root, ...p))) fail(`missing ${p.join('/')}`);
 }
 if (failures.length) finish();
@@ -26,6 +28,8 @@ const m1 = read(...M1_PATH);
 const backout = read(...BACKOUT_PATH);
 const retire = read(...RETIRE_PATH);
 const l1 = read(...L1_PATH);
+const m1b = read(...M1B_PATH);
+const m1bBackout = read(...M1B_BACKOUT_PATH);
 const stripComments = (sql) => sql.split('\n').map((l) => l.replace(/--.*$/, '')).join('\n');
 const m1Code = stripComments(m1);
 
@@ -37,7 +41,7 @@ for (const f of readdirSync(migrationsDir)) {
 }
 
 // B. No credentials or connection strings in any of the new SQL.
-for (const [name, text] of [['M1', m1], ['backout', backout], ['retire', retire], ['L1', l1]]) {
+for (const [name, text] of [['M1', m1], ['backout', backout], ['retire', retire], ['L1', l1], ['M1b', m1b], ['M1b-backout', m1bBackout]]) {
   if (/password\s+'[^']*'/i.test(text)) fail(`${name}: contains a password literal`);
   if (/postgres(ql)?:\/\/|sb_secret_|eyJ[A-Za-z0-9_-]{10,}\./.test(text)) fail(`${name}: contains a connection string or key`);
 }
@@ -341,6 +345,41 @@ if (!(rNologin >= 0 && rNologin < rTerminate && rTerminate < rConfirm && rConfir
 const l1Code = stripComments(l1);
 if (/password|banned_until|encrypted_password|\bset\s+email\b|raw_user_meta_data/i.test(l1Code.replace(/email_change_token_(new|current)/g, ''))) fail('L1: must not change passwords, bans, emails or metadata');
 if (/delete from auth\.users|delete from public\./i.test(l1Code)) fail('L1: must not delete users or app data');
+
+
+// M1b (D8, approved 2026-10-22): managers add people. The profiles -> auth.users link is dropped;
+// the add is MANAGER + link session only, under the exclusive roster lock, refuses any existing
+// roster email, normalizes the email, audits, never sends; the mobile is internal and unverified.
+// The backout restores the link NOT VALID (people added stay) and drops the function, no data.
+{
+  const code = stripComments(m1b);
+  if (!/^begin;$/m.test(code) || !/^commit;$/m.test(code)) fail('M1b: must be one transaction');
+  if (!code.includes('alter table public.profiles drop constraint if exists profiles_id_fkey;')) fail('M1b: must drop the profiles -> auth.users foreign key (D8)');
+  if (!code.includes('alter table public.profiles alter column id set default gen_random_uuid();')) fail('M1b: new profile ids must default to gen_random_uuid()');
+  if (/insert into auth\.users|delete from|drop table|truncate/i.test(code)) fail('M1b: must not create old sign-in accounts or delete anything');
+  const add = stripComments(/create function public\.team_add_person\([\s\S]*?\$\$;/.exec(m1b)?.[0] ?? '');
+  if (!add) fail('M1b: team_add_person missing');
+  const firstDecl = add.indexOf('internal.lock_and_validate(');
+  if (!add.includes("internal.lock_and_validate(array['manager']::user_role[], array['link'], '{}', true)") || firstDecl < 0 || add.indexOf('declare') > firstDecl || /:=\s*(?!internal\.lock_and_validate)[^;]*\bfrom\b/.test(add.slice(add.indexOf('declare'), firstDecl))) {
+    fail('M1b: team_add_person must be manager-only, link session only, holding the roster lock (p_roster = true) before anything else');
+  }
+  if (!add.includes('lower(btrim(p_email))')) fail('M1b: the email must be normalized (lower, trimmed)');
+  if (!/p_role not in \('manager', 'edit', 'view'\)/.test(add)) fail('M1b: only staff roles may be assigned (never guest)');
+  const dup = add.indexOf("if exists (select 1 from public.profiles o where lower(o.email) = v_email) then");
+  const ins = add.indexOf('insert into public.profiles');
+  if (dup < 0 || ins < 0 || dup > ins || !/errcode = 'unique_violation'/.test(add)) fail('M1b: any existing roster email (any status) must be refused before the insert');
+  if (!add.includes("'approved'") || !add.includes('approved_by')) fail('M1b: the added person is approved by the acting manager');
+  if (!add.includes('insert into internal.auth_events')) fail('M1b: the add must be audited');
+  if (/http|net\.|send|pg_notify/i.test(add)) fail('M1b: nothing may be sent at add time');
+  if (!/create table internal\.staff_mobile_unverified/.test(code) || /public\.profiles add column/i.test(code)) fail('M1b: the optional mobile is stored internally (unverified), never on profiles');
+  if (!code.includes('revoke all on function public.team_add_person(text, text, user_role, text) from public, anon, authenticated;')
+      || !code.includes('grant execute on function public.team_add_person(text, text, user_role, text) to recruiter_api;')) fail('M1b: team_add_person must be callable by recruiter_api only');
+  const bo = stripComments(m1bBackout);
+  if (!/^begin;$/m.test(bo) || !/^commit;$/m.test(bo)) fail('M1b-backout: must be one transaction');
+  if (!bo.includes('drop function if exists public.team_add_person(text, text, user_role, text);')) fail('M1b-backout: must drop team_add_person');
+  if (!bo.includes('add constraint profiles_id_fkey foreign key (id) references auth.users(id) on delete cascade not valid;')) fail('M1b-backout: must restore the foreign key NOT VALID (people added stay)');
+  if (/\bdrop table\b|\bdelete from\b|\btruncate\b/i.test(bo)) fail('M1b-backout: must not delete data');
+}
 
 finish();
 
