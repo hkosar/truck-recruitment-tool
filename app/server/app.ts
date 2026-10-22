@@ -15,6 +15,7 @@ import {
   SESSION_COOKIE,
   SESSION_COOKIE_MAX_AGE_SECONDS,
 } from './auth/cookies';
+import { batchListRoute } from './batch/routes';
 import { checkOrigin, csrfTokenForCookie, issueCsrf, verifyCsrf } from './auth/csrf';
 import { isSyntacticallyValidEmail, maskEmail, normalizeEmail, type UserRole } from './auth/identity';
 import { keyedHash, randomSecret, type AuthKeys } from './auth/keys';
@@ -508,6 +509,8 @@ export function createApp(deps: AppDeps): (req: AppRequest) => Promise<AppRespon
       const revoked = await data.teamSignEveryoneOut(s);
       return json(200, { revoked }, clearSessionCookies);
     }
+    const listed = await batchListRoute({ req, s, data, readJson, json: (status, payload) => json(status, payload), commonHeaders: COMMON_HEADERS });
+    if (listed) return listed;
     void info;
     throw new NotFoundError();
   }

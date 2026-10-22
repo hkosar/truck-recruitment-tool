@@ -440,6 +440,64 @@ describe.skipIf(!enabled)('A3 database: stores, permissions, concurrency, deadli
     expect((await adminQuery(`select status from public.batch_carriers where batch_id = $1 and dot_number = 1400004`, [BATCH])).rows[0].status).toBe('new');
   });
 
+  it('batch list: insurance and distance extras; CSV leaves out global-DNC carriers in the database, logs the export, refuses viewers', async () => {
+    await resetEditor();
+    // The harness shim has no st_distance (real PostGIS does); add a metres stand-in for this database only.
+    await adminQuery(`create or replace function public.st_distance(a geography, b geography) returns float8 language sql immutable as $$
+      with pa as (select split_part(regexp_replace(a::text, '^POINT\\((.*)\\)$', '\\1'), ' ', 1)::float8 as x, split_part(regexp_replace(a::text, '^POINT\\((.*)\\)$', '\\1'), ' ', 2)::float8 as y),
+           vb as (select split_part(btrim(v), ' ', 1)::float8 as x, split_part(btrim(v), ' ', 2)::float8 as y from unnest(string_to_array(regexp_replace(b::text, '^[A-Z]+\\((.*)\\)$', '\\1'), ',')) v)
+      select min(6371000 * 2 * asin(sqrt(power(sin(radians(vb.y - pa.y) / 2), 2) + cos(radians(pa.y)) * cos(radians(vb.y)) * power(sin(radians(vb.x - pa.x) / 2), 2)))) from pa, vb $$`);
+    const ed = await session(EDITOR);
+    const vw = await session(VIEWER);
+    const zone = (await adminQuery(
+      `insert into public.batch_zones (batch_id, zone_type, label, params, geom, distance_miles)
+       values ($1, 'radius', 'A3 list zone', '{"lng":-97.74,"lat":31.27,"radius_miles":50}'::jsonb, 'POINT(-97.74 31.27)'::geography, 50) returning id`,
+      [BATCH],
+    )).rows[0].id;
+    await adminQuery(`insert into public.carrier_insurance (dot_number, bipd_required, bipd_on_file) values (1400001, 750000, 1000000) on conflict (dot_number) do update set bipd_on_file = 1000000`);
+    try {
+      const extras = await data.batchListExtras(ed, BATCH, [1400001, 1400002, 1400002]);
+      expect(extras.map((e) => e.dot_number).sort()).toEqual([1400001, 1400002]);
+      const one = extras.find((e) => e.dot_number === 1400001)!;
+      expect(one).toMatchObject({ bipd_on_file: 1_000_000, bipd_required: 750_000 });
+      expect(one.distance_mi).toBeGreaterThan(68);
+      expect(one.distance_mi).toBeLessThan(70);
+      expect(extras.find((e) => e.dot_number === 1400002)).toMatchObject({ bipd_on_file: null, bipd_required: null });
+      expect(await data.batchListExtras(ed, BATCH, [])).toEqual([]);
+      expect(await data.batchListExtras(ed, BATCH, [999])).toEqual([]);
+
+      // 1400002 is DNC by flag, 1400003 by an unexpired carrier-wide suppression.
+      await adminQuery('update public.carriers set do_not_contact = true where dot_number = 1400002');
+      await adminQuery(`insert into public.contact_suppressions (dot_number, channel, reason, source) values (1400003, 'all', 'A3 list', 'manual') on conflict (dot_number, channel) where value is null do update set expires_at = null`);
+      const exportsBefore = (await adminQuery(`select count(*)::int as n from public.batch_activity where batch_id = $1 and activity_type = 'export'`, [BATCH])).rows[0].n;
+      const some = await data.batchCsvExport(ed, BATCH, [1400001, 1400002, 1400003]);
+      expect(some.rowCount).toBe(1);
+      expect(some.excluded).toBe(2);
+      const lines = some.csv.trim().split('\r\n');
+      expect(lines[0]).toBe('USDOT,Legal name,DBA,Contact name,Phone,Cell phone,Email,City,State,Status,Warnings,Last contact (UTC)');
+      expect(lines).toHaveLength(2);
+      expect(lines[1].startsWith('1400001,')).toBe(true);
+      expect(some.csv).not.toContain('1400002');
+      expect(some.csv).not.toContain('1400003');
+      const whole = await data.batchCsvExport(ed, BATCH, null);
+      expect(whole.csv).not.toMatch(/(^|\r\n)(1400002|1400003),/);
+      expect(whole.rowCount + whole.excluded).toBe((await adminQuery('select count(*)::int as n from public.batch_carriers where batch_id = $1', [BATCH])).rows[0].n);
+      const logged = (await adminQuery(`select payload from public.batch_activity where batch_id = $1 and activity_type = 'export' order by id desc limit 2`, [BATCH])).rows;
+      expect(logged[1].payload).toEqual({ kind: 'csv', row_count: 1 });
+      expect(logged[0].payload).toEqual({ kind: 'csv', row_count: whole.rowCount });
+      expect((await adminQuery(`select count(*)::int as n from public.batch_activity where batch_id = $1 and activity_type = 'export'`, [BATCH])).rows[0].n).toBe(exportsBefore + 2);
+
+      // Viewers are refused and nothing is logged; an unknown batch is reported, not exported.
+      await expect(data.batchCsvExport(vw, BATCH, [1400001])).rejects.toBeInstanceOf(NotPermittedError);
+      expect((await adminQuery(`select count(*)::int as n from public.batch_activity where batch_id = $1 and activity_type = 'export'`, [BATCH])).rows[0].n).toBe(exportsBefore + 2);
+      expect((await data.batchCsvExport(ed, 'a3b00000-0000-4000-8000-0000000000ff', null)).rowCount).toBe(-1);
+    } finally {
+      await adminQuery('delete from public.batch_zones where id = $1', [zone]);
+      await adminQuery('delete from public.carrier_insurance where dot_number = 1400001');
+      await resetEditor();
+    }
+  });
+
   it('deadlines: a slow statement is cut off and rolled back; a lock wait past the deadline is Unavailable', async () => {
     const ed = await session(EDITOR);
     const before = (await adminQuery('select count(*)::int as n from public.batch_activity')).rows[0].n;

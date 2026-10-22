@@ -371,6 +371,36 @@ describe('signed-in data API', () => {
     expect((await apiPost(env, who, '/api/rpc/bulk_set_status', { p_batch_id: 'x', p_dots: [1], p_status: 'new' })).status).toBe(409);
   });
 
+  it('batch list routes: extras and CSV export need a session, CSRF and valid input; recovery sessions are refused', async () => {
+    const env = setup();
+    const who = signedIn(env);
+    const b = '44444444-4444-4444-8444-444444444444';
+    const get = (url: string, cookie = who.cookie) => env.handle(fakeRequest({ url, headers: { cookie } }));
+    expect((await env.handle(fakeRequest({ url: `/api/batches/${b}/list-extras?dots=1,2` }))).status).toBe(401);
+    expect((await get(`/api/batches/${b}/list-extras?dots=1,2`)).status).toBe(200);
+    expect(env.data.calls.at(-1)).toMatchObject({ op: 'batchListExtras', args: [b, [1, 2]] });
+    expect((await get(`/api/batches/${b}/list-extras?dots=1,x`)).status).toBe(409);
+    expect((await get(`/api/batches/${b}/list-extras?dots=${Array.from({ length: 201 }, (_, i) => i + 1).join(',')}`)).status).toBe(409);
+    expect((await get(`/api/batches/${b}/list-extras`)).status).toBe(200);
+
+    const csv = await apiPost(env, who, `/api/batches/${b}/export-csv`, { dots: [1, 2] });
+    expect(csv.status).toBe(200);
+    expect(csv.headers['content-type']).toBe('text/csv; charset=utf-8');
+    expect(csv.headers['x-export-rows']).toBe('0');
+    expect(env.data.calls.at(-1)).toMatchObject({ op: 'batchCsvExport', args: [b, [1, 2]] });
+    expect((await apiPost(env, who, `/api/batches/${b}/export-csv`, {})).status).toBe(200);
+    expect(env.data.calls.at(-1)).toMatchObject({ op: 'batchCsvExport', args: [b, null] });
+    expect((await apiPost(env, who, `/api/batches/${b}/export-csv`, { dots: ['1'] })).status).toBe(409);
+    expect((await apiPost(env, who, `/api/batches/${b}/export-csv`, { dots: [1] }, { 'x-csrf-token': 'nope' })).status).toBe(403);
+    expect((await apiPost(env, who, `/api/batches/${b}/export-csv`, { dots: [1] }, { origin: 'https://evil.example' })).status).toBe(403);
+
+    const recovery = signedIn(env, '33333333-3333-4333-8333-333333333333', 'recovery');
+    const before = env.data.calls.length;
+    expect((await get(`/api/batches/${b}/list-extras?dots=1`, recovery.cookie)).status).toBe(403);
+    expect((await apiPost(env, recovery, `/api/batches/${b}/export-csv`, { dots: [1] })).status).toBe(403);
+    expect(env.data.calls.length).toBe(before);
+  });
+
   it('every table call has its route, carrying the session hash', async () => {
     const env = setup();
     const who = signedIn(env);

@@ -146,6 +146,8 @@ export class FakeDataStore implements DataStore {
   async teamUpdate(s: string, t: string, n: string | null, r: UserRole | null, e: string | null) { this.rec('teamUpdate', s, t, n, r, e); }
   async teamSetActive(s: string, t: string, a: boolean) { this.rec('teamSetActive', s, t, a); }
   async teamSignEveryoneOut(s: string) { this.rec('teamSignEveryoneOut', s); return 3; }
+  async batchListExtras(s: string, id: string, dots: number[]) { this.rec('batchListExtras', s, id, dots); return []; }
+  async batchCsvExport(s: string, id: string, dots: number[] | null) { this.rec('batchCsvExport', s, id, dots); return { csv: 'USDOT', rowCount: 0, excluded: 0 }; }
 }
 
 /** Builds an AppRequest without any network. */

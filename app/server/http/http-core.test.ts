@@ -111,6 +111,8 @@ describe('renewal allowlist (never "any POST")', () => {
     for (const rpc of WRITE_RPCS) expect(renewalReason('POST', `/api/rpc/${rpc}`, none)).toBe('write');
     expect(renewalReason('POST', '/api/batch-carriers/status', none)).toBe('write');
     expect(renewalReason('POST', '/api/contact-logs', none)).toBe('write');
+    expect(renewalReason('POST', '/api/batches/44444444-4444-4444-8444-444444444444/export-csv', none)).toBe('write');
+    expect(renewalReason('GET', '/api/batches/44444444-4444-4444-8444-444444444444/list-extras', none)).toBe('none');
     expect(renewalReason('POST', '/api/recovery/batch-carriers/status', none)).toBe('write');
     expect(renewalReason('POST', '/api/session/activity', none)).toBe('ping');
     expect(renewalReason('GET', '/batches/1', headers({ 'sec-fetch-mode': 'navigate', 'sec-fetch-dest': 'document' }))).toBe('navigation');
