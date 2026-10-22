@@ -25,6 +25,8 @@ export interface AppResponse {
   body: string | Buffer;
   /** Close the connection after sending (rejected bodies). */
   closeAfter?: boolean;
+  /** Work to start only after this response has finished (the Node adapter runs it as a tracked continuation). */
+  afterResponse?: () => Promise<void>;
 }
 
 export type Logger = (event: string, fields?: Record<string, string | number | boolean | undefined>) => void;

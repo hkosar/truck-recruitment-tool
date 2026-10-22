@@ -48,7 +48,13 @@ function setup(overrides: Partial<AppConfig> = {}) {
     sleep: (ms) => new Promise((r) => setTimeout(r, ms)),
     random: Math.random,
   });
-  return { handle, auth, data, mail, lifecycle, logs, config };
+  // As the Node adapter does: post-response work starts once the response is complete.
+  const handleAndFinish = async (r: Parameters<typeof handle>[0]) => {
+    const res = await handle(r);
+    if (res.afterResponse) lifecycle.trackContinuation(res.afterResponse);
+    return res;
+  };
+  return { handle: handleAndFinish, auth, data, mail, lifecycle, logs, config };
 }
 
 const settle = () => new Promise((r) => setTimeout(r, 30));

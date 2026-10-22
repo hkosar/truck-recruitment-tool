@@ -105,7 +105,7 @@ const COMMON_HEADERS: Record<string, string> = {
 };
 
 export function createApp(deps: AppDeps): (req: AppRequest) => Promise<AppResponse> {
-  const { config, auth, data, mail, lifecycle, log } = deps;
+  const { config, auth, data, mail, log } = deps;
   const throttle = deps.pingThrottle ?? new PingThrottle(PING_THROTTLE_MS);
   const pageOptions = { stagingBanner: config.stagingBanner };
 
@@ -197,15 +197,15 @@ export function createApp(deps: AppDeps): (req: AppRequest) => Promise<AppRespon
     }
     const wait = target - deps.monotonic();
     if (wait > 0) await deps.sleep(wait);
+    const response = redirect('/signin?sent=1');
     if (admitted && email !== undefined) {
-      // Registered before the response is returned (doc 15 §4.1).
-      lifecycle.trackContinuation(() =>
+      // Started by the adapter only after this response has finished, and tracked as a
+      // continuation before the request stops being tracked (doc 15 §4.1; Gate 2 finding 7).
+      response.afterResponse = () =>
         withDeadline(identityWork(email), config.continuationBudgetMs).catch(() => {
           log('signin_identity_work_failed');
-        }),
-      );
+        });
     }
-    const response = redirect('/signin?sent=1');
     if (!body.ok) response.closeAfter = true;
     return response;
   }

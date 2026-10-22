@@ -1,12 +1,16 @@
 // Send a bounded response, then close the connection. Used after a rejected body (doc 15
-// §4.3): the generic sign-in response or a 413 is written first; the connection is closed only
-// after the response is flushed AND the (drained, discarded) upload has ended, or after a short
-// grace period. Closing with unread upload bytes would make the client see a reset instead of
-// the response.
+// §4.3) and for refusals during shutdown.
+//
+// Node closes a `Connection: close` socket itself as soon as the response FINISHES (its
+// finish handler calls destroySoon). If upload bytes are still arriving then, the peer gets a
+// TCP reset and may lose the response (Gate 2 review N2). So the whole response is written
+// first (the client can read all of it, Content-Length is exact), but `end()` waits until the
+// rejected upload has been drained and discarded (body.ts), bounded by a grace period. Only
+// then does Node finish and close. The returned promise settles when the connection is closed.
 
 import type { IncomingMessage, ServerResponse } from 'node:http';
 
-const CLOSE_GRACE_MS = 5_000;
+export const CLOSE_GRACE_MS = 5_000;
 
 export function respondThenClose(
   req: IncomingMessage,
@@ -14,22 +18,36 @@ export function respondThenClose(
   status: number,
   headers: Record<string, string>,
   body: string,
-): void {
-  res.shouldKeepAlive = false;
-  res.writeHead(status, { ...headers, connection: 'close', 'content-length': String(Buffer.byteLength(body)) });
-  res.end(body, () => {
-    let closed = false;
-    const close = () => {
-      if (closed) return;
-      closed = true;
-      req.socket.end();
+): Promise<void> {
+  return new Promise<void>((resolve) => {
+    let settled = false;
+    const settle = () => {
+      if (settled) return;
+      settled = true;
+      clearTimeout(grace);
+      resolve();
+    };
+    res.once('close', settle);
+    res.shouldKeepAlive = false;
+    res.writeHead(status, { ...headers, connection: 'close', 'content-length': String(Buffer.byteLength(body)) });
+    res.write(req.method === 'HEAD' ? '' : body);
+
+    let ended = false;
+    const end = () => {
+      if (ended) return;
+      ended = true;
+      res.end();
+      // Node closes the socket after finish; this is only a backstop for a stuck peer.
       setTimeout(() => req.socket.destroy(), 1_000).unref();
     };
-    if (req.readableEnded || req.complete) close();
-    else {
-      req.once('end', close);
-      req.once('error', close);
-      setTimeout(close, CLOSE_GRACE_MS).unref();
+    const grace = setTimeout(end, CLOSE_GRACE_MS);
+    grace.unref();
+    if (req.complete || req.readableEnded) {
+      end();
+    } else {
+      req.once('end', end);
+      req.once('error', end);
+      req.once('close', end);
     }
   });
 }
