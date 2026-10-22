@@ -1280,3 +1280,33 @@ without enabling them. Never executed on a live system.
 - Role matrix 51/51.
 - Recovery consumption and enrollment races are covered by the text check only: the feature
   stays disabled and was not switched on, even locally.
+
+## 30 · Gate 2 fix round (independent review of `4b8591c` and `ffb82f6`, 2026-10-22)
+
+| Finding | Fix | Commit |
+|---|---|---|
+| 1 | Emergency cancellations and barrier (`ffb82f6`); staff-only scope (N3) | `ffb82f6`, `13186fa` |
+| 2 | Wall-clock session re-check after every lock wait: BEFORE UPDATE/DELETE trigger on the eight app-writable tables; comment insert locks its batch and re-checks; redemption re-checks expiry after its locks | `54a7ba7` |
+| 3 | Unconfirmed sign-out says so (503, retry, cookie kept) | `c28f16b` |
+| 4 | Exact Origin on confirm and sign-out (no Host fallback) | `c28f16b` |
+| 5 | Activity ping refuses prefetch or a body before throttle and touch | `c28f16b` |
+| 6 | Pings come from the router's completed navigations after a captured gesture | `69d4c24` |
+| 7 | Requests tracked until the response has left the process; post-response work starts after it | `61d1175` |
+| 8 | Test-database builder proves cluster and database ownership; no `DROP … FORCE` | `81f584b` |
+| 9 | Role matrix without false positives (self-created targets, exact SQLSTATEs, effect checks, no savepoints) | `efcd90a` |
+| 10 | SMS decisions recorded (§27–§29) | `01b9050`, `ed717d3`, `9c5b335` |
+| N1 | Warm, separate sign-in pool; operator alerts; honest retry wording | `ccf8b2a` |
+| N2 | `end()` waits for the drained upload; no reset of a still-uploading client | `61d1175` |
+| N3 | Emergency sign-out staff only (role manager/edit/view, any status); guest-role rows untouched | `13186fa` |
+
+**Measured on a new task-owned cluster (2026-10-22, local only; synthetic data; PostGIS,
+pg_trgm and citext are stand-ins).** App verify 137 passed / 30 skipped (the live-database and
+HTTP suites, run separately), lint 0 errors; server build and staging-mode build; pipeline 21
+smoke tests and build; all eight offline scripts PASS; database suites 20/20 on two runs; A3 SQL
+tests PASS (expiry re-check during a lock wait; retention foreign key); role matrix 62/62 (the old
+51/51 never counted allowed probes or the emergency check); HTTP suites 10/10 on five runs;
+cold start 10/10 rounds minted a link (warm-up 26–27 ms); browser checks: wording pages, Team
+page consequence text, keyboard and mouse `<Link>` navigation each pinged once, no ping on load
+or idle, unconfirmed sign-out page then a successful retry (session revoked `signed_out` in the
+database); backout rehearsal identical after normalization. Recovery-code enrollment and
+consumption races stay text-checked only while the feature is held.
