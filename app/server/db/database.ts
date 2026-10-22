@@ -103,6 +103,9 @@ export class Database {
       max: options.max ?? 10,
       connectionTimeoutMillis: options.connectionTimeoutMillis ?? 250,
       idleTimeoutMillis: options.idleTimeoutMillis ?? 30_000,
+      // Idle eviction never takes the pool below the warm minimum (pg-pool `min`); the keep-warm
+      // timer below only replaces connections that broke and does the initial opening.
+      min: options.minWarm ?? 0,
       types: typeParsers,
     });
     this.pool.on('error', () => {
