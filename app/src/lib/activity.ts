@@ -81,9 +81,12 @@ export const GESTURE_WINDOW_MS = 1_500;
  * A POP looks the same whether the browser's back button or script caused it (both fire
  * popstate). Script must call history.go/back/forward (React Router's navigate(-1) calls
  * window.history.go), while the browser's own back/forward controls never call page script. So
- * those methods are wrapped to mark a programmatic history move; a POP right after one counts
- * only if a user gesture caused it (an in-app "Back" button), never on its own (a timer calling
- * navigate(-1)) (Gate 2 re-review 3).
+ * those methods are wrapped to queue a scripted history move. Each POP consumes the oldest
+ * queued move, however long the traversal took (a long task can delay it; Gate 2 final check 1),
+ * and counts only if a user gesture was recent when the script called (an in-app "Back" button),
+ * never on its own (a timer calling navigate(-1)). Queued moves are cancelled by the next PUSH or
+ * REPLACE navigation; go(0) (a reload) queues nothing. Only a POP with nothing queued is the
+ * browser's own back/forward.
  */
 export function wireNavigationActivity(deps: {
   router: NavigationSource;
@@ -93,18 +96,20 @@ export function wireNavigationActivity(deps: {
   history?: HistoryLike;
 }): () => void {
   let gesture: { trigger: NavigationTrigger; at: number } | undefined;
-  let scriptedHistoryAt: number | undefined;
+  const recent = (at: number | undefined) => at !== undefined && deps.now() - at <= GESTURE_WINDOW_MS;
+  // Scripted history moves not yet seen as a POP, oldest first, each with the user gesture (if
+  // any) that was recent when the script called.
+  const scripted: Array<{ userTrigger: NavigationTrigger | undefined }> = [];
   if (deps.history) {
     const h = deps.history;
     for (const method of ['go', 'back', 'forward'] as const) {
       const original = h[method].bind(h) as (delta?: number) => void;
       h[method] = (delta?: number) => {
-        scriptedHistoryAt = deps.now();
+        if (!(method === 'go' && !delta)) scripted.push({ userTrigger: gesture && recent(gesture.at) ? gesture.trigger : undefined });
         original(delta);
       };
     }
   }
-  const recent = (at: number | undefined) => at !== undefined && deps.now() - at <= GESTURE_WINDOW_MS;
   const mark = (trigger: NavigationTrigger) => () => {
     gesture = { trigger, at: deps.now() };
   };
@@ -118,12 +123,13 @@ export function wireNavigationActivity(deps: {
     lastKey = state.location.key;
     const userGesture = gesture && recent(gesture.at) ? gesture.trigger : undefined;
     if (state.historyAction === 'POP') {
-      if (!recent(scriptedHistoryAt)) deps.report('history'); // the browser's own back/forward
-      else if (userGesture) deps.report(userGesture); // an in-app Back control the person pressed
-    } else if (userGesture) {
-      deps.report(userGesture);
+      const move = scripted.shift();
+      if (!move) deps.report('history'); // the browser's own back/forward
+      else if (move.userTrigger) deps.report(move.userTrigger); // an in-app Back control the person pressed
+    } else {
+      scripted.length = 0; // a new PUSH/REPLACE supersedes any traversal still queued
+      if (userGesture) deps.report(userGesture);
     }
     gesture = undefined;
-    scriptedHistoryAt = undefined;
   });
 }

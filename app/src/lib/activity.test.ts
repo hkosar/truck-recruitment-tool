@@ -112,6 +112,44 @@ describe('router-driven navigation pings (Gate 2 finding 6)', () => {
     expect(h.reports).toEqual(['click']);
   });
 
+  it('a scripted move whose traversal is delayed by a long task still does not ping (no time window)', () => {
+    const h = harness();
+    h.history.back();
+    h.advance(5_000); // a long task delays the popstate far beyond the gesture window
+    h.navigate('POP');
+    expect(h.reports).toEqual([]);
+  });
+
+  it('each scripted move is consumed by exactly one POP; a later browser back still pings', () => {
+    const h = harness();
+    h.history.back();
+    h.history.go(-1);
+    h.advance(3_000);
+    h.navigate('POP');
+    h.navigate('POP');
+    expect(h.reports).toEqual([]);
+    h.navigate('POP'); // nothing queued any more: the browser's own back
+    expect(h.reports).toEqual(['history']);
+  });
+
+  it('a queued move that never traversed is cancelled by the next push; go(0) (reload) queues nothing', () => {
+    const h = harness();
+    h.history.back(); // e.g. at the first entry: no traversal happens
+    h.navigate('PUSH'); // a programmatic push (no gesture): cancels the stale queued move, no ping
+    h.history.go(0);
+    h.navigate('POP');
+    expect(h.reports).toEqual(['history']);
+  });
+
+  it('an in-app Back pressed by the person counts even when its traversal is delayed', () => {
+    const h = harness();
+    h.fire('click', { button: 0 });
+    h.history.back();
+    h.advance(5_000);
+    h.navigate('POP');
+    expect(h.reports).toEqual(['click']);
+  });
+
   it('the browser back/forward controls (POP with no script history call) ping as history', () => {
     const h = harness();
     h.navigate('POP');
