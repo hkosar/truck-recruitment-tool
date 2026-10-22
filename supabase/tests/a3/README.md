@@ -9,7 +9,13 @@ owner's `a3-ownership.md`. Log retention: record second-level UTC times for "sto
 and "stop confirmed", copy the `postgres.log` tail (redacted) AFTER the stop so the shutdown
 lines are kept, and only then delete the directory. Build the database with
 
-    A3_PGPASSWORD=... node scripts/a3-build-test-db.mjs --owner-dir <task dir> --port <port> --db tr_signin_test
+    A3_PGPASSWORD=... node scripts/a3-build-test-db.mjs --owner-dir <task dir> --port <port> --db tr_signin_test --suites
+
+`--suites` also builds one database per DB-using vitest suite (`tr_signin_test_store`,
+`_readiness`, `_e2e`). The suites take their URLs only from `app/server/testing/test-db.ts`, so
+the emergency sign-out test (store suite) can never revoke the end-to-end suite's sessions, even
+when vitest runs the files in parallel (`test-db.test.ts` enforces this). The base database is
+used by the SQL scripts here and by the role matrix.
 
 The builder refuses unless `<task dir>/A3_TASK_OWNED` holds the task's token, the server on
 `<port>` reports `<task dir>/data` as its data directory, and any existing database carries

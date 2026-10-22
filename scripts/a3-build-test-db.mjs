@@ -12,6 +12,10 @@
 //   4. an existing database is dropped only if its comment is "a3-task-owned:<token>", and
 //      without FORCE (a database with other connections is refused, not cut off).
 // A new database gets that comment, so only this task's own builds can ever replace it.
+//
+// --suites also builds one database per DB-using test suite (<db>_store, <db>_readiness,
+// <db>_e2e), so suites that mutate global state (emergency sign-out revokes every staff session)
+// can never share a database (Gate 2 final check 2; app/server/testing/test-db.ts).
 
 import { createRequire } from 'node:module';
 import { readFileSync, readdirSync, writeFileSync } from 'node:fs';
@@ -58,6 +62,9 @@ const TRANSFORMS = [
   [/create index [a-z_]+ +on public\.[a-z_]+ using gin \([^;]*gin_trgm_ops\);/g, '-- [A3 shim] trigram index skipped'],
 ];
 
+/** Must equal DB_SUITES in app/server/testing/test-db.ts (checked by test-db.test.ts). */
+const SUITES = ['store', 'readiness', 'e2e'];
+
 async function main() {
   const admin = new pg.Client(conn('postgres'));
   await admin.connect();
@@ -67,19 +74,25 @@ async function main() {
     console.error(`REFUSED: the server on port ${port} is not the task-owned cluster (its data directory differs from --owner-dir)`);
     process.exit(3);
   }
-  const existing = await admin.query("select shobj_description(oid, 'pg_database') as comment from pg_database where datname = $1", [dbName]);
-  if (existing.rowCount) {
-    if (existing.rows[0].comment !== OWNER_COMMENT) {
-      await admin.end();
-      console.error(`REFUSED: database ${dbName} exists without this task's ownership comment; not dropping it`);
-      process.exit(3);
+  const names = [dbName, ...(args.suites === 'true' ? SUITES.map((s) => `${dbName}_${s}`) : [])];
+  for (const name of names) {
+    const existing = await admin.query("select shobj_description(oid, 'pg_database') as comment from pg_database where datname = $1", [name]);
+    if (existing.rowCount) {
+      if (existing.rows[0].comment !== OWNER_COMMENT) {
+        await admin.end();
+        console.error(`REFUSED: database ${name} exists without this task's ownership comment; not dropping it`);
+        process.exit(3);
+      }
+      await admin.query(`drop database ${name}`);
     }
-    await admin.query(`drop database ${dbName}`);
+    await admin.query(`create database ${name}`);
+    await admin.query(`comment on database ${name} is '${OWNER_COMMENT}'`);
   }
-  await admin.query(`create database ${dbName}`);
-  await admin.query(`comment on database ${dbName} is '${OWNER_COMMENT}'`);
   await admin.end();
+  for (const name of names) await buildOne(name, name === dbName ? args.snapshot : undefined);
+}
 
+async function buildOne(dbName, snapshotPath) {
   const db = new pg.Client(conn(dbName));
   await db.connect();
   const run = async (label, sql) => {
@@ -106,9 +119,9 @@ async function main() {
   await run('profile-fixtures', readFileSync(join(root, 'supabase/staging/profile-fixtures.sql'), 'utf8'));
   await run('business-fixtures', readFileSync(join(root, 'supabase/tests/a3/harness/business-fixtures.sql'), 'utf8'));
 
-  if (args.snapshot) {
+  if (snapshotPath) {
     const snap = await snapshot(db);
-    writeFileSync(args.snapshot, JSON.stringify(snap, null, 1));
+    writeFileSync(snapshotPath, JSON.stringify(snap, null, 1));
   }
   if (args['no-m1'] !== 'true') {
     await run('M1', readFileSync(join(root, 'supabase/pending/M1_same_origin_signin.sql'), 'utf8'));

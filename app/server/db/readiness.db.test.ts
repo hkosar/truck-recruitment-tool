@@ -7,9 +7,11 @@ import { UnavailableError } from '../core/types';
 import { DEFAULT_TIMING } from '../app';
 import { Database } from './database';
 import { PgAuthStore } from './pg-auth-store';
+import { suiteDatabase } from '../testing/test-db';
 
-const APP_URL = process.env.A3_APP_URL;
-const enabled = Boolean(APP_URL && /@127\.0\.0\.1:\d+\/tr_/.test(APP_URL) && process.env.A3_ADMIN_URL);
+// Own database (<base>_readiness; testing/test-db.ts).
+const APP_URL = suiteDatabase('readiness')?.appUrl;
+const enabled = Boolean(APP_URL);
 const BUDGET = DEFAULT_TIMING.admissionDeadlineMs;
 const sleep = (ms: number) => new Promise((r) => setTimeout(r, ms));
 

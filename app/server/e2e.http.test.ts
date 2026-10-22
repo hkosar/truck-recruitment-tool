@@ -9,8 +9,12 @@ import { afterAll, beforeAll, describe, expect, it } from 'vitest';
 import { parseServerEnv } from './config';
 import { FakeMailAdapter } from './mail/fake';
 import { startServer, type RunningServer } from './main';
+import { suiteDatabase } from './testing/test-db';
 
-const enabled = process.env.RUN_HTTP_TESTS === '1' && Boolean(process.env.A3_APP_URL) && Boolean(process.env.A3_ADMIN_URL) && existsSync('dist/index.html');
+// Own database (<base>_e2e; testing/test-db.ts): never shared with the store suite, whose
+// emergency sign-out test revokes every staff session.
+const SUITE_DB = suiteDatabase('e2e');
+const enabled = process.env.RUN_HTTP_TESTS === '1' && Boolean(SUITE_DB) && existsSync('dist/index.html');
 const PORT = Number(process.env.E2E_PORT ?? '55474');
 const ORIGIN = `http://localhost:${PORT}`;
 const BASE = `http://127.0.0.1:${PORT}`;
@@ -35,8 +39,8 @@ describe.skipIf(!enabled)('A4 real HTTP: sign-in end to end, timing, bodies, shu
   beforeAll(async () => {
     // Clean sign-in ledger for the fixture people, so consecutive runs never hit the courtesy
     // window or the flood buckets of a previous run (task-owned test database only).
-    if (process.env.A3_ADMIN_URL) {
-      const admin = new pg.Client({ connectionString: process.env.A3_ADMIN_URL });
+    if (SUITE_DB) {
+      const admin = new pg.Client({ connectionString: SUITE_DB.adminUrl });
       await admin.connect();
       await admin.query(`delete from internal.signin_links where user_id::text like '71000000-0000-4000-8000-%'`);
       await admin.query('delete from internal.auth_request_buckets');
@@ -44,7 +48,7 @@ describe.skipIf(!enabled)('A4 real HTTP: sign-in end to end, timing, bodies, shu
     }
     const env = parseServerEnv({
       APP_ORIGIN: ORIGIN, KEY_LINKS: key(11), KEY_SESSIONS: key(12), KEY_RATE: key(13),
-      DATABASE_URL: process.env.A3_APP_URL!, EMAIL_MODE: 'test', PORT: String(PORT), HOST: '127.0.0.1', TRUSTED_PROXY_HOPS: '0', STATIC_DIR: 'dist',
+      DATABASE_URL: SUITE_DB!.appUrl, EMAIL_MODE: 'test', PORT: String(PORT), HOST: '127.0.0.1', TRUSTED_PROXY_HOPS: '0', STATIC_DIR: 'dist',
     });
     running = await startServer(env, { mail, log: (event, fields) => logs.push(JSON.stringify({ event, ...fields })) });
   });

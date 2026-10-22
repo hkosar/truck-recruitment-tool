@@ -3,6 +3,8 @@
 //   A3_APP_URL   = postgres://recruiter_app:<throwaway>@127.0.0.1:<port>/tr_signin_test
 //   A3_ADMIN_URL = postgres://tr_test_admin:<throwaway>@127.0.0.1:<port>/tr_signin_test
 // The database is built by scripts/a3-build-test-db.mjs (Supabase shim, 20 migrations, fixtures, M1).
+// This suite uses its OWN database (<base>_store, built with --suites; testing/test-db.ts): its
+// emergency sign-out test revokes every staff session, so no other suite may share it.
 
 import { createServer, connect, type Server, type Socket } from 'node:net';
 import pg from 'pg';
@@ -11,10 +13,12 @@ import { NotPermittedError, OutcomeUnknownError, RefusedError, UnavailableError 
 import { Database } from './database';
 import { PgAuthStore } from './pg-auth-store';
 import { PgDataStore } from './pg-data-store';
+import { suiteDatabase } from '../testing/test-db';
 
-const APP_URL = process.env.A3_APP_URL;
-const ADMIN_URL = process.env.A3_ADMIN_URL;
-const enabled = Boolean(APP_URL && ADMIN_URL && /@127\.0\.0\.1:\d+\/tr_/.test(APP_URL ?? '') && /@127\.0\.0\.1:\d+\/tr_/.test(ADMIN_URL ?? ''));
+const SUITE_DB = suiteDatabase('store');
+const APP_URL = SUITE_DB?.appUrl;
+const ADMIN_URL = SUITE_DB?.adminUrl;
+const enabled = Boolean(SUITE_DB);
 
 const MANAGER = '71000000-0000-4000-8000-000000000001';
 const EDITOR = '71000000-0000-4000-8000-000000000002';
