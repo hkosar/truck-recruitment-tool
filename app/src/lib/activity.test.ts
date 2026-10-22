@@ -1,7 +1,7 @@
 import { readdirSync, readFileSync, statSync } from 'node:fs';
 import { join, relative, resolve } from 'node:path';
 import { afterEach, describe, expect, it, vi } from 'vitest';
-import { CLIENT_PING_INTERVAL_MS, createActivityReporter, type NavigationTrigger } from './activity';
+import { CLIENT_PING_INTERVAL_MS, createActivityReporter, GESTURE_WINDOW_MS, wireNavigationActivity, type NavigationSource, type NavigationTrigger } from './activity';
 
 afterEach(() => {
   vi.useRealTimers();
@@ -41,6 +41,78 @@ describe('activity reporter', () => {
     const reporter = createActivityReporter({ send: async () => { throw new Error('offline'); }, now: () => 0 });
     expect(reporter.reportUserNavigation('click')).toBe(true);
     await Promise.resolve();
+  });
+});
+
+describe('router-driven navigation pings (Gate 2 finding 6)', () => {
+  function harness() {
+    let t = 1_000;
+    const listeners = new Map<string, (e: { key?: string; button?: number }) => void>();
+    let sub: ((s: { location: { key: string }; historyAction: string; navigation: { state: string } }) => void) | undefined;
+    const router: NavigationSource = { state: { location: { key: 'k0' } }, subscribe: (fn) => { sub = fn; return () => {}; } };
+    const reports: NavigationTrigger[] = [];
+    wireNavigationActivity({
+      router,
+      target: { addEventListener: (type, fn, opts) => { expect(opts.capture).toBe(true); listeners.set(type, fn); } },
+      report: (trigger) => { reports.push(trigger); return true; },
+      now: () => t,
+    });
+    let n = 0;
+    return {
+      reports,
+      fire: (type: string, e: { key?: string; button?: number } = {}) => listeners.get(type)!(e),
+      navigate: (historyAction = 'PUSH', state = 'idle', sameKey = false) => sub!({ location: { key: sameKey ? `k${n}` : `k${++n}` }, historyAction, navigation: { state } }),
+      advance: (ms: number) => { t += ms; },
+    };
+  }
+
+  it('a link click (pointer then click, captured before React Router prevents the default) pings once the navigation completes', () => {
+    const h = harness();
+    h.fire('pointerdown', { button: 0 });
+    h.fire('click', { button: 0 });
+    h.navigate('PUSH', 'loading');
+    expect(h.reports).toEqual([]);
+    h.navigate('PUSH', 'idle');
+    expect(h.reports).toEqual(['click']);
+  });
+
+  it('keyboard activation (Enter or Space) pings as keyboard; other keys do not count', () => {
+    const h = harness();
+    h.fire('keydown', { key: 'Enter' });
+    h.navigate();
+    h.fire('keydown', { key: ' ' });
+    h.navigate();
+    h.fire('keydown', { key: 'a' });
+    h.navigate();
+    expect(h.reports).toEqual(['keyboard', 'keyboard']);
+  });
+
+  it('back/forward (POP) pings as history without a gesture', () => {
+    const h = harness();
+    h.navigate('POP');
+    expect(h.reports).toEqual(['history']);
+  });
+
+  it('programmatic navigation with no recent gesture, a stale gesture, a right click or a same-location revalidation does not ping', () => {
+    const h = harness();
+    h.navigate('PUSH');
+    h.navigate('REPLACE');
+    h.fire('click', { button: 0 });
+    h.advance(GESTURE_WINDOW_MS + 1);
+    h.navigate('PUSH');
+    h.fire('pointerdown', { button: 2 });
+    h.navigate('PUSH');
+    h.fire('click', { button: 0 });
+    h.navigate('PUSH', 'idle', true);
+    expect(h.reports).toEqual([]);
+  });
+
+  it('one gesture counts for one navigation only', () => {
+    const h = harness();
+    h.fire('click', { button: 0 });
+    h.navigate();
+    h.navigate();
+    expect(h.reports).toEqual(['click']);
   });
 });
 

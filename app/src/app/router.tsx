@@ -3,7 +3,7 @@ import type { ReactNode } from 'react';
 import { createBrowserRouter, Navigate } from 'react-router-dom';
 import { AppShell } from './AppShell';
 import { RequireManager, RequireRole, RequireStaff } from './guards';
-import { activitySender, createActivityReporter } from '../lib/activity';
+import { activitySender, createActivityReporter, wireNavigationActivity } from '../lib/activity';
 import { currentCsrfToken } from '../lib/api';
 
 /**
@@ -61,15 +61,11 @@ export const router = createBrowserRouter([
   },
 ]);
 
-// Deliberate-use renewal: only navigations the person caused (a same-origin link click, which
-// also covers Enter on a focused link, or browser back/forward). Never timers, prefetch, focus
-// or background refetch (lib/activity.ts; doc 14 §3.5).
+// Deliberate-use renewal: only navigations the person caused, taken from the router's own
+// completed navigations (a <Link> click or keyboard activation just before, or browser
+// back/forward). Never timers, prefetch, focus or background refetch (lib/activity.ts; doc 14
+// §3.5; Gate 2 finding 6).
 const activity = createActivityReporter({ send: activitySender(currentCsrfToken), now: () => Date.now() });
 if (typeof window !== 'undefined') {
-  window.addEventListener('click', (event) => {
-    if (event.defaultPrevented || event.button !== 0 || event.metaKey || event.ctrlKey || event.shiftKey || event.altKey) return;
-    const link = (event.target as Element | null)?.closest?.('a[href]') as HTMLAnchorElement | null;
-    if (link && link.origin === window.location.origin && !link.target) activity.reportUserNavigation('click');
-  });
-  window.addEventListener('popstate', () => activity.reportUserNavigation('history'));
+  wireNavigationActivity({ router, target: window, report: (t) => activity.reportUserNavigation(t), now: () => Date.now() });
 }
