@@ -140,6 +140,21 @@ for (const [file, from, to] of restored) {
 }
 if (!/^begin;$/m.test(backout) || !/^commit;$/m.test(backout)) fail('backout: must be one transaction');
 if (/\bdrop table\b|\bdelete from\b|\btruncate\b/i.test(stripComments(backout))) fail('backout: must not drop tables or delete data');
+// T-BACKOUT (A3, measured): the pre-M1 surface also includes platform defaults and migration
+// order, which a verbatim replay alone misses.
+{
+  const code = stripComments(backout);
+  for (const stmt of [
+    'grant all on all sequences in schema public to anon, authenticated;',
+    'alter default privileges in schema public grant all on sequences to anon, authenticated;',
+    'alter default privileges in schema public grant execute on functions to anon, authenticated;',
+    'grant execute on all functions in schema public to authenticated;',
+  ]) if (!code.includes(stmt)) fail(`backout: T-BACKOUT restore missing: ${stmt}`);
+  const loopEnd = code.indexOf('$hardening$;');
+  const guardPath = code.indexOf('alter function internal.contact_logs_dnc_guard() set search_path = public, pg_temp;');
+  if (guardPath === -1 || guardPath < loopEnd) fail('backout: the DNC guard search_path must be re-set AFTER the replayed hardening loop (migration order)');
+  if (!code.includes('revoke execute on function internal.contact_logs_dnc_guard() from service_role;')) fail('backout: DNC guard keeps the service_role grant M1 added');
+}
 
 // H. Every write policy uses the exact role set (doc 15 §14.1).
 const MANAGER = "array['manager']::user_role[]";

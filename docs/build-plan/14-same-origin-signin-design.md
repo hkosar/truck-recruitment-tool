@@ -4,6 +4,9 @@ Status: **reviewed design (Gate 1 passed). The architecture is selected: the pla
 local branch `auth/same-origin-signin` (from `docs/auth-spec-m0-signoff`, 9fc3425), by the
 sign-in implementation owner (thread thr_pn5gr4mx94). Needs independent security review before
 any code is written.
+**Gate 2 (2026-10-22 UTC):** decisions 3 and 4, the SMS supersession of recovery codes, the
+local A3/A4/A6 evidence and two defects found by it are recorded in doc 15 §26; the SMS impact
+table is doc 15 §27.
 **Revision 2 (2026-10-21 UTC):** addresses the Gate 1 review of `3b841a7` (Codex, thr_9ftwddufse,
 "approved to implement — yes after edits"; 2 blockers, 5 should-fix). See §13.
 **Revision 3 (2026-10-21 UTC):** addresses the re-review of `7f8a918` (2 blockers,
@@ -175,7 +178,9 @@ Headers on every Worker HTML response (copied from [QQ] `middleware.ts:72-156`):
 use); `style-src 'self'`; `img-src 'self' data:` (+ maps tiles); `connect-src 'self'` (+ maps);
 `object-src 'none'; base-uri 'self'; form-action 'self'; frame-ancestors 'none'`), HSTS,
 `X-Content-Type-Options: nosniff`, `Referrer-Policy: strict-origin-when-cross-origin`
-(`no-referrer` on `/auth/*`), `Permissions-Policy`, `Cache-Control: private, no-store` on
+(`no-referrer` on the `/auth/verify` token redirect; `same-origin` on the sign-in pages, because
+`no-referrer` makes browsers send `Origin: null` on their own form POSTs (A6 finding, doc 15
+§26)), `Permissions-Policy`, `Cache-Control: private, no-store` on
 everything except hashed assets. The exact maps CSP list is taken from the current app at build
 time **[assume: current Google Maps loader origins]**.
 

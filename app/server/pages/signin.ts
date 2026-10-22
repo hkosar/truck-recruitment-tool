@@ -26,7 +26,7 @@ function page(body: string, options: PageOptions = {}): string {
 <head>
 <meta charset="utf-8" />
 <meta name="viewport" content="width=device-width, initial-scale=1" />
-<meta name="referrer" content="no-referrer" />
+<meta name="referrer" content="same-origin" />
 <title>${escapeHtml(APP_WORDMARK)} — Sign in</title>
 <link rel="stylesheet" href="/auth/signin.css" />
 </head>
@@ -107,12 +107,16 @@ ${failed ? `<p class="signin-message" role="alert">${escapeHtml(RECOVERY_FAILURE
   );
 }
 
-/** Security headers for these pages (doc 14 §2.3; QQ middleware.ts:72-156, without script). */
+/** Security headers for these pages (doc 14 §2.3; QQ middleware.ts:72-156, without script).
+ *  Referrer policy is `same-origin`, not `no-referrer`: under `no-referrer` browsers send
+ *  `Origin: null` on the page's own form POSTs, which the exact-Origin CSRF check rejects (found
+ *  in the A6 browser run). `same-origin` still sends nothing to other sites, and these page URLs
+ *  never carry a token (the token URL is the /auth/verify redirect, which stays `no-referrer`). */
 export function signInPageHeaders(): Record<string, string> {
   return {
     'content-type': 'text/html; charset=utf-8',
     'cache-control': 'no-store',
-    'referrer-policy': 'no-referrer',
+    'referrer-policy': 'same-origin',
     'x-content-type-options': 'nosniff',
     'content-security-policy':
       "default-src 'none'; script-src 'none'; style-src 'self'; img-src 'self'; font-src 'self'; form-action 'self'; base-uri 'none'; frame-ancestors 'none'",

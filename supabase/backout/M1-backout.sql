@@ -376,10 +376,18 @@ drop function if exists internal.actor_can_write(user_role[]);
 -- 20260720001200_rls.sql, 20260720001400_pipeline_tables.sql, 20260722223300_security_hardening.sql
 -- and 20260723010400_dnc_activity_enum_cast.sql left them. T-BACKOUT compares the result with
 -- the pre-cutover snapshot (pre-cutover-snapshot.sql).
+-- Platform defaults are ALL on sequences and EXECUTE on new functions (T-BACKOUT measured the
+-- pre-M1 surface: anon/authenticated rwU on public sequences; default function EXECUTE for both,
+-- of which the migrations only ever revoked PUBLIC).
 grant all on all tables in schema public to anon, authenticated;
-grant usage, select on all sequences in schema public to anon, authenticated;
+grant all on all sequences in schema public to anon, authenticated;
 alter default privileges in schema public grant all on tables to anon, authenticated;
-alter default privileges in schema public grant usage, select on sequences to anon, authenticated;
+alter default privileges in schema public grant all on sequences to anon, authenticated;
+alter default privileges in schema public grant execute on functions to anon, authenticated;
+-- Every public function was executable by authenticated before M1 (platform default; no
+-- migration revokes a public function from authenticated), including extension functions such
+-- as PostGIS that no migration names. The hardening slice below then removes anon again.
+grant execute on all functions in schema public to authenticated;
 revoke update on public.carriers from authenticated;
 grant  update (do_not_contact, dnc_reason, dnc_set_by, dnc_set_at,
                contact_name_override, contact_phone_override, contact_email_override)
@@ -474,5 +482,11 @@ begin
   end loop;
 end
 $hardening$;
+
+-- ---- migration order: the hardening loop above ran BEFORE 20260723020000 created the DNC guard,
+-- so the guard keeps its own search_path; and M1's service_role grant on internal functions
+-- (M1 section 13) did not exist for it before M1.
+alter function internal.contact_logs_dnc_guard() set search_path = public, pg_temp;
+revoke execute on function internal.contact_logs_dnc_guard() from service_role;
 
 commit;

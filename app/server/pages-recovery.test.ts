@@ -40,10 +40,13 @@ describe('sign-in pages (decisions 19/35)', () => {
     expect(renderSignInForm()).not.toContain('STAGING');
     expect(renderSignInForm({ stagingBanner: true })).toContain('STAGING');
   });
-  it('headers: no-store, no-referrer, CSP without script', () => {
+  it('headers: no-store, same-origin referrer (so form POSTs carry a real Origin), CSP without script', () => {
     const h = signInPageHeaders();
     expect(h['cache-control']).toBe('no-store');
-    expect(h['referrer-policy']).toBe('no-referrer');
+    // Not no-referrer: that makes browsers send Origin: null on the confirm POST (A6 finding).
+    expect(h['referrer-policy']).toBe('same-origin');
+    expect(renderSignInForm()).toContain('<meta name="referrer" content="same-origin" />');
+    expect(renderSignInForm()).not.toContain('no-referrer');
     expect(h['content-security-policy']).toContain("script-src 'none'");
   });
   it('assets exist: black badge (same bytes as Quote-Queue) and stylesheet values', () => {

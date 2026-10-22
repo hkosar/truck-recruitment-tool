@@ -86,7 +86,7 @@ describe.skipIf(!enabled)('A4 real HTTP: sign-in end to end, timing, bodies, shu
     absorb(jar, done);
 
     const me = await fetch(`${BASE}/api/session`, { headers: { cookie: cookieHeader(jar) } });
-    const session = await me.json();
+    const session = (await me.json()) as { csrfToken: string };
     expect(session).toMatchObject({ user: { email: 'editor@tnbs-recruiter.example.invalid', role: 'edit' }, sessionKind: 'link' });
     absorb(jar, me);
     const totals = await fetch(`${BASE}/api/rpc/dashboard_totals`, { method: 'POST', headers: { origin: ORIGIN, cookie: cookieHeader(jar), 'content-type': 'application/json', 'x-csrf-token': session.csrfToken }, body: '{}' });
@@ -94,7 +94,7 @@ describe.skipIf(!enabled)('A4 real HTTP: sign-in end to end, timing, bodies, shu
     const dash = await fetch(`${BASE}/api/dashboard`, { headers: { cookie: cookieHeader(jar) } });
     expect(Array.isArray(await dash.json())).toBe(true);
     const profile = await fetch(`${BASE}/api/carriers/1400001/profile`, { headers: { cookie: cookieHeader(jar) } });
-    expect((await profile.json()).carrier.dot_number).toBe(1400001);
+    expect(((await profile.json()) as { carrier: { dot_number: number } }).carrier.dot_number).toBe(1400001);
     const shell = await fetch(`${BASE}/dashboard`, { headers: { cookie: cookieHeader(jar), 'sec-fetch-mode': 'navigate', 'sec-fetch-dest': 'document', accept: 'text/html' } });
     expect(shell.status).toBe(200);
     expect(await shell.text()).toContain('<div id="root">');

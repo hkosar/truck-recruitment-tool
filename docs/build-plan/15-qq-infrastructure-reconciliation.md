@@ -1050,10 +1050,10 @@ recipient, and raise an operator alert (`operatorAlertFor`). Only a recipient-sp
 is a definite failure (`app/server/mail/adapter.ts` `sendStatusFor`). The earlier departure was
 withdrawn; it is not proposed further.
 
-**Not built yet (needs approvals or the focused review):** the Node server and its routes, `pg`
-wiring, the SPA data-layer port and removal of the Supabase screens, the staging SQL
-adaptations (§12.5), executing any SQL (A3), local server runs (A4), hosted probes and log
-gates (A5a/A5b/A7).
+**Since then (2026-10-21/22):** the Node server and its routes, `pg` wiring (A2), the SPA port
+to the same-origin server with the Supabase screens retired (decision 3), the staging SQL as new
+files (§12.5) and the emergency sign-out (decision 4) are built. A3/A4/A6 ran locally only; the
+measured results are in §26. Hosted probes and log gates (A5a/A5b/A7) are not run.
 
 ## 23 · Retention placement (engineering call, coordinator guidance 2026-10-21)
 
@@ -1113,3 +1113,85 @@ change and the `MAINTENANCE_DATABASE_URL` setting, approved with the rollout).
 |---|---|---|---|
 | 1 | The expiry re-check after a lock wait used `now()` (frozen at transaction start) | `recheck_session()` and `lock_and_validate`'s validation use `clock_timestamp()`; the offline check forbids `now()` there (mutation-tested); A3 concurrency test where the session expires during a batch-lock wait | M1; `scripts/verify-auth-migration-contract.mjs`; `supabase/tests/a3/recheck_expiry_*.sql` |
 | 2 | Retention windows conflicted with the event→link foreign key | `email_events.link_id` is `ON DELETE SET NULL` with a recipient and message-id snapshot; links 30 days, events 180 days; retention script and unit tests; A3 test that deleting an aged link keeps its event | M1; `app/server/scripts/retention.ts`; `supabase/tests/a3/retention_fk.sql`; §23 |
+
+## 26 · Decisions incorporated and local evidence (A2/A3/A4/A6, 2026-10-22)
+
+**Decisions.**
+- *Decision 3 (manager-added staff only):* the Register, Pending, Forgot, Reset and Login
+  screens and `lib/supabase.ts` are removed from the SPA; their routes are retired. Every
+  profile record stays, including legacy pending/guest rows, which the Team page shows
+  read-only. Nothing in the database is deleted.
+- *Decision 4 (emergency sign-everyone-out):* `public.team_sign_everyone_out()` (M1), MANAGER
+  only, link session only. It revokes every app session (the actor's own and recovery sessions
+  included) and writes one audit row, in one transaction under the roster lock. The Team page
+  button asks for confirmation (`app/src/features/users/UsersAdmin.tsx:126`). Whether it also
+  invalidates recovery or SMS enrollment is **not decided** and is not built.
+- *Recovery change:* SMS supersedes backup codes. Backup-code expansion has stopped. The
+  artifacts (`internal.recovery_*` tables, `public.recovery_*` functions, `app/server/recovery/`)
+  stay in place, disabled (`internal.recovery_policy.enabled = false`). §27 is the SMS impact
+  table (design only).
+- *Admin class = manager.* Evidence: `supabase/migrations/20260720001200_rls.sql:49`
+  (`is_manager`) and `:82` (`profiles_update_mgr`);
+  `20260723004500_profile_service_bootstrap.sql:16-20` (`guard_profile_update`);
+  `app/src/lib/permissions.ts:19-30`; the M1 team functions call
+  `lock_and_validate(array['manager']…)` (M1 lines 1264, 1306, 1338, 1363, 1580).
+
+**Local harness (A3) and its limits.** This is a throwaway PostgreSQL 16 cluster on 127.0.0.1
+under the thread's storage, built by `scripts/a3-build-test-db.mjs`: a Supabase shim, the 20
+migrations, fixtures, then M1. Hosted is PostgreSQL 15 with real Supabase services. Windows
+Application Control blocks the `pg_trgm` and `citext` libraries on this machine, so PostGIS,
+`pg_trgm` and `citext` are stand-ins: text-WKT geography, trigram indexes skipped, `citext` as
+a text domain. The evidence covers permissions, locking, transactions and HTTP behaviour; it
+does not cover geography maths, trigram search speed or Supabase's own services. The cluster
+was stopped and its directory deleted after the runs.
+
+**Measured results.**
+
+| Check | Result |
+|---|---|
+| Role matrix (`supabase/staging/m1/verify-role-matrix-m1.sql`, 51 probes) | 51/51 after correcting one probe that expected an error where row-level security returns 0 rows |
+| Session-expiry re-check during a lock wait (`supabase/tests/a3/recheck_expiry_a/b.sql`) | PASS |
+| Retention foreign key (`retention_fk.sql`) | PASS |
+| `app/server/db/pg.db.test.ts` (real pg adapter) | 10/10, three runs |
+| Real HTTP (`e2e.http.test.ts`, `respond.http.test.ts`) | 7/7, three runs. The first run found a real defect: a 512 KiB chunked upload got a connection reset instead of the generic response. Fixed by draining and discarding the rejected upload and closing after it ends (§4.3) |
+| A6 real browser (local) | Sign-in form, "check your email", stale link, confirm page, signed-in dashboard and sign-out all shown. **The first browser run found a real defect** (below) |
+| T-BACKOUT (pre-M1 snapshot → M1 → live links and sessions → retire → backout → snapshot) | Identical after normalizing permission order, on the second run. **The first run found 28 differing rows** (below) |
+
+**Defect found by A6: confirm failed in a real browser.** The sign-in pages sent
+`Referrer-Policy: no-referrer`. Under that policy Chrome sends `Origin: null` on the page's own
+form POST (recorded on the wire: `Origin: null`, no Referer). The exact-Origin CSRF check
+correctly refuses that, so nobody could finish signing in. The scripted HTTP test missed it
+because it sets Origin itself. Fix: the sign-in pages use `same-origin` (nothing is sent to
+other sites; these page URLs never carry a token). The `/auth/verify` redirect, the only URL
+that carries a token, keeps `no-referrer`. After the fix the browser sends the real Origin and
+the confirm succeeds. Quote-Queue's confirm page uses the same `no-referrer` + strict-Origin
+pair ([QQ] `app/auth/confirm/route.ts:189-197`, `lib/csrf.ts:117-121`); it may have the same
+latent defect. Not checked or changed there.
+
+**Defects found by T-BACKOUT: the backout did not restore four things.**
+1. UPDATE on the public sequences for anon/authenticated.
+2. Default privileges for future sequences and functions in `public`.
+3. EXECUTE for authenticated on functions no migration names (extension functions such as
+   PostGIS).
+4. The DNC guard's own `search_path`. The replayed hardening loop overwrote it, because in
+   migration order the guard came after the loop. Also a `service_role` grant that M1 added.
+
+All four are fixed in the generated `M1-backout.sql` and enforced by new checks in
+`scripts/verify-auth-migration-contract.mjs` (each mutation-tested). By design the backout
+leaves 24 M1-only `internal` functions and 2 sequences inert, executable only by their owner
+and `service_role`, and keeps the sign-in tables for audit. The hosted pre-cutover state can
+differ from the shim's imitation of Supabase defaults, so the real pre-cutover snapshot must
+still be compared on the day.
+
+## 27 · SMS impact (design only; nothing built, bought or configured)
+
+Answers items 1–5 of the shared SMS direction (2026-10-21). Phone numbers, providers and
+parameters below are proposals; the central decision owns them.
+
+| # | Item | This app |
+|---|---|---|
+| 1 | Branch, preserved core, held work | Branch `auth/same-origin-signin` (on top of `7e5dbac`). **Preserved core:** email-link sign-in (QQ decisions 19/35); `__Host-` sessions with 30-day idle and 90-day absolute limits; revocation on email/role/status change; uniform timing and request limits; the SendGrid seam; team administration; emergency sign-everyone-out; the same-origin server and SPA port. **Held, disabled, not deleted:** backup recovery codes (`internal.recovery_*`, `public.recovery_*`, `app/server/recovery/`, the recovery sign-in form; policy flag off). No email-only sensitive-action confirmation was ever built here, so none is held. |
+| 2 | Existing sensitive actions | All are admin class (MANAGER, link session only, M1 `lock_and_validate(array['manager']…)`): change a person's role, name or email (`team_update`); disable or enable (`team_set_active`); clear an email block (`team_block_clear`); sign everyone out (`team_sign_everyone_out`). **Current confirmation:** the manager session, plus a browser confirm dialog for sign-everyone-out only. **Proposed SMS path:** a one-action SMS confirmation for role, email and status changes. For sign-everyone-out, SMS would slow an emergency, so that trade-off is Hunter's call. **Not sensitive here:** batch, status, DNC and export actions (MANAGER/EDITOR business work); no SMS is proposed for them. This app holds no bank or TIN data. |
+| 3 | Boundaries, schema, retention, logging | **Provider boundary:** `app/server/sms/`, mirroring the mail seam. It has an adapter interface (start, check), a fake, normalized outcomes (`approved`, `denied`, `expired`, `rate_limited`, `unknown`) and one-shot calls, with no automatic resend after `unknown`. **Schema (a new M-file, not M1):** `internal.staff_phones` (user, E.164 stored with protection, `verified_at`, `phone_version`). `internal.sms_challenges` (app, environment, purpose, user, phone version, revocation epoch, expiry, attempts; for actions also the session, the exact action and a target hash; `consumed_at`; provider reference). **Transactions:** a provider call never sits inside a DB transaction. Sending: tx1 records the challenge, then the provider call, then tx2 records the outcome. Confirming: the provider check first, then ONE transaction re-checks authorization (`lock_and_validate`), consumes the grant and performs the action. **Revocation:** the existing identity-change trigger and `team_sign_everyone_out` also cancel open challenges. A phone edit bumps `phone_version`, which voids challenges and recovery sessions. **Retention:** a step in the existing nightly job (§23). **Logging:** never a code, never a full number (last two digits at most), never provider secrets. |
+| 4 | Tests | **Mock/local (A3/A4 style):** purpose isolation (an enrollment approval cannot satisfy recovery or an action); a single-use grant under two concurrent confirmations; replay after consume; a phone edit or revoke racing a verify; emergency sign-out cancelling challenges; a provider `unknown` producing no resend; per-user, phone and IP limits plus a global budget; a wrong number routed to manager correction; the email-outage path; an SMS-recovery session cannot confirm actions by SMS (the default). **Hosted only (needs central approval):** real Verify behaviour (the same code reused within its validity period, isolation across services), rate limits, delivery to staff carriers, spend alarms. |
+| 5 | Dependencies, config, policy, blockers | **Dependencies:** none needed in code (the REST API can be called with `fetch`). Needed outside the code: the central provider account; one Verify service per app and environment (and per purpose if isolation requires it); least-privilege server credentials in Render settings (`SMS_MODE`, service ID, key). **Unresolved policy:** code length, lifetime, attempts and resend spacing; US-only; whether emergency sign-out keeps phone enrollment (decision 4 left this open); whether SMS-recovery sessions may confirm actions; which actions require SMS. **Actual blockers:** none for design. Implementation needs Hunter's approval, the central provider decision, and staff mobile numbers entered by a manager (not authorized now). |
