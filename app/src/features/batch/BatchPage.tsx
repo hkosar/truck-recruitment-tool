@@ -1,5 +1,5 @@
 import { useMutation, useQuery, useQueryClient } from '@tanstack/react-query';
-import { useState } from 'react';
+import { useEffect, useState } from 'react';
 import { Link, useParams, useSearchParams } from 'react-router-dom';
 import { usePermissions, useSession } from '../../app/guards';
 import { LogContactPanel } from '../../components/LogContactPanel';
@@ -13,6 +13,7 @@ import { apiGet, apiPost } from '../../lib/api';
 import { WARNING_META } from '../../lib/warnings';
 import type { BatchMemberRow, BatchStatusCounts, Status, WarningCode } from '../../types/domain';
 import type { Database, Json } from '../../types/database';
+import { BatchActions } from './BatchActions';
 import { BulkBar } from './BulkBar';
 import { ContactOptionsModal } from './ContactOptionsModal';
 import { CONTACT_CHOICES, contactFilter, fmtMiles, INSURANCE_CHOICES, insuranceMin, isCriticalRow, selectableDots, SORT_CHOICES, sortChoice, toggleDot, togglePage } from './listModel';
@@ -68,7 +69,8 @@ function StatusControl({ row, batchId, locked }: { row: BatchMemberRow; batchId:
 export default function BatchPage() {
   const { batchId } = useParams<{ batchId: string }>();
   const [searchParams, setSearchParams] = useSearchParams();
-  const { canEdit } = usePermissions();
+  const { canEdit, isManager } = usePermissions();
+  const [, setClock] = useState(0);
   const { userId } = useSession();
   const queryClient = useQueryClient();
   const [loggingCarrier, setLoggingCarrier] = useState<BatchMemberRow | null>(null);
@@ -174,6 +176,13 @@ export default function BatchPage() {
     },
   });
 
+  // No realtime: show how old the list is and let anyone reload it. Re-render every 30 s so the age stays honest.
+  useEffect(() => {
+    const timer = window.setInterval(() => setClock((tick) => tick + 1), 30_000);
+    return () => window.clearInterval(timer);
+  }, []);
+  const reload = () => { void queryClient.invalidateQueries({ queryKey: queryKeys.batch(batchId as string) }); };
+
   const updateParam = (key: string, value: string | null) => {
     const next = new URLSearchParams(searchParams);
     if (value) next.set(key, value);
@@ -205,7 +214,7 @@ export default function BatchPage() {
       {dncStatus === 'pending' ? <div className="border border-info bg-info-tint px-4 py-3 text-xs text-info">Checking the do-not-contact list…</div> : null}
       {message ? <div className="border border-info bg-info-tint px-4 py-3 text-sm text-info">{message}</div> : null}
       {loggingCarrier && !outreachLocked && !rows.some((row) => row.dot_number === loggingCarrier.dot_number && row.do_not_contact) ? <LogContactPanel carrierName={loggingCarrier.legal_name} submitting={contactMutation.isPending} onCancel={() => setLoggingCarrier(null)} onSubmit={(input) => contactMutation.mutate(input)} /> : null}
-      <header className="flex flex-wrap items-start justify-between gap-4"><div><h1 className="text-xl font-extrabold tracking-[-0.02em]">{batch.name}</h1><div className="mt-1 text-xs text-text-muted">{batch.customer || 'No customer'}{batch.job ? ` · ${batch.job}` : ''}</div><div className="mt-2 flex flex-wrap gap-1.5">{batch.batch_zones.map((zone, index) => <span key={zone.id} className="border border-border bg-surface px-2 py-1 text-[10px] font-bold text-text-muted">{String.fromCharCode(65 + index)} · {zone.label}</span>)}</div></div>{canEdit ? <button type="button" disabled={refreshMutation.isPending} onClick={() => refreshMutation.mutate()} className="bg-accent px-4 py-2.5 text-xs font-bold text-accent-ink disabled:opacity-50">{refreshMutation.isPending ? 'Refreshing…' : 'Refresh batch'}</button> : null}</header>
+      <header className="flex flex-wrap items-start justify-between gap-4"><div><h1 className="text-xl font-extrabold tracking-[-0.02em]">{batch.name}</h1><div className="mt-1 text-xs text-text-muted">{batch.customer || 'No customer'}{batch.job ? ` · ${batch.job}` : ''}</div><div className="mt-2 flex flex-wrap gap-1.5">{batch.batch_zones.map((zone, index) => <span key={zone.id} className="border border-border bg-surface px-2 py-1 text-[10px] font-bold text-text-muted">{String.fromCharCode(65 + index)} · {zone.label}</span>)}</div></div><div className="flex items-center gap-2"><span className="text-[11px] text-text-subtle" aria-live="polite">Updated {membersQuery.dataUpdatedAt ? fmtRel(new Date(membersQuery.dataUpdatedAt).toISOString()) : 'just now'}</span><button type="button" disabled={membersQuery.isFetching} onClick={reload} className="border border-border-strong px-4 py-2.5 text-xs font-bold disabled:opacity-50">{membersQuery.isFetching ? 'Refreshing…' : 'Refresh'}</button>{canEdit ? <button type="button" disabled={refreshMutation.isPending} onClick={() => refreshMutation.mutate()} className="bg-accent px-4 py-2.5 text-xs font-bold text-accent-ink disabled:opacity-50">{refreshMutation.isPending ? 'Updating carriers…' : 'Refresh batch'}</button> : null}<BatchActions batchId={batchId} batchName={batch.name} canRename={canEdit} canDelete={isManager} /></div></header>
 
       <section className="grid border border-border bg-surface sm:grid-cols-3 lg:grid-cols-6">{[['Carriers', total], ['With phone', counts.with_phone], ['With email', counts.with_email], ['Interested', counts.interested_count], ['Warnings', counts.warnings_count], ['DNC', counts.dnc_count]].map(([label, value], index) => <div key={String(label)} className={`px-4 py-3 text-center ${index ? 'border-l border-border' : ''}`}><div className="text-[10px] font-extrabold uppercase tracking-[0.08em] text-text-subtle">{label}</div><div className={`mt-1 text-xl font-extrabold tabular-nums ${label === 'Warnings' || label === 'DNC' ? 'text-crit' : ''}`}>{fmtInt(Number(value))}</div></div>)}</section>
 
