@@ -22,3 +22,4 @@ yarn-error.log*
 .vscode/*
 !.vscode/extensions.json
 .idea
+dist-server
