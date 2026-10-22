@@ -58,7 +58,9 @@ const HEADER = ['USDOT', 'Legal name', 'DBA', 'Contact name', 'Phone', 'Cell pho
 /** One CSV cell. Quotes everything that needs it and defuses spreadsheet formulas. */
 export function csvCell(value: unknown): string {
   let s = value === null || value === undefined ? '' : value instanceof Date ? value.toISOString() : String(value);
-  if (/^[=+\-@\t\r]/.test(s)) s = `'${s}`;
+  // OWASP CSV injection: = + - @ and a leading tab/CR/LF, also written full-width (NFKC maps ＝＋－＠ to ASCII) or after spaces.
+  const folded = s.normalize('NFKC');
+  if (/^[=+\-@\t\r\n]/.test(folded) || /^[=+\-@]/.test(folded.trimStart())) s = `'${s}`;
   return /[",\r\n]/.test(s) ? `"${s.replaceAll('"', '""')}"` : s;
 }
 

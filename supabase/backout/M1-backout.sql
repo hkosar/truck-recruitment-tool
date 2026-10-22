@@ -188,6 +188,7 @@ end;
 $$;
 
 -- ---- public.bulk_set_status (20260720001100_rpc.sql:491-528)
+drop function if exists public.bulk_set_status(uuid, bigint[], batch_carrier_status);  -- M1 returns jsonb; the original returns int
 create or replace function public.bulk_set_status(
   p_batch_id uuid,
   p_dots     bigint[],

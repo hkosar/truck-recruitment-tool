@@ -16,6 +16,14 @@ describe('csvCell', () => {
     expect(csvCell('@cmd')).toBe("'@cmd");
     expect(csvCell('-2+3')).toBe("'-2+3");
   });
+  it('defuses leading tab, CR, LF, full-width characters and formulas after spaces', () => {
+    expect(csvCell('\tcmd')).toBe("'\tcmd");
+    expect(csvCell('\rcmd')).toBe('"\'\rcmd"');
+    expect(csvCell('\ncmd')).toBe('"\'\ncmd"');
+    for (const c of ['＝1+1', '＋1', '－1', '＠SUM(1)']) expect(csvCell(c)).toBe(`'${c}`);
+    expect(csvCell('  =1+1')).toBe("'  =1+1");
+    expect(csvCell('a=b')).toBe('a=b');
+  });
 });
 
 describe('buildCsv', () => {

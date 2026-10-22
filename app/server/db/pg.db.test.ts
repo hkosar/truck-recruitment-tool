@@ -436,8 +436,61 @@ describe.skipIf(!enabled)('A3 database: stores, permissions, concurrency, deadli
     await adminQuery(`insert into public.batch_carriers (batch_id, dot_number) values ($1, 1400004)`, [BATCH]);
     await bulk.query('commit');
     await bulk.end();
-    expect(count.rows[0].n).toBe(1);
+    expect(count.rows[0].n).toEqual({ changed: 1, skipped: [] });
     expect((await adminQuery(`select status from public.batch_carriers where batch_id = $1 and dot_number = 1400004`, [BATCH])).rows[0].status).toBe('new');
+  });
+
+  const statusOf = async (dot: number) => (await adminQuery(`select status from public.batch_carriers where batch_id = $1 and dot_number = $2`, [BATCH, dot])).rows[0].status;
+
+  it('bulk status skips global-DNC members (flag or carrier-wide suppression) and says which', async () => {
+    await resetEditor();
+    await adminQuery('update public.carriers set do_not_contact = true where dot_number = 1400002');
+    await adminQuery(`insert into public.contact_suppressions (dot_number, channel, reason, source) values (1400003, 'all', 'A3 bulk', 'manual') on conflict (dot_number, channel) where value is null do update set expires_at = null`);
+    const ed = await session(EDITOR);
+    const vw = await session(VIEWER);
+    const r = await data.rpc(ed, 'bulk_set_status', { p_batch_id: BATCH, p_dots: [1400001, 1400002, 1400003], p_status: 'contacted' });
+    expect(r).toEqual({ changed: 1, skipped: [1400002, 1400003] });
+    expect(await statusOf(1400001)).toBe('contacted');
+    expect(await statusOf(1400002)).toBe('new');
+    expect(await statusOf(1400003)).toBe('new');
+    const skippedLog = (await adminQuery(`select payload from public.batch_activity where batch_id = $1 and payload ? 'skipped_dnc' order by id desc limit 1`, [BATCH])).rows[0].payload;
+    expect(skippedLog.skipped_dnc).toEqual([1400002, 1400003]);
+    // An expired suppression no longer blocks.
+    await adminQuery(`update public.contact_suppressions set expires_at = now() - interval '1 minute' where dot_number = 1400003 and channel = 'all' and value is null`);
+    expect(await data.rpc(ed, 'bulk_set_status', { p_batch_id: BATCH, p_dots: [1400003], p_status: 'interested' })).toEqual({ changed: 1, skipped: [] });
+    await expect(data.rpc(vw, 'bulk_set_status', { p_batch_id: BATCH, p_dots: [1400001], p_status: 'new' })).rejects.toBeInstanceOf(NotPermittedError);
+    await resetEditor();
+  });
+
+  it('bulk status vs a concurrent DNC set, both orders, decided by the carrier lock', async () => {
+    await resetEditor();
+    const ed = await session(EDITOR);
+    const ed2 = await session(EDITOR2);
+    // Bulk first: the DNC set waits for the bulk transaction; the status change already happened.
+    const bulkC = await appClient(ed);
+    const first = await bulkC.query(`select public.bulk_set_status($1, array[1400002]::bigint[], 'contacted') as n`, [BATCH]);
+    expect(first.rows[0].n).toEqual({ changed: 1, skipped: [] });
+    const dncC = await appClient(ed2);
+    const dnc = dncC.query("select public.set_do_not_contact(1400002, true, 'A3 race')");
+    expect(await isBlocked(dnc)).toBe(true);
+    await bulkC.query('commit');
+    await dnc;
+    await dncC.query('commit');
+    expect(await statusOf(1400002)).toBe('contacted');
+    // DNC first: the bulk call waits for the DNC transaction, then skips the carrier.
+    await adminQuery('update public.carriers set do_not_contact = false where dot_number = 1400003');
+    const dnc2 = await appClient(ed2);
+    await dnc2.query("select public.set_do_not_contact(1400003, true, 'A3 race')");
+    const bulk2 = await appClient(ed);
+    const late = bulk2.query(`select public.bulk_set_status($1, array[1400001, 1400003]::bigint[], 'interested') as n`, [BATCH]);
+    expect(await isBlocked(late)).toBe(true);
+    await dnc2.query('commit');
+    expect((await late).rows[0].n).toEqual({ changed: 1, skipped: [1400003] });
+    await bulk2.query('commit');
+    expect(await statusOf(1400001)).toBe('interested');
+    expect(await statusOf(1400003)).toBe('new');
+    for (const c of [bulkC, dncC, dnc2, bulk2]) await c.end();
+    await resetEditor();
   });
 
   it('batch list: insurance and distance extras; CSV leaves out global-DNC carriers in the database, logs the export, refuses viewers', async () => {
