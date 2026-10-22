@@ -1,7 +1,7 @@
 import { Readable } from 'node:stream';
 import { describe, expect, it } from 'vitest';
 import { isDeliberateNavigation, PingThrottle, renewalReason, renewedExpiry, SESSION_WINDOWS, WRITE_RPCS } from './activity';
-import { BODY_LIMITS, readBodyLimited, type BodySource } from './body';
+import { BODY_LIMITS, DRAIN_CAP_BYTES, readBodyLimited, type BodySource } from './body';
 import { readFormFields } from './form';
 import { getClientIp } from './ip';
 
@@ -28,22 +28,25 @@ describe('readBodyLimited (T-BODY, unit level)', () => {
     }
     const source: BodySource = endless();
     const result = await readBodyLimited(source, { maxBytes: BODY_LIMITS.auth });
+    // Rejected at the first chunk that crosses 32 KiB (the 5th of 8 KiB), with nothing buffered.
     expect(result).toEqual({ ok: false, reason: 'too_large' });
-    // The reader stops pulling but never closes the source: on a real request that would
-    // destroy the socket before the handler can send its bounded response.
+    expect(produced).toBeGreaterThanOrEqual(5);
+    // The rest is drained and DISCARDED (so a real client is not reset mid-upload), bounded by
+    // the drain cap; the reader never closes the source (that would destroy the socket).
+    await new Promise((r) => setTimeout(r, 300));
     expect(returned).toBe(false);
-    // Stops at the first chunk that crosses 32 KiB: 5 chunks of 8 KiB, never more.
-    expect(produced).toBe(5);
+    expect(produced).toBeLessThanOrEqual(5 + DRAIN_CAP_BYTES / (8 * 1024) + 1);
   });
 
-  it('rejects a declared oversize before reading anything', async () => {
+  it('rejects a declared oversize before buffering anything; a huge declared size is not even drained', async () => {
     let read = false;
     async function* body() {
       read = true;
       yield Buffer.from('x');
     }
-    const result = await readBodyLimited(body(), { maxBytes: 10, declaredLength: '11' });
+    const result = await readBodyLimited(body(), { maxBytes: 10, declaredLength: String(10 + DRAIN_CAP_BYTES + 1) });
     expect(result).toEqual({ ok: false, reason: 'declared_too_large' });
+    await new Promise((r) => setTimeout(r, 50));
     expect(read).toBe(false);
     expect(await readBodyLimited(body(), { maxBytes: 10, declaredLength: '1e3' })).toEqual({ ok: false, reason: 'declared_invalid' });
   });
