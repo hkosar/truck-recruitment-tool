@@ -1147,7 +1147,11 @@ Application Control blocks the `pg_trgm` and `citext` libraries on this machine,
 `pg_trgm` and `citext` are stand-ins: text-WKT geography, trigram indexes skipped, `citext` as
 a text domain. The evidence covers permissions, locking, transactions and HTTP behaviour; it
 does not cover geography maths, trigram search speed or Supabase's own services. The cluster
-was stopped and its directory deleted after the runs.
+was stopped and its directory deleted after the runs. Each run records the postmaster PID, its
+parent PID and start time; it is stopped only with `pg_ctl -D <owned data dir> stop -m fast`,
+with second-level UTC times for "stop requested" and "stop confirmed", and the redacted
+`postgres.log` tail is copied after the stop (shutdown lines kept) before the directory is
+deleted (`supabase/tests/a3/README.md`).
 
 **Measured results.**
 

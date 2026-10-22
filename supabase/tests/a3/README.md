@@ -5,7 +5,9 @@ port checked free beforehand (**never 55432**, which another process holds and m
 stopped), in a new task-owned directory under the sign-in owner's thread storage that is
 refused if it already exists, stopped with `pg_ctl -D <owned data dir> stop -m fast` and
 deleted afterwards. PIDs, parent PID, start time, port and directory are recorded in the
-owner's `a3-ownership.md`. Build the database with
+owner's `a3-ownership.md`. Log retention: record second-level UTC times for "stop requested"
+and "stop confirmed", copy the `postgres.log` tail (redacted) AFTER the stop so the shutdown
+lines are kept, and only then delete the directory. Build the database with
 
     A3_PGPASSWORD=... node scripts/a3-build-test-db.mjs --owner-dir <task dir> --port <port> --db tr_signin_test
 
