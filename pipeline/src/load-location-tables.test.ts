@@ -1,4 +1,5 @@
 import assert from 'node:assert/strict';
+import { randomBytes } from 'node:crypto';
 import { readFileSync } from 'node:fs';
 import pg from 'pg';
 import { cityCentroidFallback, zipCentroidFallback, type GeocodeCandidate } from './geocode.js';
@@ -8,9 +9,12 @@ import {
 } from './load-location-tables.js';
 
 /**
- * Always runs the pure parsing tests. The database part runs only when LOCATION_TEST_DB_URL
- * (a throwaway LOCAL Postgres, loopback only) and the two real Gazetteer files
+ * Always runs the pure parsing tests. The database part runs only when LOCATION_TEST_ADMIN_URL (an
+ * admin connection to a throwaway LOCAL Postgres, loopback only) and the two real Gazetteer files
  * (LOCATION_TEST_ZCTA, LOCATION_TEST_PLACES) are provided; otherwise it is reported as skipped.
+ * The test CREATES its own uniquely named database, stamps it with a marker, holds an advisory lock on
+ * it, and drops only that database at the end. It refuses a database name that already exists and never
+ * drops a supplied database or schema.
  */
 
 const ZCTA = ['GEOID|GEOIDFQ|ALAND|AWATER|ALAND_SQMI|AWATER_SQMI|INTPTLAT|INTPTLONG',
@@ -37,18 +41,57 @@ function pureTests(): void {
   assert.deepEqual(parseCliArgs(['--zcta=a', '--places=b']), { zcta: 'a', places: 'b', state: 'TX', apply: false }, 'dry-run is the default');
   assert.equal(parseCliArgs(['--zcta=a', '--places=b', '--apply']).apply, true);
   assert.throws(() => parseCliArgs(['--zcta=a']), /required/);
+  const amb = buildCityRows([PLACES.split('\n')[0] as string,
+    'TX|1|x|x|Reno city|25|A|900|1|1|1|32.9|-97.5', 'TX|2|x|x|Reno city|25|A|800|1|1|1|33.6|-95.5',
+    'TX|3|x|x|Sunset CDP|57|S|1|1|1|1|33.4|-97.9', 'TX|4|x|x|Sunset CDP|57|S|1|1|1|1|30.0|-96.0',
+    'TX|5|x|x|Lago Vista CDP|57|S|1|1|1|1|30.4|-97.9', 'TX|6|x|x|Lago Vista city|25|A|1|1|1|1|30.46|-97.99'].join('\n'), 'TX');
+  assert.deepEqual(amb.ambiguous, ['Reno', 'Sunset'], 'same-standing duplicates are omitted and reported');
+  assert.deepEqual(amb.rows.map((r) => r.city), ['Lago Vista'], 'town + CDP of one name resolves to the incorporated one');
+
+  const panhandle = buildZipRows(['GEOID|INTPTLAT|INTPTLONG', '73960|36.0|-102.5', '73950|36.0|-102.6', '73301|30.2|-97.7'].join('\n'));
+  assert.deepEqual(panhandle.rows.map((r) => r.zcta), ['73301', '73960'], '73960 is added; the rest of 739xx is not');
   console.log('ok  pure parsing tests');
 }
 
-async function dbTests(url: string, zctaFile: string, placesFile: string): Promise<void> {
-  const host = new URL(url).hostname;
-  if (host !== '127.0.0.1' && host !== 'localhost') throw new Error('LOCATION_TEST_DB_URL must be loopback');
-  const pool = new pg.Pool({ connectionString: url, max: 2 });
+function realFileTests(zctaFile: string, placesFile: string): void {
+  const cities = buildCityRows(readFileSync(placesFile, 'utf8'));
+  const names = new Set(cities.rows.map((r) => r.city.toLowerCase()));
+  for (const dup of ['reno', 'lakeside', 'oak ridge', 'sunset', 'chula vista']) {
+    assert.ok(cities.ambiguous.map((n) => n.toLowerCase()).includes(dup), `${dup} is reported ambiguous`);
+    assert.ok(!names.has(dup), `${dup} is not loaded`);
+  }
+  assert.ok(names.has('lago vista') && names.has('austin'), 'resolvable and unique names are still loaded');
+  const zips = buildZipRows(readFileSync(zctaFile, 'utf8'));
+  assert.ok(zips.rows.some((r) => r.zcta === '73960'), '73960 is loaded from the real file');
+  assert.ok(!zips.rows.some((r) => r.zcta === '73950'), 'other 739xx ZIPs are not');
+  console.log(JSON.stringify({ ambiguousCityNames: cities.ambiguous.length, names: cities.ambiguous }));
+  console.log('ok  real-file tests');
+}
+
+async function dbTests(adminUrl: string, zctaFile: string, placesFile: string): Promise<void> {
+  const adminParsed = new URL(adminUrl);
+  if (adminParsed.hostname !== '127.0.0.1' && adminParsed.hostname !== 'localhost') throw new Error('LOCATION_TEST_ADMIN_URL must be loopback');
+  // A brand-new database that only this run creates; a name that already exists is refused, never reused.
+  const dbName = `tr_loctest_${randomBytes(6).toString('hex')}`;
+  const token = randomBytes(16).toString('hex');
+  const admin = new pg.Client({ connectionString: adminUrl });
+  await admin.connect();
+  const existing = await admin.query('select 1 from pg_database where datname = $1', [dbName]);
+  if (existing.rowCount) throw new Error(`refusing: database ${dbName} already exists`);
+  await admin.query(`create database ${dbName}`);
+  const url = new URL(adminUrl);
+  url.pathname = `/${dbName}`;
+  const pool = new pg.Pool({ connectionString: url.toString(), max: 2 });
   const q = (sql: string, p: unknown[] = []) => pool.query(sql, p);
+  const lock = new pg.Client({ connectionString: url.toString() });
   try {
-    // Local Postgres has no PostGIS: shim just enough for geocode.ts's st_setsrid(st_makepoint(..))::geography.
-    await q(`drop schema if exists public cascade; create schema public;
-      create domain geography as point;
+    await lock.connect();
+    await lock.query('create table _owner_marker (token text not null)');
+    await lock.query('insert into _owner_marker values ($1)', [token]);
+    const got = await lock.query('select pg_try_advisory_lock(727002) as ok');
+    if (!got.rows[0]?.ok) throw new Error('test database is claimed by another process');
+    // Local Postgres has no PostGIS: shim just enough for geocode.ts st_setsrid(st_makepoint(..))::geography.
+    await q(`create domain geography as point;
       create function st_makepoint(double precision, double precision) returns point language sql immutable as 'select point($1,$2)';
       create function st_setsrid(point, int) returns point language sql immutable as 'select $1';
       create table zip_centroids (zcta text primary key, lat double precision not null, lng double precision not null);
@@ -86,6 +129,8 @@ async function dbTests(url: string, zctaFile: string, placesFile: string): Promi
     for (let i = 0; i < 20; i++) add('ZIP missing (null), real city', 'city', known[i % known.length] as string, 'TX', '');
     for (let i = 0; i < 20; i++) add('bad ZIP and made-up city', 'none', 'NOWHEREVILLE', 'TX', '00000');
     for (let i = 0; i < 20; i++) add('non-TX city, bad ZIP', 'none', 'SANTA FE', 'NM', '87501');
+    for (let i = 0; i < 10; i++) add('ambiguous city name (two Reno city), bad ZIP', 'none', 'RENO', 'TX', '00000');
+    for (let i = 0; i < 10; i++) add('Panhandle ZIP 73960', 'zip', 'WHEREVER', 'TX', '73960');
     await q(`insert into carriers (dot_number, phy_street, phy_city, phy_state, phy_zip5, address_hash)
              select * from unnest($1::bigint[], $2::text[], $3::text[], $4::text[], $5::text[], $6::text[])`,
       [carriers.map((c) => c.dotNumber), carriers.map((c) => c.street), carriers.map((c) => c.city), carriers.map((c) => c.state),
@@ -110,14 +155,26 @@ async function dbTests(url: string, zctaFile: string, placesFile: string): Promi
     console.log('ok  database tests');
   } finally {
     await pool.end();
+    await lock.end().catch(() => undefined);
+    // Drop only the database this run created, and only after proving it carries this run's marker.
+    const verify = new pg.Client({ connectionString: url.toString() });
+    let mine = false;
+    try {
+      await verify.connect();
+      mine = (await verify.query('select 1 from _owner_marker where token = $1', [token])).rowCount === 1;
+    } catch { /* fall through: not dropped */ } finally { await verify.end().catch(() => undefined); }
+    if (mine) await admin.query(`drop database ${dbName} with (force)`);
+    else console.error(`NOT dropping ${dbName}: marker not verified`);
+    await admin.end();
   }
 }
 
 async function main(): Promise<void> {
   pureTests();
-  const { LOCATION_TEST_DB_URL: url, LOCATION_TEST_ZCTA: z, LOCATION_TEST_PLACES: p } = process.env;
+  const { LOCATION_TEST_ADMIN_URL: url, LOCATION_TEST_ZCTA: z, LOCATION_TEST_PLACES: p } = process.env;
+  if (z && p) realFileTests(z, p);
   if (url && z && p) await dbTests(url, z, p);
-  else console.log('skip database tests (set LOCATION_TEST_DB_URL, LOCATION_TEST_ZCTA, LOCATION_TEST_PLACES)');
+  else console.log('skip database tests (set LOCATION_TEST_ADMIN_URL, LOCATION_TEST_ZCTA, LOCATION_TEST_PLACES)');
 }
 
 main().catch((e) => {

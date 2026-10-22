@@ -27,7 +27,9 @@ import { parseSupabaseDbTarget, verifyPipelineTarget } from './target-guard.js';
  *                              ("Austin city" -> "Austin"), because geocode.ts matches the
  *                              carrier's phy_city against `city` case-insensitively;
  *                              lat/lng <- INTPTLAT / INTPTLONG
- * The ZCTA file has no state column, so Texas ZCTAs are selected by ZIP prefix (TX_ZIP_PREFIXES).
+ * The ZCTA file has no state column, so Texas ZCTAs are selected by ZIP prefix (TX_ZIP_PREFIXES) plus
+ * the single Panhandle ZIP 73960 (TX_EXTRA_ZIPS). Place names shared by two places of the same standing
+ * (two "Reno city", two "Lakeside town", ...) are ambiguous: they are omitted and listed in the report.
  * ZCTAs are Census approximations of ZIP areas, so a few USPS ZIPs (PO-box-only, unique-organisation
  * ZIPs) have no ZCTA row and fall through to the city tier.
  */
@@ -37,6 +39,9 @@ export interface CityRow { state: string; city: string; lat: number; lng: number
 
 /** Texas ZIPs run 75000-79999, plus 733xx (IRS Austin, 73301/73344) and 885xx (El Paso). */
 export const TX_ZIP_PREFIXES: readonly string[] = ['75', '76', '77', '78', '79', '733', '885'];
+
+/** Individual Texas ZCTAs outside those prefixes (73960 is in the Panhandle; the rest of 739xx is not Texas). */
+export const TX_EXTRA_ZIPS: readonly string[] = ['73960'];
 
 /** Sanity floors for Texas: a truncated/wrong file is refused rather than loaded. */
 export const MIN_TX_ZIP_ROWS = 1500;
@@ -79,7 +84,7 @@ export function buildZipRows(text: string, prefixes: readonly string[] = TX_ZIP_
   for (const r of parseGazetteer(text)) {
     const zcta = r.GEOID ?? '';
     if (!/^\d{5}$/.test(zcta)) { rejected.push(`bad ZCTA "${zcta}"`); continue; }
-    if (!prefixes.some((p) => zcta.startsWith(p))) continue;
+    if (!prefixes.some((p) => zcta.startsWith(p)) && !TX_EXTRA_ZIPS.includes(zcta)) continue;
     const c = parseCoord(r.INTPTLAT, r.INTPTLONG);
     if (!c) { rejected.push(`bad coordinates for ZCTA ${zcta}`); continue; }
     out.set(zcta, { zcta, ...c });
@@ -94,9 +99,16 @@ export function placeBaseName(name: string, lsad: string): string {
   return name;
 }
 
-export function buildCityRows(text: string, state = 'TX'): ParseReport<CityRow> {
-  // Two places can share a base name (e.g. a town and a CDP): keep the incorporated one, else the larger.
-  const best = new Map<string, { row: CityRow; incorporated: boolean; land: number }>();
+export interface CityParseReport extends ParseReport<CityRow> {
+  /** Base names shared by two or more places of the same standing; left out of the fallback. */
+  ambiguous: string[];
+}
+
+export function buildCityRows(text: string, state = 'TX'): CityParseReport {
+  // A town and a CDP with the same base name are one place: keep the incorporated one. Two places of
+  // the SAME standing (two "Reno city", two "Lakeside town", two CDPs) cannot be told apart from the
+  // carrier's city text, so that name is omitted rather than guessed.
+  const byName = new Map<string, Array<{ row: CityRow; incorporated: boolean }>>();
   const rejected: string[] = [];
   for (const r of parseGazetteer(text)) {
     if (r.USPS !== state) continue;
@@ -104,15 +116,22 @@ export function buildCityRows(text: string, state = 'TX'): ParseReport<CityRow> 
     const city = placeBaseName(r.NAME ?? '', lsad);
     const c = parseCoord(r.INTPTLAT, r.INTPTLONG);
     if (!city || !c) { rejected.push(`bad place "${r.NAME ?? ''}" (${r.GEOID ?? ''})`); continue; }
-    const cand = { row: { state, city, ...c }, incorporated: INCORPORATED_LSAD.has(lsad), land: Number(r.ALAND) || 0 };
     const key = city.toLowerCase();
-    const cur = best.get(key);
-    if (!cur || (cand.incorporated && !cur.incorporated) || (cand.incorporated === cur.incorporated && cand.land > cur.land)) {
-      best.set(key, cand);
-    }
+    const list = byName.get(key) ?? [];
+    list.push({ row: { state, city, ...c }, incorporated: INCORPORATED_LSAD.has(lsad) });
+    byName.set(key, list);
   }
-  const rows = [...best.values()].map((b) => b.row).sort((a, b) => a.city.localeCompare(b.city));
-  return { rows, rejected };
+  const rows: CityRow[] = [];
+  const ambiguous: string[] = [];
+  for (const list of byName.values()) {
+    const inc = list.filter((x) => x.incorporated);
+    const top = inc.length > 0 ? inc : list;
+    if (top.length === 1) rows.push((top[0] as { row: CityRow }).row);
+    else ambiguous.push((top[0] as { row: CityRow }).row.city);
+  }
+  rows.sort((x, y) => x.city.localeCompare(y.city));
+  ambiguous.sort((x, y) => x.localeCompare(y));
+  return { rows, rejected, ambiguous };
 }
 
 export interface UpsertCounts { inserted: number; updated: number; unchanged: number }
@@ -201,6 +220,7 @@ async function main(): Promise<void> {
     zipRows: zips.rows.length,
     cityRows: cities.rows.length,
     rejected: zips.rejected.length + cities.rejected.length,
+    ambiguousCityNames: { count: cities.ambiguous.length, names: cities.ambiguous },
     sampleZip: zips.rows.slice(0, 2),
     sampleCity: cities.rows.slice(0, 2),
   };
