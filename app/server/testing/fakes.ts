@@ -25,6 +25,8 @@ export class FakeAuthStore implements AuthStore {
   calls: string[] = [];
   /** Make the next calls fail or hang. */
   failWith: Error | undefined;
+  /** Make only these methods fail (by name). */
+  failCalls = new Set<string>();
   bucketDelayMs = 0;
   nowMs = () => Date.now();
   private seq = 0;
@@ -32,6 +34,7 @@ export class FakeAuthStore implements AuthStore {
   private guard(name: string) {
     this.calls.push(name);
     if (this.failWith) throw this.failWith;
+    if (this.failCalls.has(name)) throw new Error(`injected failure: ${name}`);
   }
 
   async bucketHit(_kind: 'request', ipHash: string, emailHash: string): Promise<{ ipCount: number; emailCount: number }> {

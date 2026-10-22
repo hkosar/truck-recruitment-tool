@@ -193,7 +193,10 @@ export function createApp(deps: AppDeps): (req: AppRequest) => Promise<AppRespon
       );
       admitted = admitRequest({ emailValid: email !== undefined, ipCount: counts.ipCount, emailCount: counts.emailCount });
     } catch {
+      // Fail closed (no email), same response; but never silent: an operator alert per
+      // occurrence (Gate 2 review N1). The page tells the person to try again if nothing arrives.
       log('signin_admission_failed');
+      log('operator_alert', { category: 'signin_admission_unavailable' });
     }
     const wait = target - deps.monotonic();
     if (wait > 0) await deps.sleep(wait);
@@ -204,6 +207,7 @@ export function createApp(deps: AppDeps): (req: AppRequest) => Promise<AppRespon
       response.afterResponse = () =>
         withDeadline(identityWork(email), config.continuationBudgetMs).catch(() => {
           log('signin_identity_work_failed');
+          log('operator_alert', { category: 'signin_identity_work_failed' });
         });
     }
     if (!body.ok) response.closeAfter = true;

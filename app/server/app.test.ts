@@ -140,6 +140,19 @@ describe('sign-in request: one generic response for every outcome', () => {
     for (const r of [r1, r2]) expect(location(r)).toBe(`${ORIGIN}/signin?sent=1`);
     expect(env.mail.count + slow.mail.count).toBe(0);
     expect(env.logs.some((l) => l.event === 'signin_admission_failed')).toBe(true);
+    // Never silent (Gate 2 review N1): both kinds of admission failure raise an operator alert.
+    for (const e of [env, slow]) expect(e.logs.filter((l) => l.event === 'operator_alert' && l.fields?.category === 'signin_admission_unavailable')).toHaveLength(1);
+  });
+
+  it('a failure in the post-response identity work raises an operator alert (never silent)', async () => {
+    const env = setup();
+    env.auth.failCalls.add('mintIfAllowed'); // admission works; the post-response mint fails
+    const r = await env.handle(fakeRequest({ method: 'POST', url: '/auth/request', body: 'email=editor%40example.test', headers: { 'content-type': FORM } }));
+    expect(location(r)).toBe(`${ORIGIN}/signin?sent=1`);
+    await new Promise((res) => setTimeout(res, 50));
+    expect(env.auth.calls).toContain('mintIfAllowed');
+    expect(env.mail.count).toBe(0);
+    expect(env.logs.some((l) => l.event === 'operator_alert' && l.fields?.category === 'signin_identity_work_failed')).toBe(true);
   });
 
   it('20 per IP: the 21st request from one IP sends nothing', async () => {

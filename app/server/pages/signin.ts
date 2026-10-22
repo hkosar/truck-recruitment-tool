@@ -59,11 +59,15 @@ ${note}<form class="signin-form" method="post" action="/auth/request">
   );
 }
 
-/** Decision 19: the one generic paragraph, for every outcome. */
+/**
+ * Decision 19: the one generic paragraph, for every outcome. Worded as intent plus retry guidance
+ * ("we'll email", "if nothing arrives within 5 minutes, try again") because admission fails
+ * closed when the database is unavailable (Gate 2 review N1); a departure from QQ's wording.
+ */
 export function renderSignInSent(options?: PageOptions): string {
   return page(
     `<section class="signin-block" aria-live="polite">
-<p class="signin-message"><b>Check your email.</b> If that address is on the roster, we emailed a sign-in link. It works once and expires in 15 minutes. <a class="signin-link" href="/signin">Use a different address</a></p>
+<p class="signin-message"><b>Check your email.</b> If that address is on the roster, we'll email you a sign-in link. It works once and expires in 15 minutes. If nothing arrives within 5 minutes, try again. <a class="signin-link" href="/signin">Use a different address</a></p>
 </section>`,
     options,
   );

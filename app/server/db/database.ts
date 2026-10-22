@@ -26,6 +26,14 @@ export interface DatabaseOptions {
   connectionString: string;
   max?: number;
   connectionTimeoutMillis?: number;
+  idleTimeoutMillis?: number;
+  /**
+   * Readiness (Gate 2 review N1): keep at least this many connections open. `warm()` opens them
+   * at start-up and a timer re-opens any that idle eviction or a broken link removed, so the
+   * sign-in admission check does not pay connection set-up inside its 600 ms budget.
+   */
+  minWarm?: number;
+  keepWarmIntervalMs?: number;
 }
 
 // Match PostgREST's JSON numbers (the SPA was written against it): int8 and numeric as numbers;
@@ -90,12 +98,43 @@ export class Database {
       connectionString: options.connectionString,
       max: options.max ?? 10,
       connectionTimeoutMillis: options.connectionTimeoutMillis ?? 250,
-      idleTimeoutMillis: 30_000,
+      idleTimeoutMillis: options.idleTimeoutMillis ?? 30_000,
       types: typeParsers,
     });
     this.pool.on('error', () => {
       // An idle client died; the pool replaces it. Nothing to log beyond the category.
     });
+    this.minWarm = options.minWarm ?? 0;
+    if (this.minWarm > 0) {
+      this.keepWarmTimer = setInterval(() => void this.warm().catch(() => undefined), options.keepWarmIntervalMs ?? 5_000);
+      this.keepWarmTimer.unref();
+    }
+  }
+
+  private readonly minWarm: number;
+  private keepWarmTimer: ReturnType<typeof setInterval> | undefined;
+
+  /** Pool counters for readiness checks and tests. */
+  get poolCounts(): { total: number; idle: number; waiting: number } {
+    return { total: this.pool.totalCount, idle: this.pool.idleCount, waiting: this.pool.waitingCount };
+  }
+
+  /**
+   * Open connections up to `minWarm` (each runs `select 1`, so a dead link is found now, not by
+   * a sign-in). Resolves to the number of open connections; rejects if none can be opened.
+   */
+  async warm(): Promise<number> {
+    if (this.closed) return 0;
+    const missing = Math.max(0, this.minWarm - this.pool.totalCount);
+    if (missing > 0) {
+      const clients = await Promise.all(Array.from({ length: missing }, () => this.pool.connect()));
+      try {
+        await Promise.all(clients.map((c) => c.query('select 1')));
+      } finally {
+        for (const c of clients) c.release();
+      }
+    }
+    return this.pool.totalCount;
   }
 
   async transaction<T>(options: TxOptions, work: (tx: Tx) => Promise<T>): Promise<T> {
@@ -169,6 +208,7 @@ export class Database {
 
   async close(): Promise<void> {
     this.closed = true;
+    if (this.keepWarmTimer) clearInterval(this.keepWarmTimer);
     await this.pool.end();
   }
 }

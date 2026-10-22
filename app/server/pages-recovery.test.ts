@@ -28,7 +28,7 @@ describe('sign-in pages (decisions 19/35)', () => {
   });
   it('result: the one generic paragraph with "Use a different address"', () => {
     const html = renderSignInSent();
-    expect(html).toContain('<b>Check your email.</b> If that address is on the roster, we emailed a sign-in link. It works once and expires in 15 minutes.');
+    expect(html).toContain("<b>Check your email.</b> If that address is on the roster, we'll email you a sign-in link. It works once and expires in 15 minutes. If nothing arrives within 5 minutes, try again.");
     expect(html).toContain('>Use a different address</a>');
     expect(html.match(/<p /g)).toHaveLength(1);
   });

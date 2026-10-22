@@ -30,7 +30,11 @@ export interface RunningServer {
 
 export async function startServer(env: ServerEnv, options: { log?: Logger; mail?: MailAdapter; timing?: Partial<typeof DEFAULT_TIMING> } = {}): Promise<RunningServer> {
   const log = options.log ?? consoleLogger;
-  const db = new Database({ connectionString: env.databaseUrl });
+  // Two pools (Gate 2 review N1): sign-in work (admission, mint, redeem, session checks) has its
+  // own small pool, kept warm, so long data transactions can never take the connection the
+  // 600 ms admission check needs; the data pool serves everything else.
+  const authDb = new Database({ connectionString: env.databaseUrl, max: 4, connectionTimeoutMillis: 400, minWarm: 2 });
+  const db = new Database({ connectionString: env.databaseUrl, max: 10 });
   const lifecycle = new Lifecycle();
   const mail = options.mail ?? (env.emailMode === 'production' && env.sendgrid
     ? new SendGridAdapter({ ...env.sendgrid, fetch: (url, init) => fetch(url, init) })
@@ -45,7 +49,7 @@ export async function startServer(env: ServerEnv, options: { log?: Logger; mail?
       ...DEFAULT_TIMING,
       ...options.timing,
     },
-    auth: new PgAuthStore(db),
+    auth: new PgAuthStore(authDb),
     data: new PgDataStore(db),
     mail,
     lifecycle,
@@ -56,6 +60,14 @@ export async function startServer(env: ServerEnv, options: { log?: Logger; mail?
     sleep: (ms) => new Promise((r) => setTimeout(r, ms)),
     random: Math.random,
   });
+  const warmStarted = Date.now();
+  try {
+    const open = await authDb.warm();
+    log('db_warmup', { pool: 'auth', open, ms: Date.now() - warmStarted });
+  } catch {
+    // Serve anyway: every sign-in path fails closed and alerts; the keep-warm timer retries.
+    log('operator_alert', { category: 'db_unavailable_at_start' });
+  }
   const server = createNodeServer(handle, lifecycle, env.trustedProxyHops, log);
   await new Promise<void>((resolve) => server.listen(env.port, env.host, resolve));
   const address = server.address();
@@ -68,7 +80,9 @@ export async function startServer(env: ServerEnv, options: { log?: Logger; mail?
     async shutdown(budgetMs = 45_000) {
       server.close();
       server.closeIdleConnections?.();
-      const abandoned = await lifecycle.shutdown(budgetMs, () => db.close());
+      const abandoned = await lifecycle.shutdown(budgetMs, async () => {
+        await Promise.all([db.close(), authDb.close()]);
+      });
       log('shutdown', { abandoned });
       return abandoned;
     },
