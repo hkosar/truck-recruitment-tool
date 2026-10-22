@@ -47,14 +47,26 @@ begin
 end
 $$;
 
--- Explicit fixture ownership: exactly the metadata-tagged, no-password fixture identities.
+-- Explicit fixture ownership: exactly the metadata-tagged, no-password fixture identities, plus
+-- (after M1b, D8) fixture profiles an earlier cleanup left without their Auth user: only the
+-- seven fixed fixture ids of profile-fixtures.sql, on the fixture domain, with no Auth user. The
+-- same rule as supabase/staging/cleanup-fixtures.sql.
 create temporary table tmp_fixture_people on commit drop as
 select u.id, lower(u.email) as email
 from auth.users u
 where u.raw_user_meta_data->>'test_run_id' = 'stg-db-20260723-0042'
   and u.raw_user_meta_data->>'test_only' = 'true'
   and u.email like '%@tnbs-recruiter.example.invalid'
-  and u.encrypted_password is null;
+  and u.encrypted_password is null
+union
+select p.id, lower(p.email)
+from public.profiles p
+where p.id in ('71000000-0000-4000-8000-000000000001', '71000000-0000-4000-8000-000000000002',
+               '71000000-0000-4000-8000-000000000003', '71000000-0000-4000-8000-000000000004',
+               '71000000-0000-4000-8000-000000000005', '71000000-0000-4000-8000-000000000006',
+               '71000000-0000-4000-8000-000000000007')
+  and p.email like '%@tnbs-recruiter.example.invalid'
+  and not exists (select 1 from auth.users u where u.id = p.id);
 
 -- A1 sessions (they reference recovery codes), then A2 links (events keep their snapshot; the
 -- link reference is SET NULL), then A3 recovery codes and sets, then A4 blocks, then audit.
