@@ -260,16 +260,38 @@ if (!(eMismatch >= 0 && eMismatch < eInsert && eInsert < eUpdate)) fail('M1: evi
 if (!evidence.includes("'Bounced Address', 'Unsubscribed Address', 'Spam Reporting Address', 'Invalid Address'")) fail('M1: evidence must gate drop blocks on the recipient-reason allowlist');
 
 // K4. Emergency sign-everyone-out: manager only (admin class), every live session (no user
-// filter, so the actor's own and recovery sessions too), one audit row, recovery enrollment
-// untouched (open decision).
+// filter, so the actor's own and recovery sessions too), one audit row. Hunter decision
+// 2026-10-21: it also cancels every unused sign-in link and unused recovery credential, under
+// the roster lock held exclusively, and every credential path takes that lock in SHARE mode
+// before any other lock, so no concurrent mint, redemption, enrollment or consumption survives.
 const eso = m1Function('function public.team_sign_everyone_out()')?.join('\n') ?? '';
 if (!eso) fail('M1: team_sign_everyone_out missing');
 else {
-  if (!eso.includes("internal.lock_and_validate(array['manager']::user_role[], array['link']")) fail('M1: emergency sign-out must be manager-only (link session)');
-  const upd = /update internal\.app_sessions[\s\S]*?;/.exec(eso)?.[0] ?? '';
+  if (!eso.includes("internal.lock_and_validate(array['manager']::user_role[], array['link'], '{}', true)")) fail('M1: emergency sign-out must be manager-only (link session) and hold the roster lock (p_roster = true)');
+  const code = stripComments(eso);
+  const upd = /update internal\.app_sessions[\s\S]*?;/.exec(code)?.[0] ?? '';
   if (!/where revoked_at is null;/.test(upd) || /user_id/.test(upd)) fail('M1: emergency sign-out must revoke every live session, with no user filter');
+  for (const [table, where] of [
+    ['signin_links', 'where used_at is null and revoked_at is null;'],
+    ['recovery_sets', 'where revoked_at is null;'],
+    ['recovery_codes', 'where used_at is null and revoked_at is null;'],
+  ]) {
+    const u = new RegExp(`update internal\\.${table}[\\s\\S]*?;`).exec(code)?.[0] ?? '';
+    if (!u.includes(where) || /user_id/.test(u) || !u.includes("'emergency_sign_out'")) fail(`M1: emergency sign-out must cancel every unused ${table} row (${where}), with no user filter`);
+  }
   if (!eso.includes("'emergency_sign_out'") || !eso.includes('insert into internal.auth_events')) fail('M1: emergency sign-out must write an actor audit row');
-  if (/recovery_(codes|sets)/.test(stripComments(eso))) fail('M1: emergency sign-out must not touch recovery enrollment (undecided)');
+}
+for (const sig of [
+  'function internal.auth_mint_lock(',
+  'function internal.auth_link_redeem(',
+  'function public.recovery_enroll(',
+  'function internal.recovery_consume(',
+]) {
+  const body = stripComments(m1Function(sig)?.join('\n') ?? '');
+  const SHARE = 'perform 1 from internal.roster_lock for share;';
+  const share = body.indexOf(SHARE);
+  const firstLock = body.search(/\bfor (no key )?update\b|\bfor share\b|internal\.lock_and_validate\(/);
+  if (share === -1 || firstLock !== share + SHARE.indexOf('for share')) fail(`M1: ${sig}) must take the roster lock in SHARE mode before any other lock (emergency sign-out coordination)`);
 }
 
 // L. Credential retirement order: NOLOGIN, terminate, confirm, then revoke.

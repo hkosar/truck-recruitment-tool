@@ -133,6 +133,107 @@ describe.skipIf(!enabled)('A3 database: stores, permissions, concurrency, deadli
     expect(events).toBeGreaterThanOrEqual(1);
   });
 
+  // Hunter decision 2026-10-21: emergency sign-out also cancels every unused sign-in link and
+  // unused recovery credential, coordinated with mint/redeem/enroll/consume through I1.
+  async function unusedLink(userId: string, hash: string) {
+    await adminQuery(
+      `insert into internal.signin_links (user_id, token_hash, recipient_email, created_at, expires_at, send_status, send_attempted_at)
+       select id, $2, email, now(), now() + interval '15 minutes', 'accepted', now() from public.profiles where id = $1`,
+      [userId, hash],
+    );
+  }
+  const linkRow = async (hash: string) => (await adminQuery('select used_at, revoked_at, revoked_reason from internal.signin_links where token_hash = $1', [hash])).rows[0];
+
+  it('emergency sign-out cancels every unused link and recovery credential; used records and the audit stay', async () => {
+    await resetEditor();
+    const t = Date.now();
+    await adminQuery(`update internal.recovery_sets set revoked_at = now(), revoked_reason = 'test_reset' where revoked_at is null`);
+    await unusedLink(EDITOR, `eso-unused-${t}`);
+    await unusedLink(EDITOR2, `eso-used-${t}`);
+    await adminQuery('update internal.signin_links set used_at = now() where token_hash = $1', [`eso-used-${t}`]);
+    const set = (await adminQuery('insert into internal.recovery_sets (user_id) values ($1) returning id', [VIEWER])).rows[0].id;
+    await adminQuery(
+      `insert into internal.recovery_codes (set_id, user_id, code_hash, expires_at, used_at)
+       values ($1, $2, $3, now() + interval '180 days', now()), ($1, $2, $4, now() + interval '180 days', null)`,
+      [set, VIEWER, `eso-code-used-${t}`, `eso-code-unused-${t}`],
+    );
+    const usedCode = (await adminQuery('select id from internal.recovery_codes where code_hash = $1', [`eso-code-used-${t}`])).rows[0].id;
+    const recoveryHash = `eso-recovery-session-${t}`;
+    await adminQuery(
+      `insert into internal.app_sessions (user_id, token_hash, kind, email_at_issue, created_at, last_seen_at, idle_window, expires_at, absolute_expires_at, recovery_code_id)
+       select id, $2, 'recovery', email, now(), now(), interval '1 hour', now() + interval '1 hour', now() + interval '12 hours', $3 from public.profiles where id = $1`,
+      [VIEWER, recoveryHash, usedCode],
+    );
+    const mg = await session(MANAGER);
+
+    expect(await data.teamSignEveryoneOut(mg)).toBeGreaterThanOrEqual(2);
+
+    expect(await linkRow(`eso-unused-${t}`)).toMatchObject({ used_at: null, revoked_reason: 'emergency_sign_out' });
+    const used = await linkRow(`eso-used-${t}`);
+    expect(used.used_at).not.toBeNull();
+    expect(used.revoked_at).toBeNull();
+    expect((await adminQuery('select revoked_reason from internal.recovery_sets where id = $1', [set])).rows[0].revoked_reason).toBe('emergency_sign_out');
+    const codes = (await adminQuery('select code_hash, used_at, revoked_reason from internal.recovery_codes where set_id = $1 order by code_hash', [set])).rows;
+    expect(codes.find((c) => c.code_hash === `eso-code-unused-${t}`)).toMatchObject({ used_at: null, revoked_reason: 'emergency_sign_out' });
+    expect(codes.find((c) => c.code_hash === `eso-code-used-${t}`)).toMatchObject({ revoked_reason: null });
+    expect(codes.find((c) => c.code_hash === `eso-code-used-${t}`)!.used_at).not.toBeNull();
+    expect(await auth.sessionInfo(recoveryHash)).toBeNull();
+    expect(await auth.sessionInfo(mg)).toBeNull();
+    const audit = (await adminQuery(
+      "select detail from internal.auth_events where kind = 'emergency_sign_out' and user_id = $1 order by id desc limit 1", [MANAGER])).rows[0].detail;
+    expect(audit.links_cancelled).toBeGreaterThanOrEqual(1);
+    expect(audit.recovery_sets_cancelled).toBeGreaterThanOrEqual(1);
+    expect(audit.recovery_codes_cancelled).toBeGreaterThanOrEqual(1);
+  });
+
+  it('emergency sign-out first: a concurrent redemption waits, then finds its link cancelled; no session survives', async () => {
+    await resetEditor();
+    const t = Date.now();
+    await unusedLink(EDITOR, `eso-race-a-${t}`);
+    const mg = await session(MANAGER);
+    const out = await appClient(mg);
+    await out.query('select public.team_sign_everyone_out()');
+    const redeem = auth.redeem(`eso-race-a-${t}`, `eso-race-a-session-${t}`);
+    expect(await isBlocked(redeem)).toBe(true);
+    await out.query('commit');
+    await out.end();
+    expect(await redeem).toBe(false);
+    expect(await auth.sessionInfo(`eso-race-a-session-${t}`)).toBeNull();
+    expect(await linkRow(`eso-race-a-${t}`)).toMatchObject({ used_at: null, revoked_reason: 'emergency_sign_out' });
+  });
+
+  it('redemption first: emergency sign-out waits, then revokes the session the redemption created', async () => {
+    await resetEditor();
+    const t = Date.now();
+    await unusedLink(EDITOR, `eso-race-b-${t}`);
+    const mg = await session(MANAGER);
+    const red = await appClient('none');
+    expect((await red.query('select internal.auth_link_redeem($1, $2) as id', [`eso-race-b-${t}`, `eso-race-b-session-${t}`])).rows[0].id).not.toBeNull();
+    const out = data.teamSignEveryoneOut(mg);
+    expect(await isBlocked(out)).toBe(true);
+    await red.query('commit');
+    await red.end();
+    expect(await out).toBeGreaterThanOrEqual(1);
+    expect(await auth.sessionInfo(`eso-race-b-session-${t}`)).toBeNull();
+    expect((await linkRow(`eso-race-b-${t}`)).used_at).not.toBeNull();
+  });
+
+  it('mint first: emergency sign-out waits, then cancels the link the mint created', async () => {
+    await resetEditor();
+    const t = Date.now();
+    const mg = await session(MANAGER);
+    const mint = await appClient('none');
+    const day = [new Date(t - 86_400_000), new Date(t + 86_400_000)];
+    const r = (await mint.query('select * from internal.auth_mint_lock($1, $2, $3)', ['editor@tnbs-recruiter.example.invalid', ...day])).rows[0];
+    await mint.query('select internal.auth_mint_insert($1, $2, $3, null)', [r.user_id, `eso-race-c-${t}`, r.recipient]);
+    const out = data.teamSignEveryoneOut(mg);
+    expect(await isBlocked(out)).toBe(true);
+    await mint.query('commit');
+    await mint.end();
+    await out;
+    expect(await linkRow(`eso-race-c-${t}`)).toMatchObject({ used_at: null, revoked_reason: 'emergency_sign_out' });
+  });
+
   it('role loss, write first: the demotion waits; the write commits first and stands; then the session is revoked', async () => {
     await resetEditor();
     const ed = await session(EDITOR);

@@ -305,7 +305,8 @@ export function createApp(deps: AppDeps): (req: AppRequest) => Promise<AppRespon
     } catch {
       // database unavailable: show the form; the request route fails closed on its own
     }
-    return html(req.query.get('sent') === '1' ? renderSignInSent(pageOptions) : renderSignInForm(pageOptions));
+    if (req.query.get('sent') === '1') return html(renderSignInSent(pageOptions));
+    return html(renderSignInForm(pageOptions, req.query.get('everyone') === '1' ? 'everyone_signed_out' : undefined));
   }
 
   // ---------------------------------------------------------------- webhook

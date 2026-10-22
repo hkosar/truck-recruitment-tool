@@ -356,6 +356,8 @@ describe('pages, legacy routes, SPA, maintenance', () => {
     const env = setup();
     const form = await env.handle(fakeRequest({ url: '/signin' }));
     expect(form.body).toContain('Email me a sign-in link');
+    expect(form.body).not.toContain('Everyone has been signed out');
+    expect((await env.handle(fakeRequest({ url: '/signin?everyone=1' }))).body).toContain('Everyone has been signed out, including you.');
     for (const p of ['/login', '/register', '/forgot', '/reset', '/pending']) expect(location(await env.handle(fakeRequest({ url: p })))).toBe(`${ORIGIN}/signin`);
     const anon = await env.handle(fakeRequest({ url: '/batches/1', headers: { accept: 'text/html' } }));
     expect(location(anon)).toBe(`${ORIGIN}/signin`);

@@ -1,7 +1,7 @@
 import { existsSync, readFileSync } from 'node:fs';
 import { resolve } from 'node:path';
 import { describe, expect, it } from 'vitest';
-import { renderConfirm, renderRecoveryForm, renderSignInForm, renderSignInSent, renderStale, signInPageHeaders, STALE_MESSAGE } from './pages/signin';
+import { EVERYONE_SIGNED_OUT_MESSAGE, renderConfirm, renderRecoveryForm, renderSignInForm, renderSignInSent, renderStale, signInPageHeaders, STALE_MESSAGE } from './pages/signin';
 import { CODE_ALPHABET, generateCode, generateCodeSet, normalizeCode } from './recovery/codes';
 import { RECOVERY_COLUMNS, recoveryEnabled, recoveryRouteAllowed } from './recovery/matrix';
 
@@ -16,6 +16,15 @@ describe('sign-in pages (decisions 19/35)', () => {
     expect(html).not.toMatch(/<h[1-6]|<label|password|Remember|Forgot|Create an account/i);
     expect(html.match(/<input/g)).toHaveLength(1);
     expect(html).not.toMatch(/<script/i);
+  });
+  it('after an emergency sign-out: the form says everyone (including you) is out and unused links and recovery codes are cancelled', () => {
+    expect(renderSignInForm()).not.toContain('signin-notice');
+    const html = renderSignInForm({}, 'everyone_signed_out');
+    expect(EVERYONE_SIGNED_OUT_MESSAGE).toMatch(/Everyone has been signed out, including you\./);
+    expect(EVERYONE_SIGNED_OUT_MESSAGE).toMatch(/unused sign-in links and recovery codes were cancelled/);
+    expect(html).toContain('role="status"');
+    expect(html).toContain('>Email me a sign-in link</button>');
+    expect(html.match(/<input/g)).toHaveLength(1);
   });
   it('result: the one generic paragraph with "Use a different address"', () => {
     const html = renderSignInSent();

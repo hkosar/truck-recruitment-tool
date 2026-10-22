@@ -829,7 +829,7 @@ This app checked the same risk by evidence:
 
 | Class | Rows | Mode | Taken by |
 |---|---|---|---|
-| I1 | `internal.roster_lock` | FOR UPDATE | M2, M3, M5 |
+| I1 | `internal.roster_lock` | FOR UPDATE (team operations, emergency sign-out); FOR SHARE (credential paths, §29) | M2, M3, M5, emergency sign-out; FOR SHARE as the first lock of link mint, link redeem, recovery enrollment and recovery consumption |
 | I2 | `public.profiles`, ascending id (actor and targets) | targets FOR NO KEY UPDATE; actor FOR SHARE; once, final mode | `lock_and_validate`; link redeem; recovery consumption/enrollment |
 | I3 | the actor's own `internal.app_sessions` row | FOR SHARE (FOR UPDATE for M17) | `lock_and_validate` |
 | B1 | `public.batches`, ascending id | FOR NO KEY UPDATE when updated; FOR UPDATE when deleted | M11 (refresh), `batches_update`/`batches_delete` |
@@ -1124,8 +1124,8 @@ change and the `MAINTENANCE_DATABASE_URL` setting, approved with the rollout).
 - *Decision 4 (emergency sign-everyone-out):* `public.team_sign_everyone_out()` (M1), MANAGER
   only, link session only. It revokes every app session (the actor's own and recovery sessions
   included) and writes one audit row, in one transaction under the roster lock. The Team page
-  button asks for confirmation (`app/src/features/users/UsersAdmin.tsx:126`). Whether it also
-  invalidates recovery or SMS enrollment is **not decided** and is not built.
+  button asks for confirmation. **Superseded by Hunter's decision of 2026-10-21 (§29):** it also
+  cancels every unused sign-in link and unused recovery credential.
 - *Recovery direction (coordinator reconciliation, 2026-10-21):* the later SMS direction is
   current. Saved backup-code implementation, enrollment and expansion are HELD; they are not
   built further or activated. SMS (backup login and confirmation of centrally designated
@@ -1195,9 +1195,9 @@ direction (§26); implementation, provider setup, sends and real phone collectio
 |---|---|---|
 | 1 | Branch, preserved core, held work | Branch `auth/same-origin-signin` (on top of `7e5dbac`). **Preserved core:** email-link sign-in (QQ decisions 19/35); `__Host-` sessions with 30-day idle and 90-day absolute limits; revocation on email/role/status change; uniform timing and request limits; the SendGrid seam; team administration; emergency sign-everyone-out; the same-origin server and SPA port. **Held, disabled, not deleted:** backup recovery codes (`internal.recovery_*`, `public.recovery_*`, `app/server/recovery/`, the recovery sign-in form; policy flag off). No email-only sensitive-action confirmation was ever built here, so none is held. |
 | 2 | Existing sensitive actions | All are admin class (MANAGER, link session only, M1 `lock_and_validate(array['manager']…)`): change a person's role, name or email (`team_update`); disable or enable (`team_set_active`); clear an email block (`team_block_clear`); sign everyone out (`team_sign_everyone_out`). **Current confirmation:** the manager session, plus a browser confirm dialog for sign-everyone-out only. **SMS path:** none designated. These are the only candidates for central designation; this app adds no SMS-protected action on its own. If sign-everyone-out were designated, SMS would slow an emergency (trade-off for Hunter). **Not sensitive here:** batch, status, DNC and export actions (MANAGER/EDITOR business work); no SMS is proposed for them. This app holds no bank or TIN data. |
-| 3 | Boundaries, schema, retention, logging | **Provider boundary:** `app/server/sms/`, mirroring the mail seam. It has an adapter interface (start, check), a fake, normalized outcomes (`approved`, `denied`, `expired`, `rate_limited`, `unknown`) and one-shot calls, with no automatic resend after `unknown`. **Schema (a new M-file, not M1):** `internal.staff_phones` (user, E.164 stored with protection, `verified_at`, `phone_version`). `internal.sms_challenges` (app, environment, purpose, user, phone version, revocation epoch, expiry, attempts; for actions also the session, the exact action and a target hash; `consumed_at`; provider reference). **Transactions:** a provider call never sits inside a DB transaction. Sending: tx1 records the challenge, then the provider call, then tx2 records the outcome. Confirming: the provider check first, then ONE transaction re-checks authorization (`lock_and_validate`), consumes the grant and performs the action. **Revocation:** the existing identity-change trigger and `team_sign_everyone_out` also cancel open challenges. A phone edit bumps `phone_version`, which voids challenges and recovery sessions. **Retention:** a step in the existing nightly job (§23). **Logging:** never a code, never a full number (last two digits at most), never provider secrets. |
+| 3 | Boundaries, schema, retention, logging | **Provider boundary:** `app/server/sms/`, mirroring the mail seam. It has an adapter interface (start, check), a fake, normalized outcomes (`approved`, `denied`, `expired`, `rate_limited`, `unknown`) and one-shot calls, with no automatic resend after `unknown`. **Schema (a new M-file, not M1):** `internal.staff_phones` (user, E.164 stored with protection, `verified_at`, `phone_version`). `internal.sms_challenges` (app, environment, purpose, user, phone version, revocation epoch, expiry, attempts; for actions also the session, the exact action and a target hash; `consumed_at`; provider reference). **Transactions:** a provider call never sits inside a DB transaction. Sending: tx1 records the challenge, then the provider call, then tx2 records the outcome. Confirming: the provider check first, then ONE transaction re-checks authorization (`lock_and_validate`), consumes the grant and performs the action. **Revocation:** the existing identity-change trigger and `team_sign_everyone_out` also cancel open challenges; emergency sign-out cancels every pending SMS recovery and sensitive-action challenge in the same transaction, and the SMS challenge paths take I1 FOR SHARE like the other credential paths (§29). A phone edit bumps `phone_version`, which voids challenges and recovery sessions. **Retention:** a step in the existing nightly job (§23). **Logging:** never a code, never a full number (last two digits at most), never provider secrets. |
 | 4 | Tests | **Mock/local (A3/A4 style):** purpose isolation (an enrollment approval cannot satisfy recovery or an action); a single-use grant under two concurrent confirmations; replay after consume; a phone edit or revoke racing a verify; emergency sign-out cancelling challenges; a provider `unknown` producing no resend; per-user, phone and IP limits plus a global budget; a wrong number routed to manager correction; the email-outage path; an SMS-recovery session cannot confirm actions by SMS (the default). **Hosted only (needs central approval):** real Verify behaviour (the same code reused within its validity period, isolation across services), rate limits, delivery to staff carriers, spend alarms. |
-| 5 | Dependencies, config, policy, blockers | **Dependencies:** none needed in code (the REST API can be called with `fetch`). Needed outside the code: the central provider account; one Verify service per app and environment (and per purpose if isolation requires it); least-privilege server credentials in Render settings (`SMS_MODE`, service ID, key). **Unresolved policy:** code length, lifetime, attempts and resend spacing; US-only; whether emergency sign-out keeps phone enrollment (decision 4 left this open); whether SMS-recovery sessions may confirm actions; which of the row 2 candidates (if any) are centrally designated. **Actual blockers:** none for design. Implementation needs Hunter's approval, the central provider decision, and staff mobile numbers entered by a manager (not authorized now). |
+| 5 | Dependencies, config, policy, blockers | **Dependencies:** none needed in code (the REST API can be called with `fetch`). Needed outside the code: the central provider account; one Verify service per app and environment (and per purpose if isolation requires it); least-privilege server credentials in Render settings (`SMS_MODE`, service ID, key). **Unresolved policy:** code length, lifetime, attempts and resend spacing; US-only; whether emergency sign-out keeps a verified phone enrollment (§29 cancels pending challenges; the verified phone itself is not addressed by the decision); whether SMS-recovery sessions may confirm actions; which of the row 2 candidates (if any) are centrally designated. **Actual blockers:** none for design. Implementation needs Hunter's approval, the central provider decision, and staff mobile numbers entered by a manager (not authorized now). |
 
 ## 28 · Deferred: independent authenticators (TOTP/passkeys) (backlog, 2026-10-21)
 
@@ -1209,3 +1209,49 @@ or at an explicit later security review. Existing safeguards stay: role checks, 
 session restrictions. Recovery sessions never perform sensitive actions: the team functions
 accept link sessions only (M1 `lock_and_validate(array['manager']…, array['link'] …)`, lines
 1264, 1306, 1338, 1363, 1580).
+
+## 29 · Emergency sign-out cancels unused codes (Hunter decision, 2026-10-21)
+
+**Decision.** The manager-only emergency sign-everyone-out cancels, in one transaction:
+- every active staff session, normal and recovery, the manager's own included;
+- every unused staff sign-in link;
+- every unused staff recovery credential (recovery sets and unused codes).
+
+Used links and used codes keep their records, and the audit row records the counts.
+Non-staff are out of scope (only staff hold these credentials). It is no longer an open decision.
+
+**Coordination, so no concurrent use survives.** Emergency sign-out holds the roster lock (I1)
+exclusively for its whole transaction. Every path that creates or uses a staff credential takes
+I1 in SHARE mode as its first lock: link mint (`auth_mint_lock`), link redemption
+(`auth_link_redeem`), recovery enrollment and recovery consumption. A concurrent path therefore
+either commits first, in which case its new link, session or codes are cancelled by the
+sign-out, or waits and then finds its link or code cancelled. A path that starts after the
+sign-out commits is a normal new sign-in. The offline contract check enforces the cancellations
+and the lock order (mutation-tested). Pending SMS recovery and sensitive-action challenges
+follow the same rule in the SMS design (§27 row 3).
+
+**Consequence (stated in the UI and here).** If email is down after an emergency sign-out,
+there is no fallback: nobody, the manager included, can sign in until email works and they sign
+in normally, then re-enrol any recovery method. There is no back door. The Team page states this
+before the button, the confirmation dialog repeats it, and afterwards the sign-in page says
+"Everyone has been signed out, including you. All unused sign-in links and recovery codes were
+cancelled."
+
+**Held artifacts.** Recovery codes stay held and disabled; the SQL text and tests cover them
+without enabling them. Never executed on a live system.
+
+**Local evidence (A3, throwaway PG16, 2026-10-22).**
+- `pg.db.test.ts`: 14/14 on three runs, including four new tests:
+  - cancellation: unused link, set and code cancelled; used link and code untouched; recovery
+    session and the manager's own session revoked; audit counts;
+  - sign-out first: the redemption waits, then gets no session;
+  - redemption first: the sign-out waits, then revokes the new session;
+  - mint first: the sign-out waits, then cancels the new link.
+- Without the SHARE lock, temporarily removed from the throwaway database only:
+  - the redemption-first test failed, because the new session survived the sign-out;
+  - the mint-first test failed, because the sign-out did not wait.
+
+  This shows the tests detect the race.
+- Role matrix 51/51.
+- Recovery consumption and enrollment races are covered by the text check only: the feature
+  stays disabled and was not switched on, even locally.

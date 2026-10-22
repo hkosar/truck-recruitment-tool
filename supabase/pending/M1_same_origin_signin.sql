@@ -974,6 +974,9 @@ declare
   v_id uuid;
   v_email text;
 begin
+  -- I1 in SHARE mode: emergency sign-out holds I1 exclusively, so it never interleaves with
+  -- this credential path (Hunter decision 2026-10-21; doc 15 section 29).
+  perform 1 from internal.roster_lock for share;
   select p.id into v_id from public.profiles p
   where lower(p.email) = lower(p_email) and p.status = 'approved' and p.role in ('manager', 'edit', 'view')
   order by p.id limit 1;
@@ -1088,6 +1091,9 @@ declare
   v_link    uuid;
   v_session uuid;
 begin
+  -- I1 in SHARE mode: emergency sign-out holds I1 exclusively, so it never interleaves with
+  -- this credential path (Hunter decision 2026-10-21; doc 15 section 29).
+  perform 1 from internal.roster_lock for share;
   select l.user_id into v_uid from internal.signin_links l where l.token_hash = p_token_hash;
   if v_uid is null then return null; end if;
 
@@ -1360,16 +1366,40 @@ security definer
 set search_path = public, internal, pg_temp
 as $$
 declare
-  v_actor uuid := internal.lock_and_validate(array['manager']::user_role[], array['link'], '{}', true);
-  v_count int;
+  -- Holds I1 exclusively (p_roster = true) for the whole transaction. Every credential path
+  -- (mint, redeem, recovery enroll, recovery consume) takes I1 in SHARE mode first, so a
+  -- concurrent one either commits before this starts (and its link, session or codes are
+  -- revoked below) or waits and then finds everything revoked. Hunter decision 2026-10-21.
+  v_actor    uuid := internal.lock_and_validate(array['manager']::user_role[], array['link'], '{}', true);
+  v_sessions int;
+  v_links    int;
+  v_sets     int;
+  v_codes    int;
 begin
+  -- All active staff sessions, normal and recovery, the actor's own included.
   update internal.app_sessions
      set revoked_at = clock_timestamp(), revoked_reason = 'emergency_sign_out'
    where revoked_at is null;
-  get diagnostics v_count = row_count;
+  get diagnostics v_sessions = row_count;
+  -- All unused sign-in links (used links stay as they are, for audit).
+  update internal.signin_links
+     set revoked_at = clock_timestamp(), revoked_reason = 'emergency_sign_out'
+   where used_at is null and revoked_at is null;
+  get diagnostics v_links = row_count;
+  -- All unused recovery credentials (held feature; used codes stay as they are).
+  update internal.recovery_sets
+     set revoked_at = clock_timestamp(), revoked_reason = 'emergency_sign_out'
+   where revoked_at is null;
+  get diagnostics v_sets = row_count;
+  update internal.recovery_codes
+     set revoked_at = clock_timestamp(), revoked_reason = 'emergency_sign_out'
+   where used_at is null and revoked_at is null;
+  get diagnostics v_codes = row_count;
   insert into internal.auth_events (user_id, kind, detail)
-  values (v_actor, 'emergency_sign_out', jsonb_build_object('sessions_revoked', v_count));
-  return v_count;
+  values (v_actor, 'emergency_sign_out', jsonb_build_object(
+    'sessions_revoked', v_sessions, 'links_cancelled', v_links,
+    'recovery_sets_cancelled', v_sets, 'recovery_codes_cancelled', v_codes));
+  return v_sessions;
 end
 $$;
 
@@ -1407,6 +1437,9 @@ begin
   if v_uid is null then
     raise exception 'not permitted' using errcode = 'insufficient_privilege';
   end if;
+  -- I1 in SHARE mode: emergency sign-out holds I1 exclusively, so it never interleaves with
+  -- this credential path (Hunter decision 2026-10-21; doc 15 section 29).
+  perform 1 from internal.roster_lock for share;
   perform internal.lock_and_validate(array['manager','edit','view']::user_role[], array['link'], array[v_uid]);
   select s.created_at into v_created from internal.app_sessions s
   where s.token_hash = nullif(current_setting('app.session_hash', true), '');
@@ -1470,6 +1503,10 @@ begin
   where c.code_hash = p_code_hash and lower(p.email) = lower(p_email)
     and c.used_at is null and c.revoked_at is null and s.revoked_at is null and c.expires_at > now();
   if v_code is null then return null; end if;                 -- no lock taken
+
+  -- I1 in SHARE mode: emergency sign-out holds I1 exclusively, so it never interleaves with
+  -- this credential path (Hunter decision 2026-10-21; doc 15 section 29).
+  perform 1 from internal.roster_lock for share;
 
   select p.email into v_email from public.profiles p
   where p.id = v_uid and p.status = 'approved' and p.role in ('manager', 'edit', 'view')

@@ -49,8 +49,9 @@ export default function UsersAdmin() {
   });
   const signEveryoneOut = useMutation({
     mutationFn: () => apiPost<{ revoked: number }>('/api/team/sign-everyone-out', {}),
-    // Every session ends, including this one: a full navigation shows the sign-in page.
-    onSuccess: () => window.location.assign('/signin'),
+    // Every session ends, including this one: a full navigation shows the sign-in page, which
+    // confirms that everyone was signed out and unused links and recovery codes were cancelled.
+    onSuccess: () => window.location.assign('/signin?everyone=1'),
     onError,
   });
 
@@ -118,12 +119,19 @@ export default function UsersAdmin() {
 
           <section className="border border-crit bg-surface p-4">
             <h2 className="text-[11px] font-extrabold uppercase tracking-[0.08em] text-crit">Emergency</h2>
-            <p className="mt-2 text-sm text-text-muted">Sign everyone out, including you. Everyone will need a new sign-in link.</p>
+            <p className="mt-2 text-sm text-text-muted">
+              Signs out every staff member at once, including you, and cancels all unused sign-in links and recovery codes. Everyone then needs a new sign-in link by email. If email is down, nobody can get back in until it works again: there is no other way in.
+            </p>
             <button
               type="button"
               disabled={busy}
               onClick={() => {
-                if (window.confirm('Sign everyone out now, including yourself?')) signEveryoneOut.mutate();
+                if (
+                  window.confirm(
+                    'Sign everyone out now?\n\nEvery staff member, including you, is signed out immediately, and all unused sign-in links and recovery codes are cancelled.\n\nEveryone will need a new sign-in link by email. If email is down, nobody can get back in until it works again.',
+                  )
+                )
+                  signEveryoneOut.mutate();
               }}
               className="mt-3 border border-crit px-4 py-2 text-xs font-bold text-crit hover:bg-crit-tint disabled:opacity-50"
             >

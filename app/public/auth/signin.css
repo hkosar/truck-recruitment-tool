@@ -21,3 +21,4 @@ body { margin: 0; background: #f7f6f4; color: #231f20; font-family: Montserrat, 
 .signin-message b, .signin-message strong { font-weight: 800; }
 .signin-link { font-size: 12px; font-weight: 700; color: #1e3a6e; text-align: center; }
 .signin-message .signin-link { margin-left: 6px; }
+.signin-notice { margin-bottom: 14px; }

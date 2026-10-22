@@ -42,10 +42,15 @@ ${body}
 }
 
 /** Decision 19: one email box over one full-width button. No heading, label or helper. */
-export function renderSignInForm(options?: PageOptions): string {
+/** Shown after an emergency sign-everyone-out (Hunter decision 2026-10-21). Static text only. */
+export const EVERYONE_SIGNED_OUT_MESSAGE =
+  'Everyone has been signed out, including you. All unused sign-in links and recovery codes were cancelled. Enter your email to get a new sign-in link.';
+
+export function renderSignInForm(options?: PageOptions, notice?: 'everyone_signed_out'): string {
+  const note = notice === 'everyone_signed_out' ? `<p class="signin-message signin-notice" role="status">${escapeHtml(EVERYONE_SIGNED_OUT_MESSAGE)}</p>\n` : '';
   return page(
     `<section class="signin-block">
-<form class="signin-form" method="post" action="/auth/request">
+${note}<form class="signin-form" method="post" action="/auth/request">
 <input class="signin-input" id="email" name="email" type="email" required autocomplete="email" placeholder="you@example.com" aria-label="Email" />
 <button class="signin-btn" type="submit">Email me a sign-in link</button>
 </form>
