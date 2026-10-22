@@ -8,6 +8,7 @@ import pg from 'pg';
 // PoolClient needs this named-import treatment.
 import type { PoolClient } from 'pg';
 import type { Config } from './config.js';
+import { parseSupabaseDbTarget } from './target-guard.js';
 
 const { Pool } = pg;
 
@@ -68,8 +69,15 @@ export function createSupabaseClient(config: Config): SupabaseClient {
 }
 
 export function createPgPool(config: Config): PgPool {
+  // Build from the guard's explicit fields, never from the raw string: pg would let query
+  // parameters in a connection string override host/user/port (see target-guard.ts).
+  const target = parseSupabaseDbTarget(config.SUPABASE_DB_URL);
   return new Pool({
-    connectionString: config.SUPABASE_DB_URL,
+    host: target.host,
+    port: target.port,
+    user: target.user,
+    password: target.password,
+    database: target.database,
     // Render Cron Jobs are short-lived, one-shot processes handling one chain at a time:
     // a small pool + explicit `closePipelineContext()` on exit beats tuning idle timeouts.
     max: 5,

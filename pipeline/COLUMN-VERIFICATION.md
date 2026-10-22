@@ -232,13 +232,32 @@ frequencies (`00750`, `01000`, `00300`) confirm the DDL's thousands-of-dollars i
 so the ×1000 conversion remains. `sources/authority.ts` now implements the live field names and
 code-to-enum mapping.
 
-### 2.3 SMS / safety datasets (`4y6x-dmck`, `sjpe-nzai`) — UNVERIFIED, dataset choice itself unresolved
+### 2.3 SMS / safety datasets — LIVE VERIFIED 2026-07-22; crash source remains gated
 
-No independent evidence found for either dataset ID or for the crash-total field names Part B
-§1.3 describes as "confirmed across several ingesting codebases" without naming which ones for
-the crash fields specifically. `⚠️R3` (which of the two datasets to use) is unresolved by this
-session's research. See `pipeline/src/sources/safety.ts`'s header for the full caveat and the
-`safety_rating`-on-census finding above (§1.8) as a possible partial mitigation.
+Direct official DOT DataHub metadata and sample queries resolved the core R3 question:
+
+- `4y6x-dmck` is **SMS AB PassProperty**, covering active interstate and intrastate Hazmat
+  carriers. `h9zy-gjn8` is **SMS C PassProperty**, covering active intrastate non-Hazmat
+  carriers. Both are public SODA-tabular datasets, have one carrier per row, use the same
+  21-column contract, and are disjoint. Both are required for complete Texas coverage.
+- Their exact 21-column schema includes `dot_number`, `insp_total`, `driver_insp_total`,
+  `driver_oos_insp_total`, `vehicle_insp_total`, `vehicle_oos_insp_total`, and BASIC measure /
+  Acute-Critical fields. They contain **no crash totals and no safety-rating columns**.
+- `sjpe-nzai` is only an href/catalog entry pointing to the separate SMS raw-data download
+  site, not a row-queryable SODA table. It is not a usable fallback for this pipeline.
+- `az4n-8mr2` directly exposes `safety_rating` and `safety_rating_date`. Live values use compact
+  `S`, `C`, and `U` codes, which map to Satisfactory, Conditional, and Unsatisfactory; dates
+  are `YYYYMMDD` text.
+- `4wxs-vbns` is the row-queryable **SMS Input - Crash** event dataset. It has crash events and
+  `fatalities`, `injuries`, `tow_away`, and `not_preventable`, but sample analysis found that
+  apparent report identifiers are not globally unique enough to aggregate safely without a
+  separately reviewed event-key contract. Crash totals therefore remain unset rather than
+  guessed; this prevents false `recent_crashes` warnings.
+
+`sources/safety.ts` now selects only the verified inspection fields, sources ratings from the
+Company Census dataset, validates impossible totals and unknown codes fail-closed, and supports
+an isolated capped `--dry-run=true` path. Permanent crash aggregation remains a deliberate
+follow-up after deduplication tests.
 
 ---
 

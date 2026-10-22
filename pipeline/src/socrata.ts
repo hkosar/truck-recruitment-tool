@@ -26,11 +26,11 @@ export const SOCRATA_DATASETS = {
   /** AuthHist -- All With History: authority grant/revocation timeline. Phase-2 nice-to-
    *  have, NOT ingested v1 (Part B §1.2) -- do not wire this into sources/authority.ts. */
   LI_AUTH_HISTORY: '9mw4-x3tu',
-  /** SMS AB PassProperty -- primary monthly safety source (Part B §1.3). */
+  /** SMS AB PassProperty -- active interstate + intrastate Hazmat property/passenger carriers. */
   SMS_AB_PASSPROPERTY: '4y6x-dmck',
-  /** CSMS/SMS Raw Data -- fallback if 4y6x-dmck isn't row-queryable by dot_number the way
-   *  Part B expects (⚠️R3, Part B §7). */
-  SMS_RAW_FALLBACK: 'sjpe-nzai',
+  /** SMS C PassProperty -- active intrastate non-Hazmat carriers. Same 21-column contract;
+   *  disjoint carrier population. Both datasets are required for complete Texas coverage. */
+  SMS_C_PASSPROPERTY: 'h9zy-gjn8',
 } as const;
 
 export type SocrataDatasetId = (typeof SOCRATA_DATASETS)[keyof typeof SOCRATA_DATASETS];
