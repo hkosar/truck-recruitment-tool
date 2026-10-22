@@ -234,6 +234,73 @@ describe.skipIf(!enabled)('A3 database: stores, permissions, concurrency, deadli
     expect(await linkRow(`eso-race-c-${t}`)).toMatchObject({ used_at: null, revoked_reason: 'emergency_sign_out' });
   });
 
+  // Gate 2 review finding 2: a session that expires while the write waits for a lock is refused
+  // after the wait (wall clock), on the real store paths. Waits stay under DATA_TX's 2 s lock timeout.
+  async function shortSession(userId: string, ms: number): Promise<string> {
+    const hash = `short-session-${++seq}-${Date.now()}`;
+    await adminQuery(
+      `insert into internal.app_sessions (user_id, token_hash, kind, email_at_issue, created_at, last_seen_at, idle_window, expires_at, absolute_expires_at)
+       select id, $2, 'link', email, now(), now(), interval '30 days', clock_timestamp() + make_interval(secs => $3::float / 1000), now() + interval '90 days'
+       from public.profiles where id = $1`,
+      [userId, hash, ms],
+    );
+    return hash;
+  }
+  async function holdLock(sql: string, params: unknown[]): Promise<pg.Client> {
+    const c = new pg.Client({ connectionString: ADMIN_URL });
+    await c.connect();
+    await c.query('begin');
+    await c.query(sql, params);
+    return c;
+  }
+  const sleep = (ms: number) => new Promise((r) => setTimeout(r, ms));
+
+  it('expiry during a wait, comment path: the batch-lock wait outlasts the session; the comment is refused, nothing written', async () => {
+    await resetEditor();
+    const marker = `expiry-comment-${Date.now()}`;
+    const s = await shortSession(EDITOR, 800);
+    const holder = await holdLock('select 1 from public.batches where id = $1 for update', [BATCH]);
+    const write = data.addComment(s, BATCH, marker);
+    expect(await isBlocked(write)).toBe(true);
+    await sleep(1_000);
+    await holder.query('commit');
+    await holder.end();
+    await expect(write).rejects.toBeInstanceOf(NotPermittedError);
+    expect((await adminQuery('select count(*)::int as n from public.batch_activity where comment = $1', [marker])).rows[0].n).toBe(0);
+  });
+
+  it('expiry during an implicit member-row wait: the status update is refused after the wait, row unchanged', async () => {
+    await resetEditor();
+    const s = await shortSession(EDITOR, 800);
+    const holder = await holdLock('select 1 from public.batch_carriers where batch_id = $1 and dot_number = $2 for update', [BATCH, 1400003]);
+    const write = data.setMemberStatus(s, BATCH, 1400003, 'contacted');
+    expect(await isBlocked(write)).toBe(true);
+    await sleep(1_000);
+    await holder.query('commit');
+    await holder.end();
+    await expect(write).rejects.toBeInstanceOf(NotPermittedError);
+    expect((await adminQuery('select status::text from public.batch_carriers where batch_id = $1 and dot_number = $2', [BATCH, 1400003])).rows[0].status).toBe('new');
+  });
+
+  it('expiry during a wait, link redemption: a link that expires while redemption waits is not redeemed', async () => {
+    await resetEditor();
+    const hash = `expiry-link-${Date.now()}`;
+    await adminQuery(
+      `insert into internal.signin_links (user_id, token_hash, recipient_email, created_at, expires_at, send_status, send_attempted_at)
+       select id, $2, email, ts, ts + interval '15 minutes', 'accepted', now()
+       from public.profiles, lateral (select clock_timestamp() - interval '15 minutes' + interval '800 milliseconds' as ts) t where id = $1`,
+      [EDITOR, hash],
+    );
+    const holder = await holdLock('select 1 from public.profiles where id = $1 for update', [EDITOR]);
+    const redeem = auth.redeem(hash, `expiry-link-session-${Date.now()}`);
+    expect(await isBlocked(redeem)).toBe(true);
+    await sleep(1_000);
+    await holder.query('commit');
+    await holder.end();
+    expect(await redeem).toBe(false);
+    expect(await linkRow(hash)).toMatchObject({ used_at: null });
+  });
+
   it('role loss, write first: the demotion waits; the write commits first and stands; then the session is revoked', async () => {
     await resetEditor();
     const ed = await session(EDITOR);

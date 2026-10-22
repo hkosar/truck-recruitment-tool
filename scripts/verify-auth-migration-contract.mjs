@@ -246,6 +246,27 @@ const recheck = m1Function('function internal.recheck_session()')?.join('\n') ??
 if (!recheck.includes('clock_timestamp()') || /\bnow\(\)/.test(stripComments(recheck))) fail('M1: recheck_session must use clock_timestamp(), never now()');
 const lavValidate = (m1Function('function internal.lock_and_validate(')?.join('\n') ?? '').split('-- Validate from the locked rows only.')[1] ?? '';
 if (!lavValidate.includes('clock_timestamp()') || /\bnow\(\)/.test(stripComments(lavValidate))) fail('M1: lock_and_validate validation must use clock_timestamp(), never now()');
+// K2d (Gate 2 review finding 2): implicit row-lock waits re-check the session in a BEFORE
+// UPDATE/DELETE trigger on every app-writable business table; the comment insert locks its batch
+// and re-checks (member_write_ok); link redemption re-checks expiry with the wall clock after
+// all its locks; the backout removes the triggers.
+{
+  const TABLES = ['batches', 'batch_zones', 'batch_carriers', 'batch_activity', 'contact_logs', 'carriers', 'cargo_other_values', 'contact_suppressions'];
+  const onWrite = m1Function('function internal.recheck_session_on_write()')?.join('\n') ?? '';
+  if (!onWrite.includes('perform internal.recheck_session();')) fail('M1: recheck_session_on_write must call recheck_session()');
+  const loop = /do \$recheck\$[\s\S]*?\$recheck\$;/.exec(m1Code)?.[0] ?? '';
+  if (!/before update or delete on public\.%I for each row execute function internal\.recheck_session_on_write\(\)/.test(loop)) fail('M1: the re-check trigger must be BEFORE UPDATE OR DELETE, FOR EACH ROW');
+  for (const t of TABLES) {
+    if (!loop.includes(`'${t}'`)) fail(`M1: ${t} lacks the session re-check trigger`);
+    if (!backout.includes(`drop trigger if exists ${t}_recheck_session on public.${t};`)) fail(`backout: does not drop ${t}_recheck_session`);
+  }
+  const comment = /create policy act_comment on public\.batch_activity for insert[\s\S]*?;/.exec(m1Code)?.[0] ?? '';
+  if (!comment.includes("internal.member_write_ok(array['manager','edit']::user_role[], batch_id, 'key share')")) fail('M1: act_comment must lock the batch and re-check the session (member_write_ok)');
+  const redeem = stripComments(m1Function('function internal.auth_link_redeem(')?.join('\n') ?? '');
+  const lastLock = redeem.lastIndexOf('for update;');
+  const wall = redeem.indexOf('l.expires_at > clock_timestamp()', lastLock);
+  if (lastLock === -1 || wall === -1 || /expires_at > now\(\)/.test(redeem)) fail('M1: link redemption must re-check expiry with clock_timestamp() after its last lock');
+}
 
 // K2c. Events outlive links: SET NULL reference plus a snapshot, so retention never fails or loses evidence.
 if (!/link_id\s+uuid references internal\.signin_links\(id\) on delete set null/.test(m1Code)) fail('M1: email_events.link_id must be ON DELETE SET NULL');

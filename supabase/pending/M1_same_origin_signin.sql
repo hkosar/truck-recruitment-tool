@@ -533,6 +533,35 @@ create trigger batch_carriers_insert_clean
   before insert on public.batch_carriers
   for each row execute function internal.batch_carriers_insert_clean();
 
+-- Session re-check after implicit row-lock waits. A BEFORE UPDATE/DELETE row trigger runs only
+-- after PostgreSQL has locked the target row (waiting if another transaction holds it), so
+-- re-validating here with clock_timestamp() (recheck_session) covers waits that a policy,
+-- evaluated before the wait, cannot. No-op when no app actor is locked (pipeline, operator).
+create function internal.recheck_session_on_write() returns trigger
+language plpgsql
+security definer
+set search_path = public, internal, pg_temp
+as $$
+begin
+  perform internal.recheck_session();
+  if tg_op = 'DELETE' then
+    return old;
+  end if;
+  return new;
+end
+$$;
+do $recheck$
+declare
+  t text;
+begin
+  foreach t in array array['batches', 'batch_zones', 'batch_carriers', 'batch_activity', 'contact_logs',
+                           'carriers', 'cargo_other_values', 'contact_suppressions'] loop
+    execute format('create trigger %I before update or delete on public.%I for each row execute function internal.recheck_session_on_write()',
+                   t || '_recheck_session', t);
+  end loop;
+end
+$recheck$;
+
 -- ----------------------------------------------------------------------------
 -- 6. Re-keyed trigger functions and RPCs. Bodies equal their latest originals except:
 --    auth.uid() -> internal.current_staff_id(); the can_edit() guard -> lock_and_validate;
@@ -916,7 +945,7 @@ create policy logs_delete on public.contact_logs for delete
 drop policy act_comment on public.batch_activity;
 drop policy act_delete on public.batch_activity;
 create policy act_comment on public.batch_activity for insert
-  with check (internal.actor_can_write(array['manager','edit']::user_role[])
+  with check (internal.member_write_ok(array['manager','edit']::user_role[], batch_id, 'key share')
               and activity_type = 'comment' and actor_id = internal.current_staff_id());
 create policy act_delete on public.batch_activity for delete
   using (internal.actor_can_write(array['manager']::user_role[]));
@@ -1104,10 +1133,15 @@ begin
 
   select l.id into v_link from internal.signin_links l
   where l.token_hash = p_token_hash and l.user_id = v_uid
-    and l.used_at is null and l.revoked_at is null and l.expires_at > now()
+    and l.used_at is null and l.revoked_at is null and l.expires_at > clock_timestamp()
     and lower(l.recipient_email) = lower(v_email)
   for update;
   if v_link is null then return null; end if;
+  -- After every lock (I1 share, I2, A2): the link may have expired while waiting.
+  if not exists (select 1 from internal.signin_links l
+                 where l.id = v_link and l.expires_at > clock_timestamp()) then
+    return null;
+  end if;
 
   update internal.signin_links set used_at = now() where id = v_link;
   insert into internal.app_sessions (user_id, token_hash, kind, email_at_issue, created_at, last_seen_at,
@@ -1514,7 +1548,7 @@ begin
   if v_email is null or lower(v_email) <> lower(p_email) then return null; end if;
 
   update internal.recovery_codes set used_at = now()
-   where id = v_code and used_at is null and revoked_at is null;
+   where id = v_code and used_at is null and revoked_at is null and expires_at > clock_timestamp();
   if not found then return null; end if;
 
   insert into internal.app_sessions (user_id, token_hash, kind, email_at_issue, created_at, last_seen_at,
