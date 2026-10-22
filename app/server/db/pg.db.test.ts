@@ -8,12 +8,14 @@
 
 import { createServer, connect, type Server, type Socket } from 'node:net';
 import pg from 'pg';
-import { afterAll, beforeAll, describe, expect, it } from 'vitest';
+import { afterAll, beforeAll, describe, expect, it, vi } from 'vitest';
 import { NotPermittedError, OutcomeUnknownError, RefusedError, UnavailableError } from '../core/types';
 import { Database } from './database';
 import { PgAuthStore } from './pg-auth-store';
 import { PgDataStore } from './pg-data-store';
 import { suiteDatabase } from '../testing/test-db';
+// Loaded machines (manager decision): only TEST timeouts are raised; product limits are unchanged.
+vi.setConfig({ testTimeout: 30_000, hookTimeout: 60_000 });
 
 const SUITE_DB = suiteDatabase('store');
 const APP_URL = SUITE_DB?.appUrl;

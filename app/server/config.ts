@@ -5,6 +5,12 @@ export interface ServerEnv {
   appOrigin: string;
   keys: { links: string; sessions: string; rate: string };
   databaseUrl: string;
+  /**
+   * How long an ordinary request may wait for a database connection before failing closed with a
+   * 503 and an operator alert (DB_ACQUIRE_TIMEOUT_MS, default 5000, 500-30000). The sign-in
+   * admission check keeps its own tight limit regardless.
+   */
+  dbAcquireTimeoutMs: number;
   emailMode: 'test' | 'production';
   sendgrid: { apiKey: string; fromAddress: string; fromName: string } | undefined;
   webhookPublicKey: string | undefined;
@@ -58,12 +64,17 @@ export function parseServerEnv(env: Record<string, string | undefined>): ServerE
     : undefined;
   const hops = Number(env.TRUSTED_PROXY_HOPS ?? '1');
   if (!Number.isInteger(hops) || hops < 0 || hops > 5) throw new ConfigError('TRUSTED_PROXY_HOPS', 'must be an integer 0-5');
+  const dbAcquireTimeoutMs = Number(env.DB_ACQUIRE_TIMEOUT_MS ?? '5000');
+  if (!Number.isInteger(dbAcquireTimeoutMs) || dbAcquireTimeoutMs < 500 || dbAcquireTimeoutMs > 30_000) {
+    throw new ConfigError('DB_ACQUIRE_TIMEOUT_MS', 'must be an integer number of milliseconds, 500-30000');
+  }
   const port = Number(env.PORT ?? '8788');
   if (!Number.isInteger(port) || port < 1 || port > 65535) throw new ConfigError('PORT', 'must be a port number');
   return {
     appOrigin,
     keys,
     databaseUrl,
+    dbAcquireTimeoutMs,
     emailMode,
     sendgrid,
     webhookPublicKey: env.SENDGRID_WEBHOOK_VERIFICATION_KEY || undefined,

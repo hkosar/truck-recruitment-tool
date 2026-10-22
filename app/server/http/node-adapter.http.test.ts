@@ -4,10 +4,14 @@
 
 import { request, type Server } from 'node:http';
 import type { AddressInfo } from 'node:net';
-import { afterEach, describe, expect, it } from 'vitest';
+import { afterEach, describe, expect, it, vi } from 'vitest';
 import { Lifecycle } from '../core/lifecycle';
 import type { AppRequest, AppResponse } from '../core/types';
 import { createNodeServer } from './node-adapter';
+import { CLOSE_GRACE_MS } from './respond';
+
+// Loaded machines (manager decision): only TEST timeouts are raised; product limits are unchanged.
+vi.setConfig({ testTimeout: 30_000, hookTimeout: 60_000 });
 
 const enabled = process.env.RUN_HTTP_TESTS === '1';
 const sleep = (ms: number) => new Promise((r) => setTimeout(r, ms));
@@ -69,28 +73,45 @@ describe.skipIf(!enabled)('Node binding over real HTTP (A4)', () => {
       // reading), then reads it. If the server resets the connection while upload bytes are
       // still arriving, the unread response is discarded and the client sees ECONNRESET/EPIPE
       // instead: the failure the reviewer described (N2).
-      const result = await new Promise<{ status: number; location?: string; connection?: string } | { error: string }>((resolve) => {
+      // Documented behaviour (doc 15 §4.3; manager decision): the bounded response arrives; an abort
+      // is acceptable ONLY when the client was still uploading after the server's grace window
+      // (CLOSE_GRACE_MS), measured here. An abort inside the window fails the test.
+      let uploadStart = 0;
+      let uploadDoneAt: number | undefined;
+      const result = await new Promise<{ status: number; location?: string; connection?: string } | { error: string; abortAtMs: number; uploadMs: number | null }>((resolve) => {
         const req = request({ host: '127.0.0.1', port, method: 'POST', path: '/auth/request', headers: { 'content-type': 'application/x-www-form-urlencoded', 'transfer-encoding': 'chunked' } }, (res) => {
           res.resume();
           res.on('end', () => resolve({ status: res.statusCode ?? 0, location: res.headers.location, connection: res.headers.connection }));
         });
-        req.on('error', (e: NodeJS.ErrnoException) => resolve({ error: e.code ?? e.message }));
+        req.on('error', (e: NodeJS.ErrnoException) => resolve({
+          error: e.code ?? e.message,
+          abortAtMs: Math.round(performance.now() - uploadStart),
+          uploadMs: uploadDoneAt === undefined ? null : Math.round(uploadDoneAt - uploadStart),
+        }));
         req.on('socket', (socket) => {
           socket.pause();
+          uploadStart = performance.now();
           void (async () => {
             for (let i = 0; i < 48 && !req.destroyed; i++) {
               req.write(Buffer.alloc(8 * 1024, 120));
               await sleep(i % 4 === 0 ? 15 : 0); // uneven: bursts, then pauses
             }
             if (!req.destroyed) req.end();
+            uploadDoneAt = performance.now();
             await sleep(30);
             socket.resume();
           })();
         });
       });
-      expect({ round, result }).toEqual({ round, result: { status: 303, location: '/signin?sent=1', connection: 'close' } });
+      if ('error' in result) {
+        // Only an abort after the client kept uploading past the grace window is acceptable.
+        const uploadedPastGrace = (result.uploadMs ?? result.abortAtMs) >= CLOSE_GRACE_MS && result.abortAtMs >= CLOSE_GRACE_MS;
+        expect({ round, result, uploadedPastGrace }).toMatchObject({ round, uploadedPastGrace: true });
+      } else {
+        expect({ round, result }).toEqual({ round, result: { status: 303, location: '/signin?sent=1', connection: 'close' } });
+      }
     }
-  }, 30_000);
+  }, 120_000);
 
   it('during shutdown a new request on a kept-alive connection gets 503 + Retry-After, not a reset', async () => {
     const lifecycle = new Lifecycle();

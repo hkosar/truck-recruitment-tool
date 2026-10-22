@@ -18,8 +18,14 @@ export interface TxOptions {
   sessionHash?: string;
   lockTimeoutMs?: number;
   statementTimeoutMs?: number;
-  /** Whole-transaction deadline including pool acquisition. */
+  /** Work deadline, counted from when a connection has been obtained. */
   deadlineMs?: number;
+  /**
+   * A tighter limit on waiting for a pool connection than the pool's own (connectionTimeoutMillis).
+   * Only the pre-response sign-in admission check uses it (D9/F-2); ordinary requests wait up to
+   * the pool's tolerant limit (DB_ACQUIRE_TIMEOUT_MS) (manager decision on Gate 2 load failures).
+   */
+  acquireTimeoutMs?: number;
 }
 
 export interface DatabaseOptions {
@@ -38,6 +44,10 @@ export interface DatabaseOptions {
   warmQueryTimeoutMs?: number;
   /** Test hook only: the warm-up statement (default `select 1`). */
   warmSql?: string;
+  /** Pool name for operator signals ('auth' or 'data'). */
+  label?: string;
+  /** Called whenever obtaining a connection fails or exceeds its limit (an operator signal). */
+  onAcquireFailure?: (label: string) => void;
 }
 
 // Match PostgREST's JSON numbers (the SPA was written against it): int8 and numeric as numbers;
@@ -112,6 +122,8 @@ export class Database {
       // An idle client died; the pool replaces it. Nothing to log beyond the category.
     });
     this.minWarm = options.minWarm ?? 0;
+    this.label = options.label ?? 'db';
+    this.onAcquireFailure = options.onAcquireFailure;
     this.warmQueryTimeoutMs = options.warmQueryTimeoutMs ?? 2_000;
     this.warmSql = options.warmSql ?? 'select 1';
     if (this.minWarm > 0) {
@@ -121,6 +133,40 @@ export class Database {
   }
 
   private readonly minWarm: number;
+  private readonly label: string;
+  private readonly onAcquireFailure: ((label: string) => void) | undefined;
+
+  /**
+   * A pool connection, optionally within a limit tighter than the pool's own. If that limit
+   * expires first, the connection that arrives later is released at once (never leaked).
+   */
+  private acquire(limitMs: number | undefined): Promise<PoolClient> {
+    const pending = this.pool.connect();
+    if (!limitMs) return pending;
+    return new Promise<PoolClient>((resolve, reject) => {
+      let settled = false;
+      const timer = setTimeout(() => {
+        if (settled) return;
+        settled = true;
+        pending.then((late) => late.release(), () => undefined);
+        reject(new Error('acquire limit exceeded'));
+      }, limitMs);
+      pending.then(
+        (client) => {
+          if (settled) return;
+          settled = true;
+          clearTimeout(timer);
+          resolve(client);
+        },
+        (err: unknown) => {
+          if (settled) return;
+          settled = true;
+          clearTimeout(timer);
+          reject(err);
+        },
+      );
+    });
+  }
   private readonly warmQueryTimeoutMs: number;
   private readonly warmSql: string;
   private warming: Promise<number> | undefined;
@@ -173,13 +219,15 @@ export class Database {
   async transaction<T>(options: TxOptions, work: (tx: Tx) => Promise<T>): Promise<T> {
     if (this.closed) throw new UnavailableError();
     const deadlineMs = options.deadlineMs ?? 5_000;
-    const started = Date.now();
     let client: PoolClient;
     try {
-      client = await this.pool.connect();
+      client = await this.acquire(options.acquireTimeoutMs);
     } catch {
+      // Fail closed (the caller answers 503), but never silently.
+      this.onAcquireFailure?.(this.label);
       throw new UnavailableError();
     }
+    const started = Date.now();
     let destroyed = false;
     let commitSent = false;
     const destroy = () => {

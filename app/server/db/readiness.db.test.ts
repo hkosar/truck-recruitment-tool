@@ -2,12 +2,14 @@
 // 600 ms budget because of connection set-up (start-up, idle eviction) or pool contention.
 // Task-owned throwaway cluster only; skipped unless A3_APP_URL and A3_ADMIN_URL are set.
 
-import { afterEach, describe, expect, it } from 'vitest';
+import { afterEach, describe, expect, it, vi } from 'vitest';
 import { UnavailableError } from '../core/types';
 import { DEFAULT_TIMING } from '../app';
 import { Database } from './database';
 import { PgAuthStore } from './pg-auth-store';
 import { suiteDatabase } from '../testing/test-db';
+// Loaded machines (manager decision): only TEST timeouts are raised; product limits are unchanged.
+vi.setConfig({ testTimeout: 30_000, hookTimeout: 60_000 });
 
 // Own database (<base>_readiness; testing/test-db.ts).
 const APP_URL = suiteDatabase('readiness')?.appUrl;
@@ -79,6 +81,49 @@ describe.skipIf(!enabled)('A3 database readiness for sign-in admission', () => {
     await sleep(100);
     expect(d.poolCounts.total - d.poolCounts.idle).toBe(0);
     expect(await closesWithin(d, 3_000)).toBe(true);
+  });
+
+  // Manager decision on the Gate 2 load failures: ordinary requests wait tolerantly for a
+  // connection; only the sign-in admission check keeps its tight limit; both fail closed with a signal.
+  const holdOne = (d: Database, seconds: number) =>
+    d.transaction({ lockTimeoutMs: 5_000, statementTimeoutMs: 5_000, deadlineMs: 5_000 }, (tx) => tx.query(`select pg_sleep(${seconds})`));
+
+  it('ordinary requests wait through pool contention (tolerant limit) instead of failing after 250 ms', async () => {
+    const signals: string[] = [];
+    const d = db({ max: 1, connectionTimeoutMillis: 5_000, label: 'data', onAcquireFailure: (l) => signals.push(l) });
+    const busy = holdOne(d, 1.5);
+    await sleep(100);
+    const t0 = performance.now();
+    const r = await d.transaction({ deadlineMs: 2_000 }, (tx) => tx.query<{ ok: number }>('select 1 as ok'));
+    const waited = performance.now() - t0;
+    expect(r.rows[0].ok).toBe(1);
+    expect(waited).toBeGreaterThan(1_000); // it really waited for the busy connection
+    expect(signals).toEqual([]);
+    await busy;
+  });
+
+  it('the admission check keeps its tight limit on the same busy pool, signals, and leaks nothing', async () => {
+    const signals: string[] = [];
+    const d = db({ max: 1, connectionTimeoutMillis: 5_000, label: 'auth', onAcquireFailure: (l) => signals.push(l) });
+    const busy = holdOne(d, 1.5);
+    await sleep(100);
+    const t0 = performance.now();
+    await expect(new PgAuthStore(d).bucketHit('request', `tight-${Date.now()}`, 'tight', BUDGET)).rejects.toBeInstanceOf(UnavailableError);
+    expect(performance.now() - t0).toBeLessThan(BUDGET);
+    expect(signals).toEqual(['auth']);
+    await busy;
+    await sleep(200); // the connection that arrived after the admission limit is released, not leaked
+    expect(d.poolCounts.total - d.poolCounts.idle).toBe(0);
+  });
+
+  it('beyond the tolerant limit an ordinary request still fails closed (Unavailable -> 503) with a signal', async () => {
+    const signals: string[] = [];
+    const d = db({ max: 1, connectionTimeoutMillis: 600, label: 'data', onAcquireFailure: (l) => signals.push(l) });
+    const busy = holdOne(d, 1.5);
+    await sleep(100);
+    await expect(d.transaction({ deadlineMs: 2_000 }, (tx) => tx.query('select 1'))).rejects.toBeInstanceOf(UnavailableError);
+    expect(signals).toEqual(['data']);
+    await busy;
   });
 
   it('contention: a saturated shared pool fails admission; the separate sign-in pool admits within the budget', async () => {

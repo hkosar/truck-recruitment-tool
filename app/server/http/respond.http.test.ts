@@ -4,9 +4,11 @@
 
 import { createServer, request, type Server } from 'node:http';
 import type { AddressInfo } from 'node:net';
-import { afterAll, beforeAll, describe, expect, it } from 'vitest';
+import { afterAll, beforeAll, describe, expect, it, vi } from 'vitest';
 import { BODY_LIMITS, readBodyLimited } from './body';
 import { respondThenClose } from './respond';
+// Loaded machines (manager decision): only TEST timeouts are raised; product limits are unchanged.
+vi.setConfig({ testTimeout: 30_000, hookTimeout: 60_000 });
 
 const enabled = process.env.RUN_HTTP_TESTS === '1';
 

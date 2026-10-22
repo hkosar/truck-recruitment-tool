@@ -6,13 +6,15 @@ import type { AuthStore, MintState, SendEvidence, SessionInfo } from '../core/st
 import type { Database } from './database';
 
 const AUTH_TX = { lockTimeoutMs: 200, statementTimeoutMs: 400, deadlineMs: 600 };
+/** The pre-response admission check's own connection-wait limit (D9/F-2); inside its 600 ms budget. */
+export const ADMISSION_ACQUIRE_MS = 400;
 const IDENTITY_TX = { lockTimeoutMs: 5_000, statementTimeoutMs: 5_000, deadlineMs: 8_000 };
 
 export class PgAuthStore implements AuthStore {
   constructor(private readonly db: Database) {}
 
   async bucketHit(kind: 'request', ipHash: string, emailHash: string, deadlineMs: number) {
-    return this.db.transaction({ ...AUTH_TX, deadlineMs }, async (tx) => {
+    return this.db.transaction({ ...AUTH_TX, deadlineMs, acquireTimeoutMs: ADMISSION_ACQUIRE_MS }, async (tx) => {
       const { rows } = await tx.query<{ ip_count: number; email_count: number }>('select * from internal.auth_bucket_hit($1, $2, $3)', [kind, ipHash, emailHash]);
       return { ipCount: rows[0].ip_count, emailCount: rows[0].email_count };
     });

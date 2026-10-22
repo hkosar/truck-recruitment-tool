@@ -10,6 +10,11 @@ describe('server env', () => {
   it('accepts a valid environment', () => {
     expect(parseServerEnv(base)).toMatchObject({ appOrigin: 'https://recruiter.example.test', emailMode: 'test', port: 8788, host: '127.0.0.1' });
   });
+  it('database connection wait: 5 s by default, configurable within 500-30000 ms', () => {
+    expect(parseServerEnv(base).dbAcquireTimeoutMs).toBe(5_000);
+    expect(parseServerEnv({ ...base, DB_ACQUIRE_TIMEOUT_MS: '8000' }).dbAcquireTimeoutMs).toBe(8_000);
+    for (const v of ['250', '60000', 'abc', '1.5']) expect(() => parseServerEnv({ ...base, DB_ACQUIRE_TIMEOUT_MS: v })).toThrow(ConfigError);
+  });
   it('names the variable and never echoes the value', () => {
     const secret = 'postgres-password-should-not-appear';
     for (const bad of [

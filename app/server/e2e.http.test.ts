@@ -5,11 +5,13 @@
 import { appendFileSync, existsSync } from 'node:fs';
 import { request } from 'node:http';
 import pg from 'pg';
-import { afterAll, beforeAll, describe, expect, it } from 'vitest';
+import { afterAll, beforeAll, describe, expect, it, vi } from 'vitest';
 import { parseServerEnv } from './config';
 import { FakeMailAdapter } from './mail/fake';
 import { startServer, type RunningServer } from './main';
 import { suiteDatabase } from './testing/test-db';
+// Loaded machines (manager decision): only TEST timeouts are raised; product limits are unchanged.
+vi.setConfig({ testTimeout: 30_000, hookTimeout: 60_000 });
 
 // Own database (<base>_e2e; testing/test-db.ts): never shared with the store suite, whose
 // emergency sign-out test revokes every staff session.

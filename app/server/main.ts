@@ -33,8 +33,12 @@ export async function startServer(env: ServerEnv, options: { log?: Logger; mail?
   // Two pools (Gate 2 review N1): sign-in work (admission, mint, redeem, session checks) has its
   // own small pool, kept warm, so long data transactions can never take the connection the
   // 600 ms admission check needs; the data pool serves everything else.
-  const authDb = new Database({ connectionString: env.databaseUrl, max: 4, connectionTimeoutMillis: 400, minWarm: 2 });
-  const db = new Database({ connectionString: env.databaseUrl, max: 10 });
+  // Waiting for a connection: ordinary requests (both pools) up to DB_ACQUIRE_TIMEOUT_MS
+  // (default 5 s); only the sign-in admission check keeps its tight 400 ms limit (PgAuthStore
+  // bucketHit). Exceeding either fails closed (503 / the uniform sign-in response) with an alert.
+  const acquireAlert = (pool: string) => log('operator_alert', { category: 'db_pool_acquire_failed', pool });
+  const authDb = new Database({ connectionString: env.databaseUrl, max: 4, connectionTimeoutMillis: env.dbAcquireTimeoutMs, minWarm: 2, label: 'auth', onAcquireFailure: acquireAlert });
+  const db = new Database({ connectionString: env.databaseUrl, max: 10, connectionTimeoutMillis: env.dbAcquireTimeoutMs, label: 'data', onAcquireFailure: acquireAlert });
   const lifecycle = new Lifecycle();
   const mail = options.mail ?? (env.emailMode === 'production' && env.sendgrid
     ? new SendGridAdapter({ ...env.sendgrid, fetch: (url, init) => fetch(url, init) })
