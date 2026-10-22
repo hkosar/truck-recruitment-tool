@@ -112,8 +112,14 @@ Do the steps in this order; never skip step 2.
    In Render, the `pipeline` service must show no run in progress, and this must return 0 rows:
    `select id, job, started_at from public.pipeline_runs where step = 'sync-safety' and status = 'running';`
    If a run is in progress, wait for it to finish (or cancel it in Render), then check again.
+   If Render shows NO run in progress but a row is still `running` (the process was cancelled or
+   killed), reconcile it with `pipeline/sql/reconcile-stranded-safety-run.sql` (edit the run id,
+   your name and the reason). It refuses unless the row is a sync-safety run older than 15 minutes,
+   no session labelled `tnbs-pipeline` (the pool's `application_name`) is connected and nothing
+   holds a lock on carrier_safety; it marks the row `failed` with reason and actor in `error` and
+   `meta.reconciled`, and never deletes. (With safety off, runs.ts would never recover it itself.)
 3. **Empty the table** (valid because carrier_safety held 0 rows before the first write):
-   `delete from public.carrier_safety;` Keep `pipeline_runs` untouched -- it is the audit trail.
+   `delete from public.carrier_safety;` Never delete `pipeline_runs` rows -- they are the audit trail.
 4. **Optional code rollback:** point the cron's branch back to the previous release.
 5. **Later, to reload deliberately:** set `PIPELINE_SAFETY_RELOAD_AFTER` to the UTC time of step 3
    and `PIPELINE_NIGHTLY_SAFETY=on`. The next nightly ignores the earlier successes and reloads

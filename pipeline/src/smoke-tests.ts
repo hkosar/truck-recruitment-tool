@@ -1,4 +1,5 @@
 import assert from 'node:assert/strict';
+import { readFileSync } from 'node:fs';
 import { parseArgs } from './run.js';
 import { loadConfig } from './config.js';
 import { buildSelectClause as buildInsuranceSelectClause, buildWhereClause as buildInsuranceWhereClause, buildFilingsUpsertSql } from './sources/insurance.js';
@@ -13,9 +14,11 @@ import {
   mapSafetyRatingCode,
   parseFmcsaCompactDate,
   SAFETY_DATASET_IDS,
+  stageCompleteActiveTexasDots,
   validateSafetyRow,
 } from './sources/safety.js';
 import { parse as parsePgConnectionString } from 'pg-connection-string';
+import { PIPELINE_APPLICATION_NAME } from './db.js';
 import { RECORDED_PROJECT_REFS, parseSupabaseDbTarget, verifyPipelineTarget } from './target-guard.js';
 import { buildLastSafetySuccessSql, isSafetyDue, parseReloadAfter, safetyWindowStart } from './nightly-safety.js';
 
@@ -385,6 +388,28 @@ test('safety ratings refuse a source that changes during the pull', async () => 
   await assert.rejects(() => fetchCompleteSafetyRatings(client, 10), /changed during the pull/);
 });
 
+test('active-Texas membership comes from a complete, stable, filtered Census pull', async () => {
+  const staged: unknown[][] = [];
+  const pgClient = { query: async (_sql: string, values: unknown[]) => { staged.push(values); return { rowCount: values.length }; } };
+  const { client, requests } = fakeRatingSource({ rows: 25 });
+  assert.equal(await stageCompleteActiveTexasDots(client, pgClient as never, 10), 25);
+  assert.equal(staged.flat().length, 25, 'every DOT staged, one column each');
+  for (const params of requests) assert.equal(params.get('$where'), "phy_state='TX' AND status_code='A'");
+  assert.equal(requests.filter((params) => params.get('$select') === 'dot_number').length, 3);
+
+  const truncated = fakeRatingSource({ rows: 10_001, serveRows: 10_000 });
+  await assert.rejects(() => stageCompleteActiveTexasDots(truncated.client, pgClient as never, 10_000), /membership completeness failed: read 10000 rows, expected 10001/);
+  const drifting = fakeRatingSource({ rows: 25, counts: [25, 26] });
+  await assert.rejects(() => stageCompleteActiveTexasDots(drifting.client, pgClient as never, 10), /membership changed during the pull/);
+});
+
+test('confirmed-unrated uses only current source membership, never local carrier columns', () => {
+  const sql = buildSafetyUpsertSql();
+  assert.match(sql, /m\.dot_number is not null as in_rating_population/);
+  assert.match(sql, /left join staging_census_active_tx m on m\.dot_number = k\.dot_number/);
+  assert.doesNotMatch(sql, /phy_state|status_code/);
+});
+
 test('safety rating codes and compact dates map fail-closed', () => {
   assert.equal(mapSafetyRatingCode('S'), 'Satisfactory');
   assert.equal(mapSafetyRatingCode('C'), 'Conditional');
@@ -545,6 +570,21 @@ test('a deliberate reload override ignores earlier successes, is one-shot, and r
   assert.equal(loadConfig({ ...env, PIPELINE_SAFETY_RELOAD_AFTER: '2026-11-06T15:00:00Z' }).PIPELINE_SAFETY_RELOAD_AFTER, '2026-11-06T15:00:00Z');
   assert.throws(() => loadConfig({ ...env, PIPELINE_SAFETY_RELOAD_AFTER: 'yesterday' }), /PIPELINE_SAFETY_RELOAD_AFTER/);
   assert.equal(loadConfig({ ...env, PIPELINE_SAFETY_RELOAD_AFTER: '' }).PIPELINE_SAFETY_RELOAD_AFTER, undefined);
+});
+
+test('stranded-run reconciliation SQL is guarded, audited and never deletes', () => {
+  const sql = readFileSync(new URL('../sql/reconcile-stranded-safety-run.sql', import.meta.url), 'utf8');
+  const body = sql.split(/\r?\n/).filter((line) => !line.trimStart().startsWith('--')).join('\n');
+  assert.doesNotMatch(body, /\bdelete\b|\btruncate\b|\bdrop\b/i);
+  assert.match(body, /v_row\.step <> 'sync-safety' or v_row\.status <> 'running'/);
+  assert.match(body, /interval '15 minutes'/);
+  assert.match(body, /from pg_stat_activity\s+where application_name = v_app/);
+  assert.match(body, /'public\.carrier_safety'::regclass/);
+  assert.match(body, /'actor', v_actor/);
+  assert.match(body, /'reason', v_reason/);
+  assert.match(body, /v_updated <> 1/);
+  assert.match(body, /v_app\s+text\s+:= '(.+)';/);
+  assert.equal(/v_app\s+text\s+:= '(.+)';/.exec(body)?.[1], PIPELINE_APPLICATION_NAME, 'SQL checks the same label the pool sets');
 });
 
 let failed = 0;

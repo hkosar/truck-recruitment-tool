@@ -151,6 +151,9 @@ create temp table staging_safety_ratings (
   safety_rating text not null,
   safety_rating_date date not null
 ) on commit drop;
+create temp table staging_census_active_tx (
+  dot_number bigint primary key
+) on commit drop;
   `.trim();
 }
 
@@ -178,8 +181,12 @@ const SAFETY_BUSINESS_FIELDS = [
  *     (no current SMS record -- unknown, never zero); if absent from a capped pull, unchanged.
  *   - rating/date, always reconciled together, from the complete Census rating pull:
  *       rated in the source                            -> that rating and date;
- *       carrier is active Texas (the queried population) but not rated -> confirmed unrated: NULL, NULL;
- *       carrier is outside the queried population      -> unavailable: existing rating and date kept.
+ *       carrier is in THIS run's complete active-Texas Census pull but not rated
+ *                                                       -> confirmed unrated: NULL, NULL;
+ *       carrier is not in that pull (inactive, moved, deregistered, or simply not seen)
+ *                                                       -> membership unknown: existing rating and date kept.
+ *   Membership comes only from current source evidence (staging_census_active_tx), never from
+ *   carriers.phy_state/status_code, which census.ts freezes when a carrier leaves the slice.
  * A rated carrier with no AB/C row therefore still gets a row (NULL inspection inputs).
  */
 function buildSafetyTargetCte(): string {
@@ -196,7 +203,7 @@ src as (
     k.dot_number,
     s.dot_number is not null as in_sms,
     r.dot_number is not null as rated,
-    coalesce(c.phy_state = 'TX' and c.status_code = 'A', false) as in_rating_population,
+    m.dot_number is not null as in_rating_population,
     s.inspections_24mo as s_insp, s.driver_insp_24mo as s_dinsp, s.driver_oos_24mo as s_doos,
     s.vehicle_insp_24mo as s_vinsp, s.vehicle_oos_24mo as s_voos,
     r.safety_rating as r_rating, r.safety_rating_date as r_date,
@@ -208,6 +215,7 @@ src as (
   join public.carriers c on c.dot_number = k.dot_number
   left join staging_safety s on s.dot_number = k.dot_number
   left join staging_safety_ratings r on r.dot_number = k.dot_number
+  left join staging_census_active_tx m on m.dot_number = k.dot_number
   left join public.carrier_safety e on e.dot_number = k.dot_number
 ),
 counts as (
@@ -262,7 +270,7 @@ select
     is distinct from (${SAFETY_BUSINESS_FIELDS.map((f) => `t.${f}`).join(', ')}))::int as would_update,
   count(*) filter (where t.rated and not t.in_sms)::int as rating_only_rows,
   count(*) filter (where t.e_rating is not null and t.safety_rating is null)::int as ratings_cleared_confirmed_unrated,
-  count(*) filter (where not t.rated and not t.in_rating_population and t.safety_rating is not null)::int as ratings_kept_unavailable
+  count(*) filter (where not t.rated and not t.in_rating_population and t.safety_rating is not null)::int as ratings_kept_membership_unknown
 from target t
 left join public.carrier_safety e on e.dot_number = t.dot_number
   `.trim();
@@ -339,6 +347,41 @@ export async function probeSafetySources(
 
 /** Active Texas carriers with any recorded rating -- the only rows the sync joins. */
 export const SAFETY_RATING_WHERE = "phy_state='TX' AND status_code='A' AND safety_rating is not null";
+/** The population the rating pull is drawn from. A carrier in it but absent from the ratings
+ *  is confirmed unrated; anyone else's rating is preserved (membership unknown). */
+export const ACTIVE_TX_WHERE = "phy_state='TX' AND status_code='A'";
+
+/**
+ * Stage every DOT currently in the active-Texas Census slice, page by page (only DOTs are kept,
+ * so memory stays one page), and prove completeness the same way as the ratings: rows read must
+ * equal an independent filtered count(1) that does not change during the pull; duplicates fail
+ * on the staging primary key. Any mismatch throws, so the sync fails closed.
+ */
+export async function stageCompleteActiveTexasDots(
+  socrata: SocrataClient,
+  client: PgPoolClient,
+  pageSize = DEFAULT_PAGE_SIZE
+): Promise<number> {
+  const expectedRows = await socrata.count(SAFETY_RATING_DATASET_ID, ACTIVE_TX_WHERE);
+  let rowsRead = 0;
+  for await (const page of socrata.paginateOffset<Record<string, unknown>>(
+    SAFETY_RATING_DATASET_ID,
+    { $select: 'dot_number', $where: ACTIVE_TX_WHERE, $order: 'dot_number' },
+    pageSize
+  )) {
+    rowsRead += page.length;
+    const dots = page.map((row) => [parseNonNegativeInteger(row.dot_number, 'dot_number')]);
+    await bulkInsert(client, 'staging_census_active_tx', ['dot_number'], dots, 5_000);
+  }
+  if (rowsRead !== expectedRows) {
+    throw new Error(`Active-Texas membership completeness failed: read ${rowsRead} rows, expected ${expectedRows}`);
+  }
+  const finalCount = await socrata.count(SAFETY_RATING_DATASET_ID, ACTIVE_TX_WHERE);
+  if (finalCount !== expectedRows) {
+    throw new Error(`Active-Texas membership changed during the pull (${expectedRows} -> ${finalCount}); retry next run`);
+  }
+  return rowsRead;
+}
 
 /**
  * Pull every qualifying Company Census rating row, page by page, and prove completeness:
@@ -399,6 +442,7 @@ export async function syncSafety(
   const pageSize = options.pageSize ?? DEFAULT_PAGE_SIZE;
   let rowsRead = 0;
   let ratingRowsRead = 0;
+  let activeTxRowsRead = 0;
   let pageCount = 0;
 
   const sourceRowCounts = new Map<string, number>();
@@ -480,6 +524,12 @@ export async function syncSafety(
       validatedRatings,
       2_000
     );
+    activeTxRowsRead = await stageCompleteActiveTexasDots(socrata, client, pageSize);
+    // The ratings must not have changed while membership was pulled.
+    const ratingCountAfter = await socrata.count(SAFETY_RATING_DATASET_ID, SAFETY_RATING_WHERE);
+    if (ratingCountAfter !== ratingRowsRead) {
+      throw new Error(`Safety rating source changed during the membership pull (${ratingRowsRead} -> ${ratingCountAfter}); retry next run`);
+    }
 
     const expectedRows = Array.from(sourceRowCounts.values()).reduce(
       (sum, count) => sum + (options.maxPages ? Math.min(count, options.maxPages * pageSize) : count),
@@ -506,7 +556,10 @@ export async function syncSafety(
         count(*) filter (where driver_insp_24mo > inspections_24mo or vehicle_insp_24mo > inspections_24mo)::int as invalid_inspection_totals,
         min(inspections_24mo)::int as min_inspections,
         max(inspections_24mo)::int as max_inspections,
-        (select count(*)::int from staging_safety_ratings) as source_rating_rows
+        (select count(*)::int from staging_safety_ratings) as source_rating_rows,
+        (select count(*)::int from staging_census_active_tx) as active_tx_rows,
+        (select count(*)::int from staging_safety_ratings r
+          where not exists (select 1 from staging_census_active_tx m where m.dot_number = r.dot_number)) as ratings_outside_active_tx
       from staging_safety
     `);
     const validation = validationResult.rows[0] ?? {};
@@ -515,7 +568,11 @@ export async function syncSafety(
       Number(validation.invalid_vehicle_oos) > 0 ||
       Number(validation.invalid_inspection_totals) > 0 ||
       Number(validation.staged_rows) !== Number(validation.unique_dots) ||
-      Number(validation.source_rating_rows) !== ratingRowsRead
+      Number(validation.source_rating_rows) !== ratingRowsRead ||
+      Number(validation.active_tx_rows) !== activeTxRowsRead ||
+      // Every rated DOT is drawn from the active-Texas slice; anything else means the two pulls
+      // saw different source states.
+      Number(validation.ratings_outside_active_tx) > 0
     ) {
       throw new Error(`Safety staging validation failed: ${JSON.stringify(validation)}`);
     }

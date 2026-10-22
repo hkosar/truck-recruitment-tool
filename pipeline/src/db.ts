@@ -68,6 +68,8 @@ export function createSupabaseClient(config: Config): SupabaseClient {
   });
 }
 
+export const PIPELINE_APPLICATION_NAME = 'tnbs-pipeline';
+
 export function createPgPool(config: Config): PgPool {
   // Build from the guard's explicit fields, never from the raw string: pg would let query
   // parameters in a connection string override host/user/port (see target-guard.ts).
@@ -91,7 +93,10 @@ export function createPgPool(config: Config): PgPool {
     // An allowed `sslmode` in SUPABASE_DB_URL wins, mapped exactly as pg itself did when the
     // pool was built from the raw string (connection-string values overrode this default).
     ssl: target.ssl ?? { rejectUnauthorized: false },
-    ...(target.applicationName ? { application_name: target.applicationName } : {}),
+    // Labels every pipeline session so an operator can prove no writer is connected before a
+    // manual reconciliation (pipeline/sql/reconcile-stranded-safety-run.sql). An explicit
+    // application_name in SUPABASE_DB_URL wins; that SQL must then use the same name.
+    application_name: target.applicationName ?? PIPELINE_APPLICATION_NAME,
   });
 }
 
