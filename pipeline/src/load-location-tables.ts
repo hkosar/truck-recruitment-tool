@@ -29,7 +29,9 @@ import { parseSupabaseDbTarget, verifyPipelineTarget } from './target-guard.js';
  *                              lat/lng <- INTPTLAT / INTPTLONG
  * The ZCTA file has no state column, so Texas ZCTAs are selected by ZIP prefix (TX_ZIP_PREFIXES) plus
  * the single Panhandle ZIP 73960 (TX_EXTRA_ZIPS). Place names shared by two places of the same standing
- * (two "Reno city", two "Lakeside town", ...) are ambiguous: they are omitted and listed in the report.
+ * (two "Reno city", two "Lakeside town"), or a city and a CDP more than SAME_PLACE_KM apart (Agua Dulce),
+ * are ambiguous: they are omitted and listed in the report. If city_centroids already holds such a name,
+ * --apply refuses; --apply --reconcile deletes exactly those rows (reported) in the same transaction.
  * ZCTAs are Census approximations of ZIP areas, so a few USPS ZIPs (PO-box-only, unique-organisation
  * ZIPs) have no ZCTA row and fall through to the city tier.
  */
@@ -100,14 +102,26 @@ export function placeBaseName(name: string, lsad: string): string {
 }
 
 export interface CityParseReport extends ParseReport<CityRow> {
-  /** Base names shared by two or more places of the same standing; left out of the fallback. */
+  /** Base names shared by places that are NOT the same location; left out of the fallback. */
   ambiguous: string[];
 }
 
+/** Same-name places closer than this are treated as one location (a town and its own CDP). */
+export const SAME_PLACE_KM = 5;
+
+export function haversineKm(a: { lat: number; lng: number }, b: { lat: number; lng: number }): number {
+  const rad = Math.PI / 180;
+  const dLat = (b.lat - a.lat) * rad;
+  const dLng = (b.lng - a.lng) * rad;
+  const h = Math.sin(dLat / 2) ** 2 + Math.cos(a.lat * rad) * Math.cos(b.lat * rad) * Math.sin(dLng / 2) ** 2;
+  return 2 * 6371 * Math.asin(Math.sqrt(h));
+}
+
 export function buildCityRows(text: string, state = 'TX'): CityParseReport {
-  // A town and a CDP with the same base name are one place: keep the incorporated one. Two places of
-  // the SAME standing (two "Reno city", two "Lakeside town", two CDPs) cannot be told apart from the
-  // carrier's city text, so that name is omitted rather than guessed.
+  // Places sharing a base name are one location only if every pair is within SAME_PLACE_KM (a town and
+  // its own CDP); then the incorporated one wins. If any pair is farther apart (two "Reno city", or
+  // Agua Dulce city vs Agua Dulce CDP) the carrier's city text cannot say which is meant, so the name
+  // is omitted rather than guessed.
   const byName = new Map<string, Array<{ row: CityRow; incorporated: boolean }>>();
   const rejected: string[] = [];
   for (const r of parseGazetteer(text)) {
@@ -124,10 +138,14 @@ export function buildCityRows(text: string, state = 'TX'): CityParseReport {
   const rows: CityRow[] = [];
   const ambiguous: string[] = [];
   for (const list of byName.values()) {
+    let spread = 0;
+    for (let i = 0; i < list.length; i++) for (let j = i + 1; j < list.length; j++) {
+      spread = Math.max(spread, haversineKm((list[i] as { row: CityRow }).row, (list[j] as { row: CityRow }).row));
+    }
     const inc = list.filter((x) => x.incorporated);
-    const top = inc.length > 0 ? inc : list;
-    if (top.length === 1) rows.push((top[0] as { row: CityRow }).row);
-    else ambiguous.push((top[0] as { row: CityRow }).row.city);
+    const pick = inc.length > 0 ? inc[0] : list[0];
+    if (spread > SAME_PLACE_KM || inc.length > 1) ambiguous.push((list[0] as { row: CityRow }).row.city);
+    else rows.push((pick as { row: CityRow }).row);
   }
   rows.sort((x, y) => x.city.localeCompare(y.city));
   ambiguous.sort((x, y) => x.localeCompare(y));
@@ -179,15 +197,46 @@ export async function upsertCityCentroids(db: Queryable, rows: CityRow[]): Promi
   return counts;
 }
 
+export interface ApplyOptions {
+  /** Names that must NOT be in city_centroids (the ambiguous list). */
+  ambiguous?: string[];
+  state?: string;
+  /** Delete previously loaded rows for ambiguous names instead of refusing. */
+  reconcile?: boolean;
+}
+
 /** Both tables in ONE transaction: either both load or neither does. */
-export async function applyLoad(pool: pg.Pool, zips: ZipRow[], cities: CityRow[]): Promise<{ zip: UpsertCounts; city: UpsertCounts }> {
+export async function applyLoad(
+  pool: pg.Pool, zips: ZipRow[], cities: CityRow[], opts: ApplyOptions = {}
+): Promise<{ zip: UpsertCounts; city: UpsertCounts; reconciledDeleted: string[] }> {
   const client = await pool.connect();
   try {
     await client.query('begin');
+    let reconciledDeleted: string[] = [];
+    const names = (opts.ambiguous ?? []).map((n) => n.toLowerCase());
+    if (names.length > 0) {
+      const stale = await client.query<{ city: string }>(
+        'select city from public.city_centroids where state = $1 and lower(btrim(city)) = any($2::text[]) order by city',
+        [opts.state ?? 'TX', names]
+      );
+      if (stale.rows.length > 0 && !opts.reconcile) {
+        throw new Error(
+          `city_centroids already holds ${stale.rows.length} row(s) for names now excluded as ambiguous (${stale.rows.map((r) => r.city).join(', ')}); ` +
+          'refusing. Re-run with --reconcile to delete exactly those rows.'
+        );
+      }
+      if (stale.rows.length > 0) {
+        await client.query(
+          'delete from public.city_centroids where state = $1 and lower(btrim(city)) = any($2::text[])',
+          [opts.state ?? 'TX', names]
+        );
+        reconciledDeleted = stale.rows.map((r) => r.city);
+      }
+    }
     const zip = await upsertZipCentroids(client, zips);
     const city = await upsertCityCentroids(client, cities);
     await client.query('commit');
-    return { zip, city };
+    return { zip, city, reconciledDeleted };
   } catch (e) {
     await client.query('rollback').catch(() => undefined);
     throw e;
@@ -196,14 +245,15 @@ export async function applyLoad(pool: pg.Pool, zips: ZipRow[], cities: CityRow[]
   }
 }
 
-interface CliArgs { zcta: string; places: string; state: string; apply: boolean }
+interface CliArgs { zcta: string; places: string; state: string; apply: boolean; reconcile: boolean }
 
 export function parseCliArgs(argv: string[]): CliArgs {
-  const a: CliArgs = { zcta: '', places: '', state: 'TX', apply: false };
+  const a: CliArgs = { zcta: '', places: '', state: 'TX', apply: false, reconcile: false };
   for (const raw of argv) {
     if (raw === '--apply') { a.apply = true; continue; }
+    if (raw === '--reconcile') { a.reconcile = true; continue; }
     const m = /^--(zcta|places|state)=(.+)$/.exec(raw);
-    if (!m) throw new Error(`Unrecognized argument "${raw}". Usage: load-location-tables --zcta=<file> --places=<file> [--state=TX] [--apply]`);
+    if (!m) throw new Error(`Unrecognized argument "${raw}". Usage: load-location-tables --zcta=<file> --places=<file> [--state=TX] [--apply [--reconcile]]`);
     a[m[1] as 'zcta' | 'places' | 'state'] = m[2] as string;
   }
   if (!a.zcta || !a.places) throw new Error('Both --zcta=<file> and --places=<file> are required');
@@ -249,7 +299,7 @@ async function main(): Promise<void> {
     max: 1, ssl: { rejectUnauthorized: false },
   });
   try {
-    console.log(JSON.stringify(await applyLoad(pool, zips.rows, cities.rows)));
+    console.log(JSON.stringify(await applyLoad(pool, zips.rows, cities.rows, { ambiguous: cities.ambiguous, state: args.state, reconcile: args.reconcile })));
   } finally {
     await pool.end();
   }
