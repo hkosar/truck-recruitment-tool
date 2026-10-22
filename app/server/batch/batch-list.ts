@@ -103,3 +103,31 @@ export async function exportCsv(tx: Tx, batchId: string, dots: number[] | null):
   await tx.query("select public.log_export($1, 'csv', $2)", [batchId, rows.length]);
   return { csv: buildCsv(rows), rowCount: rows.length, excluded };
 }
+
+export interface RenameResult { found: boolean; from: string }
+
+/**
+ * Renames a batch (editors and managers; the update policy and column grant decide) and records it
+ * in the batch feed as a comment, since the activity enum has no rename type.
+ */
+export async function renameBatch(tx: Tx, batchId: string, name: string): Promise<RenameResult> {
+  await tx.query("select internal.lock_and_validate(array['manager','edit']::user_role[], array['link'])");
+  const current = await tx.query<{ name: string }>('select name from public.batches where id = $1 for no key update', [batchId]);
+  if (current.rowCount === 0) return { found: false, from: '' };
+  const from = current.rows[0].name;
+  if (from === name) return { found: true, from };
+  await tx.query('update public.batches set name = $2 where id = $1', [batchId, name]);
+  await tx.query(
+    `insert into public.batch_activity (batch_id, actor_id, activity_type, comment)
+     values ($1, internal.current_staff_id(), 'comment', $2)`,
+    [batchId, `Renamed batch from "${from}" to "${name}"`],
+  );
+  return { found: true, from };
+}
+
+/** Deletes a batch. Managers only: lock_and_validate refuses everyone else, and the delete policy re-checks. */
+export async function deleteBatch(tx: Tx, batchId: string): Promise<boolean> {
+  await tx.query("select internal.lock_and_validate(array['manager']::user_role[], array['link'])");
+  const r = await tx.query('delete from public.batches where id = $1', [batchId]);
+  return r.rowCount > 0;
+}

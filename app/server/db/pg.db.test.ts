@@ -498,6 +498,41 @@ describe.skipIf(!enabled)('A3 database: stores, permissions, concurrency, deadli
     }
   });
 
+  it('batch rename (editor, manager) and delete (manager only) go through the database rules', async () => {
+    await resetEditor();
+    const B2 = 'a3b00000-0000-4000-8000-0000000000b2';
+    await adminQuery('delete from public.batches where id = $1', [B2]);
+    await adminQuery(`insert into public.batches (id, name, created_by, search_definition) values ($1, 'A3 Rename Me', $2, '{}'::jsonb)`, [B2, MANAGER]);
+    await adminQuery(`insert into public.batch_carriers (batch_id, dot_number) values ($1, 1400001), ($1, 1400002)`, [B2]);
+    await adminQuery(`insert into public.contact_logs (dot_number, batch_id, user_id, channel, disposition) values (1400001, $1, $2, 'call', 'connected')`, [B2, EDITOR]);
+    const ed = await session(EDITOR);
+    const vw = await session(VIEWER);
+    const mg = await session(MANAGER);
+    const nameOf = async () => (await adminQuery('select name from public.batches where id = $1', [B2])).rows[0]?.name;
+    try {
+      await expect(data.batchRename(vw, B2, 'Viewer rename')).rejects.toBeInstanceOf(NotPermittedError);
+      expect(await nameOf()).toBe('A3 Rename Me');
+      expect(await data.batchRename(ed, B2, 'A3 Renamed')).toEqual({ found: true, from: 'A3 Rename Me' });
+      expect(await nameOf()).toBe('A3 Renamed');
+      const feed = (await adminQuery(`select comment, actor_id from public.batch_activity where batch_id = $1 and activity_type = 'comment'`, [B2])).rows;
+      expect(feed).toEqual([{ comment: 'Renamed batch from "A3 Rename Me" to "A3 Renamed"', actor_id: EDITOR }]);
+      expect((await data.batchRename(mg, B2, 'A3 Manager Name')).found).toBe(true);
+      expect((await data.batchRename(ed, 'a3b00000-0000-4000-8000-0000000000ff', 'x')).found).toBe(false);
+
+      await expect(data.batchDelete(ed, B2)).rejects.toBeInstanceOf(NotPermittedError);
+      await expect(data.batchDelete(vw, B2)).rejects.toBeInstanceOf(NotPermittedError);
+      expect(await nameOf()).toBe('A3 Manager Name');
+      expect(await data.batchDelete(mg, 'a3b00000-0000-4000-8000-0000000000ff')).toBe(false);
+      expect(await data.batchDelete(mg, B2)).toBe(true);
+      expect(await nameOf()).toBeUndefined();
+      expect((await adminQuery('select count(*)::int as n from public.batch_carriers where batch_id = $1', [B2])).rows[0].n).toBe(0);
+      expect((await adminQuery('select batch_id from public.contact_logs where dot_number = 1400001 and notes is null and user_id = $1 and batch_id is null', [EDITOR])).rowCount).toBeGreaterThanOrEqual(1);
+    } finally {
+      await adminQuery('delete from public.batches where id = $1', [B2]);
+      await adminQuery('delete from public.contact_logs where dot_number = 1400001 and batch_id is null and user_id = $1 and notes is null', [EDITOR]);
+    }
+  });
+
   it('deadlines: a slow statement is cut off and rolled back; a lock wait past the deadline is Unavailable', async () => {
     const ed = await session(EDITOR);
     const before = (await adminQuery('select count(*)::int as n from public.batch_activity')).rows[0].n;

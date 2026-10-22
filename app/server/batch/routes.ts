@@ -16,6 +16,9 @@ export interface BatchListContext {
   json: (status: number, payload: unknown) => AppResponse;
   /** Headers every response carries. */
   commonHeaders: Record<string, string>;
+  /** Signed-in person, for the audit log line. */
+  actorId: string;
+  log: (event: string, fields?: Record<string, string | number | boolean | undefined>) => void;
 }
 
 function dotList(v: unknown, max: number): number[] {
@@ -54,6 +57,26 @@ export async function batchListRoute(ctx: BatchListContext): Promise<AppResponse
       setCookies: [],
       body: `${BOM}${result.csv}`,
     };
+  }
+  if (req.method === 'POST' && (m = /^\/api\/batches\/([0-9a-f-]{36})\/rename$/i.exec(req.path))) {
+    const body = await ctx.readJson(req);
+    if (typeof body !== 'object' || body === null || Array.isArray(body)) throw new RefusedError('invalid');
+    const name = (body as Record<string, unknown>).name;
+    if (typeof name !== 'string') throw new RefusedError('invalid');
+    const trimmed = name.trim();
+    if (trimmed === '' || trimmed.length > 200) throw new RefusedError('invalid');
+    const result = await data.batchRename(s, m[1], trimmed);
+    if (!result.found) throw new NotFoundError();
+    ctx.log('batch_renamed', { batch: m[1], actor: ctx.actorId });
+    return ctx.json(200, { ok: true });
+  }
+  if (req.method === 'POST' && (m = /^\/api\/batches\/([0-9a-f-]{36})\/delete$/i.exec(req.path))) {
+    // Managers only: enforced in the database (lock_and_validate, delete policy). The batch's own
+    // feed is deleted with it, so the durable trace is this log line.
+    await ctx.readJson(req);
+    if (!(await data.batchDelete(s, m[1]))) throw new NotFoundError();
+    ctx.log('batch_deleted', { batch: m[1], actor: ctx.actorId });
+    return ctx.json(200, { ok: true });
   }
   return undefined;
 }

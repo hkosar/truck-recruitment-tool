@@ -394,8 +394,20 @@ describe('signed-in data API', () => {
     expect((await apiPost(env, who, `/api/batches/${b}/export-csv`, { dots: [1] }, { 'x-csrf-token': 'nope' })).status).toBe(403);
     expect((await apiPost(env, who, `/api/batches/${b}/export-csv`, { dots: [1] }, { origin: 'https://evil.example' })).status).toBe(403);
 
+    expect((await apiPost(env, who, `/api/batches/${b}/rename`, { name: '  New name  ' })).status).toBe(200);
+    expect(env.data.calls.at(-1)).toMatchObject({ op: 'batchRename', args: [b, 'New name'] });
+    expect((await apiPost(env, who, `/api/batches/${b}/rename`, { name: '   ' })).status).toBe(409);
+    expect((await apiPost(env, who, `/api/batches/${b}/rename`, { name: 'x'.repeat(201) })).status).toBe(409);
+    expect((await apiPost(env, who, `/api/batches/${b}/rename`, { name: 5 })).status).toBe(409);
+    expect((await apiPost(env, who, `/api/batches/${b}/delete`, {})).status).toBe(200);
+    expect(env.data.calls.at(-1)).toMatchObject({ op: 'batchDelete', args: [b] });
+    expect((await apiPost(env, who, `/api/batches/${b}/delete`, {}, { 'x-csrf-token': 'nope' })).status).toBe(403);
+    expect(env.logs.some((l) => l.event === 'batch_deleted')).toBe(true);
+
     const recovery = signedIn(env, '33333333-3333-4333-8333-333333333333', 'recovery');
     const before = env.data.calls.length;
+    expect((await apiPost(env, recovery, `/api/batches/${b}/rename`, { name: 'x' })).status).toBe(403);
+    expect((await apiPost(env, recovery, `/api/batches/${b}/delete`, {})).status).toBe(403);
     expect((await get(`/api/batches/${b}/list-extras?dots=1`, recovery.cookie)).status).toBe(403);
     expect((await apiPost(env, recovery, `/api/batches/${b}/export-csv`, { dots: [1] })).status).toBe(403);
     expect(env.data.calls.length).toBe(before);

@@ -43,7 +43,7 @@ const WRITE_ROUTES: ReadonlyArray<{ method: 'POST'; path: RegExp }> = [
   { method: 'POST', path: /^\/api\/batch-carriers\/promote$/ },
   { method: 'POST', path: /^\/api\/batches\/[0-9a-f-]{36}\/comments$/ },
   { method: 'POST', path: /^\/api\/contact-logs$/ },
-  { method: 'POST', path: /^\/api\/batches\/[0-9a-f-]{36}\/export-csv$/ },
+  { method: 'POST', path: /^\/api\/batches\/[0-9a-f-]{36}\/(export-csv|rename|delete)$/ },
   { method: 'POST', path: /^\/api\/team\/(edit|deactivate|reactivate|block-clear|recovery-revoke)$/ },
   { method: 'POST', path: /^\/api\/recovery\/batch-carriers\/status$/ },
   { method: 'POST', path: /^\/api\/recovery-codes$/ },

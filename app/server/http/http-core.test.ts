@@ -112,6 +112,7 @@ describe('renewal allowlist (never "any POST")', () => {
     expect(renewalReason('POST', '/api/batch-carriers/status', none)).toBe('write');
     expect(renewalReason('POST', '/api/contact-logs', none)).toBe('write');
     expect(renewalReason('POST', '/api/batches/44444444-4444-4444-8444-444444444444/export-csv', none)).toBe('write');
+    for (const op of ['rename', 'delete']) expect(renewalReason('POST', `/api/batches/44444444-4444-4444-8444-444444444444/${op}`, none)).toBe('write');
     expect(renewalReason('GET', '/api/batches/44444444-4444-4444-8444-444444444444/list-extras', none)).toBe('none');
     expect(renewalReason('POST', '/api/recovery/batch-carriers/status', none)).toBe('write');
     expect(renewalReason('POST', '/api/session/activity', none)).toBe('ping');
