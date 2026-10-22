@@ -121,6 +121,65 @@ describe.skipIf(!enabled)('A4 real HTTP: sign-in end to end, timing, bodies, shu
     expect(logs.join('\n')).not.toContain(link.split('token=')[1]);
   });
 
+  /** Full email-link sign-in over HTTP; returns the cookie jar and the app CSRF token. */
+  async function signInByLink(email: string): Promise<{ jar: Jar; csrf: string; session: { user: { id: string; email: string; role: string } } }> {
+    const before = mail.lastLinkFor(email);
+    const req = await post('/auth/request', `email=${encodeURIComponent(email)}`, { 'content-type': 'application/x-www-form-urlencoded' });
+    expect(req.status).toBe(303);
+    let link: string | undefined;
+    for (let i = 0; i < 80; i++) {
+      link = mail.lastLinkFor(email);
+      if (link && link !== before) break;
+      await new Promise((r) => setTimeout(r, 100));
+    }
+    expect(link && link !== before).toBe(true);
+    const jar: Jar = new Map();
+    const land = await fetch(link!.replace(ORIGIN, BASE), { redirect: 'manual' });
+    absorb(jar, land);
+    const page = await fetch(land.headers.get('location')!.replace(ORIGIN, BASE), { headers: { cookie: cookieHeader(jar) } });
+    const html = await page.text();
+    absorb(jar, page);
+    const nonce = /name="nonce" value="([^"]+)"/.exec(html)![1];
+    const formCsrf = /name="csrf_token" value="([^"]+)"/.exec(html)![1];
+    const done = await post('/auth/confirm', `nonce=${nonce}&csrf_token=${formCsrf}`, { 'content-type': 'application/x-www-form-urlencoded', cookie: cookieHeader(jar) });
+    expect(done.status).toBe(303);
+    absorb(jar, done);
+    const me = await fetch(`${BASE}/api/session`, { headers: { cookie: cookieHeader(jar) } });
+    absorb(jar, me);
+    const session = (await me.json()) as { csrfToken: string; user: { id: string; email: string; role: string } };
+    return { jar, csrf: session.csrfToken, session };
+  }
+
+  it('Task D over HTTP: a manager adds a person (no email sent); the new person then signs in by link; a duplicate is refused', async () => {
+    const manager = await signInByLink('manager@tnbs-recruiter.example.invalid');
+    const email = `newhire.${Date.now()}@example.invalid`;
+    const sentBefore = mail.count;
+    const add = await fetch(`${BASE}/api/team/add`, {
+      method: 'POST',
+      headers: { origin: ORIGIN, cookie: cookieHeader(manager.jar), 'content-type': 'application/json', 'x-csrf-token': manager.csrf },
+      body: JSON.stringify({ full_name: 'New Hire', email: email.toUpperCase(), role: 'view', mobile: '(555) 010-2030' }),
+    });
+    expect(add.status).toBe(201);
+    const { id } = (await add.json()) as { id: string };
+    expect(mail.count).toBe(sentBefore); // nothing is emailed at add time
+    const team = (await (await fetch(`${BASE}/api/team`, { headers: { cookie: cookieHeader(manager.jar) } })).json()) as Array<{ id: string; email: string; role: string; status: string }>;
+    expect(team.find((m) => m.id === id)).toMatchObject({ email, role: 'view', status: 'approved' });
+    const dup = await fetch(`${BASE}/api/team/add`, {
+      method: 'POST',
+      headers: { origin: ORIGIN, cookie: cookieHeader(manager.jar), 'content-type': 'application/json', 'x-csrf-token': manager.csrf },
+      body: JSON.stringify({ full_name: 'Again', email, role: 'edit' }),
+    });
+    expect([dup.status, ((await dup.json()) as { error: string }).error]).toEqual([409, 'conflict']);
+    const hire = await signInByLink(email);
+    expect(hire.session.user).toMatchObject({ id, email, role: 'view' });
+    // The shutdown test below requests a manager link and expects one email; clear the manager's
+    // link from this test so the 2-minute courtesy window does not apply (own test database only).
+    const admin = new pg.Client({ connectionString: SUITE_DB!.adminUrl });
+    await admin.connect();
+    await admin.query("delete from internal.signin_links where user_id = '71000000-0000-4000-8000-000000000001'");
+    await admin.end();
+  });
+
   it('timing over HTTP: known, unknown, inactive and invalid all land in the same envelope', async () => {
     const bodies = ['email=viewer%40tnbs-recruiter.example.invalid', 'email=nobody%40example.invalid', 'email=disabled%40tnbs-recruiter.example.invalid', 'email=bad'];
     const times = await Promise.all(bodies.map(async (b) => {

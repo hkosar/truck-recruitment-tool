@@ -353,6 +353,76 @@ describe.skipIf(!enabled)('A3 database: stores, permissions, concurrency, deadli
     expect(await linkRow(hash)).toMatchObject({ used_at: null });
   });
 
+  // Task D (M1b, D8 approved 2026-10-22): a manager adds a person.
+  const addInput = (email: string, role: 'manager' | 'edit' | 'view' = 'edit', mobile: string | null = null) => ({ fullName: 'Added Person', email, role, mobile });
+  async function recoverySession(userId: string): Promise<string> {
+    const t = `${Date.now()}-${++seq}`;
+    await adminQuery(`update internal.recovery_sets set revoked_at = now(), revoked_reason = 'test_reset' where user_id = $1 and revoked_at is null`, [userId]);
+    const set = (await adminQuery('insert into internal.recovery_sets (user_id) values ($1) returning id', [userId])).rows[0].id;
+    const code = (await adminQuery(`insert into internal.recovery_codes (set_id, user_id, code_hash, expires_at, used_at) values ($1, $2, $3, now() + interval '180 days', now()) returning id`, [set, userId, `add-person-code-${t}`])).rows[0].id;
+    const hash = `add-person-recovery-${t}`;
+    await adminQuery(
+      `insert into internal.app_sessions (user_id, token_hash, kind, email_at_issue, created_at, last_seen_at, idle_window, expires_at, absolute_expires_at, recovery_code_id)
+       select id, $2, 'recovery', email, now(), now(), interval '1 hour', now() + interval '1 hour', now() + interval '12 hours', $3 from public.profiles where id = $1`,
+      [userId, hash, code],
+    );
+    return hash;
+  }
+
+  it('add person: a manager adds; the row is approved, normalized and audited; the mobile is internal and unverified', async () => {
+    await resetEditor();
+    const t = Date.now();
+    const mg = await session(MANAGER);
+    const id = await data.teamAddPerson(mg, addInput(`Added.Person.${t}@Example.Invalid`, 'view', '+15551234567'));
+    const row = (await adminQuery('select email, full_name, role::text, status::text, approved_by from public.profiles where id = $1', [id])).rows[0];
+    expect(row).toEqual({ email: `added.person.${t}@example.invalid`, full_name: 'Added Person', role: 'view', status: 'approved', approved_by: MANAGER });
+    expect((await adminQuery('select count(*)::int as n from auth.users where id = $1', [id])).rows[0].n).toBe(0); // no old sign-in account
+    expect((await adminQuery('select mobile, entered_by from internal.staff_mobile_unverified where user_id = $1', [id])).rows[0]).toEqual({ mobile: '+15551234567', entered_by: MANAGER });
+    const audit = (await adminQuery("select detail from internal.auth_events where kind = 'team_add_person' and user_id = $1", [id])).rows[0].detail;
+    expect(audit).toEqual({ by: MANAGER, role: 'view', mobile_entered: true });
+    // The app role cannot read the mobile table at all.
+    const app = await appClient(mg);
+    await expect(app.query('select mobile from internal.staff_mobile_unverified')).rejects.toMatchObject({ code: '42501' });
+    await app.query('rollback');
+    await app.end();
+  });
+
+  it('add person: editor, viewer and a manager recovery session are refused; nothing is written', async () => {
+    await resetEditor();
+    const t = Date.now();
+    const email = `refused.${t}@example.invalid`;
+    for (const s of [await session(EDITOR), await session(VIEWER), await recoverySession(MANAGER)]) {
+      await expect(data.teamAddPerson(s, addInput(email))).rejects.toBeInstanceOf(NotPermittedError);
+    }
+    expect((await adminQuery('select count(*)::int as n from public.profiles where lower(email) = $1', [email])).rows[0].n).toBe(0);
+  });
+
+  it('add person: any address already on the roster is refused (case-insensitive; disabled and legacy rows too)', async () => {
+    await resetEditor();
+    const t = Date.now();
+    const mg = await session(MANAGER);
+    await data.teamAddPerson(mg, addInput(`dup.${t}@example.invalid`));
+    for (const email of [`DUP.${t}@Example.Invalid`, 'disabled@tnbs-recruiter.example.invalid', 'pending@tnbs-recruiter.example.invalid', 'editor@tnbs-recruiter.example.invalid']) {
+      await expect(data.teamAddPerson(await session(MANAGER), addInput(email))).rejects.toEqual(new RefusedError('conflict'));
+    }
+    await expect(data.teamAddPerson(await session(MANAGER), { ...addInput(`guest.${t}@example.invalid`), role: 'guest' as never })).rejects.toEqual(new RefusedError('invalid'));
+  });
+
+  it('add person: the added person requests a link, signs in, and is included in an emergency sign-out', async () => {
+    await resetEditor();
+    const t = Date.now();
+    const email = `newhire.${t}@example.invalid`;
+    const id = await data.teamAddPerson(await session(MANAGER), addInput(email, 'edit'));
+    const day = { start: new Date(t - 86_400_000), end: new Date(t + 86_400_000) };
+    const minted = await auth.mintIfAllowed(email, day, `newhire-link-${t}`, () => ({ mint: true }));
+    expect(minted).toMatchObject({ recipient: email });
+    const sessionHash = `newhire-session-${t}`;
+    expect(await auth.redeem(`newhire-link-${t}`, sessionHash)).toBe(true);
+    expect(await auth.sessionInfo(sessionHash)).toMatchObject({ userId: id, role: 'edit', kind: 'link' });
+    await data.teamSignEveryoneOut(await session(MANAGER));
+    expect(await auth.sessionInfo(sessionHash)).toBeNull();
+  });
+
   it('role loss, write first: the demotion waits; the write commits first and stands; then the session is revoked', async () => {
     await resetEditor();
     const ed = await session(EDITOR);

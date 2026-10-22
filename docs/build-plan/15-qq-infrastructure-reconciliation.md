@@ -1338,3 +1338,53 @@ whole duration (`app/server/testing/test-db.ts`; enforced by `test-db.test.ts`).
 - Three generators (run ids g1, g2, g3), 6 iterations each, all concurrent: all 18 iterations
   passed 174 with 10 skipped. Eight measured HTTP runs (run id m1) at the same time: 10/10 each,
   4.7–6.1 s, CPU 11–50 %.
+
+## 32 · Task D: managers add people (D8 approved 2026-10-22)
+
+**Decision.** Hunter, 2026-10-22: "yes, remove the old account link so managers can add people".
+Production had 0 profiles and 0 batches (Hunter's read-only count, 2026-10-22). **D10:** the
+backout-window freeze on adding people is superseded by this approval; the email-edit freeze rules
+stay as reviewed.
+
+**SQL** (`supabase/pending/M1b_add_person.sql`, applied after M1 as one transaction; never on a
+hosted database in this work):
+- `public.profiles` no longer references `auth.users`. Existing rows are untouched, and new ids
+  default to `gen_random_uuid()`.
+- `internal.staff_mobile_unverified` holds the optional mobile number. It is unverified, never used
+  for sign-in or recovery, and not readable by the app role.
+- `public.team_add_person`:
+  - manager, link session only;
+  - takes the roster lock (I1) exclusively before anything else, as every team operation does;
+  - normalizes the email and refuses any address already on the roster, in any status;
+  - assigns staff roles only, approved by the acting manager;
+  - writes an audit row (`team_add_person`) and sends nothing.
+
+**Backout** (`supabase/backout/M1b-backout.sql`, run after retire and before `M1-backout.sql`):
+it drops the function and the id default, and restores the foreign key `NOT VALID`. People added
+under M1b keep their rows; they have no old sign-in account, so they cannot use the old app. The
+mobile table stays, unreachable. Nothing is deleted. Retire step 6 joins `auth.users`, so added
+people are outside that alignment check by construction.
+
+**Server and UI.**
+- New module `app/server/team/add-person.ts` with one route line in `app.ts`: `POST /api/team/add`
+  returns 201 with the new id.
+- Duplicates return 409 `conflict` and invalid input 409 `invalid`. Recovery sessions are refused
+  by the default-deny recovery matrix.
+- The route counts as a write for session renewal.
+- The Team page has an "Add a person" form (name, email, role, optional mobile) with
+  plain-language outcomes, and says that no email is sent.
+
+**Measured locally** (2026-10-22; new owned cluster on port 55521):
+- Database suites 30/30, including four add-person tests:
+  - a manager adds; the row is approved, normalized and audited; the mobile is internal;
+  - editor, viewer and a manager recovery session are refused, and nothing is written;
+  - duplicates are refused, case-insensitive and including disabled and legacy rows;
+  - the added person requests a link, signs in, and is included in an emergency sign-out.
+- App verify with the A3 settings: 195/195.
+- HTTP suites 11/11 on three runs, including the end-to-end add-then-sign-in test.
+- Role matrix 62/62.
+- Browser 15/15 on the second run. The first run was 14/15 because the check matched the heading
+  case-sensitively, but CSS uppercase changes its text.
+- Backout rehearsal with M1b: identical after normalization; the added person is kept; the foreign
+  key is restored `NOT VALID`.
+- Contract checks for M1b and its backout: 12 mutations caught.

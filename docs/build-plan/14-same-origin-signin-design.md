@@ -898,9 +898,9 @@ only: no keys, tokens, URLs or project refs.
 | D5 | Workers plan if Free CPU is insufficient (spend) | Hunter | S8 |
 | D6 | DB connection path on hosted (Hyperdrive direct vs pooler; IPv4 add-on if required, which is spend) | manager / Hunter after A5 | S8 |
 | D7 | Fate of legacy pending/guest rows | Hunter, after O1 | nothing in the build; production cleanup only |
-| D8 | **UNAPPROVED PROPOSAL.** Drop the `profiles.id → auth.users` FK (schema change), proposed as **M2 after the backout window** | review + manager / Hunter | S5 Team "add" only; M1 and the rest are not blocked |
+| D8 | **APPROVED by Hunter 2026-10-22** ("yes, remove the old account link so managers can add people"). Done in `supabase/pending/M1b_add_person.sql`, applied right after M1 (not a later M2); backout `supabase/backout/M1b-backout.sql`. See doc 15 §32 | Hunter (decided) | none |
 | D9 | Design-system version for the sign-in surfaces (v1.0 vs [QQ] v1.1) | coordinator | S4 final visual sign-off only |
-| D10 | **UNAPPROVED PROPOSAL.** Whether there is a backout window that pauses email edits and Team "add"; its length; who declares it closed | Hunter via manager | M2 timing; production rollout plan |
+| D10 | **Adds: SUPERSEDED** by the D8 approval (2026-10-22): no backout-window freeze on adding people. **Email edits:** the reviewed freeze rules stay (M1 `internal.backout_window`); whether a window is declared, its length and who closes it remain open | Hunter via manager | production rollout plan |
 
 Build slices: S1 DB migration + SQL tests · S2 Worker auth core · S3 data API + SPA port ·
 S4 sign-in pages · S5 Team page · S6 recovery codes · S7 mail adapter + webhook · S8 rollout.
