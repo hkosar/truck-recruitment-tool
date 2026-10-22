@@ -46,9 +46,28 @@ if (matrix && cleanup) {
     'delete suppression (manager only)', 'curate cargo values (manager only)', 'insert batch directly', 'change batches.created_by',
     'set carriers.dnc_set_by directly', 'insert member with status_changed_by', 'insert member with promoted_by',
     'insert suppression as someone else', 'recovery_set_status (viewer has no writes)', 'select own profile',
-    'team_sign_everyone_out (manager only)', 'sign everyone out revokes own session too',
+    'team_sign_everyone_out (manager only)', 'sign everyone out: staff sessions incl. own revoked, non-staff kept',
+    'sees the probe member (control)', 'sees the probe rows (control)', 'generate_contact_sheet sees the probe batch (control)',
   ];
   for (const probe of requiredProbes) if (!matrix.includes(probe)) failures.push(`role matrix: missing probe "${probe}"`);
+  // Gate 2 review finding 9: no false positives.
+  // - A savepoint rollback would also delete the probe's result row (the old allowed probes and
+  //   the emergency check were never recorded); probes isolate themselves in inner blocks instead.
+  if (/\bsavepoint\b|\brollback to\b/i.test(m)) failures.push('role matrix: no savepoints (a rollback to a savepoint discards the probe result)');
+  // - Denials must raise the expected SQLSTATE; any other error is a failure, not a pass.
+  if (!m.includes('sqlstate = any (p_states)')) failures.push('role matrix: record_denied must require the expected SQLSTATE');
+  if (/exception when others then\s+insert into _results values \([^;]*, true\);/i.test(m)) failures.push('role matrix: no helper may pass on an arbitrary error');
+  // - Allowed probes check their effect as the migration role; refused writes check the target is unchanged.
+  for (const helper of ['record_allowed', 'record_unchanged']) {
+    const body = new RegExp(`function pg_temp\\.${helper}\\([\\s\\S]*?\\$\\$;`).exec(m)?.[0] ?? '';
+    if (!body.includes('reset role;') || !body.includes('execute p_check into v_ok;')) failures.push(`role matrix: ${helper} must check the effect as the migration role`);
+  }
+  for (const call of m.match(/select pg_temp\.record_allowed\([\s\S]*?\$\$\);/g) ?? []) {
+    if ((call.match(/\$\$/g) ?? []).length !== 4) failures.push(`role matrix: allowed probe without an effect check: ${call.slice(0, 80)}`);
+  }
+  // - Targets are created by the matrix itself (known, non-null), never picked under a session's RLS view.
+  if (!m.includes('create temporary table _t (') || !/raise exception 'role matrix needs/.test(m)) failures.push('role matrix: probe targets must be created up front and checked non-null');
+  if (/\(select (id|batch_id|dot_number|value) from public\.(batches|batch_carriers|contact_logs|batch_activity|contact_suppressions|cargo_other_values)( [a-z]+)? (order by [^)]*)?limit 1\)/.test(m)) failures.push('role matrix: probe targets must come from _t, not RLS-filtered subqueries');
 
   // Cleanup: gated, one transaction, every delete scoped to the fixture identities.
   const c = code(cleanup);
