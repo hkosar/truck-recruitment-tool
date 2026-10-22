@@ -2,17 +2,18 @@
 // 600 ms budget because of connection set-up (start-up, idle eviction) or pool contention.
 // Task-owned throwaway cluster only; skipped unless A3_APP_URL and A3_ADMIN_URL are set.
 
-import { afterEach, describe, expect, it, vi } from 'vitest';
+import { afterAll, afterEach, beforeAll, describe, expect, it, vi } from 'vitest';
 import { UnavailableError } from '../core/types';
 import { DEFAULT_TIMING } from '../app';
 import { Database } from './database';
 import { PgAuthStore } from './pg-auth-store';
-import { suiteDatabase } from '../testing/test-db';
+import { claimSuiteDatabase, suiteDatabase } from '../testing/test-db';
 // Loaded machines (manager decision): only TEST timeouts are raised; product limits are unchanged.
 vi.setConfig({ testTimeout: 30_000, hookTimeout: 60_000 });
 
-// Own database (<base>_readiness; testing/test-db.ts).
-const APP_URL = suiteDatabase('readiness')?.appUrl;
+// Own database per run (<base>_<run>_readiness; testing/test-db.ts), claimed exclusively.
+const SUITE_DB = suiteDatabase('readiness');
+const APP_URL = SUITE_DB?.appUrl;
 const enabled = Boolean(APP_URL);
 const BUDGET = DEFAULT_TIMING.admissionDeadlineMs;
 const sleep = (ms: number) => new Promise((r) => setTimeout(r, ms));
@@ -24,6 +25,13 @@ describe.skipIf(!enabled)('A3 database readiness for sign-in admission', () => {
     open.push(d);
     return d;
   };
+  let releaseClaim: (() => Promise<void>) | undefined;
+  beforeAll(async () => {
+    releaseClaim = await claimSuiteDatabase(SUITE_DB!.adminUrl);
+  });
+  afterAll(async () => {
+    await releaseClaim?.();
+  });
   afterEach(async () => {
     await Promise.all(open.splice(0).map((d) => d.close()));
   });

@@ -9,7 +9,7 @@ import { afterAll, beforeAll, describe, expect, it, vi } from 'vitest';
 import { parseServerEnv } from './config';
 import { FakeMailAdapter } from './mail/fake';
 import { startServer, type RunningServer } from './main';
-import { suiteDatabase } from './testing/test-db';
+import { claimSuiteDatabase, suiteDatabase } from './testing/test-db';
 // Loaded machines (manager decision): only TEST timeouts are raised; product limits are unchanged.
 vi.setConfig({ testTimeout: 30_000, hookTimeout: 60_000 });
 
@@ -38,7 +38,9 @@ describe.skipIf(!enabled)('A4 real HTTP: sign-in end to end, timing, bodies, shu
   const mail = new FakeMailAdapter();
   const logs: string[] = [];
 
+  let releaseClaim: (() => Promise<void>) | undefined;
   beforeAll(async () => {
+    releaseClaim = await claimSuiteDatabase(SUITE_DB!.adminUrl); // exclusive for this run, or fail loudly
     // Clean sign-in ledger for the fixture people, so consecutive runs never hit the courtesy
     // window or the flood buckets of a previous run (task-owned test database only).
     if (SUITE_DB) {
@@ -56,6 +58,7 @@ describe.skipIf(!enabled)('A4 real HTTP: sign-in end to end, timing, bodies, shu
   });
   afterAll(async () => {
     if (running?.lifecycle.isAccepting) await running.shutdown(5_000);
+    await releaseClaim?.();
     // Optional evidence for intermittent failures: event names and categories only, no values.
     if (process.env.E2E_EVENT_LOG) {
       const names = logs.map((l) => { const e = JSON.parse(l) as { event: string; category?: string }; return e.category ? `${e.event}:${e.category}` : e.event; });

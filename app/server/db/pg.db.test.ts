@@ -3,7 +3,7 @@
 //   A3_APP_URL   = postgres://recruiter_app:<throwaway>@127.0.0.1:<port>/tr_signin_test
 //   A3_ADMIN_URL = postgres://tr_test_admin:<throwaway>@127.0.0.1:<port>/tr_signin_test
 // The database is built by scripts/a3-build-test-db.mjs (Supabase shim, 20 migrations, fixtures, M1).
-// This suite uses its OWN database (<base>_store, built with --suites; testing/test-db.ts): its
+// This suite uses its OWN database per run (<base>_<run>_store; testing/test-db.ts): its
 // emergency sign-out test revokes every staff session, so no other suite may share it.
 
 import { createServer, connect, type Server, type Socket } from 'node:net';
@@ -13,7 +13,7 @@ import { NotPermittedError, OutcomeUnknownError, RefusedError, UnavailableError 
 import { Database } from './database';
 import { PgAuthStore } from './pg-auth-store';
 import { PgDataStore } from './pg-data-store';
-import { suiteDatabase } from '../testing/test-db';
+import { claimSuiteDatabase, suiteDatabase } from '../testing/test-db';
 // Loaded machines (manager decision): only TEST timeouts are raised; product limits are unchanged.
 vi.setConfig({ testTimeout: 30_000, hookTimeout: 60_000 });
 
@@ -66,7 +66,9 @@ describe.skipIf(!enabled)('A3 database: stores, permissions, concurrency, deadli
     await adminQuery(`delete from internal.blocked_email_addresses where normalized_email like '%@tnbs-recruiter.example.invalid'`);
   }
 
+  let releaseClaim: (() => Promise<void>) | undefined;
   beforeAll(async () => {
+    releaseClaim = await claimSuiteDatabase(ADMIN_URL!); // exclusive for this run, or fail loudly
     admin = new pg.Client({ connectionString: ADMIN_URL });
     await admin.connect();
     await adminQuery(`select set_config('request.jwt.claims', '{"role":"service_role"}', false)`);
@@ -77,6 +79,7 @@ describe.skipIf(!enabled)('A3 database: stores, permissions, concurrency, deadli
   afterAll(async () => {
     await db?.close();
     await admin?.end();
+    await releaseClaim?.();
   });
 
   it('sign-in ledger end to end: mint (under lock, with counts), check, redeem once, session, touch, sign-out', async () => {

@@ -13,9 +13,10 @@
 //      without FORCE (a database with other connections is refused, not cut off).
 // A new database gets that comment, so only this task's own builds can ever replace it.
 //
-// --suites also builds one database per DB-using test suite (<db>_store, <db>_readiness,
-// <db>_e2e), so suites that mutate global state (emergency sign-out revokes every staff session)
-// can never share a database (Gate 2 final check 2; app/server/testing/test-db.ts).
+// --run <id> builds one database per DB-using test suite for that run only (<db>_<id>_store,
+// _readiness, _e2e); --drop-run <id> drops them. Concurrent processes use different run ids, and
+// each suite also claims its database exclusively, so suites that mutate global state (emergency
+// sign-out revokes every staff session) never share a database (app/server/testing/test-db.ts).
 
 import { createRequire } from 'node:module';
 import { readFileSync, readdirSync, writeFileSync } from 'node:fs';
@@ -74,7 +75,39 @@ async function main() {
     console.error(`REFUSED: the server on port ${port} is not the task-owned cluster (its data directory differs from --owner-dir)`);
     process.exit(3);
   }
-  const names = [dbName, ...(args.suites === 'true' ? SUITES.map((s) => `${dbName}_${s}`) : [])];
+  // Per-RUN suite databases (Gate 2: concurrent copies of a suite must never share a database):
+  //   --run <id>       build ONLY <db>_<id>_<suite> for every suite (the base is left alone)
+  //   --drop-run <id>  drop those (ownership-checked, no FORCE) and build nothing
+  // --suites without a run id is refused.
+  const RUN_ID = /^[a-z][a-z0-9]{1,15}$/;
+  if (args.suites === 'true' && !args.run) {
+    await admin.end();
+    console.error('REFUSED: --suites needs --run <id> (one set of suite databases per concurrent run)');
+    process.exit(2);
+  }
+  const runId = args.run ?? args['drop-run'];
+  if (runId !== undefined && !RUN_ID.test(runId)) {
+    await admin.end();
+    console.error('REFUSED: run id must match ^[a-z][a-z0-9]{1,15}$');
+    process.exit(2);
+  }
+  const runNames = runId ? SUITES.map((s) => `${dbName}_${runId}_${s}`) : [];
+  if (args['drop-run']) {
+    for (const name of runNames) {
+      const existing = await admin.query("select shobj_description(oid, 'pg_database') as comment from pg_database where datname = $1", [name]);
+      if (!existing.rowCount) continue;
+      if (existing.rows[0].comment !== OWNER_COMMENT) {
+        await admin.end();
+        console.error(`REFUSED: database ${name} exists without this task's ownership comment; not dropping it`);
+        process.exit(3);
+      }
+      await admin.query(`drop database ${name}`);
+      console.log(`dropped ${name}`);
+    }
+    await admin.end();
+    return;
+  }
+  const names = args.run ? runNames : [dbName];
   for (const name of names) {
     const existing = await admin.query("select shobj_description(oid, 'pg_database') as comment from pg_database where datname = $1", [name]);
     if (existing.rowCount) {

@@ -4,12 +4,14 @@ import { readdirSync, readFileSync, statSync } from 'node:fs';
 import { join, relative, resolve } from 'node:path';
 import { describe, expect, it } from 'vitest';
 import { DB_SUITES, suiteDatabase } from './test-db';
+// claimSuiteDatabase is exercised against a real database by the A3 suites themselves.
 
 const serverRoot = resolve(import.meta.dirname, '..');
 const repoRoot = resolve(serverRoot, '..', '..');
 const base = {
   A3_APP_URL: 'postgres://recruiter_app:x@127.0.0.1:55473/tr_signin_test',
   A3_ADMIN_URL: 'postgres://tr_test_admin:y@127.0.0.1:55473/tr_signin_test',
+  A3_RUN_ID: 'm1',
 };
 
 function sourceFiles(dir: string): string[] {
@@ -20,14 +22,22 @@ function sourceFiles(dir: string): string[] {
 }
 
 describe('test-database isolation', () => {
-  it('every suite gets its own database; non-loopback or non-tr_ targets are refused', () => {
+  it('every suite gets its own database per run; non-loopback or non-tr_ targets are refused', () => {
     const names = DB_SUITES.map((s) => new URL(suiteDatabase(s, base)!.appUrl).pathname);
-    expect(names).toEqual(['/tr_signin_test_store', '/tr_signin_test_readiness', '/tr_signin_test_e2e']);
+    expect(names).toEqual(['/tr_signin_test_m1_store', '/tr_signin_test_m1_readiness', '/tr_signin_test_m1_e2e']);
     expect(new Set(names).size).toBe(DB_SUITES.length);
-    for (const s of DB_SUITES) expect(new URL(suiteDatabase(s, base)!.adminUrl).pathname).toBe(`/tr_signin_test_${s}`);
+    for (const s of DB_SUITES) expect(new URL(suiteDatabase(s, base)!.adminUrl).pathname).toBe(`/tr_signin_test_m1_${s}`);
+    // Two concurrent processes with different run ids never derive the same database.
+    expect(new URL(suiteDatabase('store', { ...base, A3_RUN_ID: 'g1' })!.appUrl).pathname).not.toBe(new URL(suiteDatabase('store', { ...base, A3_RUN_ID: 'g2' })!.appUrl).pathname);
     expect(suiteDatabase('store', { ...base, A3_APP_URL: 'postgres://u:p@db.example.com:5432/tr_signin_test' })).toBeUndefined();
     expect(suiteDatabase('store', { ...base, A3_ADMIN_URL: 'postgres://u:p@127.0.0.1:5432/postgres' })).toBeUndefined();
     expect(suiteDatabase('store', {})).toBeUndefined();
+  });
+
+  it('with A3 settings present, a missing or invalid run id fails loudly instead of sharing a database', () => {
+    for (const run of [undefined, '', 'X', 'has space', 'a'.repeat(17), '1abc']) {
+      expect(() => suiteDatabase('store', { ...base, A3_RUN_ID: run })).toThrow(/A3_RUN_ID/);
+    }
   });
 
   it('no test file reads the database settings directly, and no two files claim the same suite', () => {
@@ -41,6 +51,9 @@ describe('test-database isolation', () => {
       for (const m of text.matchAll(/suiteDatabase\('([a-z0-9]+)'/g)) claims.set(m[1], [...(claims.get(m[1]) ?? []), rel]);
     }
     expect(direct).toEqual([]);
+    // Every suite file also claims its database exclusively for its whole run.
+    const unclaimed = [...new Set([...claims.values()].flat())].filter((rel) => !/await claimSuiteDatabase\(/.test(readFileSync(join(serverRoot, rel), 'utf8')));
+    expect(unclaimed).toEqual([]);
     expect([...claims.entries()].filter(([, files]) => new Set(files).size > 1)).toEqual([]);
     // The three DB-using suites are covered, each by exactly one file.
     expect(Object.fromEntries([...claims.entries()].map(([s, files]) => [s, [...new Set(files)]]))).toEqual({
