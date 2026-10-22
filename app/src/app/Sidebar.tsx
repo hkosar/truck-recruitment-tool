@@ -1,9 +1,8 @@
 import { NavLink } from 'react-router-dom';
 import { useQuery } from '@tanstack/react-query';
-import { usePermissions, useProfile } from './guards';
+import { usePermissions, useProfile, useSession } from './guards';
 import { queryKeys } from '../lib/queryKeys';
 import { dashboardTotals } from '../lib/rpc';
-import { supabase } from '../lib/supabase';
 
 /**
  * Sidebar nav — docs/build-plan/02-frontend-spec.md §3f.
@@ -13,7 +12,7 @@ import { supabase } from '../lib/supabase';
  *    from).
  *  - "Outreach — coming soon" (F2): visible-but-disabled reserved tabs, no
  *    routes exist for them yet.
- *  - "Admin" (manager only): Users, pending-count badge.
+ *  - "Admin" (manager only): Users (Team). No pending badge: staff are manager-added only.
  *  - Footer: user identity + sign out. The locked TNBS system is light-only,
  *    so there is intentionally no theme state or toggle.
  */
@@ -42,19 +41,7 @@ export function Sidebar() {
     staleTime: 30_000,
   });
 
-  const pendingCountQuery = useQuery({
-    queryKey: queryKeys.pendingUsersCount(),
-    queryFn: async () => {
-      const { count, error } = await supabase
-        .from('profiles')
-        .select('id', { count: 'exact', head: true })
-        .eq('status', 'pending');
-      if (error) throw error;
-      return count ?? 0;
-    },
-    enabled: isManager,
-    staleTime: 30_000,
-  });
+  const { session } = useSession();
 
   const initial = (profile?.full_name || profile?.email || '?').slice(0, 1).toUpperCase();
 
@@ -112,11 +99,6 @@ export function Sidebar() {
             <div className="space-y-1">
               <NavLink to="/users" className={navLinkClass}>
                 <span>Users</span>
-                {pendingCountQuery.data ? (
-                  <span className="rounded-full bg-accent px-2 py-0.5 text-xs font-semibold tabular-nums text-accent-ink">
-                    {pendingCountQuery.data}
-                  </span>
-                ) : null}
               </NavLink>
             </div>
           </div>
@@ -136,13 +118,16 @@ export function Sidebar() {
             <div className="truncate text-xs text-text-subtle">{profile?.email}</div>
           </div>
         </div>
-        <button
-          type="button"
-          onClick={() => void supabase.auth.signOut()}
-          className="mt-2 w-full rounded-md border border-border-strong px-2 py-2 text-xs font-bold text-text-muted hover:bg-surface-2"
-        >
-          Sign out
-        </button>
+        {/* A real form POST: the server revokes this session and answers with a full navigation to /signin. */}
+        <form method="post" action="/auth/signout" className="mt-2">
+          <input type="hidden" name="csrf_token" value={session?.csrfToken ?? ''} />
+          <button
+            type="submit"
+            className="w-full rounded-md border border-border-strong px-2 py-2 text-xs font-bold text-text-muted hover:bg-surface-2"
+          >
+            Sign out
+          </button>
+        </form>
       </div>
     </aside>
   );

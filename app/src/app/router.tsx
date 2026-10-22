@@ -2,23 +2,16 @@ import { lazy, Suspense } from 'react';
 import type { ReactNode } from 'react';
 import { createBrowserRouter, Navigate } from 'react-router-dom';
 import { AppShell } from './AppShell';
-import { RequireAnon, RequireApproved, RequireAuth, RequireManager, RequireRole } from './guards';
+import { RequireManager, RequireRole, RequireStaff } from './guards';
+import { activitySender, createActivityReporter } from '../lib/activity';
+import { currentCsrfToken } from '../lib/api';
 
 /**
- * Route table — docs/build-plan/02-frontend-spec.md §1.2, code-split per
- * screen via React.lazy. One deliberate deviation from the literal table:
- * `/reset` is NOT gated by RequireAnon. A Supabase password-recovery link
- * signs the user into a real (if transient) session before they land on
- * `/reset` — gating it "anon only" would bounce them away before they could
- * ever set a new password. Reset.tsx checks for a recovery session itself
- * and shows "invalid or expired link" when there isn't one.
+ * Route table — docs/build-plan/02-frontend-spec.md §1.2, code-split per screen via React.lazy.
+ * Sign-in is served by the server (/signin, /auth/*); the old in-app Login, Register, Forgot,
+ * Reset and Pending screens are retired (Hunter decision 3: manager-added staff only). The
+ * server redirects their old URLs to /signin.
  */
-
-const Login = lazy(() => import('../features/auth/Login'));
-const Register = lazy(() => import('../features/auth/Register'));
-const Forgot = lazy(() => import('../features/auth/Forgot'));
-const Reset = lazy(() => import('../features/auth/Reset'));
-const Pending = lazy(() => import('../features/auth/Pending'));
 
 const Dashboard = lazy(() => import('../features/dashboard/Dashboard'));
 const Wizard = lazy(() => import('../features/batchNew/Wizard'));
@@ -42,45 +35,41 @@ function withSuspense(node: ReactNode) {
 
 export const router = createBrowserRouter([
   {
-    element: <RequireAnon />,
+    element: <RequireStaff />,
     children: [
-      { path: '/login', element: withSuspense(<Login />) },
-      { path: '/register', element: withSuspense(<Register />) },
-      { path: '/forgot', element: withSuspense(<Forgot />) },
-    ],
-  },
-  // Public: see the deviation note above.
-  { path: '/reset', element: withSuspense(<Reset />) },
-  {
-    element: <RequireAuth />,
-    children: [
-      { path: '/pending', element: withSuspense(<Pending />) },
+      // Print-only, no AppShell chrome (02 §3e: opens in a new tab, auto window.print() on load).
+      { path: '/batches/:batchId/sheet', element: withSuspense(<ContactSheet />) },
       {
-        element: <RequireApproved />,
+        element: <AppShell />,
         children: [
-          // Print-only, no AppShell chrome (02 §3e: opens in a new tab,
-          // auto window.print() on load).
-          { path: '/batches/:batchId/sheet', element: withSuspense(<ContactSheet />) },
+          { index: true, element: <Navigate to="/dashboard" replace /> },
+          { path: '/dashboard', element: withSuspense(<Dashboard />) },
           {
-            element: <AppShell />,
-            children: [
-              { index: true, element: <Navigate to="/dashboard" replace /> },
-              { path: '/dashboard', element: withSuspense(<Dashboard />) },
-              {
-                path: '/batches/new',
-                element: <RequireRole roles={['manager', 'edit']}>{withSuspense(<Wizard />)}</RequireRole>,
-              },
-              { path: '/batches/:batchId', element: withSuspense(<BatchPage />) },
-              { path: '/carriers/:dot', element: withSuspense(<CarrierProfile />) },
-              {
-                path: '/users',
-                element: <RequireManager>{withSuspense(<UsersAdmin />)}</RequireManager>,
-              },
-              { path: '*', element: withSuspense(<NotFound />) },
-            ],
+            path: '/batches/new',
+            element: <RequireRole roles={['manager', 'edit']}>{withSuspense(<Wizard />)}</RequireRole>,
           },
+          { path: '/batches/:batchId', element: withSuspense(<BatchPage />) },
+          { path: '/carriers/:dot', element: withSuspense(<CarrierProfile />) },
+          {
+            path: '/users',
+            element: <RequireManager>{withSuspense(<UsersAdmin />)}</RequireManager>,
+          },
+          { path: '*', element: withSuspense(<NotFound />) },
         ],
       },
     ],
   },
 ]);
+
+// Deliberate-use renewal: only navigations the person caused (a same-origin link click, which
+// also covers Enter on a focused link, or browser back/forward). Never timers, prefetch, focus
+// or background refetch (lib/activity.ts; doc 14 §3.5).
+const activity = createActivityReporter({ send: activitySender(currentCsrfToken), now: () => Date.now() });
+if (typeof window !== 'undefined') {
+  window.addEventListener('click', (event) => {
+    if (event.defaultPrevented || event.button !== 0 || event.metaKey || event.ctrlKey || event.shiftKey || event.altKey) return;
+    const link = (event.target as Element | null)?.closest?.('a[href]') as HTMLAnchorElement | null;
+    if (link && link.origin === window.location.origin && !link.target) activity.reportUserNavigation('click');
+  });
+  window.addEventListener('popstate', () => activity.reportUserNavigation('history'));
+}

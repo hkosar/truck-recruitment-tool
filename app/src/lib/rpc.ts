@@ -1,4 +1,20 @@
-import { supabase } from './supabase';
+import { rpc } from './api';
+
+// Same-origin RPC adapter: keeps each wrapper's existing `await query` / `query.abortSignal(signal)`
+// shape while the call now goes to POST /api/rpc/:name (17 allow-listed RPCs, server-side).
+// eslint-disable-next-line @typescript-eslint/no-explicit-any
+type RpcData = any;
+function callRpc(name: string, args: Record<string, unknown> = {}) {
+  const run = (signal?: AbortSignal) => rpc<RpcData>(name, args, signal).then((data) => ({ data, error: null as null }));
+  return {
+    then<A, B = never>(onOk?: (v: { data: RpcData; error: null }) => A | PromiseLike<A>, onErr?: (e: unknown) => B | PromiseLike<B>) {
+      return run().then(onOk, onErr);
+    },
+    abortSignal(signal: AbortSignal) {
+      return run(signal);
+    },
+  };
+}
 import type { Json } from '../types/database';
 import type {
   BatchMemberRow,
@@ -28,7 +44,7 @@ import type {
  * #3/#8/#9/#10/#11. These are the RPC NAMES the database actually exposes;
  * 02-frontend-spec.md's table used working aliases while drafting (mapping
  * below, from 01's reconciliation section) — call sites should import from
- * here, never call `supabase.rpc(...)` directly.
+ * here, never call the RPC endpoint directly.
  *
  *   search_count        -> count_carriers          batch_status_counts()   is a NEW RPC (amendment #11)
  *   search_preview       -> search_carriers          dashboard_totals()      is a NEW RPC (amendment #11)
@@ -100,7 +116,7 @@ export async function searchCarriers(
   definition: SearchDefinition,
   options: SearchCarriersOptions = {},
 ): Promise<{ rows: SearchCarrierRow[]; total: number }> {
-  const query = supabase.rpc('search_carriers', {
+  const query = callRpc('search_carriers', {
     p_definition: toJson(definition),
     p_page: options.page ?? 1,
     p_page_size: options.pageSize ?? 50,
@@ -121,7 +137,7 @@ export async function searchCarriers(
 // the wizard, not here.
 // ---------------------------------------------------------------------------
 export async function countCarriers(definition: SearchDefinition, signal?: AbortSignal): Promise<CountCarriersResult> {
-  const query = supabase.rpc('count_carriers', { p_definition: toJson(definition) });
+  const query = callRpc('count_carriers', { p_definition: toJson(definition) });
   const { data, error } = signal ? await query.abortSignal(signal) : await query;
   if (error) throw error;
   return firstRow(data, 'count_carriers');
@@ -134,7 +150,7 @@ export async function facetOtherValues(
   definition: SearchDefinition,
   options: { keyword?: string | null; limit?: number; offset?: number; signal?: AbortSignal } = {},
 ): Promise<FacetOtherValueRow[]> {
-  const query = supabase.rpc('facet_other_values', {
+  const query = callRpc('facet_other_values', {
     p_definition: toJson(definition),
     p_keyword: nullableRpcArg(options.keyword),
     p_limit: options.limit ?? 100,
@@ -149,7 +165,7 @@ export async function facetSuggestedKeywords(
   definition: SearchDefinition,
   signal?: AbortSignal,
 ): Promise<FacetSuggestedKeywordRow[]> {
-  const query = supabase.rpc('facet_suggested_keywords', { p_definition: toJson(definition) });
+  const query = callRpc('facet_suggested_keywords', { p_definition: toJson(definition) });
   const { data, error } = signal ? await query.abortSignal(signal) : await query;
   if (error) throw error;
   return data ?? [];
@@ -161,7 +177,7 @@ export async function facetSuggestedKeywords(
  * definition) — callers pass the already-scoped definition; this wrapper
  * doesn't strip it itself. */
 export async function facetCargoFlags(definition: SearchDefinition, signal?: AbortSignal): Promise<CargoFlagCountRow[]> {
-  const query = supabase.rpc('facet_cargo_flags', { p_definition: toJson(definition) });
+  const query = callRpc('facet_cargo_flags', { p_definition: toJson(definition) });
   const { data, error } = signal ? await query.abortSignal(signal) : await query;
   if (error) throw error;
   return data ?? [];
@@ -177,7 +193,7 @@ export async function createBatch(args: {
   description?: string | null;
   definition: SearchDefinition;
 }): Promise<CreateBatchResult> {
-  const { data, error } = await supabase.rpc('create_batch', {
+  const { data, error } = await callRpc('create_batch', {
     p_name: args.name,
     p_customer: nullableRpcArg(args.customer),
     p_job: nullableRpcArg(args.job),
@@ -189,7 +205,7 @@ export async function createBatch(args: {
 }
 
 export async function refreshBatch(batchId: string): Promise<RefreshBatchResult> {
-  const { data, error } = await supabase.rpc('refresh_batch', { p_batch_id: batchId });
+  const { data, error } = await callRpc('refresh_batch', { p_batch_id: batchId });
   if (error) throw error;
   return firstRow(data, 'refresh_batch');
 }
@@ -198,7 +214,7 @@ export async function refreshBatch(batchId: string): Promise<RefreshBatchResult>
  * change is a plain `PATCH batch_carriers` instead (01 §5.4) — see this
  * file's header. */
 export async function bulkSetStatus(batchId: string, dots: number[], status: Status): Promise<number> {
-  const { data, error } = await supabase.rpc('bulk_set_status', {
+  const { data, error } = await callRpc('bulk_set_status', {
     p_batch_id: batchId,
     p_dots: dots,
     p_status: status,
@@ -210,7 +226,7 @@ export async function bulkSetStatus(batchId: string, dots: number[], status: Sta
 /** Global DNC toggle (F23 sibling / profile header). Logs into every batch
  * currently containing the carrier (01 §5.4 locked rule). */
 export async function setDoNotContact(dot: number, on: boolean, reason?: string | null): Promise<void> {
-  const { error } = await supabase.rpc('set_do_not_contact', {
+  const { error } = await callRpc('set_do_not_contact', {
     p_dot: dot,
     p_on: on,
     p_reason: nullableRpcArg(reason),
@@ -221,7 +237,7 @@ export async function setDoNotContact(dot: number, on: boolean, reason?: string 
 /** Sheet/CSV exports write activity (01 amendment #19) so F11's feed
  * records them — call after a successful Print/Export action. */
 export async function logExport(batchId: string, kind: 'call_sheet' | 'csv', rowCount: number): Promise<void> {
-  const { error } = await supabase.rpc('log_export', {
+  const { error } = await callRpc('log_export', {
     p_batch_id: batchId,
     p_kind: kind,
     p_row_count: rowCount,
@@ -255,7 +271,7 @@ export async function batchMembers(
   batchId: string,
   options: BatchMembersOptions = {},
 ): Promise<{ rows: BatchMemberRow[]; total: number }> {
-  const query = supabase.rpc('batch_members', {
+  const query = callRpc('batch_members', {
     p_batch_id: batchId,
     p_status: nullableRpcArg(options.status),
     p_q: nullableRpcArg(options.q),
@@ -283,7 +299,7 @@ export async function batchMembersMap(
   batchId: string,
   options: BatchMembersFilters & { sort?: BatchMembersSort; dir?: SortDir; signal?: AbortSignal } = {},
 ): Promise<BatchMembersMapRow[]> {
-  const query = supabase.rpc('batch_members_map', {
+  const query = callRpc('batch_members_map', {
     p_batch_id: batchId,
     p_status: nullableRpcArg(options.status),
     p_q: nullableRpcArg(options.q),
@@ -307,7 +323,7 @@ export async function searchCarriersMap(
   definition: SearchDefinition,
   options: { limit?: number; signal?: AbortSignal } = {},
 ): Promise<SearchCarriersMapRow[]> {
-  const query = supabase.rpc('search_carriers_map', {
+  const query = callRpc('search_carriers_map', {
     p_definition: toJson(definition),
     p_limit: options.limit ?? 5000,
   });
@@ -323,7 +339,7 @@ export async function generateContactSheet(
   batchId: string,
   dots: number[] | null = null,
 ): Promise<ContactSheetRow[]> {
-  const { data, error } = await supabase.rpc('generate_contact_sheet', {
+  const { data, error } = await callRpc('generate_contact_sheet', {
     p_batch_id: batchId,
     p_dots: nullableRpcArg(dots),
   });
@@ -342,7 +358,7 @@ export async function generateContactSheet(
  * warnings_count + with_phone + with_email"), not literal SQL — confirm
  * against the real migration once M1.2 cuts it. */
 export async function batchStatusCounts(batchId: string, signal?: AbortSignal): Promise<BatchStatusCounts> {
-  const query = supabase.rpc('batch_status_counts', { p_batch_id: batchId });
+  const query = callRpc('batch_status_counts', { p_batch_id: batchId });
   const { data, error } = signal ? await query.abortSignal(signal) : await query;
   if (error) throw error;
   return firstRow(data, 'batch_status_counts');
@@ -351,7 +367,7 @@ export async function batchStatusCounts(batchId: string, signal?: AbortSignal): 
 /** Dashboard StatStrip (F24): active batches / distinct carriers in play /
  * with phone / interested / promoted. */
 export async function dashboardTotals(signal?: AbortSignal): Promise<DashboardTotals> {
-  const query = supabase.rpc('dashboard_totals');
+  const query = callRpc('dashboard_totals');
   const { data, error } = signal ? await query.abortSignal(signal) : await query;
   if (error) throw error;
   return firstRow(data, 'dashboard_totals');
@@ -361,7 +377,7 @@ export async function dashboardTotals(signal?: AbortSignal): Promise<DashboardTo
 // 01 §5.6 — compliance helper (call-sheet today; email/SMS modules later)
 // ---------------------------------------------------------------------------
 export async function isContactable(dot: number, channel: Channel, signal?: AbortSignal): Promise<boolean> {
-  const query = supabase.rpc('is_contactable', { p_dot: dot, p_channel: channel });
+  const query = callRpc('is_contactable', { p_dot: dot, p_channel: channel });
   const { data, error } = signal ? await query.abortSignal(signal) : await query;
   if (error) throw error;
   return data ?? false;

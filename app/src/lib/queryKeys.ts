@@ -36,7 +36,6 @@ export const queryKeys = {
   facetCargo: (scopeHash: string) => ['facet', 'cargo', scopeHash] as const,
 
   users: () => ['users'] as const,
-  pendingUsersCount: () => ['users', 'pending-count'] as const,
   /** current signed-in profile (app/guards.tsx useSession()). */
   me: () => ['me'] as const,
 };

@@ -8,35 +8,35 @@ import { fmtInt, fmtMoney, fmtPhone, fmtRel } from '../../lib/format';
 import { queryKeys } from '../../lib/queryKeys';
 import { safetyVerdict } from '../../lib/safety';
 import { setDoNotContact } from '../../lib/rpc';
-import { supabase } from '../../lib/supabase';
+import { apiGet, apiPost } from '../../lib/api';
+import type { Database } from '../../types/database';
 import { WARNING_META } from '../../lib/warnings';
 import { DISPOSITIONS_BY_CHANNEL } from '../../types/domain';
 import type { Channel, ContactDisposition, WarningCode } from '../../types/domain';
 
+type Tables = Database['public']['Tables'];
+interface CarrierProfilePayload {
+  carrier: Tables['carriers']['Row'];
+  insurance: Tables['carrier_insurance']['Row'] | null;
+  safety: Tables['carrier_safety']['Row'] | null;
+  inspections: Tables['carrier_inspections']['Row'][];
+  warning: Database['public']['Views']['carrier_warnings']['Row'] | null;
+  logs: (Tables['contact_logs']['Row'] & { profiles: { full_name: string } | null; batches: { name: string } | null })[];
+  memberships: (Tables['batch_carriers']['Row'] & { batches: { name: string; customer: string | null; job: string | null } | null })[];
+  suppressions: Pick<Tables['contact_suppressions']['Row'], 'channel' | 'value' | 'expires_at'>[];
+}
+
 async function loadCarrier(dot: number) {
-  const [carrier, insurance, safety, inspections, warning, logs, memberships, suppressions] = await Promise.all([
-    supabase.from('carriers').select('*').eq('dot_number', dot).single(),
-    supabase.from('carrier_insurance').select('*').eq('dot_number', dot).maybeSingle(),
-    supabase.from('carrier_safety').select('*').eq('dot_number', dot).maybeSingle(),
-    supabase.from('carrier_inspections').select('*').eq('dot_number', dot).order('inspection_date', { ascending: false }).limit(10),
-    supabase.from('carrier_warnings').select('*').eq('dot_number', dot).maybeSingle(),
-    supabase.from('contact_logs').select('*, profiles(full_name), batches(name)').eq('dot_number', dot).order('contacted_at', { ascending: false }).limit(100),
-    supabase.from('batch_carriers').select('*, batches(name, customer, job)').eq('dot_number', dot).order('added_at', { ascending: false }),
-    supabase.from('contact_suppressions').select('channel, value, expires_at').eq('dot_number', dot).eq('channel', 'all').is('value', null),
-  ]);
-  for (const result of [carrier, insurance, safety, inspections, warning, logs, memberships, suppressions]) {
-    if (result.error) throw result.error;
-  }
-  if (!carrier.data) throw new Error(`Carrier USDOT ${dot} not found`);
+  const p = await apiGet<CarrierProfilePayload>(`/api/carriers/${dot}/profile`);
   return {
-    carrier: carrier.data,
-    insurance: insurance.data,
-    safety: safety.data,
-    inspections: inspections.data ?? [],
-    warningReasons: warning.data?.warning_reasons ?? [],
-    logs: logs.data ?? [],
-    memberships: memberships.data ?? [],
-    suppressions: suppressions.data ?? [],
+    carrier: p.carrier,
+    insurance: p.insurance,
+    safety: p.safety,
+    inspections: p.inspections ?? [],
+    warningReasons: p.warning?.warning_reasons ?? [],
+    logs: p.logs ?? [],
+    memberships: p.memberships ?? [],
+    suppressions: p.suppressions ?? [],
   };
 }
 
@@ -65,8 +65,7 @@ export default function CarrierProfile() {
   const promoteMutation = useMutation({
     mutationFn: async () => {
       if (!batchId) throw new Error('Open this carrier from a batch to mark it promoted.');
-      const { error } = await supabase.from('batch_carriers').update({ promoted_at: new Date().toISOString() }).eq('batch_id', batchId).eq('dot_number', dot);
-      if (error) throw error;
+      await apiPost('/api/batch-carriers/promote', { batch_id: batchId, dot_number: dot });
     },
     onSuccess: async () => { setMessage('Carrier marked as promoted.'); await queryClient.invalidateQueries({ queryKey: queryKeys.carrier(dot) }); },
     onError: (error) => setMessage(error instanceof Error ? error.message : 'Promotion failed.'),
@@ -76,8 +75,7 @@ export default function CarrierProfile() {
       if (!userId) throw new Error('No signed-in user.');
       // Re-check at submission: DNC may have been set after this page loaded.
       if ((await loadGlobalDncDots([dot])).has(dot)) throw new Error(DNC_BLOCKED_MESSAGE);
-      const { error } = await supabase.from('contact_logs').insert({ dot_number: dot, batch_id: batchId, user_id: userId, channel, disposition, notes: notes || null, next_steps: nextSteps || null });
-      if (error) throw error;
+      await apiPost('/api/contact-logs', { dot_number: dot, batch_id: batchId, channel, disposition, notes: notes || null, next_steps: nextSteps || null });
     },
     onSuccess: async () => { setMessage(`${channel} logged.`); await queryClient.invalidateQueries({ queryKey: queryKeys.carrier(dot) }); },
     onError: async (error) => { setMessage(error instanceof Error ? error.message : 'Contact log failed.'); await queryClient.invalidateQueries({ queryKey: queryKeys.carrier(dot) }); },

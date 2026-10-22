@@ -3,7 +3,7 @@ import { useEffect, useRef } from 'react';
 import { useParams } from 'react-router-dom';
 import { fmtPhone } from '../../../lib/format';
 import { generateContactSheet, logExport } from '../../../lib/rpc';
-import { supabase } from '../../../lib/supabase';
+import { apiGet, loadSession } from '../../../lib/api';
 import { WARNING_META } from '../../../lib/warnings';
 import type { ContactSheetRow, WarningCode } from '../../../types/domain';
 
@@ -26,19 +26,13 @@ async function loadSheet(batchId: string): Promise<{
   generatedBy: string;
 }> {
   const dots = selectedDots(batchId);
-  const [rows, batchResult, sessionResult] = await Promise.all([
+  const [rows, batch, session] = await Promise.all([
     generateContactSheet(batchId, dots),
-    supabase.from('batches').select('name, customer, job').eq('id', batchId).single(),
-    supabase.auth.getSession(),
+    apiGet<{ name: string; customer: string | null; job: string | null }>(`/api/batches/${batchId}/sheet-header`),
+    loadSession(),
   ]);
-  if (batchResult.error) throw batchResult.error;
-  const userId = sessionResult.data.session?.user.id;
-  let generatedBy = sessionResult.data.session?.user.email ?? 'Twisted Nail';
-  if (userId) {
-    const profileResult = await supabase.from('profiles').select('full_name, email').eq('id', userId).maybeSingle();
-    if (profileResult.data) generatedBy = profileResult.data.full_name || profileResult.data.email;
-  }
-  return { batch: batchResult.data, rows, generatedBy };
+  const generatedBy = session.user.name || session.user.email || 'Twisted Nail';
+  return { batch, rows, generatedBy };
 }
 
 function warningLabels(reasons: string[]): string {

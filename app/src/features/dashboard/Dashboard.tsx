@@ -4,7 +4,7 @@ import { usePermissions } from '../../app/guards';
 import { fmtInt, fmtRel } from '../../lib/format';
 import { queryKeys } from '../../lib/queryKeys';
 import { dashboardTotals } from '../../lib/rpc';
-import { supabase } from '../../lib/supabase';
+import { apiGet } from '../../lib/api';
 import type { BatchSummary, DashboardTotals } from '../../types/domain';
 
 const EMPTY_TOTALS: DashboardTotals = {
@@ -36,16 +36,8 @@ function laneSummary(zones: BatchSummary['zones']): string {
 }
 
 async function loadDashboard(): Promise<{ totals: DashboardTotals; batches: BatchSummary[] }> {
-  const [totals, batchesResult] = await Promise.all([
-    dashboardTotals(),
-    supabase
-      .from('batch_dashboard')
-      .select('*')
-      .is('archived_at', null)
-      .order('last_activity_at', { ascending: false, nullsFirst: false }),
-  ]);
-  if (batchesResult.error) throw batchesResult.error;
-  return { totals: totals ?? EMPTY_TOTALS, batches: batchesResult.data ?? [] };
+  const [totals, batches] = await Promise.all([dashboardTotals(), apiGet<BatchSummary[]>('/api/dashboard')]);
+  return { totals: totals ?? EMPTY_TOTALS, batches: batches ?? [] };
 }
 
 function StatStrip({ totals }: { totals: DashboardTotals }) {

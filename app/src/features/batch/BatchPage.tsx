@@ -9,9 +9,21 @@ import { loadGlobalDncDots } from '../../lib/dnc';
 import { fmtInt, fmtPhone, fmtRel } from '../../lib/format';
 import { queryKeys } from '../../lib/queryKeys';
 import { batchMembers, batchStatusCounts, refreshBatch } from '../../lib/rpc';
-import { supabase } from '../../lib/supabase';
+import { apiGet, apiPost } from '../../lib/api';
 import { WARNING_META } from '../../lib/warnings';
 import type { BatchMemberRow, BatchStatusCounts, Status, WarningCode } from '../../types/domain';
+import type { Database, Json } from '../../types/database';
+
+type BatchRow = Database['public']['Tables']['batches']['Row'] & { batch_zones: Database['public']['Tables']['batch_zones']['Row'][] };
+interface ActivityRow {
+  id: number;
+  activity_type: Database['public']['Enums']['activity_type'];
+  comment: string | null;
+  payload: Json;
+  created_at: string;
+  actor_id: string | null;
+  profiles: { full_name: string } | null;
+}
 
 const STATUS_OPTIONS: { value: Status; label: string; countKey: keyof BatchStatusCounts; tone: string }[] = [
   { value: 'new', label: 'New', countKey: 'new_count', tone: 'bg-st-new-tint text-st-new' },
@@ -30,8 +42,7 @@ function StatusControl({ row, batchId, locked }: { row: BatchMemberRow; batchId:
   const queryClient = useQueryClient();
   const mutation = useMutation({
     mutationFn: async (status: Status) => {
-      const { error } = await supabase.from('batch_carriers').update({ status }).eq('batch_id', batchId).eq('dot_number', row.dot_number);
-      if (error) throw error;
+      await apiPost('/api/batch-carriers/status', { batch_id: batchId, dot_number: row.dot_number, status });
     },
     onSuccess: async () => queryClient.invalidateQueries({ queryKey: queryKeys.batch(batchId) }),
   });
@@ -57,9 +68,7 @@ export default function BatchPage() {
   const batchQuery = useQuery({
     queryKey: queryKeys.batch(batchId || ''),
     queryFn: async () => {
-      const { data, error } = await supabase.from('batches').select('*, batch_zones(*)').eq('id', batchId as string).single();
-      if (error) throw error;
-      return data;
+      return apiGet<BatchRow>(`/api/batches/${batchId as string}`);
     },
     enabled: Boolean(batchId),
   });
@@ -76,9 +85,7 @@ export default function BatchPage() {
   const activityQuery = useQuery({
     queryKey: queryKeys.batchActivity(batchId || ''),
     queryFn: async () => {
-      const { data, error } = await supabase.from('batch_activity').select('id, activity_type, comment, payload, created_at, actor_id, profiles(full_name)').eq('batch_id', batchId as string).order('id', { ascending: false }).limit(3);
-      if (error) throw error;
-      return data ?? [];
+      return apiGet<ActivityRow[]>(`/api/batches/${batchId as string}/activity?limit=3`);
     },
     enabled: Boolean(batchId),
   });
@@ -89,8 +96,7 @@ export default function BatchPage() {
   const commentMutation = useMutation({
     mutationFn: async (comment: string) => {
       if (!userId) throw new Error('No signed-in user.');
-      const { error } = await supabase.from('batch_activity').insert({ batch_id: batchId as string, actor_id: userId, activity_type: 'comment', comment });
-      if (error) throw error;
+      await apiPost(`/api/batches/${batchId as string}/comments`, { comment });
     },
     onSuccess: async () => queryClient.invalidateQueries({ queryKey: queryKeys.batchActivity(batchId as string) }),
   });
@@ -100,16 +106,14 @@ export default function BatchPage() {
       if (outreachLocked) throw new Error('The do-not-contact check is not complete. Outreach is disabled until it succeeds.');
       // Re-check at submission: the panel may have been open while DNC was set elsewhere.
       if ((await loadGlobalDncDots([loggingCarrier.dot_number])).has(loggingCarrier.dot_number)) throw new Error(DNC_BLOCKED_MESSAGE);
-      const { error } = await supabase.from('contact_logs').insert({
+      await apiPost('/api/contact-logs', {
         dot_number: loggingCarrier.dot_number,
         batch_id: batchId as string,
-        user_id: userId,
         channel: input.channel,
         disposition: input.disposition,
         notes: input.notes || null,
         next_steps: input.nextSteps || null,
       });
-      if (error) throw error;
     },
     onSuccess: async () => {
       setMessage(`Outreach logged for ${loggingCarrier?.legal_name ?? 'carrier'}.`);

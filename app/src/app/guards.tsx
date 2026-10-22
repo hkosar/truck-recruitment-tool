@@ -1,85 +1,50 @@
-import { useEffect, useState } from 'react';
-import { Navigate, Outlet, useLocation } from 'react-router-dom';
+import { Navigate, Outlet } from 'react-router-dom';
 import type { ReactNode } from 'react';
 import { useQuery } from '@tanstack/react-query';
-import { supabase } from '../lib/supabase';
+import { loadSession, type SessionPayload } from '../lib/api';
 import { queryKeys } from '../lib/queryKeys';
 import { getPermissions } from '../lib/permissions';
 import type { Permissions } from '../lib/permissions';
 import type { Profile, UserRole } from '../types/domain';
 
 /**
- * RequireAuth / RequireApproved / RequireManager — docs/build-plan/
- * 02-frontend-spec.md §1.2 routing guards, gated on the `profiles` row per
- * §1.4: `status='pending'` (or role `guest`) hard-redirects to `/pending`
- * from every app route (the v1 guest gate, kept); `status='disabled'`
- * signs out + redirects to `/login` (amendment #14 — 02's prose said
- * "suspended", the canonical `user_status` value is `disabled`).
- *
- * Also exports RequireAnon (anon-only auth screens) and RequireRole (the
- * general "manager|edit" case /batches/new needs — §1.2's routing table has
- * more than the three guard names this file's spec comment lists;
- * RequireManager is RequireRole(['manager']) underneath).
+ * Session guards for the same-origin sign-in (docs/build-plan/14-same-origin-signin-design.md,
+ * 15-qq-infrastructure-reconciliation.md). The server only serves the app shell to a valid
+ * staff session and redirects everyone else to its own /signin page, so there is no in-app
+ * login, registration, pending or guest screen (Hunter decision 3: manager-added staff only).
+ * A session that ends while the app is open is caught by the first 401 (lib/api.ts), which
+ * does a full page load to /signin.
  */
 
-// ---------------------------------------------------------------------------
-// Session/profile plumbing
-// ---------------------------------------------------------------------------
-async function fetchProfile(userId: string): Promise<Profile | null> {
-  const { data, error } = await supabase.from('profiles').select('*').eq('id', userId).maybeSingle();
-  if (error) throw error;
-  return data;
-}
-
-function useAuthUserId(): { loading: boolean; userId: string | null } {
-  const [state, setState] = useState<{ loading: boolean; userId: string | null }>({
-    loading: true,
-    userId: null,
-  });
-
-  useEffect(() => {
-    let active = true;
-
-    supabase.auth.getSession().then(({ data }) => {
-      if (active) setState({ loading: false, userId: data.session?.user.id ?? null });
-    });
-
-    const {
-      data: { subscription },
-    } = supabase.auth.onAuthStateChange((_event, session) => {
-      setState({ loading: false, userId: session?.user.id ?? null });
-    });
-
-    return () => {
-      active = false;
-      subscription.unsubscribe();
-    };
-  }, []);
-
-  return state;
-}
-
 export interface SessionState {
-  /** true until the initial auth check AND (if authed) the profile fetch
-   * both resolve. */
   loading: boolean;
   userId: string | null;
   profile: Profile | null;
+  session: SessionPayload | null;
+}
+
+function profileFrom(session: SessionPayload): Profile {
+  return {
+    id: session.user.id,
+    email: session.user.email,
+    full_name: session.user.name,
+    role: session.user.role,
+    status: 'approved',
+    avatar_color: '#64748b',
+    approved_by: null,
+    approved_at: null,
+    created_at: '',
+  } as Profile;
 }
 
 export function useSession(): SessionState {
-  const { loading: authLoading, userId } = useAuthUserId();
-
-  const profileQuery = useQuery({
-    queryKey: queryKeys.me(),
-    queryFn: () => fetchProfile(userId as string),
-    enabled: Boolean(userId),
-  });
-
+  const query = useQuery({ queryKey: queryKeys.me(), queryFn: () => loadSession(), staleTime: 60_000, retry: false });
+  const session = query.data ?? null;
   return {
-    loading: authLoading || (Boolean(userId) && profileQuery.isPending),
-    userId,
-    profile: profileQuery.data ?? null,
+    loading: query.isPending,
+    userId: session?.user.id ?? null,
+    profile: session ? profileFrom(session) : null,
+    session,
   };
 }
 
@@ -92,9 +57,6 @@ export function usePermissions(): Permissions {
   return getPermissions(profile?.role ?? null);
 }
 
-// ---------------------------------------------------------------------------
-// UI bits
-// ---------------------------------------------------------------------------
 function FullScreenLoader() {
   return (
     <div className="flex h-dvh w-full items-center justify-center bg-bg text-text-muted">
@@ -107,46 +69,10 @@ function renderOutletOrChildren(children: ReactNode | undefined) {
   return children === undefined ? <Outlet /> : <>{children}</>;
 }
 
-// ---------------------------------------------------------------------------
-// Guards
-// ---------------------------------------------------------------------------
-
-/** anon-only auth screens (§1.2: /login, /register, /forgot). Any
- * authenticated session — regardless of approval status — bounces to `/`,
- * where RequireAuth -> RequireApproved sort out the correct destination
- * (pending/disabled/approved), so the branching logic has one owner. */
-export function RequireAnon({ children }: { children?: ReactNode }) {
-  const { loading, userId } = useSession();
-  if (loading) return <FullScreenLoader />;
-  if (userId) return <Navigate to="/" replace />;
-  return renderOutletOrChildren(children);
-}
-
-export function RequireAuth({ children }: { children?: ReactNode }) {
-  const { loading, userId } = useSession();
-  const location = useLocation();
-  if (loading) return <FullScreenLoader />;
-  if (!userId) return <Navigate to="/login" state={{ from: location }} replace />;
-  return renderOutletOrChildren(children);
-}
-
-/** Must render under RequireAuth (or checks auth itself, as here, so it's
- * also safe to use standalone). */
-export function RequireApproved({ children }: { children?: ReactNode }) {
-  const { loading, userId, profile } = useSession();
-  const location = useLocation();
-
-  if (loading) return <FullScreenLoader />;
-  if (!userId) return <Navigate to="/login" state={{ from: location }} replace />;
-
-  if (profile?.status === 'disabled') {
-    void supabase.auth.signOut();
-    return <Navigate to="/login" replace />;
-  }
-  if (!profile || profile.status === 'pending' || profile.role === 'guest') {
-    return <Navigate to="/pending" replace />;
-  }
-
+/** Signed-in staff only. Without a session the API answers 401 and lib/api.ts navigates to /signin. */
+export function RequireStaff({ children }: { children?: ReactNode }) {
+  const { loading, session } = useSession();
+  if (loading || !session) return <FullScreenLoader />;
   return renderOutletOrChildren(children);
 }
 
