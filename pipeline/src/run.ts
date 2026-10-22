@@ -222,8 +222,9 @@ async function runChain(
 }
 
 /** Runs after the nightly chain has finished, so a safety failure can never block or skip
- *  the existing nightly steps. A failure still fails the process (Render alert + pipeline_runs). */
-async function runNightlySafety(ctx: PipelineContext, socrata: SocrataClient, args: CliArgs): Promise<void> {
+ *  the existing nightly steps. A failure still fails the process (Render alert + pipeline_runs).
+ *  Exported for the local database harness. */
+export async function runNightlySafety(ctx: PipelineContext, socrata: SocrataClient, args: CliArgs): Promise<void> {
   const decision = await decideNightlySafety(ctx, ctx.config.PIPELINE_NIGHTLY_SAFETY);
   ctx.log.info('nightly.safety_decision', { mode: ctx.config.PIPELINE_NIGHTLY_SAFETY, ...decision });
   if (!decision.run) return;
