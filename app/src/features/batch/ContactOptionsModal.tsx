@@ -1,4 +1,5 @@
 import { useMutation, useQuery } from '@tanstack/react-query';
+import { useEffect, useRef } from 'react';
 import { fmtPhone } from '../../lib/format';
 import { generateContactSheet } from '../../lib/rpc';
 import { fetchBatchCsv, saveBlob } from './exportCsv';
@@ -11,6 +12,17 @@ export function ContactOptionsModal({ batchId, dots, canEdit, onClose, onMessage
   onClose: () => void;
   onMessage: (message: string) => void;
 }) {
+  const dialog = useRef<HTMLDialogElement>(null);
+  // Native modal dialog: showModal makes the page behind inert and handles Tab. Focus goes to Done on open and back to the opener on close.
+  useEffect(() => {
+    const opener = document.activeElement instanceof HTMLElement ? document.activeElement : null;
+    const element = dialog.current;
+    if (element && !element.open) element.showModal();
+    return () => {
+      if (element?.open) element.close();
+      opener?.focus();
+    };
+  }, []);
   const sorted = [...dots].sort((a, b) => a - b);
   // generate_contact_sheet drops do-not-contact carriers in the database, so this preview is the exportable set.
   const preview = useQuery({ queryKey: ['batch', batchId, 'contact-options', sorted.join(',')], queryFn: () => generateContactSheet(batchId, sorted), staleTime: 0, gcTime: 0 });
@@ -34,8 +46,8 @@ export function ContactOptionsModal({ batchId, dots, canEdit, onClose, onMessage
   };
 
   return (
-    <div className="fixed inset-0 z-40 flex items-center justify-center bg-black/40 p-4" role="dialog" aria-modal="true" aria-labelledby="contact-options-title">
-      <div className="flex max-h-[90dvh] w-full max-w-3xl flex-col border border-border bg-surface shadow-xl">
+    <dialog ref={dialog} aria-labelledby="contact-options-title" onCancel={(event) => { event.preventDefault(); onClose(); }} className="m-auto w-full max-w-3xl border border-border bg-surface p-0 text-text shadow-xl backdrop:bg-black/40">
+      <div className="flex max-h-[90dvh] w-full flex-col">
         <div className="border-b border-border px-5 py-3 text-sm font-extrabold" id="contact-options-title">Generate Contact Options</div>
         <div className="space-y-3 overflow-y-auto p-5">
           {preview.isPending ? <div className="h-24 animate-pulse bg-th-bg" /> : null}
@@ -64,9 +76,9 @@ export function ContactOptionsModal({ batchId, dots, canEdit, onClose, onMessage
         <div className="flex flex-wrap justify-end gap-2 border-t border-border px-5 py-3">
           <button type="button" onClick={print} disabled={!preview.isSuccess || rows.length === 0} className="border border-border-strong px-3 py-2 text-xs font-bold disabled:opacity-40">Print call sheet</button>
           {canEdit ? <button type="button" onClick={() => csv.mutate()} disabled={!preview.isSuccess || rows.length === 0 || csv.isPending} className="border border-border-strong px-3 py-2 text-xs font-bold disabled:opacity-40">{csv.isPending ? 'Exporting…' : 'Export CSV'}</button> : null}
-          <button type="button" onClick={onClose} className="bg-accent px-4 py-2 text-xs font-bold text-accent-ink">Done</button>
+          <button type="button" autoFocus onClick={onClose} className="bg-accent px-4 py-2 text-xs font-bold text-accent-ink">Done</button>
         </div>
       </div>
-    </div>
+    </dialog>
   );
 }

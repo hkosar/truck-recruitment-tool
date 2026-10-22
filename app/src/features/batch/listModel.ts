@@ -71,6 +71,13 @@ export function togglePage(selected: ReadonlySet<number>, pageDots: readonly num
   return next;
 }
 
+/** State that belongs to one batch. Read it with scopedValue: a value saved for another batch reads as empty. */
+export interface Scoped<T> { batchId: string; value: T }
+
+export function scopedValue<T>(state: Scoped<T>, batchId: string, empty: T): T {
+  return state.batchId === batchId ? state.value : empty;
+}
+
 export function fmtMiles(miles: number | null | undefined): string {
   return miles === null || miles === undefined ? '—' : `${Math.round(miles).toLocaleString('en-US')} mi`;
 }

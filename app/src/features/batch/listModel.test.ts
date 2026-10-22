@@ -1,5 +1,5 @@
 import { describe, expect, it } from 'vitest';
-import { contactFilter, insuranceMin, isCriticalRow, selectableDots, sortChoice, toggleDot, togglePage } from './listModel';
+import { scopedValue, contactFilter, insuranceMin, isCriticalRow, selectableDots, sortChoice, toggleDot, togglePage } from './listModel';
 
 describe('isCriticalRow (red wash)', () => {
   it('washes do-not-contact rows', () => expect(isCriticalRow({ do_not_contact: true, warning_reasons: [] })).toBe(true));
@@ -36,4 +36,13 @@ describe('selection', () => {
     expect(togglePage(all, [1, 3]).size).toBe(0);
   });
   it('select-all keeps other pages', () => expect([...togglePage(new Set([9]), [1, 3])].sort()).toEqual([1, 3, 9]));
+});
+
+describe('batch-scoped state', () => {
+  it('reads as empty once the batch id changes, and returns to the value for the same batch', () => {
+    const state = { batchId: 'a', value: new Set([1, 2]) };
+    expect(scopedValue(state, 'a', new Set<number>()).size).toBe(2);
+    expect(scopedValue(state, 'b', new Set<number>()).size).toBe(0);
+    expect(scopedValue({ batchId: 'a', value: true }, 'b', false)).toBe(false);
+  });
 });
