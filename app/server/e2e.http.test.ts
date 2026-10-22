@@ -2,7 +2,7 @@
 // services) against the A3 database. Skipped unless RUN_HTTP_TESTS=1 and A3_APP_URL are set and
 // the build exists (npm run build). Port: E2E_PORT (recorded in the A3/A4 ownership file).
 
-import { existsSync } from 'node:fs';
+import { appendFileSync, existsSync } from 'node:fs';
 import { request } from 'node:http';
 import pg from 'pg';
 import { afterAll, beforeAll, describe, expect, it } from 'vitest';
@@ -50,6 +50,11 @@ describe.skipIf(!enabled)('A4 real HTTP: sign-in end to end, timing, bodies, shu
   });
   afterAll(async () => {
     if (running?.lifecycle.isAccepting) await running.shutdown(5_000);
+    // Optional evidence for intermittent failures: event names and categories only, no values.
+    if (process.env.E2E_EVENT_LOG) {
+      const names = logs.map((l) => { const e = JSON.parse(l) as { event: string; category?: string }; return e.category ? `${e.event}:${e.category}` : e.event; });
+      appendFileSync(process.env.E2E_EVENT_LOG, `${new Date().toISOString()} ${names.join(' ') || '(no events)'}\n`);
+    }
   });
 
   const post = (path: string, body: string, headers: Record<string, string>) =>
