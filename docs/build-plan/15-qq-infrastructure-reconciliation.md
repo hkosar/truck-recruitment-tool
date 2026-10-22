@@ -1126,10 +1126,12 @@ change and the `MAINTENANCE_DATABASE_URL` setting, approved with the rollout).
   included) and writes one audit row, in one transaction under the roster lock. The Team page
   button asks for confirmation (`app/src/features/users/UsersAdmin.tsx:126`). Whether it also
   invalidates recovery or SMS enrollment is **not decided** and is not built.
-- *Recovery change:* SMS supersedes backup codes. Backup-code expansion has stopped. The
-  artifacts (`internal.recovery_*` tables, `public.recovery_*` functions, `app/server/recovery/`)
-  stay in place, disabled (`internal.recovery_policy.enabled = false`). §27 is the SMS impact
-  table (design only).
+- *Recovery direction (open, 2026-10-21):* one coordinator message said SMS supersedes the
+  saved backup codes; a later Hunter-decision relay says restricted single-use recovery codes
+  remain in scope. The manager is asking the coordinator which is current. Until then neither is
+  expanded. The artifacts (`internal.recovery_*` tables, `public.recovery_*` functions,
+  `app/server/recovery/`) stay in place, disabled (`internal.recovery_policy.enabled = false`).
+  Neither blocks the core sign-in tests. §27 is the SMS impact table (design only).
 - *Admin class = manager.* Evidence: `supabase/migrations/20260720001200_rls.sql:49`
   (`is_manager`) and `:82` (`profiles_update_mgr`);
   `20260723004500_profile_service_bootstrap.sql:16-20` (`guard_profile_update`);
@@ -1186,7 +1188,8 @@ still be compared on the day.
 ## 27 · SMS impact (design only; nothing built, bought or configured)
 
 Answers items 1–5 of the shared SMS direction (2026-10-21). Phone numbers, providers and
-parameters below are proposals; the central decision owns them.
+parameters below are proposals; the central decision owns them. Whether SMS or recovery codes
+is the recovery path is open (§26); row 1's "held" wording describes the current code state only.
 
 | # | Item | This app |
 |---|---|---|
@@ -1195,3 +1198,14 @@ parameters below are proposals; the central decision owns them.
 | 3 | Boundaries, schema, retention, logging | **Provider boundary:** `app/server/sms/`, mirroring the mail seam. It has an adapter interface (start, check), a fake, normalized outcomes (`approved`, `denied`, `expired`, `rate_limited`, `unknown`) and one-shot calls, with no automatic resend after `unknown`. **Schema (a new M-file, not M1):** `internal.staff_phones` (user, E.164 stored with protection, `verified_at`, `phone_version`). `internal.sms_challenges` (app, environment, purpose, user, phone version, revocation epoch, expiry, attempts; for actions also the session, the exact action and a target hash; `consumed_at`; provider reference). **Transactions:** a provider call never sits inside a DB transaction. Sending: tx1 records the challenge, then the provider call, then tx2 records the outcome. Confirming: the provider check first, then ONE transaction re-checks authorization (`lock_and_validate`), consumes the grant and performs the action. **Revocation:** the existing identity-change trigger and `team_sign_everyone_out` also cancel open challenges. A phone edit bumps `phone_version`, which voids challenges and recovery sessions. **Retention:** a step in the existing nightly job (§23). **Logging:** never a code, never a full number (last two digits at most), never provider secrets. |
 | 4 | Tests | **Mock/local (A3/A4 style):** purpose isolation (an enrollment approval cannot satisfy recovery or an action); a single-use grant under two concurrent confirmations; replay after consume; a phone edit or revoke racing a verify; emergency sign-out cancelling challenges; a provider `unknown` producing no resend; per-user, phone and IP limits plus a global budget; a wrong number routed to manager correction; the email-outage path; an SMS-recovery session cannot confirm actions by SMS (the default). **Hosted only (needs central approval):** real Verify behaviour (the same code reused within its validity period, isolation across services), rate limits, delivery to staff carriers, spend alarms. |
 | 5 | Dependencies, config, policy, blockers | **Dependencies:** none needed in code (the REST API can be called with `fetch`). Needed outside the code: the central provider account; one Verify service per app and environment (and per purpose if isolation requires it); least-privilege server credentials in Render settings (`SMS_MODE`, service ID, key). **Unresolved policy:** code length, lifetime, attempts and resend spacing; US-only; whether emergency sign-out keeps phone enrollment (decision 4 left this open); whether SMS-recovery sessions may confirm actions; which actions require SMS. **Actual blockers:** none for design. Implementation needs Hunter's approval, the central provider decision, and staff mobile numbers entered by a manager (not authorized now). |
+
+## 28 · Deferred: independent authenticators (TOTP/passkeys) (backlog, 2026-10-21)
+
+Hunter, 2026-10-21 (via the coordinator): "Lets not use the authenticator at this time, but
+remember this option later." Authenticator-app codes (TOTP), passkeys and other independent
+authenticators are **not** built or required in this build. They are not blockers. Backlog
+option: optional independent verification for sensitive actions. Revisit only when Hunter asks
+or at an explicit later security review. Existing safeguards stay: role checks, masking, audit,
+session restrictions. Recovery sessions never perform sensitive actions: the team functions
+accept link sessions only (M1 `lock_and_validate(array['manager']…, array['link'] …)`, lines
+1264, 1306, 1338, 1363, 1580).
