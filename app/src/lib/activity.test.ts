@@ -51,15 +51,20 @@ describe('router-driven navigation pings (Gate 2 finding 6)', () => {
     let sub: ((s: { location: { key: string }; historyAction: string; navigation: { state: string } }) => void) | undefined;
     const router: NavigationSource = { state: { location: { key: 'k0' } }, subscribe: (fn) => { sub = fn; return () => {}; } };
     const reports: NavigationTrigger[] = [];
+    const historyCalls: string[] = [];
+    const history = { go: (d?: number) => { historyCalls.push(`go(${d})`); }, back: () => { historyCalls.push('back'); }, forward: () => { historyCalls.push('forward'); } };
     wireNavigationActivity({
       router,
       target: { addEventListener: (type, fn, opts) => { expect(opts.capture).toBe(true); listeners.set(type, fn); } },
       report: (trigger) => { reports.push(trigger); return true; },
       now: () => t,
+      history,
     });
     let n = 0;
     return {
       reports,
+      history,
+      historyCalls,
       fire: (type: string, e: { key?: string; button?: number } = {}) => listeners.get(type)!(e),
       navigate: (historyAction = 'PUSH', state = 'idle', sameKey = false) => sub!({ location: { key: sameKey ? `k${n}` : `k${++n}` }, historyAction, navigation: { state } }),
       advance: (ms: number) => { t += ms; },
@@ -87,7 +92,27 @@ describe('router-driven navigation pings (Gate 2 finding 6)', () => {
     expect(h.reports).toEqual(['keyboard', 'keyboard']);
   });
 
-  it('back/forward (POP) pings as history without a gesture', () => {
+  it('a programmatic history move (a timer calling navigate(-1) -> history.go) does not ping; the call still goes through', () => {
+    const h = harness();
+    h.history.go(-1);
+    h.navigate('POP');
+    h.history.back();
+    h.navigate('POP');
+    h.history.forward();
+    h.navigate('POP');
+    expect(h.reports).toEqual([]);
+    expect(h.historyCalls).toEqual(['go(-1)', 'back', 'forward']);
+  });
+
+  it('an in-app Back control the person pressed (click, then history.back) pings as click', () => {
+    const h = harness();
+    h.fire('click', { button: 0 });
+    h.history.back();
+    h.navigate('POP');
+    expect(h.reports).toEqual(['click']);
+  });
+
+  it('the browser back/forward controls (POP with no script history call) ping as history', () => {
     const h = harness();
     h.navigate('POP');
     expect(h.reports).toEqual(['history']);

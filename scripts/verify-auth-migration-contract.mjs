@@ -233,11 +233,21 @@ for (const [start, lockMarker] of [
   ['function public.set_do_not_contact(', 'for no key update'],
   ['function internal.contact_logs_dnc_guard()', 'for share'],
   ['function public.recovery_set_status(', 'for no key update'],
+  ['function public.log_export(', 'for key share'],
 ]) {
   const body = m1Function(start)?.join('\n') ?? '';
   const lockAt = body.lastIndexOf(lockMarker);
   const recheckAt = body.lastIndexOf('internal.recheck_session()');
   if (lockAt < 0 || recheckAt < lockAt) fail(`M1: ${start} must re-check the session after its last business lock`);
+}
+// Gate 2 re-review 1: the export log locks its batch and re-checks BEFORE inserting (an INSERT is
+// not covered by the BEFORE UPDATE/DELETE re-check trigger, and its foreign key could wait).
+{
+  const body = stripComments(m1Function('function public.log_export(')?.join('\n') ?? '');
+  const lock = body.indexOf('perform 1 from public.batches where id = p_batch_id for key share;');
+  const recheck = body.indexOf('perform internal.recheck_session();');
+  const insert = body.indexOf('insert into public.batch_activity');
+  if (!(lock >= 0 && lock < recheck && recheck < insert)) fail('M1: log_export must lock its batch, then re-check the session, then insert');
 }
 
 // K2b. Time checks after a possible lock wait use the wall clock, never now() (frozen at

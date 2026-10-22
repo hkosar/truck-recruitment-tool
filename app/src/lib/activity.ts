@@ -59,6 +59,13 @@ export interface GestureTarget {
   addEventListener(type: string, listener: (event: { key?: string; button?: number }) => void, options: { capture: true; passive: true }): void;
 }
 
+/** The history methods that page script (including React Router's navigate(-1)) calls. */
+export interface HistoryLike {
+  go(delta?: number): void;
+  back(): void;
+  forward(): void;
+}
+
 /** A navigation counts as user-caused only within this time after the person's gesture. */
 export const GESTURE_WINDOW_MS = 1_500;
 
@@ -67,17 +74,37 @@ export const GESTURE_WINDOW_MS = 1_500;
  * React Router handles <Link> clicks itself (it prevents the browser default), so the trigger is
  * the router's own completed location change, attributed to a gesture seen just before it in the
  * CAPTURE phase (pointer, click, or Enter/Space, which also covers keyboard activation of a link),
- * or to browser back/forward (history action POP). Programmatic navigations with no recent
- * gesture (timers, redirects after background work) and revalidations without a location change
- * report nothing.
+ * or to the browser's own back/forward (history action POP). Programmatic navigations with no
+ * recent gesture (timers, redirects after background work) and revalidations without a location
+ * change report nothing.
+ *
+ * A POP looks the same whether the browser's back button or script caused it (both fire
+ * popstate). Script must call history.go/back/forward (React Router's navigate(-1) calls
+ * window.history.go), while the browser's own back/forward controls never call page script. So
+ * those methods are wrapped to mark a programmatic history move; a POP right after one counts
+ * only if a user gesture caused it (an in-app "Back" button), never on its own (a timer calling
+ * navigate(-1)) (Gate 2 re-review 3).
  */
 export function wireNavigationActivity(deps: {
   router: NavigationSource;
   target: GestureTarget;
   report: (trigger: NavigationTrigger) => boolean;
   now: () => number;
+  history?: HistoryLike;
 }): () => void {
   let gesture: { trigger: NavigationTrigger; at: number } | undefined;
+  let scriptedHistoryAt: number | undefined;
+  if (deps.history) {
+    const h = deps.history;
+    for (const method of ['go', 'back', 'forward'] as const) {
+      const original = h[method].bind(h) as (delta?: number) => void;
+      h[method] = (delta?: number) => {
+        scriptedHistoryAt = deps.now();
+        original(delta);
+      };
+    }
+  }
+  const recent = (at: number | undefined) => at !== undefined && deps.now() - at <= GESTURE_WINDOW_MS;
   const mark = (trigger: NavigationTrigger) => () => {
     gesture = { trigger, at: deps.now() };
   };
@@ -89,11 +116,14 @@ export function wireNavigationActivity(deps: {
   return deps.router.subscribe((state) => {
     if (state.navigation.state !== 'idle' || state.location.key === lastKey) return;
     lastKey = state.location.key;
+    const userGesture = gesture && recent(gesture.at) ? gesture.trigger : undefined;
     if (state.historyAction === 'POP') {
-      deps.report('history');
-    } else if (gesture && deps.now() - gesture.at <= GESTURE_WINDOW_MS) {
-      deps.report(gesture.trigger);
+      if (!recent(scriptedHistoryAt)) deps.report('history'); // the browser's own back/forward
+      else if (userGesture) deps.report(userGesture); // an in-app Back control the person pressed
+    } else if (userGesture) {
+      deps.report(userGesture);
     }
     gesture = undefined;
+    scriptedHistoryAt = undefined;
   });
 }

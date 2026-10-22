@@ -52,6 +52,33 @@ describe.skipIf(!enabled)('A3 database readiness for sign-in admission', () => {
     expect(await admit(new PgAuthStore(warm))).toBeLessThan(BUDGET);
   });
 
+  const closesWithin = (d: Database, ms: number) => Promise.race([d.close().then(() => true), sleep(ms).then(() => false)]);
+
+  it('warm-up with mixed acquisition success and failure leaks no client; shutdown (pool.end) completes', async () => {
+    // Pool of 2; one slot held by a running transaction. Warm-up wants 2 more: one acquisition gets
+    // the free slot (slow warm query), the other times out waiting. Neither may be stranded.
+    const d = new Database({ connectionString: APP_URL!, max: 2, connectionTimeoutMillis: 300, minWarm: 3, warmSql: 'select pg_sleep(0.6)' });
+    const holder = d.transaction({ lockTimeoutMs: 5_000, statementTimeoutMs: 5_000, deadlineMs: 5_000 }, (tx) => tx.query('select pg_sleep(1.2)'));
+    await sleep(100);
+    const warmed = await d.warm().then((n) => ({ ok: true, n }), (e: Error) => ({ ok: false, n: -1, e: e.message }));
+    expect(warmed.ok).toBe(true); // the successful acquisition counts; the timed-out one is reported, not fatal
+    await holder;
+    await sleep(100);
+    const c = d.poolCounts;
+    expect(c.total - c.idle).toBe(0); // nothing still checked out by the warm-up
+    expect(await closesWithin(d, 3_000)).toBe(true);
+  });
+
+  it('a warm-up query that hangs is cut off; the client is destroyed, not returned; shutdown completes', async () => {
+    const d = new Database({ connectionString: APP_URL!, max: 2, minWarm: 1, warmSql: 'select pg_sleep(5)', warmQueryTimeoutMs: 300 });
+    const t0 = performance.now();
+    await expect(d.warm()).rejects.toBeTruthy();
+    expect(performance.now() - t0).toBeLessThan(2_000);
+    await sleep(100);
+    expect(d.poolCounts.total - d.poolCounts.idle).toBe(0);
+    expect(await closesWithin(d, 3_000)).toBe(true);
+  });
+
   it('contention: a saturated shared pool fails admission; the separate sign-in pool admits within the budget', async () => {
     const hold = (d: Database) => d.transaction({ lockTimeoutMs: 5_000, statementTimeoutMs: 5_000, deadlineMs: 5_000 }, (tx) => tx.query('select pg_sleep(1.5)'));
     const shared = db({ max: 2, connectionTimeoutMillis: 250 });

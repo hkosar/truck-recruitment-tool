@@ -34,6 +34,10 @@ export interface DatabaseOptions {
    */
   minWarm?: number;
   keepWarmIntervalMs?: number;
+  /** Upper bound for each warm-up query (default 2 s); a client that exceeds it is destroyed. */
+  warmQueryTimeoutMs?: number;
+  /** Test hook only: the warm-up statement (default `select 1`). */
+  warmSql?: string;
 }
 
 // Match PostgREST's JSON numbers (the SPA was written against it): int8 and numeric as numbers;
@@ -105,6 +109,8 @@ export class Database {
       // An idle client died; the pool replaces it. Nothing to log beyond the category.
     });
     this.minWarm = options.minWarm ?? 0;
+    this.warmQueryTimeoutMs = options.warmQueryTimeoutMs ?? 2_000;
+    this.warmSql = options.warmSql ?? 'select 1';
     if (this.minWarm > 0) {
       this.keepWarmTimer = setInterval(() => void this.warm().catch(() => undefined), options.keepWarmIntervalMs ?? 5_000);
       this.keepWarmTimer.unref();
@@ -112,6 +118,9 @@ export class Database {
   }
 
   private readonly minWarm: number;
+  private readonly warmQueryTimeoutMs: number;
+  private readonly warmSql: string;
+  private warming: Promise<number> | undefined;
   private keepWarmTimer: ReturnType<typeof setInterval> | undefined;
 
   /** Pool counters for readiness checks and tests. */
@@ -125,15 +134,36 @@ export class Database {
    */
   async warm(): Promise<number> {
     if (this.closed) return 0;
+    // One warm-up at a time (the keep-warm timer may fire while one is running).
+    this.warming ??= this.warmOnce().finally(() => {
+      this.warming = undefined;
+    });
+    return this.warming;
+  }
+
+  /**
+   * Each acquisition has its own guaranteed release (Gate 2 re-review 2): a failed acquisition
+   * never strands the clients that succeeded; a warm-up query is bounded by query_timeout, and a
+   * client that failed or timed out is destroyed rather than returned to the pool. Rejects only if
+   * every acquisition failed.
+   */
+  private async warmOnce(): Promise<number> {
     const missing = Math.max(0, this.minWarm - this.pool.totalCount);
-    if (missing > 0) {
-      const clients = await Promise.all(Array.from({ length: missing }, () => this.pool.connect()));
-      try {
-        await Promise.all(clients.map((c) => c.query('select 1')));
-      } finally {
-        for (const c of clients) c.release();
-      }
-    }
+    if (missing === 0) return this.pool.totalCount;
+    const attempts = await Promise.allSettled(
+      Array.from({ length: missing }, async () => {
+        const client = await this.pool.connect();
+        try {
+          await client.query({ text: this.warmSql, query_timeout: this.warmQueryTimeoutMs } as pg.QueryConfig);
+        } catch (err) {
+          client.release(err instanceof Error ? err : new Error('warm-up failed'));
+          throw err;
+        }
+        client.release();
+      }),
+    );
+    const failed = attempts.filter((a) => a.status === 'rejected');
+    if (failed.length === attempts.length) throw (failed[0] as PromiseRejectedResult).reason;
     return this.pool.totalCount;
   }
 

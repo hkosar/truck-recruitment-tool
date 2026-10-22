@@ -823,6 +823,10 @@ begin
   if p_kind not in ('call_sheet','csv') then
     raise exception 'invalid export kind: % (expected call_sheet or csv)', p_kind;
   end if;
+  -- M1: lock the parent batch (B1) before the insert, so the foreign-key check cannot wait
+  -- afterwards, and re-check the session with the wall clock after that wait (Gate 2 re-review 1).
+  perform 1 from public.batches where id = p_batch_id for key share;
+  perform internal.recheck_session();
 
   insert into public.batch_activity (batch_id, actor_id, activity_type, payload)
   values (p_batch_id, internal.current_staff_id(), 'export', jsonb_build_object('kind', p_kind, 'row_count', p_row_count));

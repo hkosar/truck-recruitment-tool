@@ -298,6 +298,20 @@ describe.skipIf(!enabled)('A3 database: stores, permissions, concurrency, deadli
     expect((await adminQuery('select count(*)::int as n from public.batch_activity where comment = $1', [marker])).rows[0].n).toBe(0);
   });
 
+  it('expiry during a wait, export logging: the batch-lock wait outlasts the session; the export is refused, nothing written', async () => {
+    await resetEditor();
+    const rowCount = 40_000 + (Date.now() % 1_000);
+    const s = await shortSession(EDITOR, 800);
+    const holder = await holdLock('select 1 from public.batches where id = $1 for update', [BATCH]);
+    const write = data.rpc(s, 'log_export', { p_batch_id: BATCH, p_kind: 'csv', p_row_count: rowCount });
+    expect(await isBlocked(write)).toBe(true);
+    await sleep(1_000);
+    await holder.query('commit');
+    await holder.end();
+    await expect(write).rejects.toBeInstanceOf(NotPermittedError);
+    expect((await adminQuery("select count(*)::int as n from public.batch_activity where activity_type = 'export' and (payload->>'row_count')::int = $1", [rowCount])).rows[0].n).toBe(0);
+  });
+
   it('expiry during an implicit member-row wait: the status update is refused after the wait, row unchanged', async () => {
     await resetEditor();
     const s = await shortSession(EDITOR, 800);

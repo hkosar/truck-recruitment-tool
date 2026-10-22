@@ -67,5 +67,5 @@ export const router = createBrowserRouter([
 // §3.5; Gate 2 finding 6).
 const activity = createActivityReporter({ send: activitySender(currentCsrfToken), now: () => Date.now() });
 if (typeof window !== 'undefined') {
-  wireNavigationActivity({ router, target: window, report: (t) => activity.reportUserNavigation(t), now: () => Date.now() });
+  wireNavigationActivity({ router, target: window, history: window.history, report: (t) => activity.reportUserNavigation(t), now: () => Date.now() });
 }
