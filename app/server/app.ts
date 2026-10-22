@@ -33,12 +33,12 @@ import {
   type AppResponse,
   type Logger,
 } from './core/types';
-import { isDeliberateNavigation, PING_THROTTLE_MS, PingThrottle, renewalReason } from './http/activity';
+import { isDeliberateNavigation, isPrefetch, PING_THROTTLE_MS, PingThrottle, renewalReason } from './http/activity';
 import { BODY_LIMITS } from './http/body';
 import { readFormFields } from './http/form';
 import { operatorAlertFor, sendStatusFor, type MailAdapter } from './mail/adapter';
 import { evidenceFor, parseEvents, SIGNATURE_HEADER, TIMESTAMP_HEADER, verifySendGridSignature } from './mail/webhook';
-import { renderConfirm, renderSignInForm, renderSignInSent, renderStale, signInPageHeaders } from './pages/signin';
+import { renderConfirm, renderSignInForm, renderSignInSent, renderSignOutFailed, renderStale, signInPageHeaders } from './pages/signin';
 import { recoveryRouteAllowed } from './recovery/matrix';
 
 export interface AppConfig {
@@ -255,7 +255,7 @@ export function createApp(deps: AppDeps): (req: AppRequest) => Promise<AppRespon
       host: req.headers.get('host'),
       cookieValue: readOpaqueCookie(req.cookies, CONFIRM_CSRF_COOKIE),
       submittedToken: fields.csrf_token,
-      strict: false,
+      strict: true, // exact Origin required; no Host fallback (Gate 2 finding 4)
     });
     const parsed = parseConfirmCookie(req.cookies.get(CONFIRM_COOKIE));
     if (!csrf.ok || !parsed || fields.nonce !== parsed.nonce) return html(renderStale(pageOptions), clear);
@@ -285,15 +285,18 @@ export function createApp(deps: AppDeps): (req: AppRequest) => Promise<AppRespon
       host: req.headers.get('host'),
       cookieValue: readOpaqueCookie(req.cookies, APP_CSRF_COOKIE),
       submittedToken: token,
-      strict: false,
+      strict: true, // exact Origin required; no Host fallback (Gate 2 finding 4)
     });
     if (!csrf.ok) return { status: 403, headers: { ...COMMON_HEADERS, 'content-type': 'text/plain', 'cache-control': 'no-store' }, setCookies: [], body: 'Forbidden', closeAfter: !body.ok };
     const hash = sessionHashOf(req);
     if (hash) {
       try {
         await auth.revoke(hash);
-      } catch {
-        log('signout_revoke_failed');
+      } catch (err) {
+        // Not confirmed (failed or outcome unknown): never claim success, keep the cookie so the
+        // retry can finish the job; revoking twice is harmless (Gate 2 finding 3).
+        log('signout_revoke_failed', { outcome: err instanceof OutcomeUnknownError ? 'unknown' : 'failed' });
+        return { ...html(renderSignOutFailed(token!, pageOptions), [], 503), closeAfter: !body.ok };
       }
     }
     return redirect('/signin', clearSessionCookies);
@@ -428,6 +431,10 @@ export function createApp(deps: AppDeps): (req: AppRequest) => Promise<AppRespon
       }, setCookies);
     }
     if (method === 'POST' && path === '/api/session/activity') {
+      // Refused pings are 403 and never touch (doc 14 §3.5; Gate 2 finding 5).
+      if (isPrefetch(req.headers)) return json(403, { error: 'prefetch' });
+      const ping = await req.readBody(64);
+      if (!ping.ok || ping.body.length !== 0) return { ...json(403, { error: 'body' }), closeAfter: !ping.ok };
       if (throttle.allow(s, deps.now())) await auth.touch(s);
       return { status: 204, headers: { ...COMMON_HEADERS, 'cache-control': 'no-store' }, setCookies: [], body: '' };
     }

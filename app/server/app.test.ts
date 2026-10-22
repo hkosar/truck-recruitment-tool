@@ -67,6 +67,14 @@ function signedIn(env: ReturnType<typeof setup>, userId = '11111111-1111-4111-81
   };
 }
 
+/** The SPA's activity ping: same-origin POST, CSRF header, empty body. */
+function ping(env: ReturnType<typeof setup>, who: ReturnType<typeof signedIn>, headers: Record<string, string> = {}, body = '') {
+  return env.handle(fakeRequest({
+    method: 'POST', url: '/api/session/activity', body,
+    headers: { cookie: who.cookie, origin: ORIGIN, 'x-csrf-token': who.csrfToken, ...headers },
+  }));
+}
+
 function apiPost(env: ReturnType<typeof setup>, who: ReturnType<typeof signedIn>, path: string, body: unknown, headers: Record<string, string> = {}) {
   return env.handle(fakeRequest({
     method: 'POST', url: path, body: JSON.stringify(body),
@@ -244,6 +252,25 @@ describe('opening the link, confirming, signing out', () => {
     expect(env.auth.calls).not.toContain('redeem');
   });
 
+  it('confirm requires the exact Origin: missing, empty, "null" and foreign are refused even with valid cookies and token (no Host fallback)', async () => {
+    for (const origin of [undefined, '', 'null', 'https://evil.example', `${ORIGIN}.evil.example`]) {
+      const env = setup();
+      const link = await mintLink(env);
+      const land = await env.handle(fakeRequest({ url: link.replace(ORIGIN, '') }));
+      const confirmCookie = land.setCookies[0].split(';')[0];
+      const x = new URL(location(land)).searchParams.get('x')!;
+      const page = await env.handle(fakeRequest({ url: `/auth/confirm?x=${x}`, headers: { cookie: confirmCookie } }));
+      const csrfCookie = cookieValue(page, CONFIRM_CSRF_COOKIE)!;
+      const formToken = /name="csrf_token" value="([^"]+)"/.exec(String(page.body))![1];
+      const headers: Record<string, string> = { 'content-type': FORM, host: new URL(ORIGIN).host, cookie: `${confirmCookie}; ${CONFIRM_CSRF_COOKIE}=${csrfCookie}` };
+      if (origin !== undefined) headers.origin = origin;
+      const r = await env.handle(fakeRequest({ method: 'POST', url: '/auth/confirm', body: `nonce=${x}&csrf_token=${formToken}`, headers }));
+      expect(r.body).toContain('This link was already used or has expired.');
+      expect(r.setCookies.some((c) => c.startsWith(`${SESSION_COOKIE}=`) && !/Max-Age=0/.test(c))).toBe(false);
+      expect(env.auth.calls).not.toContain('redeem');
+    }
+  });
+
   it('sign-out needs the app CSRF token; it revokes the session, clears cookies and navigates fully', async () => {
     const env = setup();
     const who = signedIn(env);
@@ -256,6 +283,39 @@ describe('opening the link, confirming, signing out', () => {
     expect(location(ok)).toBe(`${ORIGIN}/signin`);
     expect(ok.setCookies).toEqual(expect.arrayContaining([expect.stringMatching(/^__Host-tr_session=; .*Max-Age=0/)]));
     expect(env.auth.sessions.get(who.hash)!.revoked).toBe(true);
+  });
+
+  it('sign-out requires the exact Origin: missing, empty, "null" and foreign are refused with a valid token (no Host fallback)', async () => {
+    for (const origin of [undefined, '', 'null', 'https://evil.example']) {
+      const env = setup();
+      const who = signedIn(env);
+      const headers: Record<string, string> = { 'content-type': FORM, host: new URL(ORIGIN).host, cookie: who.cookie };
+      if (origin !== undefined) headers.origin = origin;
+      const r = await env.handle(fakeRequest({ method: 'POST', url: '/auth/signout', body: `csrf_token=${who.csrfToken}`, headers }));
+      expect(r.status).toBe(403);
+      expect(env.auth.sessions.get(who.hash)!.revoked).toBe(false);
+    }
+  });
+
+  it('sign-out whose revocation fails or is unknown says so, keeps the session cookie and offers a retry that then succeeds', async () => {
+    for (const failure of [new UnavailableError(), new OutcomeUnknownError()]) {
+      const env = setup();
+      const who = signedIn(env);
+      const send = () => env.handle(fakeRequest({ method: 'POST', url: '/auth/signout', body: `csrf_token=${who.csrfToken}`, headers: { 'content-type': FORM, origin: ORIGIN, cookie: who.cookie } }));
+      env.auth.failWith = failure;
+      const failed = await send();
+      expect(failed.status).toBe(503);
+      expect(String(failed.body)).toContain('Sign-out did not finish.');
+      expect(String(failed.body)).toContain('Try signing out again');
+      expect(String(failed.body)).toContain(`name="csrf_token" value="${who.csrfToken}"`);
+      expect(failed.setCookies).toEqual([]);
+      expect(env.auth.sessions.get(who.hash)!.revoked).toBe(false);
+      env.auth.failWith = undefined;
+      const retry = await send();
+      expect(retry.status).toBe(303);
+      expect(location(retry)).toBe(`${ORIGIN}/signin`);
+      expect(env.auth.sessions.get(who.hash)!.revoked).toBe(true);
+    }
   });
 });
 
@@ -321,15 +381,30 @@ describe('signed-in data API', () => {
     expect(touches()).toBe(0);
     await apiPost(env, who, '/api/rpc/log_export', { p_batch_id: '44444444-4444-4444-8444-444444444444', p_kind: 'csv', p_row_count: 1 });
     expect(touches()).toBe(1);
-    await apiPost(env, who, '/api/session/activity', {});
-    await apiPost(env, who, '/api/session/activity', {});
+    expect((await ping(env, who)).status).toBe(204);
+    await ping(env, who);
     expect(touches()).toBe(2);
     await env.handle(fakeRequest({ url: '/batches/x', headers: { cookie: who.cookie, 'sec-fetch-mode': 'navigate', 'sec-fetch-dest': 'document', accept: 'text/html' } }));
     expect(touches()).toBe(3);
     await env.handle(fakeRequest({ url: '/batches/x', headers: { cookie: who.cookie, 'sec-fetch-mode': 'navigate', 'sec-fetch-dest': 'document', 'sec-purpose': 'prefetch', accept: 'text/html' } }));
     expect(touches()).toBe(3);
-    const forged = await apiPost(env, who, '/api/session/activity', {}, { 'x-csrf-token': 'forged' });
+    const forged = await ping(env, who, { 'x-csrf-token': 'forged' });
     expect(forged.status).toBe(403);
+  });
+
+  it('activity ping: a prefetch header or a non-empty body is refused (403) BEFORE the throttle and the touch', async () => {
+    const env = setup();
+    const who = signedIn(env);
+    const touches = () => env.auth.sessions.get(who.hash)!.touches;
+    expect((await ping(env, who, { 'sec-purpose': 'prefetch' })).status).toBe(403);
+    expect((await ping(env, who, { purpose: 'prefetch' })).status).toBe(403);
+    expect((await ping(env, who, { 'content-type': 'application/json' }, '{}')).status).toBe(403);
+    expect((await ping(env, who, {}, 'x')).status).toBe(403);
+    expect(touches()).toBe(0);
+    expect(env.auth.calls).not.toContain('touch');
+    // The throttle was not consumed by the refused pings: the first valid ping still counts.
+    expect((await ping(env, who)).status).toBe(204);
+    expect(touches()).toBe(1);
   });
 
   it('a recovery session reaches only its matrix', async () => {

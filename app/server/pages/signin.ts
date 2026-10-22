@@ -96,6 +96,23 @@ export function renderStale(options?: PageOptions): string {
   );
 }
 
+export const SIGNOUT_FAILED_MESSAGE =
+  'Sign-out did not finish. We could not confirm that your session ended, so it may still be active on this device. Please try again.';
+
+/** Sign-out whose revocation was not confirmed (Gate 2 finding 3): honest message, one retry. */
+export function renderSignOutFailed(csrfToken: string, options?: PageOptions): string {
+  return page(
+    `<section class="signin-block signin-form" aria-live="polite">
+<p class="signin-message">${escapeHtml(SIGNOUT_FAILED_MESSAGE)}</p>
+<form class="signin-form" method="post" action="/auth/signout">
+<input type="hidden" name="csrf_token" value="${escapeHtml(csrfToken)}" />
+<button class="signin-btn" type="submit">Try signing out again</button>
+</form>
+</section>`,
+    options,
+  );
+}
+
 /** Recovery-code form (doc 14 §7.2), served only when recovery is enabled. Not linked from /signin. */
 export function renderRecoveryForm(preToken: string, failed: boolean, options?: PageOptions): string {
   return page(
