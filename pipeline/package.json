@@ -19,7 +19,9 @@
     "dev": "tsx src/run.ts nightly --pages=1 --batches=1",
     "smoke:insurance": "tsx src/run.ts sync-insurance --pages=1 --dry-run=true",
     "smoke:safety": "tsx src/run.ts sync-safety --pages=1 --dry-run=true",
-    "staging:sql": "tsx src/staging-sql-runner.ts"
+    "staging:sql": "tsx src/staging-sql-runner.ts",
+    "load:location-tables": "tsx src/load-location-tables.ts",
+    "test:location-tables": "tsx src/load-location-tables.test.ts"
   },
   "dependencies": {
     "@supabase/supabase-js": "^2.45.4",
