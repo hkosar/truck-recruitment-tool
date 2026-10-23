@@ -77,8 +77,9 @@ when needed, $0; (c) transfer it to a Free organization and pause it, $0, restor
    confirmation, dry run first).
 4. *Operator:* dry run, then `--execute`: replay the 20 migrations in order, one transaction
    each, stopping on the first error; checksums as `scripts/verify-migration-baseline.mjs`.
-5. *Operator:* fictional fixtures, the staging identity marker, and the hosted Auth fixture
-   accounts for A5b (doc 11 commands, new ref); expect `staging-sql.done`.
+5. *Operator:* fictional fixtures, the staging identity marker, the hosted Auth fixture
+   accounts for A5b, and the 12 eligible T-SHUTDOWN fixture identities (§1.5 row 10) (doc 11
+   commands, new ref); expect `staging-sql.done`.
 6. *Operator:* `snapshot` (`supabase/backout/pre-cutover-snapshot.sql`), stored outside the
    repo.
 7. **Legacy rehearsal frontend (approval 5).** The backout returns users to the old app, so the
@@ -124,7 +125,7 @@ citext, and no Supabase services.
 | 7 | Hosted Auth, stateful | idem | **A5b** (class B) | as in doc 14 §8.1 |
 | 8 | Legacy credentials retired | idem | **L1** (§1.8), then its A5b probes incl. L-a/L-b/L-c | refused as specified |
 | 9 | Client IP (T-IP) | no Render proxy | doc 15 §4.2, staging-only diagnostic endpoint | each client keyed to its real source |
-| 10 | Graceful shutdown (T-SHUTDOWN) | local only | during a deploy, a client sends eligible fixture sign-in requests (three fixture identities in rotation, under the rate limits) every ~300 ms across the whole switch-over, so a send continuation straddles SIGTERM | **pending at SIGTERM:** the `shutdown_started` log line (§5 item 4) shows ≥ 1 pending continuation; **completed after:** the `shutdown` line shows `abandoned: 0`, and every admitted request's link row records `send_status = 'accepted'`; every HTTP response arrived; new connections refused cleanly. A run with 0 pending at SIGTERM is **inconclusive** and is repeated, never counted as a pass |
+| 10 | Graceful shutdown (T-SHUTDOWN) | local only | **Bounded, synchronized bursts, every limit kept** (`rate.ts`: 20 requests per IP per 15 min; `ladder.ts`: 1 link/min, 5/hour, 10/day per person and the 2-minute courtesy). Fixtures: **12 distinct eligible staging fixture identities** reserved for this test (added in the §5 item 1 tooling commit). One attempt = one burst of **6 requests, one per fixture, sent at the same moment** from one client, using only fixtures with no link in the last 2 minutes and under their hour/day ceilings; then, **300 ms into the ~880 ms response envelope** (the window the local test uses), the operator sends SIGTERM to the server process from the Render shell of the staging instance (availability on the $7 plan to be confirmed; without it the test is reported as not run, not passed). A deploy is **not** the trigger: Render signals the old instance about 60 s after traffic moves, when its work has normally finished. At most 3 attempts per 15 minutes (18 requests, under the IP ceiling), alternating the two fixture sets of 6, attempts **at least 5 minutes apart** (no fixture reused inside its 2-minute courtesy or 1-per-minute ceiling), **at most 8 attempts per hour** (each fixture at most 4 times per hour, under its 5) and each fixture at most 10 times per Chicago day | **Pending at SIGTERM:** `shutdown_started` (§5 item 4) reports the burst's requests as accepted and their continuations not yet complete. **Correlated completion:** before the burst the operator records each fixture's newest link id; afterwards **exactly one new link row per fixture** in the burst exists and each records `send_status = 'accepted'`; the count of minted links equals 6, and `shutdown` reports `abandoned: 0`; every HTTP response of the burst arrived (303). A fixture with no new link means a limit or courtesy was hit, so the attempt is **invalid** (fixture selection error), not a pass. An attempt where the SIGTERM landed after the work completed (`shutdown_started` shows nothing pending) is **inconclusive** and is repeated within the bounds above, never counted as a pass |
 | 11 | Deploy readiness gate | no Render | §2.5: deploy with a deliberately wrong database password | the deploy never becomes ready and is cancelled; the old instance keeps serving |
 | 12 | Mail end to end | fake adapter | real send to an owner mailbox; signed webhook | delivered event recorded; bad signature refused |
 | 13 | Backout rehearsal (T-REPLAY) | SQL-only locally | §3.3 on staging | snapshot identical **and** an old-app fixture signs in and logs a call |
@@ -375,7 +376,8 @@ ledgers only. The nightly retention step is **not wired**; without it the ledger
 
 ## 5 · Reviewed code items before the single push
 
-1. Staging runner: new staging ref and the actions in §1.3 step 3; offline contract updates.
+1. Staging runner: new staging ref and the actions in §1.3 step 3; the 12 T-SHUTDOWN fixture
+   identities in the staging fixtures; offline contract updates.
 2. `/readyz` and `/healthz/db` (§2.5), with tests.
 3. Pipeline retention hook (§4 step 1), with tests; no change to existing pipeline access.
 4. A `shutdown_started` log line at SIGTERM carrying the lifecycle counts (accepted requests,
