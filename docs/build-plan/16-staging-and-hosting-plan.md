@@ -2,7 +2,8 @@
 
 Status: **plan only.** Nothing in this document has been run, installed, created, bought,
 pushed or changed on any hosted system. Written 2026-10-23 (UTC) by the sign-in owner;
-revision 2 the same day after the plan review (Codex, of `9befc35`; §7). Every step needs its
+revision 2 after the plan review (Codex, of `9befc35`), revision 3 after its re-review (of
+`a5a4171`); both in §9. Every step needs its
 own "go" from Hunter (§6). Identifiers (project refs, URLs, service IDs, keys) are not repeated
 here; they live in doc 11 and the owners' dashboards.
 
@@ -53,12 +54,12 @@ sign-in (docs 14/15), and reaches the database through Supabase's shared pooler 
 
 | Option | What | Cost | For | Against |
 |---|---|---|---|---|
-| **R1 (recommended)** | New staging project; replay all 20 migrations; fixtures; then M1, M1b, M1c. **Delete** the old project once R1 passes (fictional data only; its migration list is recorded first) | +$10/month only while both exist; after the old one is deleted, the same as today (~$10/month) | The only option with the **real full replay** (§1.5 row 1); clean ledger; the marker installs on a pristine baseline | New ref: the runner and contracts pin the staging ref (reviewed commit, §5 item 1) |
+| **R1 (recommended)** | New staging project; replay all 20 migrations; fixtures; then M1, M1b, M1c. **Delete** the old project only after the backout rehearsal on the new project passes (fictional data only; its migration list is recorded first) | +$10/month only while both exist; after the old one is deleted, the same as today (~$10/month) | The only option with the **real full replay** (§1.5 row 1); clean ledger; the marker installs on a pristine baseline | New ref: the runner and contracts pin the staging ref (reviewed commit, §5 item 1) |
 | R2 | Wipe the existing project's public schema and replay | $0 extra | Keeps the ref | Destructive on a hosted DB; Auth users and storage stay; misleading ledger; not reversible |
 | R3 | Adopt the used rows into the marker | $0 | — | No approved path (doc 11) |
 | R4 | Supabase preview branch (doc 10 option B) | per hour while it exists | Disposable | Branching ties to the production ledger, which is incomplete (doc 10) |
 
-**Retention choice for staging after production cutover** (approval 29): (a) keep the new
+**Retention choice for staging after production cutover** (approval 25): (a) keep the new
 staging project running for regression tests, ~$10/month; (b) delete it and rebuild with R1
 when needed, $0; (c) transfer it to a Free organization and pause it, $0, restorable for a year.
 **Recommended: (a) during the first month after cutover, then (b).**
@@ -80,7 +81,16 @@ when needed, $0; (c) transfer it to a Free organization and pause it, $0, restor
    accounts for A5b (doc 11 commands, new ref); expect `staging-sql.done`.
 6. *Operator:* `snapshot` (`supabase/backout/pre-cutover-snapshot.sql`), stored outside the
    repo.
-7. Continue with §1.4.
+7. **Legacy rehearsal frontend (approval 5).** The backout returns users to the old app, so the
+   rehearsal needs the old app **pointed at the new project**. The operator builds the pre-cutover
+   SPA (the commit the current staging Worker serves, doc 11) with the **new** staging project's
+   URL and public anon key, and the owner deploys it as a **separate, isolated** Cloudflare
+   Worker (`tnbs-carrier-recruiter-staging-legacy`), leaving the current Worker untouched.
+   **Prove the configuration before M1:** (a) the built bundle contains the new staging ref and
+   neither the old staging ref nor the production ref (operator search of the build output);
+   (b) the page's staging header shows the new ref; (c) a staging fixture signs in with its
+   password, opens a batch and logs a test call. This is the baseline the backout must restore.
+8. Continue with §1.4.
 
 ### 1.4 Applying M1, M1b, M1c (staging)
 
@@ -114,7 +124,7 @@ citext, and no Supabase services.
 | 7 | Hosted Auth, stateful | idem | **A5b** (class B) | as in doc 14 §8.1 |
 | 8 | Legacy credentials retired | idem | **L1** (§1.8), then its A5b probes incl. L-a/L-b/L-c | refused as specified |
 | 9 | Client IP (T-IP) | no Render proxy | doc 15 §4.2, staging-only diagnostic endpoint | each client keyed to its real source |
-| 10 | Graceful shutdown (T-SHUTDOWN) | local only | deploy while a sign-in request to an owner mailbox is in flight | the HTTP response arrives; **the post-response email continuation completes** (the email arrives and the send row records `accepted`); new requests refused cleanly |
+| 10 | Graceful shutdown (T-SHUTDOWN) | local only | during a deploy, a client sends eligible fixture sign-in requests (three fixture identities in rotation, under the rate limits) every ~300 ms across the whole switch-over, so a send continuation straddles SIGTERM | **pending at SIGTERM:** the `shutdown_started` log line (§5 item 4) shows ≥ 1 pending continuation; **completed after:** the `shutdown` line shows `abandoned: 0`, and every admitted request's link row records `send_status = 'accepted'`; every HTTP response arrived; new connections refused cleanly. A run with 0 pending at SIGTERM is **inconclusive** and is repeated, never counted as a pass |
 | 11 | Deploy readiness gate | no Render | §2.5: deploy with a deliberately wrong database password | the deploy never becomes ready and is cancelled; the old instance keeps serving |
 | 12 | Mail end to end | fake adapter | real send to an owner mailbox; signed webhook | delivered event recorded; bad signature refused |
 | 13 | Backout rehearsal (T-REPLAY) | SQL-only locally | §3.3 on staging | snapshot identical **and** an old-app fixture signs in and logs a call |
@@ -142,19 +152,31 @@ signature. Metadata canaries: unique fixture recipient addresses.
 Results are reported as hit counts only. Any credential-canary hit, or a recipient address in
 the first three sinks, blocks production until fixed and re-run.
 
-### 1.7 Readiness of the old app for backout (staging)
+### 1.7 Backout targets
 
-The backout target is the **previous app** (staging: the existing Cloudflare Worker with
-Supabase Auth passwords; production: the pre-cutover frontend recorded at cutover). Keep it
-deployed and untouched until the backout window closes.
+- **Staging:** the legacy rehearsal frontend of §1.3 step 7, pointed at the **new** staging
+  project. The old Worker and the old staging database are not part of the rehearsal; the old
+  database is deleted only after the rehearsal passes (approval 17).
+- **Production:** the pre-cutover frontend, recorded at cutover and kept deployed and untouched
+  until the backout window closes.
 
-### 1.8 L1 on staging (legacy Supabase Auth retirement)
+### 1.8 Staging Auth phases: credential prep → O2 → L1 → rejection probes
 
-Per doc 14 §11.6, **its own approval**, after §1.4 and after the owner turns the Supabase
-Auth providers off (O2): read the hosted JWT/OTP expiry settings (stop if unreadable), stop new
-issuance, delete legacy refresh tokens and sessions, wait the derived interval W, run the A5b
-probes. L1 is one-way for legacy sessions; the backout (§3.3) restores the email provider so
-people can sign in again with passwords.
+Doc 14 §8.1 and §11.6, in this order, each phase its own approval:
+
+1. **Credential prep (approval 12), before O2.** With the providers still on, the operator
+   creates, for the staging Auth fixtures only: legacy sessions and refresh tokens, and the
+   valid pre-cutover verification credentials L-a, L-b, L-c (Admin `generateLink`, one
+   email-change token). These are what the later probes must see refused.
+2. **O2 (approval 13).** The owner turns the Supabase Auth providers off on staging (signups
+   stay off).
+3. **L1, then the rejection probes (approval 14).** Read the hosted JWT/OTP expiry settings
+   (stop if unreadable); L-a is redeemed during L1 as specified; delete legacy refresh tokens
+   and sessions; wait the derived interval W; then the A5b rejection probes: refresh with the
+   prepared token refused, `PUT /user` refused, L-b and L-c refused, provider endpoints answer
+   with documented errors identically for known and unknown addresses.
+L1 is one-way for legacy sessions; the backout (§3.3) restores the email provider so people can
+sign in again with passwords.
 
 ---
 
@@ -208,7 +230,7 @@ From `app/.env.example`, set as build-time variables on each service:
 The browser key is HTTP-referrer restricted. **Read-only first:** the owner checks in Google
 Cloud Console → APIs & Services → Credentials → the browser key → Application restrictions
 which referrers are allowed. Adding the staging origin (and later the production origin) is a
-**separate authorized action** (approvals 9 and 24). Until it is done, maps on the new service fail
+**separate authorized action** (approvals 8 and 20). Until it is done, maps on the new service fail
 closed; nothing else depends on it.
 
 ### 2.5 Liveness, readiness and outage monitoring
@@ -231,7 +253,7 @@ closed; nothing else depends on it.
 - **Outage monitoring:** an external uptime check of `/healthz/db` and `/signin` every few
   minutes that alerts the owner; plus Render's deploy-failure notifications and the server's
   existing `operator_alert` log events. The monitor provider and its cost are **not chosen or
-  verified** (approval 13).
+  verified** (approval 10).
 
 ### 2.6 Supabase pooler connectivity with the custom role
 
@@ -248,7 +270,7 @@ Micro limits: **60** direct database connections, **200** pooler clients
 (supabase.com/docs/guides/platform/compute-and-disk). Session mode holds one server connection
 per client, so the app's peak (~31) must stay well under 60 alongside Supabase's own services.
 
-**Probe (staging, approval 10), acceptance criteria:**
+**Probe (staging, approval 11), acceptance criteria:**
 1. Connect as `recruiter_app.<staging-ref>` through the shared pooler, session mode:
    `select current_user, current_setting('server_version_num')` → `recruiter_app` and a
    version.
@@ -257,8 +279,12 @@ per client, so the app's peak (~31) must stay well under 60 alongside Supabase's
 3. **Transaction-local isolation:** in client A, `begin; select set_config('app.session_hash',
    'probe-a', true); commit;` then a new transaction reads `current_setting('app.session_hash',
    true)` as empty; a concurrent client B never sees `probe-a`.
-4. **Admission timing:** from the staging service, sign-in requests (known, unknown, invalid)
-   all answer within the local envelope (880–1300 ms) over 20 requests.
+4. **Admission timing, no false pass:** 20 sign-in requests (known eligible fixture, unknown,
+   deactivated, invalid) all answer within the local envelope (880–1300 ms), **and** each
+   eligible fixture request was **admitted and queued**: a new link row exists for it with
+   `send_status` recorded, and the Render log shows **no** `signin_admission_unavailable` (or
+   `db_pool_acquire_failed`) alert during the run. Uniform timing with every admission failing
+   closed is a **fail**.
 No data is read or written beyond these statements.
 
 ### 2.7 IPv4 add-on: not needed
@@ -289,17 +315,23 @@ frozen (D8 superseded that part).
 
 ### 3.2 Production cutover (each line its own "go"; doc 12 kept separate)
 
+**Production access does not open before L1.** The legacy credential and Auth roster-probing
+paths must be closed before anyone uses the new system, so O2, L1 and their acceptance probes
+run **inside** the cutover maintenance period, and the L1 approval (21) is given **before** the
+cutover approval (22).
+
 1. Read-only production inventory (O1); D7 and the unique-index decision; the **four July
-   migrations** as their own change (doc 12 item 3) if still unapplied; pre-cutover snapshot.
+   migrations** as their own change (doc 12 item 3) if still unapplied; pre-cutover snapshot;
+   the hosted JWT/OTP expiry settings read (they fix L1's wait W, and so the length of the
+   maintenance period).
 2. Production Render service created **suspended**; env (§2.3, §2.4); shutdown delay set and
    read back (§2.2); Maps referrer added (§2.4); SendGrid production key/webhook (§7 E).
-3. Cutover window: maintenance on → **M1 → M1b → M1c** (self-check must pass) →
+3. **Cutover (maintenance on throughout):** M1 → M1b → M1c (self-check must pass) →
    `recruiter_app` password → deploy the reviewed commit (Render waits for `/readyz`) →
-   **`window-on` and verify** → probes (A5a subset) → A7 subset → T-IP → maintenance off →
-   first manager signs in. The backout window is open.
-4. **O2 + L1 on production: a separate approval**, after the first manager has signed in and
-   while the window is open.
-5. Retention wired on the production pipeline (§4), separate approval.
+   `window-on` and verify → **O2** (providers off) → **L1** (wait W) → acceptance probes:
+   production subset of A5a and of the L1 rejection probes, A7 subset, T-IP → **maintenance
+   off** → first manager signs in. The backout window is open.
+4. Retention wired on the production pipeline (§4), separate approval.
 
 ### 3.3 Backout (rehearsed on staging first)
 
@@ -311,9 +343,10 @@ Worker; production: the recorded pre-cutover frontend) → smoke test → tell t
 preserved (people added stay; batch-delete records stay). Sessions closed by L1 stay closed;
 people sign in again with their passwords.
 
-**Staging rehearsal (T-REPLAY, approval 18)** proves more than the snapshot: after the
-backout, **a staging fixture signs in on the old password page, opens a batch and logs a test
-call** (the real old-app path, including the restored email provider); then M1, M1b, M1c are
+**Staging rehearsal (T-REPLAY, approval 15)** runs against the **new** staging project and
+proves more than the snapshot: after the backout, **a staging fixture signs in on the legacy
+rehearsal frontend (§1.3 step 7) with its password, opens a batch and logs a test call** (the
+real old-app path, including the restored email provider); then M1, M1b, M1c are
 re-applied and the new app works again with new keys and a new `recruiter_app` password.
 
 ---
@@ -330,11 +363,11 @@ ledgers only. The nightly retention step is **not wired**; without it the ledger
    `SUPABASE_DB_URL` / service-role access is **not changed or widened**.
 2. **Separate credential:** the owner sets the `recruiter_maintenance` password (§1.4 step 4);
    it is never the app's or the pipeline's credential.
-3. **Hosted least-privilege test (staging, approval 19):** runner action `retention-dry-run`
+3. **Hosted least-privilege test (staging, approval 11):** runner action `retention-dry-run`
    as `recruiter_maintenance`: counts what would be deleted; then proves it **cannot** select
    from `public.profiles`, cannot execute the sign-in functions, and cannot update any table;
    then one real run deletes only aged fixture rows.
-4. **Pipeline configuration approval (approval 27):** add `MAINTENANCE_DATABASE_URL` to the
+4. **Pipeline configuration approval (approval 23):** add `MAINTENANCE_DATABASE_URL` to the
    production pipeline service after cutover; read back that `PIPELINE_COMMAND` and the
    existing secrets are unchanged (doc 12 guards).
 
@@ -345,61 +378,70 @@ ledgers only. The nightly retention step is **not wired**; without it the ledger
 1. Staging runner: new staging ref and the actions in §1.3 step 3; offline contract updates.
 2. `/readyz` and `/healthz/db` (§2.5), with tests.
 3. Pipeline retention hook (§4 step 1), with tests; no change to existing pipeline access.
-Each gets an independent review; then `wave1/integration` is pushed once (approval 3).
+4. A `shutdown_started` log line at SIGTERM carrying the lifecycle counts (accepted requests,
+   pending continuations; `app/server/core/lifecycle.ts` already keeps them) so T-SHUTDOWN can
+   prove work was pending; event names and counts only.
+Each gets an independent review; then `wave1/integration` is pushed once (approval 3). None of
+these is made yet.
 
 ---
 
 ## 6 · Approvals Hunter must give, in order
 
-Line: approval · recommended answer · cost. Resource creation, destructive retirement and
-production steps are separate lines.
+Line: approval · recommended answer · cost. Push, deletions, production changes, L1 and window
+closure are separate lines. **25 approvals.**
 
 1. Create the new staging project (R1 step 2) · **yes** · +$10/month while the old one also
    exists.
-2. Engineering: the three reviewed code items of §5 · **yes** · $0.
+2. Engineering: the four reviewed code items of §5 · **yes** · $0.
 3. Push `wave1/integration` once, after item 2's reviews · **yes** · $0.
-4. Replay migrations, fixtures, marker, Auth fixtures on the new staging project · **yes** · $0.
-5. Apply M1, M1b, M1c on staging; set `recruiter_app` and `recruiter_maintenance` passwords ·
-   **yes** · $0.
-6. Delete the **old** staging project after step 5 passes (migration list recorded first) ·
-   **yes** · saves ~$10/month (back to today's cost).
-7. Render workspace plan · **stay on Hobby** · $0 (Pro $25/month).
-8. Create the Render staging service ($7 plan), env, `VITE_*` settings; set and read back
-   `maxShutdownDelaySeconds: 60` via a temporary Render API key · **yes** · ≤ $7/month,
-   prorated.
-9. Google Maps browser key: add the staging origin to its referrer restrictions (after the
+4. Replay migrations, fixtures, marker and Auth fixtures on the new staging project · **yes** ·
+   $0.
+5. Legacy rehearsal frontend: an isolated Worker of the pre-cutover app pointed at the new
+   project, configuration proven before M1 (§1.3 step 7) · **yes** · cost: the owner confirms
+   the Cloudflare plan (not recorded in the repo).
+6. Apply M1, M1b, M1c on staging; set the `recruiter_app` and `recruiter_maintenance` passwords
+   · **yes** · $0.
+7. Render: stay on the **Hobby** workspace, and create the staging service ($7 plan) with env,
+   `VITE_*` settings, and `maxShutdownDelaySeconds: 60` set and read back via a temporary API
+   key · **yes** · ≤ $7/month, prorated (Pro would add $25/month).
+8. Google Maps browser key: add the staging origin to its referrer restrictions (after the
    read-only check) · **yes** · $0.
-10. Pooler probe with the custom role (§2.6) · **yes** · $0.
-11. SendGrid **capacity check** (read-only, §7 B) · **yes** · $0.
-12. SendGrid staging send-only key, second signed webhook, sender (§7 A, C, D) · **yes, only if
-    capacity exists** · $0 if capacity exists.
-13. Outage monitor (provider and cost to be proposed and verified first) · **yes, after a
-    verified quote** · unverified.
-14. A5a stateless probes + T-IP on staging · **yes** · $0.
-15. O2: turn Supabase Auth providers off on **staging** · **yes** · $0.
-16. A5b stateful probes on staging · **yes** · $0.
-17. **L1 on staging** (separate) · **yes** · $0.
-18. Staging backout rehearsal (T-REPLAY, §3.3, with the old-app fixture login) · **yes** · $0.
-19. Staging retention least-privilege test (§4 step 3) · **yes** · $0.
-20. A7 log gate on staging (grant log read access or run the searches) · **yes** · $0.
-21. Hunter's 5-minute staging walkthrough · **yes** · $0.
-22. **D10:** declare a backout window · **yes, 14 days, closed by Hunter; `window-on` verified**
-    · $0.
-23. Production: the four July migrations as their own change (doc 12) · **yes, if the
+9. SendGrid: capacity check first (read-only); **only if capacity exists**, the staging
+   send-only key, second signed webhook and sender (§7 B, A, C, D) · **yes** · $0 if capacity
+   exists.
+10. Outage monitor (provider and cost proposed and verified first) · **yes, after a verified
+    quote** · unverified.
+11. **Scoped staging test authorization**, staging fixtures only, no production contact: the
+    pooler probe (§2.6), A5a stateless probes and T-IP, the readiness-gate test, T-SHUTDOWN,
+    mail end to end, and the retention least-privilege test (§4 step 3) · **yes** · $0.
+12. Staging Auth phase 1: credential prep before O2 (§1.8 step 1) · **yes** · $0.
+13. Staging Auth phase 2: O2, providers off on staging · **yes** · $0.
+14. Staging Auth phase 3: **L1 on staging**, then the A5b rejection probes · **yes** · $0.
+15. Staging backout rehearsal (T-REPLAY) on the new project through the legacy rehearsal
+    frontend (§3.3) · **yes** · $0.
+16. A7 log gate on staging (grant log read access or run the searches) · **yes** · $0.
+    *Milestone, not an approval:* Hunter's 5-minute staging walkthrough.
+17. Delete the **old** staging project (after 15 passes; migration list recorded) · **yes** ·
+    saves ~$10/month.
+18. **D10:** declare a backout window · **yes, 14 days, closed by Hunter; `window-on`
+    verified** · $0.
+19. Production: the four July migrations as their own change (doc 12) · **yes, if the
     inventory shows them unapplied** · $0.
-24. Production Render service (suspended), env, `VITE_*`, shutdown delay read back, Maps
+20. Production Render service (suspended), env, `VITE_*`, shutdown delay read back, Maps
     referrer for the production origin, SendGrid production key/webhook · **yes** · $7/month.
-25. Production cutover (§3.2 step 3: M1/M1b/M1c, deploy, `window-on`, probes) · **yes, in a
-    scheduled maintenance window** · $0.
-26. **O2 + L1 on production** (separate, during the window) · **yes** · $0.
-27. Production pipeline configuration: add `MAINTENANCE_DATABASE_URL` (§4 step 4) · **yes** ·
+21. **Production L1** (with O2), given before 22 and run inside the cutover before access
+    opens · **yes** · $0.
+22. Production cutover (§3.2 step 3; maintenance stays on until O2, L1 and the acceptance
+    probes pass) · **yes, in a scheduled maintenance window** · $0.
+23. Production pipeline configuration: add `MAINTENANCE_DATABASE_URL` (§4 step 4) · **yes** ·
     $0.
-28. Close the backout window (`window-off`) · **Hunter decides at day 14** · $0.
-29. Destructive retirement after acceptance: the old Cloudflare Worker; the old static-site
-    entry in `render.yaml` (a reviewed Blueprint change); the staging SendGrid key and webhook;
-    the Render staging service; and the staging project per the retention choice (§1.3:
-    recommended keep one month, then delete) · **yes, each listed resource** · saves up to
-    $17/month.
+24. Close the backout window (`window-off`) · **Hunter decides at day 14** · $0.
+25. Destructive retirement after acceptance: the old Cloudflare Worker, the legacy rehearsal
+    Worker, the old static-site entry in `render.yaml` (a reviewed Blueprint change), the staging
+    SendGrid key and webhook, the Render staging service, and the staging project per the
+    retention choice (§1.3; recommended keep one month, then delete) · **yes, each listed
+    resource** · saves up to $17/month.
 
 Steady state after cutover and retirement: **$7/month** (production Render). While staging
 runs: +$7 (Render) +~$10 (Supabase). No IPv4 add-on.
@@ -429,7 +471,7 @@ C. **Second Event Webhook.** Create new webhook → name `tnbs-recruiter-staging
 D. **Sender.** Settings → Sender Authentication: an address on a domain Quote-Queue has already
    authenticated (no DNS change) → `SENDGRID_FROM_ADDRESS`, display name →
    `SENDGRID_FROM_NAME`.
-E. Production repeats B, A, C, D with `-prod` names (approval 24); keys are never shared.
+E. Production repeats B, A, C, D with `-prod` names (approval 20); keys are never shared.
 
 ---
 
@@ -437,21 +479,22 @@ E. Production repeats B, A, C, D with `-prod` names (approval 24); keys are neve
 
 | Step | Runs it | Rollback |
 |---|---|---|
-| New staging project | owner | delete it (old project untouched until approval 6) |
+| New staging project | owner | delete it (old project untouched until approval 17) |
 | Code items + single push | operator, reviewed | revert / delete the remote branch (no production effect) |
 | Replay, fixtures, marker | operator via runner | delete and recreate the new project |
 | M1/M1b/M1c on staging | operator via runner | backouts (§3.3, rehearsed) |
 | Passwords (`recruiter_app`, `recruiter_maintenance`) | owner | `retire-app-credentials.sql` (NOLOGIN) / `alter role … nologin` |
-| Delete old staging project | owner | none (fictional data; migration list recorded) |
+| Legacy rehearsal frontend | owner (deploy), operator (build, config proof) | delete that Worker |
+| Delete old staging project (after T-REPLAY) | owner | none (fictional data; migration list recorded) |
 | Render staging service, env, shutdown delay | owner (service, env), operator (API PATCH/GET) | suspend or delete the service; revoke the API key |
 | Maps referrer change | owner | remove the added referrer |
 | SendGrid key, webhook, sender | owner | delete the key; disable the webhook |
 | Pooler probe, A5a, T-IP | operator / owner | none (no data) |
-| O2, A5b, L1 (staging) | owner (O2), operator | O2: providers back on; L1 one-way for legacy sessions |
+| Credential prep, O2, L1 + rejection probes (staging) | operator (prep, L1), owner (O2) | O2: providers back on; L1 one-way for legacy sessions |
 | T-REPLAY, retention test, A7 | operator / owner | re-apply M1/M1b/M1c (part of the rehearsal) |
 | Production steps | §3.2 | §3.3 |
 | Pipeline config (retention) | owner | remove `MAINTENANCE_DATABASE_URL`; the step skips |
-| Retirement (approval 29) | owner | none for deletions; the reviewed Blueprint change is revertible |
+| Retirement (approval 25) | owner | none for deletions; the reviewed Blueprint change is revertible |
 
 Teardown costs: Render staging stops billing at suspension or deletion (per second). The
 Supabase staging project bills until deleted or transferred to a Free organization and paused
@@ -463,7 +506,7 @@ Supabase staging project bills until deleted or transferred to a Free organizati
 
 | # | Finding | Change |
 |---|---|---|
-| 1 | Paid projects cannot be paused; credit is per organization | §1.2 corrected costs and states; §1.3 retention choice; approvals 1, 6, 29 |
+| 1 | Paid projects cannot be paused; credit is per organization | §1.2 corrected costs and states; §1.3 retention choice; approvals 1, 17, 25 (revision-3 numbering) |
 | 2 | Window not activated; backout must restore the email provider; rehearse the old app | §3.1 `window-on` + verify; §3.3 email provider restored before returning users; old-app fixture login and call in T-REPLAY |
 | 3 | `/signin` is liveness, not readiness | §2.5 `/readyz` deploy gate + `/healthz/db` monitoring, proposed as a separate reviewed code item (§5 item 2; not made); §1.5 row 11 |
 | 4 | A7 pass rule vs provider metadata; error cases | §1.6 per-sink table; `/api/*` and the forced error cases retained; backup-code paths stay disabled |
@@ -472,6 +515,15 @@ Supabase staging project bills until deleted or transferred to a Free organizati
 | 7 | Shutdown delay had no executable step | §2.2 API PATCH + GET read-back, stop if not returned |
 | 8 | Probe and T-SHUTDOWN criteria too weak | §2.6 budget, isolation and timing criteria; §1.5 row 10 post-response email continuation |
 | 9 | Approval order | §5 single push after reviewed code; §6 capacity check before key creation; L1 separate on staging and production; creation, retirement and cutover separate; teardown approval lists every resource |
+
+### Re-review (Codex, of `a5a4171`, 2026-10-23)
+
+| # | Finding | Change |
+|---|---|---|
+| 1 | Blocker: production opened before L1 | §3.2: O2, L1 and acceptance probes inside the maintenance period, before access opens; L1 approval (21) before the cutover (22); staging phases in §1.8 (prep before O2, rejection probes after L1), approvals 12–14 |
+| 2 | Backout rehearsal targeted the old database | §1.3 step 7 legacy rehearsal frontend on the new project, configuration proven before M1; §1.7; old staging DB deleted only after the rehearsal (approval 17) |
+| 3 | Hosted tests could false-pass | §1.5 row 10: pending at SIGTERM (`shutdown_started`, §5 item 4) and completed after, inconclusive runs repeated; §2.6 step 4: eligible request admitted and queued, no admission-unavailable alert |
+| 4 | Approval merges | 7→8, 11→12, 10+14+19 as one scoped test authorization (11), walkthrough a milestone; 25 approvals |
 
 ## Sources (read 2026-10-23, UTC)
 
