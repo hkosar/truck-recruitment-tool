@@ -6,8 +6,9 @@ import { afterAll, afterEach, beforeAll, describe, expect, it, vi } from 'vitest
 import { UnavailableError } from '../core/types';
 import { DEFAULT_TIMING } from '../app';
 import { Database } from './database';
-import { PgAuthStore } from './pg-auth-store';
+import { ADMISSION_ACQUIRE_MS, PgAuthStore } from './pg-auth-store';
 import { claimSuiteDatabase, suiteDatabase } from '../testing/test-db';
+import pg from 'pg';
 // Loaded machines (manager decision): only TEST timeouts are raised; product limits are unchanged.
 vi.setConfig({ testTimeout: 30_000, hookTimeout: 60_000 });
 
@@ -87,12 +88,28 @@ describe.skipIf(!enabled)('A3 database readiness for sign-in admission', () => {
     expect(await closesWithin(d, 3_000)).toBe(true);
   });
 
-  it('a warm-up query that hangs is cut off; the client is destroyed, not returned; shutdown completes', async () => {
-    const d = new Database({ connectionString: APP_URL!, max: 2, minWarm: 1, warmSql: 'select pg_sleep(5)', warmQueryTimeoutMs: 300, connectionTimeoutMillis: POOL_CONNECT_MS });
+  it('a warm-up query that hangs is cut off by its 300 ms query limit (not connection setup); the client leaves the pool; shutdown completes', async () => {
+    // Connection setup measured on its own (a fresh connection to the same server), so the query
+    // cutoff can be judged separately from it.
+    const probe = new pg.Client({ connectionString: APP_URL! });
+    const c0 = performance.now();
+    await probe.connect();
+    const connectMs = performance.now() - c0;
+    await probe.end();
+    const QUERY_LIMIT_MS = 300;
+    const d = new Database({ connectionString: APP_URL!, max: 2, minWarm: 1, warmSql: 'select pg_sleep(5)', warmQueryTimeoutMs: QUERY_LIMIT_MS, connectionTimeoutMillis: POOL_CONNECT_MS });
     const t0 = performance.now();
-    await expect(d.warm()).rejects.toBeTruthy();
-    expect(performance.now() - t0).toBeLessThan(POOL_CONNECT_MS); // cut off by the 300 ms query limit, not by a connect failure
-    await waitFor('the timed-out client is destroyed, not returned', allHeld(d, 0));
+    const err = await d.warm().then(() => undefined, (e: unknown) => e);
+    const elapsed = performance.now() - t0;
+    // The query limit fired (pg: 'Query read timeout'), not the connect limit
+    // ('timeout exceeded when trying to connect'), and not pg_sleep's 5 s.
+    expect(err).toBeInstanceOf(Error);
+    expect((err as Error).message).toBe('Query read timeout');
+    expect(elapsed).toBeGreaterThanOrEqual(QUERY_LIMIT_MS);
+    expect(elapsed - connectMs).toBeLessThan(QUERY_LIMIT_MS + 1_000);
+    // Destroyed, not returned: the client leaves the pool entirely (no idle survivor either).
+    await waitFor('the timed-out client has left the pool entirely', () => d.poolCounts.total === 0);
+    expect(d.poolCounts).toMatchObject({ total: 0, idle: 0 });
     expect(await closesWithin(d, 3_000)).toBe(true);
   });
 
@@ -187,7 +204,12 @@ describe.skipIf(!enabled)('A3 database readiness for sign-in admission', () => {
     const sharedHolders = [holdConnection(shared, 2), holdConnection(shared, 2)];
     await Promise.all(sharedHolders.map((h) => h.inside));
     await waitFor('both shared connections checked out', allHeld(shared, 2));
+    const s0 = performance.now();
     await expect(new PgAuthStore(shared).bucketHit('request', `shared-${Date.now()}`, 'shared', BUDGET)).rejects.toBeInstanceOf(UnavailableError);
+    const sharedMs = performance.now() - s0;
+    // It waited for a connection up to the admission call's own limit, and failed inside the budget.
+    expect(sharedMs).toBeGreaterThanOrEqual(ADMISSION_ACQUIRE_MS - 25);
+    expect(sharedMs).toBeLessThan(BUDGET);
     // The separate sign-in pool, warmed and verified idle, admits while the data pool is saturated.
     const authDb = db({ max: 4, connectionTimeoutMillis: POOL_CONNECT_MS, minWarm: 2 });
     expect(await authDb.warm()).toBeGreaterThanOrEqual(2);
