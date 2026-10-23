@@ -1,6 +1,7 @@
 // A4 REAL-HTTP TESTS (approval A4: local Node server on loopback, fake mailer, no external
 // services) against the A3 database. Skipped unless RUN_HTTP_TESTS=1 and A3_APP_URL are set and
-// the build exists (npm run build). Port: E2E_PORT (recorded in the A3/A4 ownership file).
+// the build exists (npm run build). Port: OS-assigned (listen on 0), like the other HTTP test files:
+// this machine's ephemeral range is 1024-65535, so a fixed port could collide (doc 15 §33).
 
 import { appendFileSync, existsSync } from 'node:fs';
 import { request } from 'node:http';
@@ -17,9 +18,11 @@ vi.setConfig({ testTimeout: 30_000, hookTimeout: 60_000 });
 // emergency sign-out test revokes every staff session.
 const SUITE_DB = suiteDatabase('e2e');
 const enabled = process.env.RUN_HTTP_TESTS === '1' && Boolean(SUITE_DB) && existsSync('dist/index.html');
-const PORT = Number(process.env.E2E_PORT ?? '55474');
-const ORIGIN = `http://localhost:${PORT}`;
-const BASE = `http://127.0.0.1:${PORT}`;
+// The public origin is independent of the listening port (as behind the production proxy); the
+// server listens on an OS-assigned loopback port, read back after start.
+const ORIGIN = 'https://recruiter.example.test';
+let BASE = '';
+let PORT = 0;
 const key = (n: number) => Buffer.alloc(32, n).toString('base64url');
 
 type Jar = Map<string, string>;
@@ -52,9 +55,12 @@ describe.skipIf(!enabled)('A4 real HTTP: sign-in end to end, timing, bodies, shu
     }
     const env = parseServerEnv({
       APP_ORIGIN: ORIGIN, KEY_LINKS: key(11), KEY_SESSIONS: key(12), KEY_RATE: key(13),
-      DATABASE_URL: SUITE_DB!.appUrl, EMAIL_MODE: 'test', PORT: String(PORT), HOST: '127.0.0.1', TRUSTED_PROXY_HOPS: '0', STATIC_DIR: 'dist',
+      DATABASE_URL: SUITE_DB!.appUrl, EMAIL_MODE: 'test', PORT: '8788', HOST: '127.0.0.1', TRUSTED_PROXY_HOPS: '0', STATIC_DIR: 'dist',
     });
-    running = await startServer(env, { mail, log: (event, fields) => logs.push(JSON.stringify({ event, ...fields })) });
+    // PORT above only satisfies the production config check; the test listens on port 0.
+    running = await startServer({ ...env, port: 0 }, { mail, log: (event, fields) => logs.push(JSON.stringify({ event, ...fields })) });
+    PORT = running.port;
+    BASE = `http://127.0.0.1:${PORT}`;
   });
   afterAll(async () => {
     if (running?.lifecycle.isAccepting) await running.shutdown(5_000);

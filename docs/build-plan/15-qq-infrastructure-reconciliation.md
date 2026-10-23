@@ -1441,3 +1441,13 @@ backout grants it back.
 
 **Batch rename/delete dialog focus.** Focus now returns to the "⋯" button after the dialog has
 closed (close first, then focus, as in the carrier dialog); before, focus was lost to the page.
+
+**HTTP test port (2026-10-23).** One HTTP run in 26 failed once with `connect ETIMEDOUT
+127.0.0.1:55582` inside the timing test (311 ms in, before any app assertion). A bounded
+investigation (20 runs with `NODE_DEBUG=net,http` and netstat snapshots) did not reproduce it and
+found no cause: no foreign socket on the port, 36-100 TIME_WAIT sockets in total, at most 4
+concurrent connections against a backlog of 511. It stays UNEXPLAINED. This machine's ephemeral
+range is 1024-65535, so any fixed test port can collide with an OS-assigned one; as a test-only
+mitigation the end-to-end HTTP test now listens on an OS-assigned port (0), like the other HTTP
+test files, with the public origin fixed (`https://recruiter.example.test`) independent of the
+listening port. No deadline changed. Measured: app verify 233/233, HTTP 10/10 runs.
