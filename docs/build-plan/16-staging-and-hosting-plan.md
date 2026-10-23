@@ -504,6 +504,8 @@ Supabase staging project bills until deleted or transferred to a Free organizati
 
 ## 9 · Review response (Codex, plan review of `9befc35`, 2026-10-23)
 
+*This table records the review of revision 2, which used the old approval numbering (1–29). Approval numbers cited in it are converted to the current (revision-3) numbering of §6.*
+
 | # | Finding | Change |
 |---|---|---|
 | 1 | Paid projects cannot be paused; credit is per organization | §1.2 corrected costs and states; §1.3 retention choice; approvals 1, 17, 25 (revision-3 numbering) |
