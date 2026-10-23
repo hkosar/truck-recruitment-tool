@@ -147,7 +147,9 @@ export async function finishRun(
  */
 export async function sendFailureEmail(
   ctx: PipelineContext,
-  run: Pick<RunRecord, 'job' | 'step'>,
+  // 'retention' is the nightly sign-in ledger retention step (retention-step.ts); it is not a
+  // pipeline_runs step, so it is named here only for the alert's subject and body.
+  run: { job: RunRecord['job']; step: RunRecord['step'] | 'retention' },
   errorMessage: string,
   totals: RunTotals = {}
 ): Promise<void> {

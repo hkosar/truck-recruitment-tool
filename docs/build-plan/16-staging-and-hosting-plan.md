@@ -359,7 +359,7 @@ ledgers only. The nightly retention step is **not wired**; without it the ledger
 
 1. **Reviewed pipeline hook (§5 item 3):** a step after the nightly sync, in its own `try`,
    connecting with a separate `MAINTENANCE_DATABASE_URL` as `recruiter_maintenance`, using the
-   retention rules in `app/server/scripts/retention.ts` (statement timeout, row cap, failure
+   retention rules in `pipeline/src/retention.ts` via `pipeline/src/retention-step.ts` (statement timeout, row cap, failure
    logged and alerted, never failing the pipeline run). The pipeline's existing
    `SUPABASE_DB_URL` / service-role access is **not changed or widened**.
 2. **Separate credential:** the owner sets the `recruiter_maintenance` password (§1.4 step 4);
@@ -547,5 +547,5 @@ Supabase staging project bills until deleted or transferred to a Free organizati
   https://www.twilio.com/docs/sendgrid/ui/analytics-and-reporting/email-activity-feed
 - [repo] docs 10, 11, 12, 14 (§8, §11.5, §11.6), 15 (§4.2, §8, §23); `render.yaml`;
   `app/.env.example`; `app/server/config.ts`; `app/server/main.ts`; `app/server/app.ts`;
-  `app/server/db/database.ts`; `app/server/scripts/retention.ts`;
+  `app/server/db/database.ts`; `pipeline/src/retention.ts`, `pipeline/src/retention-step.ts`;
   `supabase/pending/M1_same_origin_signin.sql`; `scripts/verify-baseline-reconciliation.mjs`.

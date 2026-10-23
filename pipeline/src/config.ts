@@ -39,6 +39,14 @@ const EnvSchema = z.object({
     .string()
     .regex(/^postgres(ql)?:\/\//, 'SUPABASE_DB_URL must be a postgres:// connection string'),
 
+  /** Sign-in ledger retention (doc 15 §23, doc 16 §4): a SEPARATE login for the least-privilege
+   *  recruiter_maintenance role, same project, session pooler. Optional: when absent the nightly
+   *  retention step only logs that it skipped. Never used for anything else. */
+  MAINTENANCE_DATABASE_URL: z
+    .string()
+    .regex(/^postgres(ql)?:\/\//, 'MAINTENANCE_DATABASE_URL must be a postgres:// connection string')
+    .optional(),
+
   // ---- Socrata (data.transportation.gov, SODA v2.1) ---------------------------------
   /** Free app token; lifts anonymous IP throttling to 1,000 req/rolling-hour
    *  (dev.socrata.com/docs/app-tokens.html; 04-costs §1). Required -- master plan lists it

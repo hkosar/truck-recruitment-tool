@@ -1,0 +1,94 @@
+// Nightly sign-in ledger retention step (doc 15 §23, doc 16 §4).
+//
+// - OFF unless MAINTENANCE_DATABASE_URL is set: then it only logs that it skipped.
+// - Its OWN connection as the least-privilege `recruiter_maintenance` login (select/delete on the
+//   five sign-in ledgers only). It never uses SUPABASE_DB_URL or the service-role client, so the
+//   pipeline's own permissions are unchanged.
+// - Fail closed on the target: the URL must parse with the pipeline's own guard (no query string
+//   or fragment), name the SAME project the pipeline already verified, and log in as
+//   recruiter_maintenance (checked again with current_user after connecting).
+// - Never fails the pipeline: refusals and errors are logged (counts and reasons only, never the
+//   URL) and alerted; the run continues.
+
+import pg from 'pg';
+import type { Config } from './config.js';
+import { runRetention, type Queryable, type RetentionResult } from './retention.js';
+import { parseSupabaseDbTarget } from './target-guard.js';
+
+export const MAINTENANCE_ROLE = 'recruiter_maintenance';
+
+export type RetentionOutcome =
+  | { status: 'skipped'; reason: 'not_configured' }
+  | { status: 'refused'; reason: 'unparseable' | 'other_project' | 'wrong_role' | 'connected_as_other_role' }
+  | { status: 'done'; result: RetentionResult }
+  | { status: 'failed'; reason: 'connect_or_query_error' };
+
+export interface RetentionClient extends Queryable {
+  connect(): Promise<void>;
+  query(sql: string, params?: unknown[]): Promise<{ rowCount: number | null; rows?: Array<Record<string, unknown>> }>;
+  end(): Promise<void>;
+}
+
+export interface RetentionStepDeps {
+  log: { info(event: string, fields?: Record<string, unknown>): void; error(event: string, fields?: Record<string, unknown>): void };
+  /** Called once when the step refuses or fails; must not throw. */
+  alert: (message: string) => Promise<void>;
+  /** Builds a client from explicit fields (never from the raw string). */
+  createClient?: (fields: { host: string; port: number; user: string; password: string; database: string }) => RetentionClient;
+}
+
+const defaultClient: NonNullable<RetentionStepDeps['createClient']> = (fields) =>
+  new pg.Client({ ...fields, application_name: 'tnbs-retention', connectionTimeoutMillis: 10_000 }) as unknown as RetentionClient;
+
+/** The role part of a Supabase user name: `<role>.<ref>` on the shared pooler, `<role>` otherwise. */
+function roleOf(user: string): string {
+  const dot = user.lastIndexOf('.');
+  return dot >= 0 ? user.slice(0, dot) : user;
+}
+
+export async function runRetentionStep(
+  config: Pick<Config, 'MAINTENANCE_DATABASE_URL'>,
+  verifiedProjectRef: string,
+  deps: RetentionStepDeps,
+): Promise<RetentionOutcome> {
+  const raw = config.MAINTENANCE_DATABASE_URL;
+  if (!raw) {
+    deps.log.info('retention.skipped', { reason: 'not_configured' });
+    return { status: 'skipped', reason: 'not_configured' };
+  }
+  const refuse = async (reason: 'unparseable' | 'other_project' | 'wrong_role' | 'connected_as_other_role'): Promise<RetentionOutcome> => {
+    deps.log.error('retention.refused', { reason });
+    await deps.alert(`Retention refused to run: ${reason}`);
+    return { status: 'refused', reason };
+  };
+
+  let target: ReturnType<typeof parseSupabaseDbTarget>;
+  try {
+    target = parseSupabaseDbTarget(raw);
+  } catch {
+    return refuse('unparseable');
+  }
+  if (target.projectRef !== verifiedProjectRef) return refuse('other_project');
+  if (roleOf(target.user) !== MAINTENANCE_ROLE) return refuse('wrong_role');
+
+  const client = (deps.createClient ?? defaultClient)({
+    host: target.host, port: target.port, user: target.user, password: target.password, database: target.database,
+  });
+  let connected = false;
+  try {
+    await client.connect();
+    connected = true;
+    const who = await client.query('select current_user as u');
+    if (who.rows?.[0]?.u !== MAINTENANCE_ROLE) return await refuse('connected_as_other_role');
+    const result = await runRetention(client);
+    deps.log.info('retention.done', { deleted: result.deleted, failed: result.failed });
+    if (result.failed.length > 0) await deps.alert(`Retention: ${result.failed.length} rule(s) failed: ${result.failed.join(', ')}`);
+    return { status: 'done', result };
+  } catch {
+    deps.log.error('retention.failed', { reason: 'connect_or_query_error' });
+    await deps.alert('Retention failed: connect or query error');
+    return { status: 'failed', reason: 'connect_or_query_error' };
+  } finally {
+    if (connected) await client.end().catch(() => undefined);
+  }
+}

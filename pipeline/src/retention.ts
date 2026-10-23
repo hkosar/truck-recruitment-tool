@@ -1,7 +1,8 @@
 // Sign-in ledger retention (Quote-Queue scripts/retention.ts windows; own code). Runs as the
 // least-privilege `recruiter_maintenance` role, as a step in the existing nightly pipeline job
-// (doc 15 §23). Written against a minimal query interface; the pipeline hook supplies a `pg`
-// client for that role. NOT wired and NOT run yet.
+// (doc 15 §23, doc 16 §4). Written against a minimal query interface; the pipeline hook
+// (retention-step.ts) supplies a `pg` client for that role. Moved here from app/server/scripts
+// so the pipeline package can run it.
 //
 // Windows: request buckets and recovery failures 48 hours; links and sessions 30 days after
 // they ended; email events 180 days. Events outlive links: email_events.link_id is

@@ -19,6 +19,9 @@ import {
 import { parse as parsePgConnectionString } from 'pg-connection-string';
 import { STAGING_SQL_ACTIONS, planStagingSqlRun } from './staging-sql-runner.js';
 import { RECORDED_PROJECT_REFS, parseSupabaseDbTarget, verifyPipelineTarget } from './target-guard.js';
+import { readFileSync } from 'node:fs';
+import { RETENTION_RULES, runRetention, type Queryable } from './retention.js';
+import { runRetentionStep, type RetentionClient } from './retention-step.js';
 
 type Test = { name: string; run: () => void | Promise<void> };
 const tests: Test[] = [];
@@ -462,6 +465,147 @@ test('location candidate queue excludes already-attempted no-match addresses', (
   const { sql } = buildCandidateQuery(100);
   assert.match(sql, /where geocode_addr_hash is distinct from address_hash/i);
   assert.doesNotMatch(sql, /geom is null or/i);
+});
+
+// ---- Sign-in ledger retention (moved from app/server/scripts/retention.test.ts) -------------
+const M1_SQL = readFileSync(new URL('../../supabase/pending/M1_same_origin_signin.sql', import.meta.url), 'utf8');
+
+function fakeRetentionDb(counts: Record<string, number[]>, failOn?: string): Queryable & { log: string[] } {
+  const log: string[] = [];
+  return {
+    log,
+    async query(sql: string) {
+      log.push(sql);
+      const table = /delete from ([\w.]+)/.exec(sql)?.[1];
+      if (!table) return { rowCount: null };
+      if (table === failOn) throw new Error('boom');
+      const queue = counts[table] ?? [];
+      return { rowCount: queue.length ? queue.shift()! : 0 };
+    },
+  };
+}
+
+test('retention: events are kept longer than links, and the link foreign key cannot block link deletion', () => {
+  const days = (rule: string) => Number(/interval '(\d+) (days|hours)'/.exec(RETENTION_RULES.find((r) => r.name === rule)!.where)![1]);
+  assert.equal(days('email_events'), 180);
+  assert.equal(days('signin_links'), 30);
+  assert.match(M1_SQL, /link_id\s+uuid references internal\.signin_links\(id\) on delete set null/);
+  assert.match(M1_SQL, /create table internal\.email_events \([\s\S]*recipient_email\s+text not null/);
+});
+
+test('retention: never deletes events by link, and every rule uses the wall clock', () => {
+  for (const rule of RETENTION_RULES) {
+    assert.ok(rule.where.includes('clock_timestamp()'), rule.name);
+    assert.doesNotMatch(rule.where, /\bnow\(\)/);
+  }
+  assert.ok(!RETENTION_RULES.find((r) => r.name === 'email_events')!.where.includes('link'));
+});
+
+test('retention: deletes in bounded batches until a short batch, per table', async () => {
+  const db = fakeRetentionDb({ 'internal.signin_links': [5000, 5000, 12], 'internal.email_events': [3] });
+  const result = await runRetention(db, { batchSize: 5000 });
+  assert.equal(result.deleted.signin_links, 10_012);
+  assert.equal(result.deleted.email_events, 3);
+  assert.deepEqual(result.failed, []);
+  assert.equal(db.log[0], "set statement_timeout = '30s'");
+});
+
+test('retention: a failing rule is reported and the others still run', async () => {
+  const db = fakeRetentionDb({ 'internal.app_sessions': [2] }, 'internal.signin_links');
+  const result = await runRetention(db);
+  assert.deepEqual(result.failed, ['signin_links']);
+  assert.equal(result.deleted.app_sessions, 2);
+});
+
+test('retention: stops after the per-rule batch cap', async () => {
+  const db = fakeRetentionDb({ 'internal.auth_request_buckets': Array(10).fill(1) });
+  const result = await runRetention(db, { batchSize: 1, maxBatchesPerRule: 3 });
+  assert.equal(result.deleted.request_buckets, 3);
+});
+
+// ---- The nightly retention step (retention-step.ts) -----------------------------------------
+const STAGING = RECORDED_PROJECT_REFS.staging;
+const PROD = RECORDED_PROJECT_REFS.production;
+const maintUrl = (role: string, ref: string, extra = '') => `postgresql://${role}.${ref}:redacted-pw@aws-0-us-east-2.pooler.supabase.com:5432/postgres${extra}`;
+
+function stepHarness(currentUser = 'recruiter_maintenance', failQuery = false) {
+  const events: Array<{ level: string; event: string; fields?: Record<string, unknown> }> = [];
+  const alerts: string[] = [];
+  const created: Array<Record<string, unknown>> = [];
+  let ended = 0;
+  const deps = {
+    log: {
+      info: (event: string, fields?: Record<string, unknown>) => events.push({ level: 'info', event, fields }),
+      error: (event: string, fields?: Record<string, unknown>) => events.push({ level: 'error', event, fields }),
+    },
+    alert: async (message: string) => {
+      alerts.push(message);
+    },
+    createClient: (fields: Record<string, unknown>): RetentionClient => {
+      created.push(fields);
+      return {
+        async connect() {},
+        async query(sql: string) {
+          if (failQuery) throw new Error('db down');
+          if (/current_user/.test(sql)) return { rowCount: 1, rows: [{ u: currentUser }] };
+          return { rowCount: 0 };
+        },
+        async end() {
+          ended += 1;
+        },
+      };
+    },
+  };
+  return { deps, events, alerts, created, ended: () => ended };
+}
+
+test('retention step: OFF unless MAINTENANCE_DATABASE_URL is set (no connection, no alert)', async () => {
+  const h = stepHarness();
+  const out = await runRetentionStep({ MAINTENANCE_DATABASE_URL: undefined }, PROD, h.deps);
+  assert.deepEqual(out, { status: 'skipped', reason: 'not_configured' });
+  assert.equal(h.created.length, 0);
+  assert.deepEqual(h.alerts, []);
+  assert.deepEqual(h.events.map((e) => e.event), ['retention.skipped']);
+});
+
+test('retention step: refuses another project, another role, and a query string; never connects; logs no URL', async () => {
+  for (const [url, reason] of [
+    [maintUrl('recruiter_maintenance', STAGING), 'other_project'],
+    [maintUrl('postgres', PROD), 'wrong_role'],
+    [maintUrl('recruiter_api', PROD), 'wrong_role'],
+    [maintUrl('recruiter_maintenance', PROD, '?host=evil.example.com'), 'unparseable'],
+    ['postgresql://recruiter_maintenance:pw@db.example.com:5432/postgres', 'unparseable'],
+  ] as const) {
+    const h = stepHarness();
+    const out = await runRetentionStep({ MAINTENANCE_DATABASE_URL: url }, PROD, h.deps);
+    assert.deepEqual(out, { status: 'refused', reason });
+    assert.equal(h.created.length, 0, url);
+    assert.equal(h.alerts.length, 1);
+    assert.ok(!JSON.stringify(h.events).includes('redacted-pw') && !JSON.stringify(h.alerts).includes('redacted-pw'));
+  }
+});
+
+test('retention step: connects with explicit fields as recruiter_maintenance, runs, logs counts only, closes', async () => {
+  const h = stepHarness();
+  const out = await runRetentionStep({ MAINTENANCE_DATABASE_URL: maintUrl('recruiter_maintenance', PROD) }, PROD, h.deps);
+  assert.equal(out.status, 'done');
+  assert.equal(h.created.length, 1);
+  assert.deepEqual(Object.keys(h.created[0]!).sort(), ['database', 'host', 'password', 'port', 'user']);
+  assert.equal(h.created[0]!.user, `recruiter_maintenance.${PROD}`);
+  assert.equal(h.ended(), 1);
+  assert.deepEqual(h.alerts, []);
+  const done = h.events.find((e) => e.event === 'retention.done')!;
+  assert.deepEqual(Object.keys(done.fields!).sort(), ['deleted', 'failed']);
+});
+
+test('retention step: refuses if the session is not recruiter_maintenance; a DB error never throws', async () => {
+  const other = stepHarness('postgres');
+  assert.deepEqual(await runRetentionStep({ MAINTENANCE_DATABASE_URL: maintUrl('recruiter_maintenance', PROD) }, PROD, other.deps), { status: 'refused', reason: 'connected_as_other_role' });
+  assert.equal(other.ended(), 1);
+  const down = stepHarness('recruiter_maintenance', true);
+  assert.deepEqual(await runRetentionStep({ MAINTENANCE_DATABASE_URL: maintUrl('recruiter_maintenance', PROD) }, PROD, down.deps), { status: 'failed', reason: 'connect_or_query_error' });
+  assert.equal(down.alerts.length, 1);
+  assert.equal(down.ended(), 1);
 });
 
 let failed = 0;
