@@ -506,8 +506,154 @@ describe.skipIf(!enabled)('A3 database: stores, permissions, concurrency, deadli
     await adminQuery(`insert into public.batch_carriers (batch_id, dot_number) values ($1, 1400004)`, [BATCH]);
     await bulk.query('commit');
     await bulk.end();
-    expect(count.rows[0].n).toBe(1);
+    expect(count.rows[0].n).toEqual({ changed: 1, skipped: [] });
     expect((await adminQuery(`select status from public.batch_carriers where batch_id = $1 and dot_number = 1400004`, [BATCH])).rows[0].status).toBe('new');
+  });
+
+  const statusOf = async (dot: number) => (await adminQuery(`select status from public.batch_carriers where batch_id = $1 and dot_number = $2`, [BATCH, dot])).rows[0].status;
+
+  it('bulk status skips global-DNC members (flag or carrier-wide suppression) and says which', async () => {
+    await resetEditor();
+    await adminQuery('update public.carriers set do_not_contact = true where dot_number = 1400002');
+    await adminQuery(`insert into public.contact_suppressions (dot_number, channel, reason, source) values (1400003, 'all', 'A3 bulk', 'manual') on conflict (dot_number, channel) where value is null do update set expires_at = null`);
+    const ed = await session(EDITOR);
+    const vw = await session(VIEWER);
+    const r = await data.rpc(ed, 'bulk_set_status', { p_batch_id: BATCH, p_dots: [1400001, 1400002, 1400003], p_status: 'contacted' });
+    expect(r).toEqual({ changed: 1, skipped: [1400002, 1400003] });
+    expect(await statusOf(1400001)).toBe('contacted');
+    expect(await statusOf(1400002)).toBe('new');
+    expect(await statusOf(1400003)).toBe('new');
+    const skippedLog = (await adminQuery(`select payload from public.batch_activity where batch_id = $1 and payload ? 'skipped_dnc' order by id desc limit 1`, [BATCH])).rows[0].payload;
+    expect(skippedLog.skipped_dnc).toEqual([1400002, 1400003]);
+    // An expired suppression no longer blocks.
+    await adminQuery(`update public.contact_suppressions set expires_at = now() - interval '1 minute' where dot_number = 1400003 and channel = 'all' and value is null`);
+    expect(await data.rpc(ed, 'bulk_set_status', { p_batch_id: BATCH, p_dots: [1400003], p_status: 'interested' })).toEqual({ changed: 1, skipped: [] });
+    await expect(data.rpc(vw, 'bulk_set_status', { p_batch_id: BATCH, p_dots: [1400001], p_status: 'new' })).rejects.toBeInstanceOf(NotPermittedError);
+    await resetEditor();
+  });
+
+  it('bulk status vs a concurrent DNC set, both orders, decided by the carrier lock', async () => {
+    await resetEditor();
+    const ed = await session(EDITOR);
+    const ed2 = await session(EDITOR2);
+    // Bulk first: the DNC set waits for the bulk transaction; the status change already happened.
+    const bulkC = await appClient(ed);
+    const first = await bulkC.query(`select public.bulk_set_status($1, array[1400002]::bigint[], 'contacted') as n`, [BATCH]);
+    expect(first.rows[0].n).toEqual({ changed: 1, skipped: [] });
+    const dncC = await appClient(ed2);
+    const dnc = dncC.query("select public.set_do_not_contact(1400002, true, 'A3 race')");
+    expect(await isBlocked(dnc)).toBe(true);
+    await bulkC.query('commit');
+    await dnc;
+    await dncC.query('commit');
+    expect(await statusOf(1400002)).toBe('contacted');
+    // DNC first: the bulk call waits for the DNC transaction, then skips the carrier.
+    await adminQuery('update public.carriers set do_not_contact = false where dot_number = 1400003');
+    const dnc2 = await appClient(ed2);
+    await dnc2.query("select public.set_do_not_contact(1400003, true, 'A3 race')");
+    const bulk2 = await appClient(ed);
+    const late = bulk2.query(`select public.bulk_set_status($1, array[1400001, 1400003]::bigint[], 'interested') as n`, [BATCH]);
+    expect(await isBlocked(late)).toBe(true);
+    await dnc2.query('commit');
+    expect((await late).rows[0].n).toEqual({ changed: 1, skipped: [1400003] });
+    await bulk2.query('commit');
+    expect(await statusOf(1400001)).toBe('interested');
+    expect(await statusOf(1400003)).toBe('new');
+    for (const c of [bulkC, dncC, dnc2, bulk2]) await c.end();
+    await resetEditor();
+  });
+
+  it('batch list: insurance and distance extras; CSV leaves out global-DNC carriers in the database, logs the export, refuses viewers', async () => {
+    await resetEditor();
+    // The harness shim has no st_distance (real PostGIS does); add a metres stand-in for this database only.
+    await adminQuery(`create or replace function public.st_distance(a geography, b geography) returns float8 language sql immutable as $$
+      with pa as (select split_part(regexp_replace(a::text, '^POINT\\((.*)\\)$', '\\1'), ' ', 1)::float8 as x, split_part(regexp_replace(a::text, '^POINT\\((.*)\\)$', '\\1'), ' ', 2)::float8 as y),
+           vb as (select split_part(btrim(v), ' ', 1)::float8 as x, split_part(btrim(v), ' ', 2)::float8 as y from unnest(string_to_array(regexp_replace(b::text, '^[A-Z]+\\((.*)\\)$', '\\1'), ',')) v)
+      select min(6371000 * 2 * asin(sqrt(power(sin(radians(vb.y - pa.y) / 2), 2) + cos(radians(pa.y)) * cos(radians(vb.y)) * power(sin(radians(vb.x - pa.x) / 2), 2)))) from pa, vb $$`);
+    const ed = await session(EDITOR);
+    const vw = await session(VIEWER);
+    const zone = (await adminQuery(
+      `insert into public.batch_zones (batch_id, zone_type, label, params, geom, distance_miles)
+       values ($1, 'radius', 'A3 list zone', '{"lng":-97.74,"lat":31.27,"radius_miles":50}'::jsonb, 'POINT(-97.74 31.27)'::geography, 50) returning id`,
+      [BATCH],
+    )).rows[0].id;
+    await adminQuery(`insert into public.carrier_insurance (dot_number, bipd_required, bipd_on_file) values (1400001, 750000, 1000000) on conflict (dot_number) do update set bipd_on_file = 1000000`);
+    try {
+      const extras = await data.batchListExtras(ed, BATCH, [1400001, 1400002, 1400002]);
+      expect(extras.map((e) => e.dot_number).sort()).toEqual([1400001, 1400002]);
+      const one = extras.find((e) => e.dot_number === 1400001)!;
+      expect(one).toMatchObject({ bipd_on_file: 1_000_000, bipd_required: 750_000 });
+      expect(one.distance_mi).toBeGreaterThan(68);
+      expect(one.distance_mi).toBeLessThan(70);
+      expect(extras.find((e) => e.dot_number === 1400002)).toMatchObject({ bipd_on_file: null, bipd_required: null });
+      expect(await data.batchListExtras(ed, BATCH, [])).toEqual([]);
+      expect(await data.batchListExtras(ed, BATCH, [999])).toEqual([]);
+
+      // 1400002 is DNC by flag, 1400003 by an unexpired carrier-wide suppression.
+      await adminQuery('update public.carriers set do_not_contact = true where dot_number = 1400002');
+      await adminQuery(`insert into public.contact_suppressions (dot_number, channel, reason, source) values (1400003, 'all', 'A3 list', 'manual') on conflict (dot_number, channel) where value is null do update set expires_at = null`);
+      const exportsBefore = (await adminQuery(`select count(*)::int as n from public.batch_activity where batch_id = $1 and activity_type = 'export'`, [BATCH])).rows[0].n;
+      const some = await data.batchCsvExport(ed, BATCH, [1400001, 1400002, 1400003]);
+      expect(some.rowCount).toBe(1);
+      expect(some.excluded).toBe(2);
+      const lines = some.csv.trim().split('\r\n');
+      expect(lines[0]).toBe('USDOT,Legal name,DBA,Contact name,Phone,Cell phone,Email,City,State,Status,Warnings,Last contact (UTC)');
+      expect(lines).toHaveLength(2);
+      expect(lines[1].startsWith('1400001,')).toBe(true);
+      expect(some.csv).not.toContain('1400002');
+      expect(some.csv).not.toContain('1400003');
+      const whole = await data.batchCsvExport(ed, BATCH, null);
+      expect(whole.csv).not.toMatch(/(^|\r\n)(1400002|1400003),/);
+      expect(whole.rowCount + whole.excluded).toBe((await adminQuery('select count(*)::int as n from public.batch_carriers where batch_id = $1', [BATCH])).rows[0].n);
+      const logged = (await adminQuery(`select payload from public.batch_activity where batch_id = $1 and activity_type = 'export' order by id desc limit 2`, [BATCH])).rows;
+      expect(logged[1].payload).toEqual({ kind: 'csv', row_count: 1 });
+      expect(logged[0].payload).toEqual({ kind: 'csv', row_count: whole.rowCount });
+      expect((await adminQuery(`select count(*)::int as n from public.batch_activity where batch_id = $1 and activity_type = 'export'`, [BATCH])).rows[0].n).toBe(exportsBefore + 2);
+
+      // Viewers are refused and nothing is logged; an unknown batch is reported, not exported.
+      await expect(data.batchCsvExport(vw, BATCH, [1400001])).rejects.toBeInstanceOf(NotPermittedError);
+      expect((await adminQuery(`select count(*)::int as n from public.batch_activity where batch_id = $1 and activity_type = 'export'`, [BATCH])).rows[0].n).toBe(exportsBefore + 2);
+      expect((await data.batchCsvExport(ed, 'a3b00000-0000-4000-8000-0000000000ff', null)).rowCount).toBe(-1);
+    } finally {
+      await adminQuery('delete from public.batch_zones where id = $1', [zone]);
+      await adminQuery('delete from public.carrier_insurance where dot_number = 1400001');
+      await resetEditor();
+    }
+  });
+
+  it('batch rename (editor, manager) and delete (manager only) go through the database rules', async () => {
+    await resetEditor();
+    const B2 = 'a3b00000-0000-4000-8000-0000000000b2';
+    await adminQuery('delete from public.batches where id = $1', [B2]);
+    await adminQuery(`insert into public.batches (id, name, created_by, search_definition) values ($1, 'A3 Rename Me', $2, '{}'::jsonb)`, [B2, MANAGER]);
+    await adminQuery(`insert into public.batch_carriers (batch_id, dot_number) values ($1, 1400001), ($1, 1400002)`, [B2]);
+    await adminQuery(`insert into public.contact_logs (dot_number, batch_id, user_id, channel, disposition) values (1400001, $1, $2, 'call', 'connected')`, [B2, EDITOR]);
+    const ed = await session(EDITOR);
+    const vw = await session(VIEWER);
+    const mg = await session(MANAGER);
+    const nameOf = async () => (await adminQuery('select name from public.batches where id = $1', [B2])).rows[0]?.name;
+    try {
+      await expect(data.batchRename(vw, B2, 'Viewer rename')).rejects.toBeInstanceOf(NotPermittedError);
+      expect(await nameOf()).toBe('A3 Rename Me');
+      expect(await data.batchRename(ed, B2, 'A3 Renamed')).toEqual({ found: true, from: 'A3 Rename Me' });
+      expect(await nameOf()).toBe('A3 Renamed');
+      const feed = (await adminQuery(`select comment, actor_id from public.batch_activity where batch_id = $1 and activity_type = 'comment'`, [B2])).rows;
+      expect(feed).toEqual([{ comment: 'Renamed batch from "A3 Rename Me" to "A3 Renamed"', actor_id: EDITOR }]);
+      expect((await data.batchRename(mg, B2, 'A3 Manager Name')).found).toBe(true);
+      expect((await data.batchRename(ed, 'a3b00000-0000-4000-8000-0000000000ff', 'x')).found).toBe(false);
+
+      await expect(data.batchDelete(ed, B2)).rejects.toBeInstanceOf(NotPermittedError);
+      await expect(data.batchDelete(vw, B2)).rejects.toBeInstanceOf(NotPermittedError);
+      expect(await nameOf()).toBe('A3 Manager Name');
+      expect(await data.batchDelete(mg, 'a3b00000-0000-4000-8000-0000000000ff')).toBe(false);
+      expect(await data.batchDelete(mg, B2)).toBe(true);
+      expect(await nameOf()).toBeUndefined();
+      expect((await adminQuery('select count(*)::int as n from public.batch_carriers where batch_id = $1', [B2])).rows[0].n).toBe(0);
+      expect((await adminQuery('select batch_id from public.contact_logs where dot_number = 1400001 and notes is null and user_id = $1 and batch_id is null', [EDITOR])).rowCount).toBeGreaterThanOrEqual(1);
+    } finally {
+      await adminQuery('delete from public.batches where id = $1', [B2]);
+      await adminQuery('delete from public.contact_logs where dot_number = 1400001 and batch_id is null and user_id = $1 and notes is null', [EDITOR]);
+    }
   });
 
   it('deadlines: a slow statement is cut off and rolled back; a lock wait past the deadline is Unavailable', async () => {

@@ -1518,7 +1518,7 @@ export type Database = {
           p_dots: number[]
           p_status: Database["public"]["Enums"]["batch_carrier_status"]
         }
-        Returns: number
+        Returns: Json
       }
       count_carriers: {
         Args: { p_definition: Json }

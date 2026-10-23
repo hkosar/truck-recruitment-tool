@@ -711,19 +711,23 @@ begin
 end;
 $$;
 
+-- Return type changes from int to jsonb ({changed, skipped}), so the old function is dropped first
+-- (the backout restores the int version).
+drop function if exists public.bulk_set_status(uuid, bigint[], batch_carrier_status);
 create or replace function public.bulk_set_status(
   p_batch_id uuid,
   p_dots     bigint[],
   p_status   batch_carrier_status
 )
-returns int
+returns jsonb
 language plpgsql
 security definer
 set search_path = public
 as $$
 declare
-  v_count  int;
-  v_locked bigint[];
+  v_count   int;
+  v_locked  bigint[];
+  v_skipped bigint[];
 begin
   perform internal.lock_and_validate(array['manager','edit']::user_role[], array['link']);
 
@@ -737,6 +741,24 @@ begin
     for no key update
   ) bc;
   perform internal.recheck_session();
+
+  -- Global-DNC members are skipped, never changed. Their carriers (B4) are locked FOR SHARE in
+  -- sorted order after the members, the same lock the contact-log guard takes, so a concurrent
+  -- DNC set either commits first (and is seen here) or waits until this transaction ends. The
+  -- predicate is the contact-log guard's: do_not_contact, or an unexpired carrier-wide 'all'
+  -- suppression with no value.
+  perform 1 from (
+    select c.dot_number from public.carriers c where c.dot_number = any(v_locked) order by c.dot_number for share
+  ) locked_carriers;
+  perform internal.recheck_session();
+  select coalesce(array_agg(d order by d), '{}') into v_skipped
+  from unnest(v_locked) d
+  where exists (select 1 from public.carriers c where c.dot_number = d and c.do_not_contact)
+     or exists (
+       select 1 from public.contact_suppressions cs
+       where cs.dot_number = d and cs.channel::text = 'all' and cs.value is null
+         and (cs.expires_at is null or cs.expires_at > now()));
+  v_locked := array(select d from unnest(v_locked) d where not d = any(v_skipped) order by d);
 
   perform set_config('app.suppress_row_activity', 'on', true);
 
@@ -756,7 +778,13 @@ begin
           jsonb_build_object('to', p_status, 'count', v_count,
                               'dots', (select coalesce(jsonb_agg(d), '[]'::jsonb) from unnest(v_locked[1:50]) d)));
 
-  return v_count;
+  if cardinality(v_skipped) > 0 then
+    insert into public.batch_activity (batch_id, actor_id, activity_type, payload)
+    values (p_batch_id, internal.current_staff_id(), 'bulk_status_change',
+            jsonb_build_object('to', p_status, 'count', 0, 'skipped_dnc', to_jsonb(v_skipped[1:50])));
+  end if;
+
+  return jsonb_build_object('changed', v_count, 'skipped', to_jsonb(v_skipped));
 end;
 $$;
 

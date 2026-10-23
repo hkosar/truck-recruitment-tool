@@ -3,6 +3,7 @@
 // lock sequence first (doc 15 §14.2), then the batch parent before member rows (§17.2).
 
 import type { UserRole } from '../auth/identity';
+import { deleteBatch, exportCsv, memberExtras, renameBatch } from '../batch/batch-list';
 import type { ContactLogInput, DataStore, TeamMember } from '../core/stores';
 import { RPC_SPECS, rpcCallSql } from '../core/rpc-spec';
 import { NotFoundError, RefusedError } from '../core/types';
@@ -175,6 +176,22 @@ export class PgDataStore implements DataStore {
 
   async teamSetActive(s: string, target: string, active: boolean) {
     await this.tx(s, (tx) => tx.query('select public.team_set_active($1, $2)', [target, active])).catch((err) => refineRefusal(err, 'team'));
+  }
+
+  batchListExtras(s: string, batchId: string, dots: number[]) {
+    return this.tx(s, (tx) => memberExtras(tx, batchId, dots));
+  }
+
+  batchCsvExport(s: string, batchId: string, dots: number[] | null) {
+    return this.tx(s, (tx) => exportCsv(tx, batchId, dots));
+  }
+
+  batchRename(s: string, batchId: string, name: string) {
+    return this.tx(s, (tx) => renameBatch(tx, batchId, name));
+  }
+
+  batchDelete(s: string, batchId: string) {
+    return this.tx(s, (tx) => deleteBatch(tx, batchId));
   }
 
   async teamSignEveryoneOut(s: string) {

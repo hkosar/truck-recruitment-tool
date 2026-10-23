@@ -213,14 +213,15 @@ export async function refreshBatch(batchId: string): Promise<RefreshBatchResult>
 /** Bulk status change (BulkBar "Mark status…", F5/F11). A single-row status
  * change is a plain `PATCH batch_carriers` instead (01 §5.4) — see this
  * file's header. */
-export async function bulkSetStatus(batchId: string, dots: number[], status: Status): Promise<number> {
+export async function bulkSetStatus(batchId: string, dots: number[], status: Status): Promise<{ changed: number; skipped: number[] }> {
   const { data, error } = await callRpc('bulk_set_status', {
     p_batch_id: batchId,
     p_dots: dots,
     p_status: status,
   });
   if (error) throw error;
-  return data ?? 0;
+  const result = data as { changed?: number; skipped?: number[] } | null;
+  return { changed: result?.changed ?? 0, skipped: result?.skipped ?? [] };
 }
 
 /** Global DNC toggle (F23 sibling / profile header). Logs into every batch

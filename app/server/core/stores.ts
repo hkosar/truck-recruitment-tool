@@ -5,6 +5,7 @@
 import type { SendStatus } from '../auth/ladder';
 import type { SessionKind, UserRole, UserStatus } from '../auth/identity';
 import type { AddPersonStore } from '../team/add-person';
+import type { CsvExport, MemberExtra, RenameResult } from '../batch/batch-list';
 
 export interface MintState {
   userId: string;
@@ -95,4 +96,8 @@ export interface DataStore extends AddPersonStore {
   teamUpdate(s: string, target: string, fullName: string | null, role: UserRole | null, email: string | null): Promise<void>;
   teamSetActive(s: string, target: string, active: boolean): Promise<void>;
   teamSignEveryoneOut(s: string): Promise<number>;
+  batchListExtras(s: string, batchId: string, dots: number[]): Promise<MemberExtra[]>;
+  batchCsvExport(s: string, batchId: string, dots: number[] | null): Promise<CsvExport>;
+  batchRename(s: string, batchId: string, name: string): Promise<RenameResult>;
+  batchDelete(s: string, batchId: string): Promise<boolean>;
 }
