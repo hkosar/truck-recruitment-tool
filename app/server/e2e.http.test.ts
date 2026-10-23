@@ -222,6 +222,12 @@ describe.skipIf(!enabled)('A4 real HTTP: sign-in end to end, timing, bodies, shu
     expect(res.status).toBe(303);
     expect(await abandoned).toBe(0);
     expect(mail.count).toBe(before + 1);
+    // The shutdown_started line recorded the request as pending when shutdown began (counts only).
+    const started = logs.map((l) => JSON.parse(l) as { event: string; accepted?: number; continuations?: number; budgetMs?: number }).find((e) => e.event === 'shutdown_started');
+    expect(started?.budgetMs).toBe(10_000);
+    expect((started?.accepted ?? 0) + (started?.continuations ?? 0)).toBeGreaterThanOrEqual(1);
+    expect(Object.keys(started!).sort()).toEqual(['accepted', 'budgetMs', 'continuations', 'event']);
+    expect(logs.map((l) => (JSON.parse(l) as { event: string }).event)).toContain('shutdown');
     // Admission has stopped: a request on a reused keep-alive connection gets 503 + Retry-After
     // (doc 15 §4.1); a new connection is refused because the listener is closed.
     const late = await fetch(`${BASE}/signin`).then((r) => ({ status: r.status, retry: r.headers.get('retry-after') }), () => ({ status: 0, retry: null }));

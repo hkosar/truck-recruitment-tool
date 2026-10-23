@@ -82,6 +82,10 @@ export async function startServer(env: ServerEnv, options: { log?: Logger; mail?
     lifecycle,
     mail,
     async shutdown(budgetMs = 45_000) {
+      // Work still in flight when shutdown begins (doc 16 T-SHUTDOWN: proves work was pending at
+      // SIGTERM). Counts only: accepted requests and post-response continuations not yet done.
+      const pending = lifecycle.counts;
+      log('shutdown_started', { accepted: pending.accepted, continuations: pending.continuations, budgetMs });
       server.close();
       server.closeIdleConnections?.();
       const abandoned = await lifecycle.shutdown(budgetMs, async () => {
