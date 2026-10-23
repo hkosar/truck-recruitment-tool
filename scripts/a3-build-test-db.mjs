@@ -1,7 +1,8 @@
 #!/usr/bin/env node
 // A3 ONLY: builds a disposable test database inside the task-owned throwaway cluster.
 // Usage (password from the environment, never printed):
-//   A3_PGPASSWORD=... node scripts/a3-build-test-db.mjs --owner-dir <task dir> --port <n> --db tr_<name> [--no-m1] [--snapshot out.json]
+//   A3_PGPASSWORD=... node scripts/a3-build-test-db.mjs --owner-dir <task dir> --port <n> --db tr_<name> [--no-m1] [--no-m1b] [--no-m1c]
+//     [--postgis-schema <schema>] [--snapshot out.json]
 // Steps: (re)create the database; Supabase shim; the 20 migrations with recorded PostGIS
 // substitutions; staging profile fixtures; A3 business fixtures; optionally a snapshot; M1.
 //
@@ -136,7 +137,28 @@ async function buildOne(dbName, snapshotPath) {
       throw err;
     }
   };
-  await run('supabase-shim', readFileSync(join(root, 'supabase/tests/a3/harness/supabase-shim.sql'), 'utf8'));
+  let shim = readFileSync(join(root, 'supabase/tests/a3/harness/supabase-shim.sql'), 'utf8');
+  // --postgis-schema <name>: the PostGIS stand-ins (and their extension) live in that schema instead
+  // of public, and the database search_path includes it, as on Supabase ("$user", public, extensions).
+  const postgisSchema = args['postgis-schema'] ?? 'public';
+  if (!/^[a-z_]+$/.test(postgisSchema)) throw new Error('--postgis-schema must be a plain lower-case name');
+  if (postgisSchema !== 'public') {
+    const path = `"$user", public, ${postgisSchema}`;
+    const begin = '-- [A3 postgis placement: begin]\n';
+    const end = '-- [A3 postgis placement: end]\n';
+    const ext = 'create extension test_ext5 schema public;';
+    if ([begin, end, ext].some((m) => shim.split(m).length !== 2)) throw new Error('supabase-shim.sql placement markers not found');
+    shim = shim
+      .replace(begin, `${begin}create schema ${postgisSchema};
+grant usage on schema ${postgisSchema} to anon, authenticated, service_role;
+set search_path = ${postgisSchema}, public;
+`)
+      .replace(end, `${end}set search_path = ${path};
+alter database ${dbName} set search_path = ${path};
+`)
+      .replace(ext, `create extension test_ext5 schema ${postgisSchema};`);
+  }
+  await run('supabase-shim', shim);
 
   const substitutions = [];
   const migrations = readdirSync(join(root, 'supabase/migrations')).filter((f) => /^\d{14}_.+\.sql$/.test(f)).sort();
@@ -161,6 +183,10 @@ async function buildOne(dbName, snapshotPath) {
     // M1b (D8: managers add people) is applied after M1, as in the planned rollout; --no-m1b skips it.
     if (args['no-m1b'] !== 'true') {
       await run('M1b', readFileSync(join(root, 'supabase/pending/M1b_add_person.sql'), 'utf8'));
+      // M1c (permanent record of batch deletes) follows M1b; --no-m1c skips it.
+      if (args['no-m1c'] !== 'true') {
+        await run('M1c', readFileSync(join(root, 'supabase/pending/M1c_batch_delete_audit.sql'), 'utf8'));
+      }
     }
   }
   await db.end();

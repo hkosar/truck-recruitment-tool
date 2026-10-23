@@ -446,6 +446,39 @@ grant execute on function
   to authenticated;
 revoke execute on function public.set_do_not_contact(bigint, boolean, text) from public, anon;
 grant execute on function public.set_do_not_contact(bigint, boolean, text) to authenticated, service_role;
+-- Symmetric to M1's PostGIS block: the explicit grants on the PostGIS extension's member routines,
+-- and (PostGIS outside public) the schema USAGE and recruiter_app's search_path.
+do $postgis_for_app_backout$
+declare
+  v_ext    oid;
+  v_schema name;
+  r        record;
+begin
+  select e.oid, n.nspname into v_ext, v_schema
+  from pg_depend d
+  join pg_proc p on p.oid = d.objid
+  join pg_extension e on e.oid = d.refobjid
+  join pg_namespace n on n.oid = e.extnamespace
+  where d.classid = 'pg_proc'::regclass and d.refclassid = 'pg_extension'::regclass
+    and d.deptype = 'e' and p.proname = 'st_x'
+  limit 1;
+  if v_ext is null then
+    return;
+  end if;
+  for r in
+    select p.oid::regprocedure as fn
+    from pg_depend d join pg_proc p on p.oid = d.objid
+    where d.classid = 'pg_proc'::regclass and d.refclassid = 'pg_extension'::regclass
+      and d.deptype = 'e' and d.refobjid = v_ext and p.prokind in ('f', 'a', 'w')
+  loop
+    execute format('revoke execute on routine %s from recruiter_api', r.fn);
+  end loop;
+  if v_schema <> 'public' then
+    execute format('revoke usage on schema %I from recruiter_api', v_schema);
+    execute format('alter role recruiter_app in database %I reset search_path', current_database());
+  end if;
+end
+$postgis_for_app_backout$;
 revoke recruiter_api from recruiter_app;
 revoke all on all tables in schema public from recruiter_api;
 revoke all on all sequences in schema public from recruiter_api;

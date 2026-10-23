@@ -1388,3 +1388,46 @@ people are outside that alignment check by construction.
 - Backout rehearsal with M1b: identical after normalization; the added person is kept; the foreign
   key is restored `NOT VALID`.
 - Contract checks for M1b and its backout: 12 mutations caught.
+
+## 33 · Wave 1 integration fixes (2026-10-23)
+
+**Permanent record of batch deletes (Hunter: "yes", 2026-10-23).** New pending file
+`supabase/pending/M1c_batch_delete_audit.sql`, applied after M1 and M1b; backout
+`supabase/backout/M1c-backout.sql` (drops the function, keeps the records).
+`internal.batch_delete_audit` holds batch id, name, actor, time and member count. It has no
+foreign key, so nothing cascades into it and it outlives the batch and the person. It is
+append-only (update, delete and truncate refused by trigger) and no app role can read or write it.
+`public.batch_delete` is the manager-only delete: `lock_and_validate` (manager, link session),
+the batches delete policy's own check, lock the batch (B1), write the record, delete, all in one
+transaction. The server calls it instead of deleting directly.
+
+**PostGIS and M1 (approved fix).** M1 used `revoke execute on all functions in schema public …`,
+which also covers extension functions. Together with the migrations' own revoke of PUBLIC
+(`20260720001200_rls.sql:176`), the new app role `recruiter_api` could not run PostGIS, so batch
+pages, maps, search and the batch list's distance column would fail with `permission denied for
+function st_x` (found by the integration browser run). Now:
+- M1 revokes per routine and skips extension members (`pg_depend` deptype `e`);
+- `recruiter_api` gets EXECUTE on the PostGIS extension's own member routines only (found as the
+  extension that owns `st_x`), plus USAGE on its schema and recruiter_app's search_path in this
+  database when PostGIS is not in `public`; M1 stops if the app role still cannot run `st_x`,
+  `st_y`, `st_dwithin`, `st_makepoint`, `st_setsrid`, `st_makeline` or `st_distance`;
+- the M1 backout undoes exactly those grants; the contract check forbids a blanket revoke.
+
+Why earlier runs missed it: no database or HTTP test called a PostGIS-using function as the app
+role; the role matrix probes other functions; the browser checks never opened a batch page; the
+A3 stand-ins were ordinary functions (not extension members); and the batch-list test created its
+own `st_distance` that PUBLIC could run. The stand-ins are now members of an extension
+(`test_ext5`, empty and SQL-only, because no PostGIS control file exists here), the batch-list
+test no longer creates a function, and a database test calls every PostGIS-using RPC and the
+batch list as the app role. A control build with the old M1 fails that test.
+
+**Placement limit (measured, not changed).** `20260722223300_security_hardening.sql` (before M1)
+pins every app function's search_path to `public, internal, pg_temp`, and M1 re-applies it. With
+PostGIS in another schema (Supabase's `extensions`), those functions cannot resolve PostGIS types
+at all, before or after M1. M1's grants handle that placement, but the functions would not work
+until the hardening search_path also names the PostGIS schema, a separate decision. The live
+placement is one read-only query at the staging gate:
+`select extnamespace::regnamespace from pg_extension where extname = 'postgis';`
+
+**Batch rename/delete dialog focus.** Focus now returns to the "⋯" button after the dialog has
+closed (close first, then focus, as in the carrier dialog); before, focus was lost to the page.

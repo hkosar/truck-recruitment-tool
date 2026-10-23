@@ -72,6 +72,7 @@ create publication supabase_realtime;
 create domain citext as text;
 
 -- PostGIS stand-ins (text WKT).
+-- [A3 postgis placement: begin]
 create domain geometry as text;
 create domain geography as text;
 create function st_makepoint(x float8, y float8) returns geometry language sql immutable as
@@ -99,3 +100,28 @@ create function st_dwithin(a geography, b geography, r float8) returns boolean l
            cos(radians(pa.y)) * cos(radians(vb.y)) * power(sin(radians(vb.x - pa.x) / 2), 2)))) <= r, false)
   from pa, vb
 $$;
+-- Metres from a point to the nearest vertex of the other shape (the batch list's distance column).
+create function st_distance(a geography, b geography) returns float8 language sql immutable as $$
+  with pa as (select split_part(regexp_replace(a::text, '^POINT\((.*)\)$', '\1'), ' ', 1)::float8 as x, split_part(regexp_replace(a::text, '^POINT\((.*)\)$', '\1'), ' ', 2)::float8 as y),
+       vb as (select split_part(btrim(v), ' ', 1)::float8 as x, split_part(btrim(v), ' ', 2)::float8 as y from unnest(string_to_array(regexp_replace(b::text, '^[A-Z]+\((.*)\)$', '\1'), ',')) v)
+  select min(6371000 * 2 * asin(sqrt(power(sin(radians(vb.y - pa.y) / 2), 2) + cos(radians(pa.y)) * cos(radians(vb.y)) * power(sin(radians(vb.x - pa.x) / 2), 2)))) from pa, vb
+$$;
+-- [A3 postgis placement: end]
+
+-- PostGIS OWNERSHIP mirrored (2026-10-23): in a real database these objects belong to the postgis
+-- EXTENSION, and M1 must treat extension members differently from the app's own functions. No
+-- postgis control file exists on this machine (and contrib DLLs are blocked), so the stand-ins are
+-- attached to test_ext5, an empty SQL-only extension shipped with PostgreSQL, which makes them real
+-- extension members (pg_depend deptype 'e'). The builder's --postgis-schema option moves both the
+-- stand-ins and this extension to another schema (e.g. extensions, as Supabase does).
+create extension test_ext5 schema public;
+alter extension test_ext5 add domain geometry;
+alter extension test_ext5 add domain geography;
+alter extension test_ext5 add function st_makepoint(float8, float8);
+alter extension test_ext5 add function st_setsrid(geometry, int);
+alter extension test_ext5 add function st_makeline(geometry[]);
+alter extension test_ext5 add function geometrytype(geometry);
+alter extension test_ext5 add function st_x(geometry);
+alter extension test_ext5 add function st_y(geometry);
+alter extension test_ext5 add function st_dwithin(geography, geography, float8);
+alter extension test_ext5 add function st_distance(geography, geography);

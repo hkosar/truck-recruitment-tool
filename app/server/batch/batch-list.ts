@@ -127,9 +127,12 @@ export async function renameBatch(tx: Tx, batchId: string, name: string): Promis
   return { found: true, from };
 }
 
-/** Deletes a batch. Managers only: lock_and_validate refuses everyone else, and the delete policy re-checks. */
+/**
+ * Deletes a batch. Managers only (public.batch_delete: lock_and_validate, then the delete policy's
+ * own check). The permanent record (internal.batch_delete_audit, M1c) is written by the same
+ * function, so it commits with the delete or not at all. False when the batch does not exist.
+ */
 export async function deleteBatch(tx: Tx, batchId: string): Promise<boolean> {
-  await tx.query("select internal.lock_and_validate(array['manager']::user_role[], array['link'])");
-  const r = await tx.query('delete from public.batches where id = $1', [batchId]);
-  return r.rowCount > 0;
+  const r = await tx.query<{ deleted: boolean }>('select public.batch_delete($1) as deleted', [batchId]);
+  return r.rows[0].deleted === true;
 }

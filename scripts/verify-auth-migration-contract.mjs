@@ -18,8 +18,10 @@ const RETIRE_PATH = ['supabase', 'backout', 'retire-app-credentials.sql'];
 const L1_PATH = ['supabase', 'rollout', 'L1-close-legacy-auth.sql'];
 const M1B_PATH = ['supabase', 'pending', 'M1b_add_person.sql'];
 const M1B_BACKOUT_PATH = ['supabase', 'backout', 'M1b-backout.sql'];
+const M1C_PATH = ['supabase', 'pending', 'M1c_batch_delete_audit.sql'];
+const M1C_BACKOUT_PATH = ['supabase', 'backout', 'M1c-backout.sql'];
 
-for (const p of [M1_PATH, BACKOUT_PATH, RETIRE_PATH, L1_PATH, M1B_PATH, M1B_BACKOUT_PATH, ['supabase', 'backout', 'pre-cutover-snapshot.sql']]) {
+for (const p of [M1_PATH, BACKOUT_PATH, RETIRE_PATH, L1_PATH, M1B_PATH, M1B_BACKOUT_PATH, M1C_PATH, M1C_BACKOUT_PATH, ['supabase', 'backout', 'pre-cutover-snapshot.sql']]) {
   if (!existsSync(join(root, ...p))) fail(`missing ${p.join('/')}`);
 }
 if (failures.length) finish();
@@ -30,6 +32,8 @@ const retire = read(...RETIRE_PATH);
 const l1 = read(...L1_PATH);
 const m1b = read(...M1B_PATH);
 const m1bBackout = read(...M1B_BACKOUT_PATH);
+const m1c = read(...M1C_PATH);
+const m1cBackout = read(...M1C_BACKOUT_PATH);
 const stripComments = (sql) => sql.split('\n').map((l) => l.replace(/--.*$/, '')).join('\n');
 const m1Code = stripComments(m1);
 
@@ -41,7 +45,7 @@ for (const f of readdirSync(migrationsDir)) {
 }
 
 // B. No credentials or connection strings in any of the new SQL.
-for (const [name, text] of [['M1', m1], ['backout', backout], ['retire', retire], ['L1', l1], ['M1b', m1b], ['M1b-backout', m1bBackout]]) {
+for (const [name, text] of [['M1', m1], ['backout', backout], ['retire', retire], ['L1', l1], ['M1b', m1b], ['M1b-backout', m1bBackout], ['M1c', m1c], ['M1c-backout', m1cBackout]]) {
   if (/password\s+'[^']*'/i.test(text)) fail(`${name}: contains a password literal`);
   if (/postgres(ql)?:\/\/|sb_secret_|eyJ[A-Za-z0-9_-]{10,}\./.test(text)) fail(`${name}: contains a connection string or key`);
 }
@@ -380,6 +384,71 @@ if (/delete from auth\.users|delete from public\./i.test(l1Code)) fail('L1: must
   if (!bo.includes('drop function if exists public.team_add_person(text, text, user_role, text);')) fail('M1b-backout: must drop team_add_person');
   if (!bo.includes('add constraint profiles_id_fkey foreign key (id) references auth.users(id) on delete cascade not valid;')) fail('M1b-backout: must restore the foreign key NOT VALID (people added stay)');
   if (/\bdrop table\b|\bdelete from\b|\btruncate\b/i.test(bo)) fail('M1b-backout: must not delete data');
+}
+
+// PostGIS (approved fix, 2026-10-23). A blanket "revoke execute on all functions in schema" also
+// strips extension functions (PostGIS in public), which the app's map/search/batch SQL calls as
+// recruiter_api: forbidden in M1. The revoke must skip extension members, and recruiter_api must
+// get the PostGIS extension's own routines (plus schema USAGE when PostGIS is not in public), with
+// a fail-closed check; the backout must undo exactly that.
+{
+  const code = m1Code;
+  if (/revoke\s+execute\s+on\s+all\s+(functions|routines)\s+in\s+schema/i.test(code)) {
+    fail('M1: blanket "revoke execute on all functions in schema" is forbidden (it strips extension functions such as PostGIS); revoke per routine, skipping extension members');
+  }
+  const loop = /do \$revoke_app_routines\$[\s\S]*?\$revoke_app_routines\$;/.exec(code)?.[0] ?? '';
+  if (!loop || !/n\.nspname in \('public', 'internal'\)/.test(loop) || !/not exists \(\s*select 1 from pg_depend d\s+where d\.classid = 'pg_proc'::regclass and d\.objid = p\.oid\s+and d\.refclassid = 'pg_extension'::regclass and d\.deptype = 'e'\)/.test(loop)
+      || !loop.includes("execute format('revoke execute on routine %s from public, anon, authenticated', r.fn);")) {
+    fail('M1: the app-routine revoke must cover public and internal and exclude extension members (pg_depend deptype e)');
+  }
+  const pg = /do \$postgis_for_app\$[\s\S]*?\$postgis_for_app\$;/.exec(code)?.[0] ?? '';
+  if (!pg) fail('M1: the PostGIS grant block for recruiter_api is missing');
+  else {
+    if (!/p\.proname = 'st_x'\) <> 1 then\s+raise exception/.test(pg)) fail('M1: PostGIS must be identified as exactly one extension owning st_x, or the migration stops');
+    if (!pg.includes("execute format('grant execute on routine %s to recruiter_api', r.fn);") || !/d\.refobjid = v_ext/.test(pg)) fail('M1: recruiter_api must get EXECUTE on the PostGIS extension member routines only');
+    if (!pg.includes("execute format('grant usage on schema %I to recruiter_api', v_schema);") || !pg.includes("execute format('alter role recruiter_app in database %I set search_path = public, %I', current_database(), v_schema);")) fail('M1: PostGIS outside public needs schema USAGE and the search_path for recruiter_app');
+    if (!/not has_function_privilege\('recruiter_api', p\.oid, 'execute'\)/.test(pg) || !/raise exception 'M1: recruiter_api cannot run the PostGIS functions the app uses'/.test(pg)) fail('M1: the PostGIS grant must fail closed when recruiter_api still cannot run st_x/st_y/st_dwithin/st_makepoint/st_setsrid/st_makeline/st_distance');
+    for (const fn of ['st_x', 'st_y', 'st_dwithin', 'st_makepoint', 'st_setsrid', 'st_makeline', 'st_distance']) if (!pg.includes(`'${fn}'`)) fail(`M1: the PostGIS check must name ${fn}`);
+  }
+  if (/grant\s+execute\s+on\s+all\s+(functions|routines)\s+in\s+schema\s+\w+\s+to\s+recruiter_api/i.test(code)) fail('M1: recruiter_api must not get EXECUTE on every function in a schema');
+  const bo = stripComments(backout);
+  const pgb = /do \$postgis_for_app_backout\$[\s\S]*?\$postgis_for_app_backout\$;/.exec(bo)?.[0] ?? '';
+  if (!pgb || !pgb.includes("execute format('revoke execute on routine %s from recruiter_api', r.fn);") || !pgb.includes("execute format('revoke usage on schema %I from recruiter_api', v_schema);") || !pgb.includes("execute format('alter role recruiter_app in database %I reset search_path', current_database());")) {
+    fail('backout: must undo the PostGIS grants symmetrically (member routines, schema USAGE, search_path)');
+  }
+  if (bo.indexOf('$postgis_for_app_backout$') > bo.indexOf('revoke recruiter_api from recruiter_app;')) fail('backout: undo the PostGIS grants before dismantling recruiter_api');
+}
+
+// M1c (Hunter, 2026-10-23): a permanent record of every batch delete, written in the SAME
+// transaction as the manager-only delete, in a table nothing cascades into; the backout keeps it.
+{
+  const code = stripComments(m1c);
+  if (!/^begin;$/m.test(code) || !/^commit;$/m.test(code)) fail('M1c: must be one transaction');
+  const table = /create table internal\.batch_delete_audit \(([\s\S]*?)\n\);/.exec(code)?.[1] ?? '';
+  if (!table) fail('M1c: internal.batch_delete_audit missing');
+  for (const col of ['batch_id     uuid not null', 'batch_name   text not null', 'actor_id     uuid not null', 'deleted_at   timestamptz not null', 'member_count int not null']) {
+    if (!table.includes(col)) fail(`M1c: audit column missing: ${col}`);
+  }
+  if (/references|cascade/i.test(table)) fail('M1c: the audit table must have no foreign key (nothing may cascade into it)');
+  if (!/before update or delete on internal\.batch_delete_audit/.test(code) || !/before truncate on internal\.batch_delete_audit/.test(code)) fail('M1c: the audit table must be append-only (update, delete and truncate refused)');
+  if (!code.includes('revoke all on table internal.batch_delete_audit from public, anon, authenticated, recruiter_api;') || /grant [^;]* on (table )?internal\.batch_delete_audit/i.test(code)) fail('M1c: no app role may touch the audit table directly');
+  const fn = /create function public\.batch_delete\(p_batch_id uuid\)[\s\S]*?\$\$;/.exec(code)?.[0] ?? '';
+  if (!fn) fail('M1c: public.batch_delete missing');
+  else {
+    if (!fn.includes("v_actor   uuid := internal.lock_and_validate(array['manager']::user_role[], array['link']);") || fn.indexOf('internal.lock_and_validate(') > fn.indexOf('v_name ')) fail('M1c: batch_delete must be manager-only, link session only, validated before anything else');
+    if (!fn.includes("if not internal.actor_can_write(array['manager']::user_role[]) then")) fail('M1c: batch_delete must keep the delete policy check (it bypasses RLS)');
+    const lock = fn.indexOf('for update;');
+    const audit = fn.indexOf('insert into internal.batch_delete_audit');
+    const del = fn.indexOf('delete from public.batches where id = p_batch_id;');
+    if (lock < 0 || audit < 0 || del < 0 || !(lock < audit && audit < del)) fail('M1c: lock the batch, write the audit row, then delete (one function, one transaction)');
+    if (!/if not found then\s+return false;/.test(fn) || fn.indexOf('return false;') > audit) fail('M1c: an unknown batch must write nothing');
+    if (/exception\s+when/i.test(fn)) fail('M1c: batch_delete must not swallow errors (a failed delete must roll back its audit row)');
+  }
+  if (!code.includes('revoke all on function public.batch_delete(uuid) from public, anon, authenticated;') || !code.includes('grant execute on function public.batch_delete(uuid) to recruiter_api;')) fail('M1c: batch_delete must be callable by recruiter_api only');
+  const bo = stripComments(m1cBackout);
+  if (!/^begin;$/m.test(bo) || !/^commit;$/m.test(bo)) fail('M1c-backout: must be one transaction');
+  if (!bo.includes('drop function if exists public.batch_delete(uuid);')) fail('M1c-backout: must drop batch_delete');
+  if (/\bdrop table\b|\bdelete from\b|\btruncate\b|batch_delete_audit/i.test(bo)) fail('M1c-backout: must keep the permanent record (no drop, delete or truncate)');
 }
 
 finish();

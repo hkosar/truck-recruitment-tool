@@ -71,8 +71,9 @@ export async function batchListRoute(ctx: BatchListContext): Promise<AppResponse
     return ctx.json(200, { ok: true });
   }
   if (req.method === 'POST' && (m = /^\/api\/batches\/([0-9a-f-]{36})\/delete$/i.exec(req.path))) {
-    // Managers only: enforced in the database (lock_and_validate, delete policy). The batch's own
-    // feed is deleted with it, so the durable trace is this log line.
+    // Managers only: enforced in the database (public.batch_delete). The batch's own feed is
+    // deleted with it; the permanent record is internal.batch_delete_audit (M1c), written in the
+    // same transaction. This log line is the operator's copy.
     await ctx.readJson(req);
     if (!(await data.batchDelete(s, m[1]))) throw new NotFoundError();
     ctx.log('batch_deleted', { batch: m[1], actor: ctx.actorId });

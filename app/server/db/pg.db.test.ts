@@ -565,11 +565,8 @@ describe.skipIf(!enabled)('A3 database: stores, permissions, concurrency, deadli
 
   it('batch list: insurance and distance extras; CSV leaves out global-DNC carriers in the database, logs the export, refuses viewers', async () => {
     await resetEditor();
-    // The harness shim has no st_distance (real PostGIS does); add a metres stand-in for this database only.
-    await adminQuery(`create or replace function public.st_distance(a geography, b geography) returns float8 language sql immutable as $$
-      with pa as (select split_part(regexp_replace(a::text, '^POINT\\((.*)\\)$', '\\1'), ' ', 1)::float8 as x, split_part(regexp_replace(a::text, '^POINT\\((.*)\\)$', '\\1'), ' ', 2)::float8 as y),
-           vb as (select split_part(btrim(v), ' ', 1)::float8 as x, split_part(btrim(v), ' ', 2)::float8 as y from unnest(string_to_array(regexp_replace(b::text, '^[A-Z]+\\((.*)\\)$', '\\1'), ',')) v)
-      select min(6371000 * 2 * asin(sqrt(power(sin(radians(vb.y - pa.y) / 2), 2) + cos(radians(pa.y)) * cos(radians(vb.y)) * power(sin(radians(vb.x - pa.x) / 2), 2)))) from pa, vb $$`);
+    // st_distance (the distance column, run as the app role) is a PostGIS stand-in in the harness shim,
+    // an extension member like the others, so this also proves M1's PostGIS grant for it.
     const ed = await session(EDITOR);
     const vw = await session(VIEWER);
     const zone = (await adminQuery(
@@ -653,6 +650,131 @@ describe.skipIf(!enabled)('A3 database: stores, permissions, concurrency, deadli
     } finally {
       await adminQuery('delete from public.batches where id = $1', [B2]);
       await adminQuery('delete from public.contact_logs where dot_number = 1400001 and batch_id is null and user_id = $1 and notes is null', [EDITOR]);
+    }
+  });
+
+  it('PostGIS as the app role: every RPC and server query that calls st_x / st_y / st_dwithin / st_makepoint / st_setsrid / st_makeline / st_distance runs', async () => {
+    // The stand-ins are real extension members here (supabase-shim.sql), as PostGIS is in a real
+    // database, so M1's per-routine revoke skips them and its PostGIS grant gives them to recruiter_api.
+    const owned = (await adminQuery(`select count(*)::int as n from pg_depend d join pg_proc p on p.oid = d.objid
+      where d.classid = 'pg_proc'::regclass and d.refclassid = 'pg_extension'::regclass and d.deptype = 'e'
+        and p.proname in ('st_x', 'st_y', 'st_dwithin', 'st_makepoint', 'st_setsrid', 'st_makeline', 'st_distance')`)).rows[0].n;
+    expect(owned).toBe(7);
+    const callable = (await adminQuery(`select bool_and(has_function_privilege('recruiter_api', p.oid, 'execute')) as ok from pg_proc p
+      where p.proname in ('st_x', 'st_y', 'st_dwithin', 'st_makepoint', 'st_setsrid', 'st_makeline', 'st_distance')`)).rows[0].ok;
+    expect(callable).toBe(true);
+    // M1's per-routine revoke still covers every APP routine in public and internal: none is
+    // executable by PUBLIC (a NULL acl means the default, which includes PUBLIC). Only extension
+    // members are skipped, and anon cannot run PostGIS (the hardening migration revoked it).
+    const publicExec = (await adminQuery(`select count(*)::int as n from pg_proc p join pg_namespace n on n.oid = p.pronamespace
+      where n.nspname in ('public', 'internal') and p.prokind in ('f', 'a', 'w')
+        and not exists (select 1 from pg_depend d where d.classid = 'pg_proc'::regclass and d.objid = p.oid
+                          and d.refclassid = 'pg_extension'::regclass and d.deptype = 'e')
+        and (p.proacl is null or exists (select 1 from aclexplode(p.proacl) a where a.grantee = 0 and a.privilege_type = 'EXECUTE'))`)).rows[0].n;
+    expect(publicExec).toBe(0);
+    // PostGIS in public: the hardening migration revoked anon, and M1 leaves extension functions
+    // alone. (PostGIS in another schema, e.g. extensions on Supabase, keeps the platform's grants.)
+    const stx = (await adminQuery(`select p.oid::regprocedure::text as fn, n.nspname from pg_proc p join pg_namespace n on n.oid = p.pronamespace where p.proname = 'st_x'`)).rows[0];
+    if (stx.nspname === 'public') expect((await adminQuery(`select has_function_privilege('anon', $1::regprocedure, 'execute') as ok`, [stx.fn])).rows[0].ok).toBe(false);
+
+    const ed = await session(EDITOR);
+    const radius = { zones: [{ zone_type: 'radius', params: { lat: 30.27, lng: -97.74, radius_miles: 10 } }] };
+    const corridor = { zones: [{ zone_type: 'corridor', params: { route: [[-97.80, 30.20], [-97.70, 30.30]], buffer_miles: 5 } }] };
+    const members = (await data.rpc(ed, 'batch_members', {
+      p_batch_id: BATCH, p_status: null, p_q: null, p_warnings_only: false, p_min_insurance: null, p_size_min: null, p_size_max: null,
+      p_has_phone: null, p_has_email: null, p_page: 1, p_page_size: 50, p_sort: 'status', p_dir: 'asc',
+    })) as Array<{ dot_number: number; lng: number; lat: number }>;
+    expect(members.length).toBeGreaterThanOrEqual(3);
+    expect(members.every((m) => m.lng === -97.74 && m.lat === 30.27)).toBe(true);
+    const map = (await data.rpc(ed, 'batch_members_map', {
+      p_batch_id: BATCH, p_status: null, p_q: null, p_warnings_only: false, p_min_insurance: null, p_size_min: null, p_size_max: null,
+      p_has_phone: null, p_has_email: null, p_sort: 'status', p_dir: 'asc',
+    })) as Array<{ lng: number; lat: number }>;
+    expect(map.length).toBeGreaterThanOrEqual(3);
+    expect(map.every((m) => m.lng === -97.74 && m.lat === 30.27)).toBe(true);
+    for (const def of [radius, corridor]) {
+      const found = (await data.rpc(ed, 'search_carriers', { p_definition: def, p_page: 1, p_page_size: 50, p_sort: 'name', p_dir: 'asc' })) as Array<{ dot_number: number; lng: number }>;
+      expect(found.map((r) => Number(r.dot_number)).filter((d) => d >= 1400001 && d <= 1400005).length).toBe(5);
+      expect(found.every((r) => r.lng === -97.74)).toBe(true);
+      const pins = (await data.rpc(ed, 'search_carriers_map', { p_definition: def, p_limit: 100 })) as Array<{ dot_number: number }>;
+      expect(pins.map((r) => Number(r.dot_number)).filter((d) => d >= 1400001 && d <= 1400005).length).toBe(5);
+    }
+    // The batch list's distance column (server SQL, app role) -> st_distance.
+    expect(Array.isArray(await data.batchListExtras(ed, BATCH, [1400001, 1400002]))).toBe(true);
+    // create_batch / refresh_batch run the matcher (internal.matching_carriers -> st_dwithin,
+    // internal.zone_geom -> st_setsrid / st_makepoint / st_makeline).
+    let created: string | undefined;
+    try {
+      const made = (await data.rpc(ed, 'create_batch', { p_name: `A3 PostGIS ${Date.now()}`, p_customer: null, p_job: null, p_description: null, p_definition: corridor })) as Array<Record<string, unknown>>;
+      created = (await adminQuery(`select id from public.batches where name like 'A3 PostGIS %' order by created_at desc limit 1`)).rows[0]?.id;
+      expect(made.length).toBeGreaterThanOrEqual(1);
+      expect((await adminQuery('select count(*)::int as n from public.batch_carriers where batch_id = $1 and dot_number between 1400001 and 1400005', [created])).rows[0].n).toBe(5);
+      await data.rpc(ed, 'refresh_batch', { p_batch_id: created });
+    } finally {
+      if (created) await adminQuery('delete from public.batches where id = $1', [created]);
+    }
+  });
+
+  it('batch delete audit (M1c): written with the delete, survives it, nothing on refusal or failure, append-only, app role cannot read it', async () => {
+    await resetEditor();
+    // A fresh batch id every run: audit rows are permanent (append-only), so an earlier run's row stays.
+    const B3 = (await adminQuery('select gen_random_uuid() as id')).rows[0].id as string;
+    const UNKNOWN = 'a3b00000-0000-4000-8000-0000000000fe';
+    const audits = async (id: string) => (await adminQuery('select batch_id, batch_name, actor_id, member_count, deleted_at from internal.batch_delete_audit where batch_id = $1', [id])).rows;
+    const exists = async () => (await adminQuery('select 1 from public.batches where id = $1', [B3])).rowCount === 1;
+    await adminQuery('delete from public.batches where id = $1', [B3]);
+    await adminQuery(`insert into public.batches (id, name, created_by, search_definition) values ($1, 'A3 Audit Me', $2, '{}'::jsonb)`, [B3, MANAGER]);
+    await adminQuery(`insert into public.batch_carriers (batch_id, dot_number) values ($1, 1400001), ($1, 1400002)`, [B3]);
+    const ed = await session(EDITOR);
+    const vw = await session(VIEWER);
+    const mg = await session(MANAGER);
+    try {
+      // Non-managers stay refused, and nothing is recorded.
+      await expect(data.batchDelete(ed, B3)).rejects.toBeInstanceOf(NotPermittedError);
+      await expect(data.batchDelete(vw, B3)).rejects.toBeInstanceOf(NotPermittedError);
+      expect(await exists()).toBe(true);
+      expect(await audits(B3)).toEqual([]);
+      // An unknown batch: false, nothing recorded.
+      expect(await data.batchDelete(mg, UNKNOWN)).toBe(false);
+      expect(await audits(UNKNOWN)).toEqual([]);
+      // A delete that fails AFTER the audit insert (a test-only trigger refuses the batch row):
+      // the whole transaction rolls back, so the batch stays and there is no audit row.
+      await adminQuery(`create function public.a3_refuse_batch_delete() returns trigger language plpgsql as $$
+        begin if old.name = 'A3 Audit Me' then raise exception 'A3 forced delete failure'; end if; return old; end $$`);
+      await adminQuery('create trigger a3_refuse_batch_delete before delete on public.batches for each row execute function public.a3_refuse_batch_delete()');
+      try {
+        await expect(data.batchDelete(mg, B3)).rejects.toBeTruthy();
+      } finally {
+        await adminQuery('drop trigger a3_refuse_batch_delete on public.batches');
+        await adminQuery('drop function public.a3_refuse_batch_delete()');
+      }
+      expect(await exists()).toBe(true);
+      expect(await audits(B3)).toEqual([]);
+      // The manager's delete: the batch and its members are gone; the record stays.
+      const t0 = Date.now();
+      expect(await data.batchDelete(mg, B3)).toBe(true);
+      expect(await exists()).toBe(false);
+      expect((await adminQuery('select count(*)::int as n from public.batch_carriers where batch_id = $1', [B3])).rows[0].n).toBe(0);
+      const rec = await audits(B3);
+      expect(rec).toHaveLength(1);
+      expect(rec[0]).toMatchObject({ batch_id: B3, batch_name: 'A3 Audit Me', actor_id: MANAGER, member_count: 2 });
+      expect(Math.abs(new Date(rec[0].deleted_at).getTime() - t0)).toBeLessThan(60_000);
+      // Append-only, even for the administrator.
+      await expect(adminQuery('update internal.batch_delete_audit set batch_name = $2 where batch_id = $1', [B3, 'x'])).rejects.toThrow(/append-only/);
+      await expect(adminQuery('delete from internal.batch_delete_audit where batch_id = $1', [B3])).rejects.toThrow(/append-only/);
+      await expect(adminQuery('truncate internal.batch_delete_audit')).rejects.toThrow(/append-only/);
+      expect(await audits(B3)).toHaveLength(1);
+      // The app role cannot read or write the record directly.
+      const app = new pg.Client({ connectionString: APP_URL });
+      await app.connect();
+      try {
+        await expect(app.query('select * from internal.batch_delete_audit')).rejects.toThrow(/permission denied/);
+        await expect(app.query(`insert into internal.batch_delete_audit (batch_id, batch_name, actor_id, member_count) values ($1, 'forged', $2, 0)`, [UNKNOWN, MANAGER])).rejects.toThrow(/permission denied/);
+      } finally {
+        await app.end();
+      }
+    } finally {
+      await adminQuery('delete from public.batches where id = $1', [B3]);
     }
   });
 

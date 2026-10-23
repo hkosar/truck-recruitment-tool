@@ -1705,8 +1705,29 @@ $$;
 -- ----------------------------------------------------------------------------
 revoke all on all tables in schema public from anon, authenticated;
 revoke all on all sequences in schema public from anon, authenticated;
-revoke execute on all functions in schema public from public, anon, authenticated;
-revoke execute on all functions in schema internal from public, anon, authenticated;
+-- Every routine in public and internal EXCEPT extension members (pg_depend deptype 'e'). A blanket
+-- "on all functions in schema" would also strip PostGIS when it is installed in public, and the
+-- app's own map/search/batch SQL calls it (approved fix, 2026-10-23). Extension functions keep
+-- whatever the platform gave them; recruiter_api gets PostGIS explicitly below.
+do $revoke_app_routines$
+declare
+  r record;
+begin
+  for r in
+    select p.oid::regprocedure as fn
+    from pg_proc p
+    join pg_namespace n on n.oid = p.pronamespace
+    where n.nspname in ('public', 'internal')
+      and p.prokind in ('f', 'a', 'w')
+      and not exists (
+        select 1 from pg_depend d
+        where d.classid = 'pg_proc'::regclass and d.objid = p.oid
+          and d.refclassid = 'pg_extension'::regclass and d.deptype = 'e')
+  loop
+    execute format('revoke execute on routine %s from public, anon, authenticated', r.fn);
+  end loop;
+end
+$revoke_app_routines$;
 revoke usage on schema internal from anon, authenticated;
 alter default privileges in schema public revoke all on tables from anon, authenticated;
 alter default privileges in schema public revoke all on sequences from anon, authenticated;
@@ -1714,6 +1735,63 @@ alter default privileges in schema public revoke execute on functions from publi
 alter default privileges in schema internal revoke execute on functions from public, anon, authenticated;
 
 grant usage on schema public, internal to recruiter_api;
+
+-- PostGIS for recruiter_api (approved fix, 2026-10-23). The app's invoker SQL (batch_members,
+-- batch_members_map, search_carriers, search_carriers_map, internal.zone_geom,
+-- internal.matching_carriers, and the server's batch-list query, app/server/batch/batch-list.ts)
+-- calls st_x / st_y / st_dwithin / st_makepoint / st_setsrid / st_makeline / st_distance, plus
+-- PostGIS casts and operators. The migrations already revoked PUBLIC from every
+-- public function (20260720001200_rls.sql:176), so before M1 only authenticated could run PostGIS.
+-- recruiter_api gets EXECUTE on the PostGIS extension's own member routines only (no app function,
+-- nothing in other extensions). PostGIS is found as the extension that owns st_x, wherever it is
+-- installed: in public, or in another schema (Supabase: extensions), where recruiter_api also
+-- gets USAGE on that schema and recruiter_app's search_path includes it (this database only).
+-- Fails closed.
+do $postgis_for_app$
+declare
+  v_ext    oid;
+  v_schema name;
+  r        record;
+begin
+  if (select count(distinct d.refobjid)
+        from pg_depend d join pg_proc p on p.oid = d.objid
+       where d.classid = 'pg_proc'::regclass and d.refclassid = 'pg_extension'::regclass
+         and d.deptype = 'e' and p.proname = 'st_x') <> 1 then
+    raise exception 'M1: expected exactly one extension (PostGIS) owning st_x';
+  end if;
+  select e.oid, n.nspname into v_ext, v_schema
+  from pg_depend d
+  join pg_proc p on p.oid = d.objid
+  join pg_extension e on e.oid = d.refobjid
+  join pg_namespace n on n.oid = e.extnamespace
+  where d.classid = 'pg_proc'::regclass and d.refclassid = 'pg_extension'::regclass
+    and d.deptype = 'e' and p.proname = 'st_x'
+  limit 1;
+  if v_schema <> 'public' then
+    execute format('grant usage on schema %I to recruiter_api', v_schema);
+    execute format('alter role recruiter_app in database %I set search_path = public, %I', current_database(), v_schema);
+  end if;
+  for r in
+    select p.oid::regprocedure as fn
+    from pg_depend d join pg_proc p on p.oid = d.objid
+    where d.classid = 'pg_proc'::regclass and d.refclassid = 'pg_extension'::regclass
+      and d.deptype = 'e' and d.refobjid = v_ext and p.prokind in ('f', 'a', 'w')
+  loop
+    execute format('grant execute on routine %s to recruiter_api', r.fn);
+  end loop;
+  -- Fail closed: every PostGIS routine the app's SQL names must now be callable by recruiter_api.
+  if (select count(distinct p.proname) from pg_proc p
+       where p.pronamespace = (select extnamespace from pg_extension where oid = v_ext)
+         and p.proname in ('st_x', 'st_y', 'st_dwithin', 'st_makepoint', 'st_setsrid', 'st_makeline', 'st_distance')) <> 7
+     or exists (select 1 from pg_proc p
+                 where p.pronamespace = (select extnamespace from pg_extension where oid = v_ext)
+                   and p.proname in ('st_x', 'st_y', 'st_dwithin', 'st_makepoint', 'st_setsrid', 'st_makeline', 'st_distance')
+                   and not has_function_privilege('recruiter_api', p.oid, 'execute'))
+     or not has_schema_privilege('recruiter_api', v_schema, 'usage') then
+    raise exception 'M1: recruiter_api cannot run the PostGIS functions the app uses';
+  end if;
+end
+$postgis_for_app$;
 grant select on all tables in schema public to recruiter_api;        -- RLS decides rows
 grant usage, select on all sequences in schema public to recruiter_api;
 
