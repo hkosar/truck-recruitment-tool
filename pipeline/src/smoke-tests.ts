@@ -578,7 +578,13 @@ test('stranded-run reconciliation SQL is guarded, audited and never deletes', ()
   assert.doesNotMatch(body, /\bdelete\b|\btruncate\b|\bdrop\b/i);
   assert.match(body, /v_row\.step <> 'sync-safety' or v_row\.status <> 'running'/);
   assert.match(body, /interval '15 minutes'/);
-  assert.match(body, /from pg_stat_activity\s+where application_name = v_app/);
+  // Substring match: exact name, "Supavisor - <name>" and any other prefix.
+  assert.match(body, /strpos\(coalesce\(application_name, ''\), v_app\) > 0/);
+  // Pipeline role inside a transaction, and any session holding temp tables.
+  assert.match(body, /usename = v_db_user\s+and xact_start is not null/);
+  assert.match(body, /c\.oid is null or c\.relpersistence = 't'/);
+  // Render confirmation stays step 1.
+  assert.match(sql, /1\. FIRST, in Render/);
   assert.match(body, /'public\.carrier_safety'::regclass/);
   assert.match(body, /'actor', v_actor/);
   assert.match(body, /'reason', v_reason/);
