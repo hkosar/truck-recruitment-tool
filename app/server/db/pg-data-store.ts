@@ -7,6 +7,7 @@ import type { ContactLogInput, DataStore, TeamMember } from '../core/stores';
 import { RPC_SPECS, rpcCallSql } from '../core/rpc-spec';
 import { NotFoundError, RefusedError } from '../core/types';
 import type { Database, Tx } from './database';
+import { teamAddPersonSql, type AddPersonInput } from '../team/add-person';
 
 const DATA_TX = { lockTimeoutMs: 2_000, statementTimeoutMs: 8_000, deadlineMs: 10_000 };
 const EDITOR_LOCK = "select internal.lock_and_validate(array['manager','edit']::user_role[], array['link'])";
@@ -166,6 +167,10 @@ export class PgDataStore implements DataStore {
 
   async teamUpdate(s: string, target: string, fullName: string | null, role: UserRole | null, email: string | null) {
     await this.tx(s, (tx) => tx.query('select public.team_update($1, $2, $3::user_role, $4)', [target, fullName, role, email])).catch((err) => refineRefusal(err, 'team'));
+  }
+
+  async teamAddPerson(s: string, input: AddPersonInput) {
+    return this.tx(s, (tx) => teamAddPersonSql(tx, input)).catch((err) => refineRefusal(err, 'team'));
   }
 
   async teamSetActive(s: string, target: string, active: boolean) {

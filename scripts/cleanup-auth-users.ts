@@ -1,12 +1,16 @@
 /**
- * cleanup-auth-users.ts — removes one nonproduction test run's Auth users and
- * verifies that trigger-cascaded profiles and user-owned workflow rows are gone.
+ * cleanup-auth-users.ts — removes one nonproduction test run's Auth users and their profiles,
+ * and verifies that nothing of the run remains. After M1b (D8) profiles no longer cascade from
+ * auth.users, so the profiles are removed explicitly first, and orphaned fixture profiles make
+ * the script refuse (see cleanup-auth-core.mjs).
  *
  * Uses the same fail-closed environment contract as seed-auth-users.ts. The
  * script will not target the production Carrier Recruiter ref and has no force
  * bypass. Run only after the relevant application tests finish.
  */
 import { createClient } from "@supabase/supabase-js";
+// Plain ESM (no type declarations) so its tests run with `node --test` and no dependencies.
+import { cleanupRun } from "./cleanup-auth-core.mjs";
 
 const PRODUCTION_PROJECT_REF = "ejrfobddnojbijzrjbii";
 const environment = process.env.TEST_ENVIRONMENT;
@@ -47,29 +51,39 @@ const validationError = (() => {
 
 let admin: ReturnType<typeof createClient>;
 
-async function listRunUsers() {
+async function listAllUsers() {
   const users = [];
   for (let page = 1; ; page += 1) {
     const response = await admin.auth.admin.listUsers({ page, perPage: 200 });
     if (response.error) throw response.error;
-    users.push(
-      ...response.data.users.filter(
-        (user) =>
-          user.user_metadata?.test_only === true &&
-          user.user_metadata?.test_run_id === runId &&
-          user.email?.endsWith(`@${fixtureDomain}`)
-      )
-    );
+    users.push(...response.data.users);
     if (response.data.users.length < 200) break;
   }
   return users;
 }
 
-async function assertZero(table: string, column: string, values: string[]) {
-  if (values.length === 0) return;
+async function listRunUsers() {
+  return (await listAllUsers()).filter(
+    (user) =>
+      user.user_metadata?.test_only === true &&
+      user.user_metadata?.test_run_id === runId &&
+      user.email?.endsWith(`@${fixtureDomain}`)
+  );
+}
+
+/** Fixture-domain profiles with no Auth user: orphans the removed cascade (M1b) can leave. */
+async function orphanFixtureProfiles() {
+  const authIds = new Set((await listAllUsers()).map((user) => user.id));
+  const result = await admin.from("profiles").select("id").ilike("email", `%@${fixtureDomain}`);
+  if (result.error) throw result.error;
+  return (result.data as Array<{ id: string }>).map((row) => row.id).filter((id) => !authIds.has(id));
+}
+
+async function countReferences(table: string, column: string, values: string[]) {
+  if (values.length === 0) return 0;
   const result = await admin.from(table).select("*", { count: "exact", head: true }).in(column, values);
   if (result.error) throw result.error;
-  if (result.count !== 0) throw new Error(`${table} retains ${result.count} rows for run ${runId}`);
+  return result.count ?? 0;
 }
 
 async function main() {
@@ -77,38 +91,24 @@ async function main() {
   admin = createClient(url, key, {
     auth: { autoRefreshToken: false, persistSession: false },
   });
-
-  const users = await listRunUsers();
-  const ids = users.map((user) => user.id);
-  if (users.length === 0) {
-    console.log(`PASS no test users remain for run ${runId}`);
-    return;
-  }
-
-  // Verify every public FK that can reference a profile before deleting any
-  // Auth user. This makes cleanup all-or-nothing: if one test left business-data
-  // residue, no identities are removed and the run stays inspectable.
-  await assertZero("profiles", "approved_by", ids);
-  await assertZero("carriers", "dnc_set_by", ids);
-  await assertZero("batches", "created_by", ids);
-  await assertZero("batch_carriers", "status_changed_by", ids);
-  await assertZero("batch_carriers", "promoted_by", ids);
-  await assertZero("contact_logs", "user_id", ids);
-  await assertZero("contact_suppressions", "created_by", ids);
-  await assertZero("batch_activity", "actor_id", ids);
-
-  for (const user of users) {
-    const deleted = await admin.auth.admin.deleteUser(user.id);
-    if (deleted.error) throw deleted.error;
-    console.log(`deleted ${user.email}`);
-  }
-
-  await assertZero("profiles", "id", ids);
-  const remainingUsers = await listRunUsers();
-  if (remainingUsers.length !== 0) {
-    throw new Error(`${remainingUsers.length} Auth users remain for run ${runId}`);
-  }
-  console.log(`PASS no Auth users, profiles, or checked workflow rows remain for run ${runId}`);
+  // The decision logic (orphan refusal, all-or-nothing reference checks, explicit profile removal
+  // before Auth users) lives in cleanup-auth-core.mjs and is tested by cleanup-auth-core.test.mjs.
+  await cleanupRun(
+    {
+      listRunUsers: async () => (await listRunUsers()).map((user) => ({ id: user.id, email: user.email })),
+      orphanFixtureProfiles,
+      countReferences,
+      deleteProfiles: async (ids) => {
+        const result = await admin.from("profiles").delete().in("id", ids);
+        if (result.error) throw result.error;
+      },
+      deleteUser: async (id) => {
+        const deleted = await admin.auth.admin.deleteUser(id);
+        if (deleted.error) throw deleted.error;
+      },
+    },
+    { runId, log: (line) => console.log(line) }
+  );
 }
 
 main().catch((error) => {

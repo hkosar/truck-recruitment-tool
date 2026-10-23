@@ -5,7 +5,7 @@ import { csrfTokenForCookie } from './auth/csrf';
 import { keyedHash } from './auth/keys';
 import { RPC_SPECS } from './core/rpc-spec';
 import { Lifecycle } from './core/lifecycle';
-import { NotPermittedError, OutcomeUnknownError, UnavailableError, type AppResponse } from './core/types';
+import { NotPermittedError, OutcomeUnknownError, RefusedError, UnavailableError, type AppResponse } from './core/types';
 import { FakeMailAdapter } from './mail/fake';
 import { FakeAuthStore, FakeDataStore, fakeRequest } from './testing/fakes';
 
@@ -335,6 +335,45 @@ describe('opening the link, confirming, signing out', () => {
       expect(location(retry)).toBe(`${ORIGIN}/signin`);
       expect(env.auth.sessions.get(who.hash)!.revoked).toBe(true);
     }
+  });
+});
+
+describe('add person (Task D)', () => {
+  const MANAGER_ID = '33333333-3333-4333-8333-333333333333';
+
+  it('a manager adds a person: 201, normalized input reaches the store, nothing is emailed, the write renews', async () => {
+    const env = setup();
+    const who = signedIn(env, MANAGER_ID);
+    const r = await apiPost(env, who, '/api/team/add', { full_name: ' Pat Lee ', email: ' Pat@Example.TEST ', role: 'view', mobile: '(555) 123-4567' });
+    expect(r.status).toBe(201);
+    expect(JSON.parse(String(r.body))).toEqual({ id: '99999999-9999-4999-8999-999999999999' });
+    const call = env.data.calls.find((c) => c.op === 'teamAddPerson')!;
+    expect({ s: call.s, args: call.args }).toEqual({ s: who.hash, args: [{ fullName: 'Pat Lee', email: 'pat@example.test', role: 'view', mobile: '+15551234567' }] });
+    expect(env.mail.count).toBe(0);
+    expect(env.auth.sessions.get(who.hash)!.touches).toBe(1);
+  });
+
+  it('invalid input is refused before the database; a recovery session and a missing CSRF token are refused outright', async () => {
+    const env = setup();
+    const who = signedIn(env, MANAGER_ID);
+    for (const body of [{ full_name: '', email: 'a@b.co', role: 'view' }, { full_name: 'A', email: 'nope', role: 'view' }, { full_name: 'A', email: 'a@b.co', role: 'guest' }, { full_name: 'A', email: 'a@b.co', role: 'view', mobile: '123' }]) {
+      const r = await apiPost(env, who, '/api/team/add', body);
+      expect([r.status, JSON.parse(String(r.body)).error]).toEqual([409, 'invalid']);
+    }
+    const recovery = signedIn(env, MANAGER_ID, 'recovery');
+    expect((await apiPost(env, recovery, '/api/team/add', { full_name: 'A', email: 'a@b.co', role: 'view' })).status).toBe(403);
+    expect((await apiPost(env, who, '/api/team/add', { full_name: 'A', email: 'a@b.co', role: 'view' }, { 'x-csrf-token': 'forged' })).status).toBe(403);
+    expect(env.data.calls.some((c) => c.op === 'teamAddPerson')).toBe(false);
+  });
+
+  it('database refusals map to fixed responses (duplicate -> 409 conflict, not a manager -> 403)', async () => {
+    const env = setup();
+    const who = signedIn(env, MANAGER_ID);
+    env.data.failWith = new RefusedError('conflict');
+    const dup = await apiPost(env, who, '/api/team/add', { full_name: 'A', email: 'a@b.co', role: 'view' });
+    expect([dup.status, JSON.parse(String(dup.body)).error]).toEqual([409, 'conflict']);
+    env.data.failWith = new NotPermittedError();
+    expect((await apiPost(env, who, '/api/team/add', { full_name: 'A', email: 'a@b.co', role: 'view' })).status).toBe(403);
   });
 });
 

@@ -158,6 +158,10 @@ async function buildOne(dbName, snapshotPath) {
   }
   if (args['no-m1'] !== 'true') {
     await run('M1', readFileSync(join(root, 'supabase/pending/M1_same_origin_signin.sql'), 'utf8'));
+    // M1b (D8: managers add people) is applied after M1, as in the planned rollout; --no-m1b skips it.
+    if (args['no-m1b'] !== 'true') {
+      await run('M1b', readFileSync(join(root, 'supabase/pending/M1b_add_person.sql'), 'utf8'));
+    }
   }
   await db.end();
   console.log(JSON.stringify({ database: dbName, migrations: migrations.length, m1: args['no-m1'] !== 'true', substitutions }, null, 1));
