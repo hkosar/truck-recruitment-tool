@@ -12,6 +12,7 @@
 --      transaction as the delete (same function), after the batch row is locked; if anything
 --      fails, both roll back together. Lock order (doc 15 §17.2): the actor's own session (I3),
 --      then the batch (B1); the cascade then takes its zones, members and feed (B2, B3, B6).
+--   3. recruiter_api loses direct DELETE on public.batches: batch_delete is the only way.
 -- ============================================================================
 begin;
 
@@ -81,5 +82,10 @@ $$;
 
 revoke all on function public.batch_delete(uuid) from public, anon, authenticated;
 grant execute on function public.batch_delete(uuid) to recruiter_api;
+
+-- ---- 3. The only way to delete a batch is public.batch_delete (review fix, 2026-10-23): the app
+-- role loses its direct DELETE on public.batches (granted in M1 section 11), so no delete can
+-- skip the record.
+revoke delete on public.batches from recruiter_api;
 
 commit;

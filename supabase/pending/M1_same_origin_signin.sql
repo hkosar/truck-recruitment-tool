@@ -1768,6 +1768,13 @@ begin
     and d.deptype = 'e' and p.proname = 'st_x'
   limit 1;
   if v_schema <> 'public' then
+    -- Trusted only: section 13 adds this schema to pinned search_paths, so no app or API role
+    -- may be able to create objects in it.
+    if has_schema_privilege('public', v_schema, 'create') or has_schema_privilege('anon', v_schema, 'create')
+       or has_schema_privilege('authenticated', v_schema, 'create') or has_schema_privilege('recruiter_api', v_schema, 'create')
+       or has_schema_privilege('recruiter_app', v_schema, 'create') then
+      raise exception 'M1: PostGIS schema % is writable by an app role; refusing to trust it', v_schema;
+    end if;
     execute format('grant usage on schema %I to recruiter_api', v_schema);
     execute format('alter role recruiter_app in database %I set search_path = public, %I', current_database(), v_schema);
   end if;
@@ -1896,13 +1903,31 @@ end
 $realtime$;
 
 -- ----------------------------------------------------------------------------
--- 13. Re-apply the hardening search_path to every function this migration (re)defined,
---     exactly as 20260722223300_security_hardening.sql does.
+-- 13. Re-apply the hardening search_path to every app function, as
+--     20260722223300_security_hardening.sql does, PLUS the PostGIS schema when PostGIS is not in
+--     public (review fix, 2026-10-23): a function's pinned search_path overrides the login's, so
+--     without it spatial calls (st_*, geometry, geography) cannot resolve. The PostGIS schema comes
+--     after public and internal, so it never shadows an app object, and section 11 refused it if
+--     any app role could create objects in it. This also re-pins the July hardening's functions
+--     and create_batch / refresh_batch (20260720001100_rpc.sql:384,436 pin search_path = public).
 -- ----------------------------------------------------------------------------
 do $hardening$
 declare
-  fn regprocedure;
+  fn        regprocedure;
+  v_postgis name;
+  v_path    text := 'public, internal, pg_temp';
 begin
+  select n.nspname into v_postgis
+  from pg_depend d
+  join pg_proc p on p.oid = d.objid
+  join pg_extension e on e.oid = d.refobjid
+  join pg_namespace n on n.oid = e.extnamespace
+  where d.classid = 'pg_proc'::regclass and d.refclassid = 'pg_extension'::regclass
+    and d.deptype = 'e' and p.proname = 'st_x'
+  limit 1;
+  if v_postgis is not null and v_postgis <> 'public' then
+    v_path := format('public, internal, %I, pg_temp', v_postgis);
+  end if;
   for fn in
     select p.oid::regprocedure
     from pg_proc p
@@ -1917,7 +1942,53 @@ begin
           and d.deptype = 'e'
       )
   loop
-    execute format('alter function %s set search_path = public, internal, pg_temp', fn);
+    execute format('alter function %s set search_path = %s', fn, v_path);
   end loop;
 end
 $hardening$;
+
+-- ----------------------------------------------------------------------------
+-- 14. PostGIS self-check (review fix, 2026-10-23): AFTER the final search_path step, EXECUTE
+--     representative spatial queries as recruiter_api through the app's own pinned functions
+--     (zone_geom: st_setsrid / st_makepoint / st_makeline; matching_carriers: st_dwithin) and
+--     the PostGIS functions the app's SQL names directly (st_x, st_y, st_distance). Any failure
+--     (missing grant, unresolvable name or type, wrong placement) stops the migration.
+-- ----------------------------------------------------------------------------
+do $postgis_selfcheck$
+declare
+  v_postgis name;
+  v_granted boolean := false;
+  v_dummy   text;
+begin
+  select n.nspname into v_postgis
+  from pg_depend d
+  join pg_proc p on p.oid = d.objid
+  join pg_extension e on e.oid = d.refobjid
+  join pg_namespace n on n.oid = e.extnamespace
+  where d.classid = 'pg_proc'::regclass and d.refclassid = 'pg_extension'::regclass
+    and d.deptype = 'e' and p.proname = 'st_x'
+  limit 1;
+  if v_postgis is null then
+    raise exception 'M1: PostGIS self-check: no extension owns st_x';
+  end if;
+  begin
+    if not pg_has_role(current_user, 'recruiter_api', 'member') then
+      execute format('grant recruiter_api to %I', current_user);
+      v_granted := true;
+    end if;
+    execute 'set local role recruiter_api';
+    perform internal.zone_geom('{"zone_type":"radius","params":{"lat":30.27,"lng":-97.74,"radius_miles":1}}'::jsonb);
+    perform internal.zone_geom('{"zone_type":"corridor","params":{"route":[[-97.80,30.20],[-97.70,30.30]],"buffer_miles":1}}'::jsonb);
+    perform count(*) from internal.matching_carriers('{"zones":[{"zone_type":"radius","params":{"lat":30.27,"lng":-97.74,"radius_miles":1}}]}'::jsonb);
+    execute format('select %1$I.st_x(%1$I.st_makepoint(1, 2))::text || %1$I.st_y(%1$I.st_makepoint(1, 2))::text'
+                   ' || %1$I.st_distance(%1$I.st_makepoint(1, 2)::%1$I.geography, %1$I.st_makepoint(1, 3)::%1$I.geography)::text', v_postgis)
+      into v_dummy;
+    execute 'reset role';
+    if v_granted then
+      execute format('revoke recruiter_api from %I', current_user);
+    end if;
+  exception when others then
+    raise exception 'M1: PostGIS self-check as recruiter_api failed: %', sqlerrm;
+  end;
+end
+$postgis_selfcheck$;

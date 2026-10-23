@@ -141,11 +141,24 @@ const restored = [
   ['20260720001200_rls.sql', 118, 120], ['20260720001200_rls.sql', 124, 126], ['20260720001200_rls.sql', 133, 135],
   ['20260720001200_rls.sql', 142, 144], ['20260720001200_rls.sql', 152, 154], ['20260720001200_rls.sql', 162, 163],
   ['20260720001200_rls.sql', 94, 97], ['20260720001200_rls.sql', 111, 112], ['20260722223300_security_hardening.sql', 36, 75],
-  ['20260722223300_security_hardening.sql', 11, 32], ['20260723010400_dnc_activity_enum_cast.sql', 55, 56],
+  ['20260723010400_dnc_activity_enum_cast.sql', 55, 56],
 ];
 for (const [file, from, to] of restored) {
   const text = originalLines(file, from, to).join('\n').replace(/^create function /, 'create or replace function ');
   if (!backout.includes(text)) fail(`backout: does not restore ${file}:${from}-${to} verbatim`);
+}
+// The July hardening loop (20260722223300_security_hardening.sql:11-32) is replayed with the same
+// function selection, and the same search_path unless PostGIS is outside public (review fix
+// 2026-10-23: then the PostGIS schema follows public and internal, as in M1 section 13).
+{
+  const orig = originalLines('20260722223300_security_hardening.sql', 11, 32).join('\n');
+  const selection = orig.slice(orig.indexOf('  for fn in'), orig.indexOf('  loop'));
+  const bo = /do \$hardening\$[\s\S]*?\$hardening\$;/.exec(backout)?.[0] ?? '';
+  if (!selection || !bo.includes(selection)) fail('backout: the hardening loop must select the same functions as 20260722223300_security_hardening.sql:11-32');
+  if (!bo.includes("v_path    text := 'public, internal, pg_temp';") || !bo.includes("v_path := format('public, internal, %I, pg_temp', v_postgis);")
+      || !/if v_postgis is not null and v_postgis <> 'public' then/.test(bo) || !bo.includes("execute format('alter function %s set search_path = %s', fn, v_path);")) {
+    fail('backout: the replayed hardening must keep public, internal, pg_temp and add only the PostGIS schema (when not public)');
+  }
 }
 if (!/^begin;$/m.test(backout) || !/^commit;$/m.test(backout)) fail('backout: must be one transaction');
 if (/\bdrop table\b|\bdelete from\b|\btruncate\b/i.test(stripComments(backout))) fail('backout: must not drop tables or delete data');
@@ -411,6 +424,24 @@ if (/delete from auth\.users|delete from public\./i.test(l1Code)) fail('L1: must
     for (const fn of ['st_x', 'st_y', 'st_dwithin', 'st_makepoint', 'st_setsrid', 'st_makeline', 'st_distance']) if (!pg.includes(`'${fn}'`)) fail(`M1: the PostGIS check must name ${fn}`);
   }
   if (/grant\s+execute\s+on\s+all\s+(functions|routines)\s+in\s+schema\s+\w+\s+to\s+recruiter_api/i.test(code)) fail('M1: recruiter_api must not get EXECUTE on every function in a schema');
+  if (!/raise exception 'M1: PostGIS schema % is writable by an app role; refusing to trust it'/.test(pg)
+      || !['public', 'anon', 'authenticated', 'recruiter_api', 'recruiter_app'].every((r) => pg.includes(`has_schema_privilege('${r}', v_schema, 'create')`))) {
+    fail('M1: a PostGIS schema outside public must be refused if any app or API role can create objects in it');
+  }
+  // Final hardening step: the PostGIS schema joins the pinned search_path (after public, internal).
+  const hard = /do \$hardening\$[\s\S]*?\$hardening\$;/.exec(code)?.[0] ?? '';
+  if (!hard.includes("v_path    text := 'public, internal, pg_temp';") || !hard.includes("v_path := format('public, internal, %I, pg_temp', v_postgis);")
+      || !hard.includes("execute format('alter function %s set search_path = %s', fn, v_path);") || /set search_path = public, internal, pg_temp', fn/.test(hard)) {
+    fail('M1: the final hardening step must pin public, internal, <PostGIS schema>, pg_temp when PostGIS is not in public');
+  }
+  // Self-check: EXECUTE spatial queries as recruiter_api AFTER the final hardening step.
+  const sc = /do \$postgis_selfcheck\$[\s\S]*?\$postgis_selfcheck\$;/.exec(code)?.[0] ?? '';
+  if (!sc || code.indexOf('$postgis_selfcheck$') < code.lastIndexOf('$hardening$;')) fail('M1: the PostGIS self-check must run after the final hardening step');
+  else {
+    if (!sc.includes("execute 'set local role recruiter_api';")) fail('M1: the PostGIS self-check must run as recruiter_api');
+    for (const call of ['internal.zone_geom(', 'internal.matching_carriers(', '.st_x(', '.st_y(', '.st_distance(', 'corridor']) if (!sc.includes(call)) fail(`M1: the PostGIS self-check must execute ${call}`);
+    if (!/raise exception 'M1: PostGIS self-check as recruiter_api failed: %'/.test(sc)) fail('M1: a failed PostGIS self-check must stop the migration');
+  }
   const bo = stripComments(backout);
   const pgb = /do \$postgis_for_app_backout\$[\s\S]*?\$postgis_for_app_backout\$;/.exec(bo)?.[0] ?? '';
   if (!pgb || !pgb.includes("execute format('revoke execute on routine %s from recruiter_api', r.fn);") || !pgb.includes("execute format('revoke usage on schema %I from recruiter_api', v_schema);") || !pgb.includes("execute format('alter role recruiter_app in database %I reset search_path', current_database());")) {
@@ -445,9 +476,11 @@ if (/delete from auth\.users|delete from public\./i.test(l1Code)) fail('L1: must
     if (/exception\s+when/i.test(fn)) fail('M1c: batch_delete must not swallow errors (a failed delete must roll back its audit row)');
   }
   if (!code.includes('revoke all on function public.batch_delete(uuid) from public, anon, authenticated;') || !code.includes('grant execute on function public.batch_delete(uuid) to recruiter_api;')) fail('M1c: batch_delete must be callable by recruiter_api only');
+  if (!/^revoke delete on public\.batches from recruiter_api;$/m.test(code)) fail('M1c: recruiter_api must lose direct DELETE on public.batches (batch_delete is the only way)');
   const bo = stripComments(m1cBackout);
   if (!/^begin;$/m.test(bo) || !/^commit;$/m.test(bo)) fail('M1c-backout: must be one transaction');
   if (!bo.includes('drop function if exists public.batch_delete(uuid);')) fail('M1c-backout: must drop batch_delete');
+  if (!/^grant delete on public\.batches to recruiter_api;/m.test(bo)) fail('M1c-backout: must restore the direct DELETE on public.batches that M1 granted');
   if (/\bdrop table\b|\bdelete from\b|\btruncate\b|batch_delete_audit/i.test(bo)) fail('M1c-backout: must keep the permanent record (no drop, delete or truncate)');
 }
 

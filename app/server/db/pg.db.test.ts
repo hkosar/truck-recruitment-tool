@@ -674,6 +674,14 @@ describe.skipIf(!enabled)('A3 database: stores, permissions, concurrency, deadli
     expect(publicExec).toBe(0);
     // PostGIS in public: the hardening migration revoked anon, and M1 leaves extension functions
     // alone. (PostGIS in another schema, e.g. extensions on Supabase, keeps the platform's grants.)
+    // Every pinned app function that names PostGIS can resolve it: its search_path includes the
+    // PostGIS schema (public, or e.g. extensions after public and internal; M1 section 13).
+    const pgSchema = (await adminQuery(`select n.nspname from pg_proc p join pg_namespace n on n.oid = p.pronamespace where p.proname = 'st_x'`)).rows[0].nspname as string;
+    const unresolvable = (await adminQuery(`select p.oid::regprocedure::text as fn from pg_proc p join pg_namespace n on n.oid = p.pronamespace
+      where n.nspname in ('public', 'internal')
+        and exists (select 1 from unnest(p.proconfig) c where c like 'search_path=%' and not (string_to_array(replace(substr(c, 13), ' ', ''), ',') @> array[$1::text]))
+        and p.prosrc ~* '(geometry|geography|st_[a-z]+[(])'`, [pgSchema])).rows;
+    expect(unresolvable).toEqual([]);
     const stx = (await adminQuery(`select p.oid::regprocedure::text as fn, n.nspname from pg_proc p join pg_namespace n on n.oid = p.pronamespace where p.proname = 'st_x'`)).rows[0];
     if (stx.nspname === 'public') expect((await adminQuery(`select has_function_privilege('anon', $1::regprocedure, 'execute') as ok`, [stx.fn])).rows[0].ok).toBe(false);
 
@@ -750,7 +758,18 @@ describe.skipIf(!enabled)('A3 database: stores, permissions, concurrency, deadli
       }
       expect(await exists()).toBe(true);
       expect(await audits(B3)).toEqual([]);
-      // The manager's delete: the batch and its members are gone; the record stays.
+      // A DIRECT delete by the manager's own session through the app role is refused (M1c revoked
+      // DELETE on public.batches): batch_delete is the only way, so no delete can skip the record.
+      const direct = await appClient(mg);
+      try {
+        await expect(direct.query('delete from public.batches where id = $1', [B3])).rejects.toThrow(/permission denied for table batches/);
+      } finally {
+        await direct.query('rollback').catch(() => undefined);
+        await direct.end();
+      }
+      expect(await exists()).toBe(true);
+      expect(await audits(B3)).toEqual([]);
+      // The manager's delete: the batch and its members are gone; exactly one record stays.
       const t0 = Date.now();
       expect(await data.batchDelete(mg, B3)).toBe(true);
       expect(await exists()).toBe(false);

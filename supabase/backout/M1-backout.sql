@@ -502,11 +502,26 @@ begin
 end
 $realtime$;
 
--- ---- hardening search_path, exactly as 20260722223300_security_hardening.sql:11-32
+-- ---- hardening search_path, as 20260722223300_security_hardening.sql:11-32, PLUS the PostGIS
+-- schema when PostGIS is not in public (as M1 section 13), so the restored functions can still
+-- resolve spatial calls. With PostGIS in public this is exactly the original.
 do $hardening$
 declare
-  fn regprocedure;
+  fn        regprocedure;
+  v_postgis name;
+  v_path    text := 'public, internal, pg_temp';
 begin
+  select n.nspname into v_postgis
+  from pg_depend d
+  join pg_proc p on p.oid = d.objid
+  join pg_extension e on e.oid = d.refobjid
+  join pg_namespace n on n.oid = e.extnamespace
+  where d.classid = 'pg_proc'::regclass and d.refclassid = 'pg_extension'::regclass
+    and d.deptype = 'e' and p.proname = 'st_x'
+  limit 1;
+  if v_postgis is not null and v_postgis <> 'public' then
+    v_path := format('public, internal, %I, pg_temp', v_postgis);
+  end if;
   for fn in
     select p.oid::regprocedure
     from pg_proc p
@@ -521,7 +536,7 @@ begin
           and d.deptype = 'e'
       )
   loop
-    execute format('alter function %s set search_path = public, internal, pg_temp', fn);
+    execute format('alter function %s set search_path = %s', fn, v_path);
   end loop;
 end
 $hardening$;

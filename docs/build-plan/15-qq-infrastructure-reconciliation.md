@@ -1421,13 +1421,23 @@ own `st_distance` that PUBLIC could run. The stand-ins are now members of an ext
 test no longer creates a function, and a database test calls every PostGIS-using RPC and the
 batch list as the app role. A control build with the old M1 fails that test.
 
-**Placement limit (measured, not changed).** `20260722223300_security_hardening.sql` (before M1)
-pins every app function's search_path to `public, internal, pg_temp`, and M1 re-applies it. With
-PostGIS in another schema (Supabase's `extensions`), those functions cannot resolve PostGIS types
-at all, before or after M1. M1's grants handle that placement, but the functions would not work
-until the hardening search_path also names the PostGIS schema, a separate decision. The live
-placement is one read-only query at the staging gate:
-`select extnamespace::regnamespace from pg_extension where extname = 'postgis';`
+**Either placement (review fix, 2026-10-23).** `20260722223300_security_hardening.sql` pins every
+app function's search_path to `public, internal, pg_temp`, and a function's pin overrides the
+login's search_path, so with PostGIS in another schema (Supabase's `extensions`) spatial calls
+could not resolve. M1's final hardening step (section 13) now finds the PostGIS schema and, when
+it is not `public`, pins `public, internal, <schema>, pg_temp` on every app function (including
+the July hardening's and `create_batch` / `refresh_batch`, pinned to `public` by
+`20260720001100_rpc.sql:384,436`); the schema follows public and internal, and M1 refuses it if
+any app or API role can create objects in it. Section 14 then EXECUTES representative spatial
+queries as `recruiter_api` (zone_geom radius and corridor, matching_carriers, st_x, st_y,
+st_distance) and stops the migration on any failure. The M1 backout replays the hardening with the
+same rule. Measured in both placements (public and extensions): database suites 36/36 each; a
+control build with the old fixed path stops at the self-check (`type "geography" does not exist`).
+Live placement check: `select extnamespace::regnamespace from pg_extension where extname = 'postgis';`
+
+**No direct batch delete (review fix).** M1c revokes DELETE on `public.batches` from
+`recruiter_api`, so `public.batch_delete` (which writes the record) is the only way; the M1c
+backout grants it back.
 
 **Batch rename/delete dialog focus.** Focus now returns to the "⋯" button after the dialog has
 closed (close first, then focus, as in the carrier dialog); before, focus was lost to the page.
