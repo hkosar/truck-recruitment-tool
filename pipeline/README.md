@@ -102,6 +102,15 @@ carriers (~150-220k rows), and per amendment #13 / `00-master-plan.md` M2.7, the
 backfill is meant to run once, deliberately, against the **production** Supabase Pro project —
 the free dev project keeps synthetic seed data only.
 
+## Live deployment notes (Render `pipeline` cron)
+
+- **`SUPABASE_DB_URL` has no query string** (no `?`), confirmed by the owner in the Render
+  dashboard on 2026-10-23 (UTC). The target guard's option allowlist therefore does not apply,
+  and the pool uses its default settings: TLS without certificate verification (`ssl:
+  { rejectUnauthorized: false }`, unchanged from before) and `application_name` `tnbs-pipeline`.
+  If options are ever added to that URL, re-check them against the allowlist in "Environment" first.
+- With `PIPELINE_NIGHTLY_SAFETY` unset or `off`, the nightly run does exactly the existing steps.
+
 ## Safety rollback (carrier_safety)
 
 Do the steps in this order; never skip step 2.
