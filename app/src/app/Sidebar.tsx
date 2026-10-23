@@ -7,7 +7,7 @@ import { dashboardTotals } from '../lib/rpc';
 /**
  * Sidebar nav — docs/build-plan/02-frontend-spec.md §3f.
  *  - "Recruiting": Dashboard (renamed from Batches, F3; badge = active
- *    batches) + New Batch (edit-gated, matches the /batches/new route
+ *    batches) + New Search (edit-gated, matches the /batches/new route
  *    guard so the nav never links somewhere the user would get bounced
  *    from).
  *  - "Outreach — coming soon" (F2): visible-but-disabled reserved tabs, no
@@ -65,7 +65,7 @@ export function Sidebar() {
             </NavLink>
             {canEdit ? (
               <NavLink to="/batches/new" className={navLinkClass}>
-                <span>New Batch</span>
+                <span>New Search</span>
               </NavLink>
             ) : null}
           </div>

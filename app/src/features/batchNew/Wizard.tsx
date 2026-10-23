@@ -63,7 +63,7 @@ export default function Wizard() {
   };
 
   return (
-    <div className="mx-auto max-w-[1600px] space-y-4"><header><h1 className="text-xl font-extrabold tracking-[-0.02em]">New Batch</h1></header>{message ? <div className="border border-crit bg-crit-tint p-3 text-sm text-crit">{message}</div> : null}<div className="grid items-start gap-4 xl:grid-cols-[minmax(0,680px)_minmax(420px,1fr)]">
+    <div className="mx-auto max-w-[1600px] space-y-4"><header><h1 className="text-xl font-extrabold tracking-[-0.02em]">New Search</h1></header>{message ? <div className="border border-crit bg-crit-tint p-3 text-sm text-crit">{message}</div> : null}<div className="grid items-start gap-4 xl:grid-cols-[minmax(0,680px)_minmax(420px,1fr)]">
       <div className="space-y-4">
         <section className="border border-border bg-surface p-4"><h2 className="text-[11px] font-extrabold uppercase tracking-[0.08em] text-text-muted">Details</h2><div className="mt-3 grid gap-3 md:grid-cols-2"><label className="md:col-span-2 text-xs font-bold">Batch name<input value={name} onChange={(event) => setName(event.target.value)} className="mt-1 w-full border border-border-strong px-3 py-2.5 text-sm" required /></label><label className="text-xs font-bold">Customer<input value={customer} onChange={(event) => setCustomer(event.target.value)} className="mt-1 w-full border border-border-strong px-3 py-2" /></label><label className="text-xs font-bold">Job<input value={job} onChange={(event) => setJob(event.target.value)} className="mt-1 w-full border border-border-strong px-3 py-2" /></label></div></section>
 

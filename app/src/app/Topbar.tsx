@@ -8,7 +8,7 @@ import { Link, useLocation } from 'react-router-dom';
 const SEGMENT_LABELS: Record<string, string> = {
   dashboard: 'Dashboard',
   batches: 'Batches',
-  new: 'New Batch',
+  new: 'New Search',
   carriers: 'Carriers',
   users: 'Users',
   sheet: 'Contact Sheet',

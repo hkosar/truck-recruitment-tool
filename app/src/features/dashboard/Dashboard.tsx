@@ -102,7 +102,7 @@ export default function Dashboard() {
         <h1 className="text-xl font-extrabold tracking-[-0.02em]">Dashboard</h1>
         {canEdit ? (
           <Link to="/batches/new" className="bg-accent px-4 py-2.5 text-xs font-bold text-accent-ink hover:bg-accent-hover">
-            New Batch
+            New Search
           </Link>
         ) : null}
       </header>
