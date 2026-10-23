@@ -75,6 +75,13 @@ describe.skipIf(!enabled)('A4 real HTTP: sign-in end to end, timing, bodies, shu
   const post = (path: string, body: string, headers: Record<string, string>) =>
     fetch(`${BASE}${path}`, { method: 'POST', redirect: 'manual', headers: { origin: ORIGIN, ...headers }, body });
 
+  it('health routes on the real server: /readyz and /healthz/db answer 200 "ok" with the database up', async () => {
+    for (const path of ['/readyz', '/healthz/db']) {
+      const r = await fetch(`${BASE}${path}`);
+      expect([r.status, await r.text(), r.headers.get('cache-control')]).toEqual([200, 'ok', 'no-store']);
+    }
+  });
+
   it('request → email link → landing → confirm → signed-in API and app shell → sign out', async () => {
     const t0 = performance.now();
     const req = await post('/auth/request', 'email=editor%40tnbs-recruiter.example.invalid', { 'content-type': 'application/x-www-form-urlencoded' });

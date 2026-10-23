@@ -41,6 +41,7 @@ import { operatorAlertFor, sendStatusFor, type MailAdapter } from './mail/adapte
 import { evidenceFor, parseEvents, SIGNATURE_HEADER, TIMESTAMP_HEADER, verifySendGridSignature } from './mail/webhook';
 import { renderConfirm, renderSignInForm, renderSignInSent, renderSignOutFailed, renderStale, signInPageHeaders } from './pages/signin';
 import { recoveryRouteAllowed } from './recovery/matrix';
+import type { Health } from './http/health';
 import { ADD_PERSON_PATH, handleAddPerson } from './team/add-person';
 
 export interface AppConfig {
@@ -80,6 +81,8 @@ export interface AppDeps {
   sleep: (ms: number) => Promise<void>;
   random: () => number;
   pingThrottle?: PingThrottle;
+  /** /readyz and /healthz/db (doc 16 §2.5). Absent: both answer 503. */
+  health?: Health;
 }
 
 const LEGACY_PATHS = new Set(['/login', '/register', '/forgot', '/reset', '/pending']);
@@ -554,6 +557,12 @@ export function createApp(deps: AppDeps): (req: AppRequest) => Promise<AppRespon
 
   // ---------------------------------------------------------------- router
   return async function handle(req: AppRequest): Promise<AppResponse> {
+    // Health routes answer even in maintenance: the cutover deploy runs in maintenance and Render
+    // waits for /readyz. Generic bodies only; no session, no detail.
+    if ((req.path === '/readyz' || req.path === '/healthz/db') && (req.method === 'GET' || req.method === 'HEAD')) {
+      const ok = deps.health ? await (req.path === '/readyz' ? deps.health.readiness() : deps.health.liveDb()) : false;
+      return { status: ok ? 200 : 503, headers: { ...COMMON_HEADERS, 'content-type': 'text/plain', 'cache-control': 'no-store' }, setCookies: [], body: ok ? 'ok' : 'unavailable' };
+    }
     if (config.maintenance) {
       return { status: 503, headers: { ...COMMON_HEADERS, 'content-type': 'text/plain', 'cache-control': 'no-store', 'retry-after': '120' }, setCookies: [], body: 'Back shortly.' };
     }

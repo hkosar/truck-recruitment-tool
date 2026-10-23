@@ -9,6 +9,7 @@ import { Database } from './database';
 import { ADMISSION_ACQUIRE_MS, PgAuthStore } from './pg-auth-store';
 import { claimSuiteDatabase, suiteDatabase } from '../testing/test-db';
 import pg from 'pg';
+import { databaseHealth, HEALTH_CHECK_MS } from '../http/health';
 // Loaded machines (manager decision): only TEST timeouts are raised; product limits are unchanged.
 vi.setConfig({ testTimeout: 30_000, hookTimeout: 60_000 });
 
@@ -196,6 +197,28 @@ describe.skipIf(!enabled)('A3 database readiness for sign-in admission', () => {
     await expect(d.transaction({ deadlineMs: 2_000 }, (tx) => tx.query('select 1'))).rejects.toBeInstanceOf(UnavailableError);
     expect(signals).toEqual(['data']);
     expect(await holder.outcome).toBe('ok');
+  });
+
+  it('health (doc 16 §2.5): a wrong database password never becomes ready; the right one does, stays ready after the database goes away, while the live check fails', async () => {
+    const bad = new URL(APP_URL!);
+    bad.password = `wrong-${Date.now()}`;
+    const wrong = db({ connectionString: bad.toString(), max: 2, connectionTimeoutMillis: POOL_CONNECT_MS });
+    const wrongHealth = databaseHealth(wrong);
+    for (let i = 0; i < 3; i++) {
+      const t0 = performance.now();
+      expect(await wrongHealth.readiness()).toBe(false);
+      expect(performance.now() - t0).toBeLessThan(HEALTH_CHECK_MS + 500);
+    }
+    expect(await wrongHealth.liveDb()).toBe(false);
+
+    // Not registered with the afterEach cleanup: this test closes it itself.
+    const right = new Database({ connectionString: APP_URL!, max: 2, connectionTimeoutMillis: POOL_CONNECT_MS });
+    const health = databaseHealth(right);
+    expect(await health.liveDb()).toBe(true);
+    expect(await health.readiness()).toBe(true);
+    await right.close();
+    expect(await health.readiness()).toBe(true); // latched: no restart loop during an outage
+    expect(await health.liveDb()).toBe(false); // monitoring still sees it
   });
 
   it('contention: a saturated shared pool fails admission; the separate sign-in pool admits within the budget', async () => {

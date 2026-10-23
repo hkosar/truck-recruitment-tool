@@ -9,6 +9,7 @@ import type { Logger } from './core/types';
 import { Database } from './db/database';
 import { PgAuthStore } from './db/pg-auth-store';
 import { PgDataStore } from './db/pg-data-store';
+import { databaseHealth } from './http/health';
 import { createNodeServer } from './http/node-adapter';
 import { loadStaticFiles } from './http/static-files';
 import type { MailAdapter } from './mail/adapter';
@@ -40,6 +41,8 @@ export async function startServer(env: ServerEnv, options: { log?: Logger; mail?
   const authDb = new Database({ connectionString: env.databaseUrl, max: 4, connectionTimeoutMillis: env.dbAcquireTimeoutMs, minWarm: 2, label: 'auth', onAcquireFailure: acquireAlert });
   const db = new Database({ connectionString: env.databaseUrl, max: 10, connectionTimeoutMillis: env.dbAcquireTimeoutMs, label: 'data', onAcquireFailure: acquireAlert });
   const lifecycle = new Lifecycle();
+  // Readiness and database health (doc 16 §2.5), through the DATA pool, never the sign-in pool.
+  const health = databaseHealth(db);
   const mail = options.mail ?? (env.emailMode === 'production' && env.sendgrid
     ? new SendGridAdapter({ ...env.sendgrid, fetch: (url, init) => fetch(url, init) })
     : new FakeMailAdapter());
@@ -63,6 +66,7 @@ export async function startServer(env: ServerEnv, options: { log?: Logger; mail?
     monotonic: () => performance.now(),
     sleep: (ms) => new Promise((r) => setTimeout(r, ms)),
     random: Math.random,
+    health,
   });
   const warmStarted = Date.now();
   try {
