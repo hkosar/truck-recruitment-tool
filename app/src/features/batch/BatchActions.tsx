@@ -1,5 +1,5 @@
 import { useMutation, useQueryClient } from '@tanstack/react-query';
-import { useEffect, useRef, useState } from 'react';
+import { useEffect, useRef, useState, type RefObject } from 'react';
 import { useNavigate } from 'react-router-dom';
 import { apiPost } from '../../lib/api';
 import { queryKeys } from '../../lib/queryKeys';
@@ -26,12 +26,12 @@ export function BatchActions({ batchId, batchName, canRename, canDelete }: { bat
           {canDelete ? <button type="button" role="menuitem" onClick={() => start('delete')} className="block w-full px-3 py-2 text-left font-bold text-crit hover:bg-crit-tint">Delete batch…</button> : null}
         </div>
       ) : null}
-      {operation ? <OperationDialog operation={operation} onClose={() => { setOperation(null); trigger.current?.focus(); }} /> : null}
+      {operation ? <OperationDialog operation={operation} returnFocusTo={trigger} onClose={() => setOperation(null)} /> : null}
     </div>
   );
 }
 
-function OperationDialog({ operation, onClose }: { operation: BatchOperation; onClose: () => void }) {
+function OperationDialog({ operation, returnFocusTo, onClose }: { operation: BatchOperation; returnFocusTo: RefObject<HTMLButtonElement | null>; onClose: () => void }) {
   const dialog = useRef<HTMLDialogElement>(null);
   const queryClient = useQueryClient();
   const navigate = useNavigate();
@@ -39,10 +39,17 @@ function OperationDialog({ operation, onClose }: { operation: BatchOperation; on
   const [error, setError] = useState<string | null>(null);
   const isDelete = operation.kind === 'delete';
 
+  // Native modal: showModal() makes the page behind inert, so focus can only go back to the "⋯"
+  // trigger AFTER the dialog has closed (as in the carrier ConfirmDialog): close first, then focus.
   useEffect(() => {
     const element = dialog.current;
+    const trigger = returnFocusTo.current;
     if (element && !element.open) element.showModal();
-  }, []);
+    return () => {
+      if (element?.open) element.close();
+      if (trigger?.isConnected) trigger.focus();
+    };
+  }, [returnFocusTo]);
 
   const mutation = useMutation({
     mutationFn: async () => {
