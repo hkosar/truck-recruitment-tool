@@ -76,7 +76,10 @@ export const REAPPLY_POST_SQL: Readonly<Partial<Record<ReapplyTarget, string>>> 
  * are NOT atomic. Before the file or the revoke is sent, the retained audit guards are verified from the
  * catalogue (not by object names alone):
  *   trigger_function : internal.batch_delete_audit_append_only() is a plpgsql trigger function, not SECURITY
- *                      DEFINER, search_path = internal, pg_temp, and its body is the reviewed "append-only" raise;
+ *                      DEFINER, its body is the reviewed "append-only" raise, and its search_path is the M1c one
+ *                      (internal, pg_temp) or the one M1's pinning step gives every function in a backed-out database
+ *                      (public, internal, pg_temp; the reapplied M1c file resets it);
+ *   trigger_function_pinned : its search_path is exactly the M1c one (internal, pg_temp), as after the M1c file;
  *   triggers         : on internal.batch_delete_audit there are exactly two non-internal triggers, both enabled
  *                      (tgenabled = 'O'), both bound to that function, no arguments, no WHEN clause, no column
  *                      list: no_update_delete = BEFORE UPDATE OR DELETE FOR EACH ROW,
@@ -110,8 +113,9 @@ tg as (select t.tgname, t.tgenabled, t.tgfoid, t.tgtype, t.tgnargs, t.tgqual, t.
 select
   exists (select 1 from tb) as audit_table,
   exists (select 1 from fn where prorettype = 'trigger'::regtype and prolang = (select oid from pg_language where lanname = 'plpgsql')
-            and not prosecdef and proconfig = array['search_path=internal, pg_temp']
+            and not prosecdef and proconfig in (array['search_path=internal, pg_temp'], array['search_path=public, internal, pg_temp'])
             and prosrc like '%raise exception ''internal.batch_delete_audit is append-only''%') as trigger_function,
+  exists (select 1 from fn where proconfig = array['search_path=internal, pg_temp']) as trigger_function_pinned,
   ((select count(*) from tg where not tgisinternal) = 2
     and exists (select 1 from tg where tgname = 'batch_delete_audit_no_update_delete' and tgenabled = 'O' and tgfoid = (select oid from fn)
                   and tgtype = 27 and tgnargs = 0 and tgqual is null and tgattr = '')
@@ -137,6 +141,7 @@ export const M1C_POSTCONDITION_SQL = `select coalesce(has_function_privilege('se
 export interface M1cStateFacts {
   audit_table: boolean;
   trigger_function: boolean;
+  trigger_function_pinned: boolean;
   triggers: boolean;
   table_shape: boolean;
   table_acl_clean: boolean;
@@ -173,7 +178,7 @@ export function classifyM1cState(f: M1cStateFacts): M1cClassification {
     return { state: failed.length === 0 ? 'normal' : 'refuse', failed };
   }
   const failed = [
-    ...wrong([...GUARD_FACTS, 'batch_delete', 'batch_delete_acl_ok', 'batches_delete_clean', 'service_role_direct_execute'], true),
+    ...wrong([...GUARD_FACTS, 'trigger_function_pinned', 'batch_delete', 'batch_delete_acl_ok', 'batches_delete_clean', 'service_role_direct_execute'], true),
     ...wrong(['service_role_other_path_execute'], false),
   ];
   return { state: failed.length === 0 ? 'recover' : 'refuse', failed };

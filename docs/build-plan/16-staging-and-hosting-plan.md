@@ -399,7 +399,7 @@ anything is changed, and the refusal names only the failed check names:
   `internal.batch_delete_audit_append_only()`; then only the revoke is sent.
 
 "Guards intact" means: the trigger function is the reviewed plpgsql trigger function
-(not SECURITY DEFINER, `search_path = internal, pg_temp`, body is the append-only raise); the audit
+(not SECURITY DEFINER, body is the append-only raise, `search_path` either the M1c one `internal, pg_temp` or `public, internal, pg_temp`, which M1's search-path pinning gives it in a backed-out database before the reapplied M1c file resets it; the interrupted state requires the M1c one); the audit
 table has exactly the two triggers `batch_delete_audit_no_update_delete` (BEFORE UPDATE OR DELETE,
 FOR EACH ROW) and `batch_delete_audit_no_truncate` (BEFORE TRUNCATE, FOR EACH STATEMENT), both
 enabled, both on that function, with no arguments, WHEN clause or column list; the table has the six
@@ -412,8 +412,8 @@ success only if `service_role` has lost EXECUTE. It does not revoke PUBLIC or in
 compensate. What is not checked: the full body of `batch_delete`, ownership of the objects, other
 objects in the schema. The hosted catalogue may differ from the local one (for example extra
 default ACL entries); a refusal there is safe and means a human inspects. Proved locally on a real
-PostgreSQL 16 catalogue (`pipeline/src/reapply-m1c-a3.test.ts`, 17 states: disabled, wrong-function
-and wrong-timing triggers, restored DELETE on batches, PUBLIC and inherited EXECUTE, table/function
+PostgreSQL 16 catalogue (`pipeline/src/reapply-m1c-a3.test.ts`, 20 states: disabled, wrong-function
+and wrong-timing triggers, wrong function search paths, restored DELETE on batches, PUBLIC and inherited EXECUTE, table/function
 privileges for `recruiter_api`, missing trigger/function/disabled trigger with `batch_delete`
 absent, plus the valid interrupted and backed-out states). Also proved locally: a fresh apply and a backout followed
 by the three re-applies give snapshots identical after normalization, with the role matrix 62/62.

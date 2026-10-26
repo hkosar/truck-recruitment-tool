@@ -542,8 +542,8 @@ test('location candidate queue excludes already-attempted no-match addresses', (
 });
 
 test('reapply-m1c state classification: backed-out state and the interrupted-run state are the only accepted ones; every guard fact must be true', async () => {
-  const intact = { audit_table: true, trigger_function: true, triggers: true, table_shape: true, table_acl_clean: true, function_acl_clean: true, batch_delete: false, batch_delete_acl_ok: true, batches_delete_clean: true, service_role_direct_execute: false, service_role_other_path_execute: false };
-  const interrupted = { ...intact, batch_delete: true, service_role_direct_execute: true };
+  const intact = { audit_table: true, trigger_function: true, trigger_function_pinned: false, triggers: true, table_shape: true, table_acl_clean: true, function_acl_clean: true, batch_delete: false, batch_delete_acl_ok: true, batches_delete_clean: true, service_role_direct_execute: false, service_role_other_path_execute: false };
+  const interrupted = { ...intact, trigger_function_pinned: true, batch_delete: true, service_role_direct_execute: true };
   // backed-out state (batch_delete absent): normal when the retained guards are intact, with or without the direct entry
   assert.equal(classifyM1cState(intact).state, 'normal');
   assert.equal(classifyM1cState({ ...intact, service_role_direct_execute: true }).state, 'normal');
@@ -556,7 +556,7 @@ test('reapply-m1c state classification: backed-out state and the interrupted-run
   assert.equal(classifyM1cState({ ...intact, service_role_other_path_execute: true }).state, 'refuse');
   // interrupted state: exactly one accepted shape
   assert.equal(classifyM1cState(interrupted).state, 'recover');
-  for (const k of ['audit_table', 'trigger_function', 'triggers', 'table_shape', 'table_acl_clean', 'function_acl_clean', 'batch_delete_acl_ok', 'batches_delete_clean', 'service_role_direct_execute'] as const) {
+  for (const k of ['audit_table', 'trigger_function', 'trigger_function_pinned', 'triggers', 'table_shape', 'table_acl_clean', 'function_acl_clean', 'batch_delete_acl_ok', 'batches_delete_clean', 'service_role_direct_execute'] as const) {
     assert.equal(classifyM1cState({ ...interrupted, [k]: false }).state, 'refuse', `interrupted with ${k} false`);
   }
   assert.equal(classifyM1cState({ ...interrupted, service_role_other_path_execute: true }).state, 'refuse');

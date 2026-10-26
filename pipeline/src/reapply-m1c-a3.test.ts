@@ -87,6 +87,8 @@ async function main(): Promise<void> {
   const scenarios: { name: string; setup: string; cleanup: string; expect: Expect; failedCheck?: string }[] = [
     { name: 'fresh apply (no direct grant): nothing to recover, refused', setup: '', cleanup: '', expect: 'refuse', failedCheck: 'service_role_direct_execute' },
     { name: 'interrupted state: guards intact, only the direct service_role grant extra', setup: grantDirect, cleanup: '', expect: 'recover' },
+    { name: 'interrupted state but trigger function search_path is the one M1 pins (the M1c file would have reset it)', setup: `${grantDirect} alter function ${FN} set search_path = public, internal, pg_temp;`, cleanup: `alter function ${FN} set search_path = internal, pg_temp; ${cleanFresh}`, expect: 'refuse', failedCheck: 'trigger_function_pinned' },
+    { name: 'interrupted state but trigger function has another search_path', setup: `${grantDirect} alter function ${FN} set search_path = public;`, cleanup: `alter function ${FN} set search_path = internal, pg_temp; ${cleanFresh}`, expect: 'refuse', failedCheck: 'trigger_function' },
     { name: 'disabled no_update_delete trigger', setup: `${grantDirect} alter table ${T} disable trigger batch_delete_audit_no_update_delete;`, cleanup: `alter table ${T} enable trigger batch_delete_audit_no_update_delete; ${cleanFresh}`, expect: 'refuse', failedCheck: 'triggers' },
     { name: 'disabled no_truncate trigger', setup: `${grantDirect} alter table ${T} disable trigger batch_delete_audit_no_truncate;`, cleanup: `alter table ${T} enable trigger batch_delete_audit_no_truncate; ${cleanFresh}`, expect: 'refuse', failedCheck: 'triggers' },
     { name: 'trigger attached to a different function', setup: `${grantDirect}
@@ -111,6 +113,7 @@ async function main(): Promise<void> {
     { name: 'backed-out state, a trigger disabled (batch_delete absent)', setup: `${backOut} alter table ${T} disable trigger batch_delete_audit_no_update_delete;`, cleanup: `${restoreM1c} ${cleanFresh}`, expect: 'refuse', failedCheck: 'triggers' },
     { name: 'backed-out state, trigger function missing (batch_delete absent)', setup: `${backOut} drop trigger batch_delete_audit_no_update_delete on ${T}; drop trigger batch_delete_audit_no_truncate on ${T}; drop function ${FN};`, cleanup: `${restoreM1c} ${cleanFresh}`, expect: 'refuse', failedCheck: 'trigger_function' },
     { name: 'backed-out state, PUBLIC can execute the trigger function (batch_delete absent)', setup: `${backOut} grant execute on function ${FN} to public;`, cleanup: `${restoreM1c} ${cleanFresh}`, expect: 'refuse' },
+    { name: 'valid backed-out state after M1 re-apply (function search_path pinned by M1): normal re-apply', setup: `${backOut} alter function ${FN} set search_path = public, internal, pg_temp; grant execute on function ${FN} to service_role;`, cleanup: '', expect: 'normal' },
     { name: 'valid backed-out state (batch_delete absent, guards intact): normal re-apply', setup: backOut, cleanup: '', expect: 'normal' },
   ];
 
