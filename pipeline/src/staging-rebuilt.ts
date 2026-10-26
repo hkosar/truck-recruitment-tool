@@ -2,6 +2,7 @@ import { createHash } from 'node:crypto';
 import { existsSync, readFileSync, readdirSync, writeFileSync } from 'node:fs';
 import { isAbsolute, relative, resolve } from 'node:path';
 import pg from 'pg';
+import { REAPPLY_PRECHECKS, idempotentReapplySql, type ReapplyTarget } from './reapply.js';
 import { MAINTENANCE_ROLE, roleOf } from './retention-step.js';
 import { runRetentionDryRun, type DryRunReport } from './retention-dry-run.js';
 import { RECORDED_PROJECT_REFS, parseSupabaseDbTarget, type SupabaseDbTarget } from './target-guard.js';
@@ -31,6 +32,8 @@ interface RebuiltActionSpec {
   sql?: string;
   confirmation: string;
   confirmationSetting?: string;
+  /** Re-apply after a backout: the file is sent in its idempotent form (reapply.ts) behind a state precheck. */
+  reapply?: ReapplyTarget;
   /** The file carries a pinned-ref gate that must be re-pinned (so it must contain the old ref). */
   pinned: boolean;
 }
@@ -49,6 +52,9 @@ export const REBUILT_STAGING_SQL_ACTIONS: Readonly<Record<string, RebuiltActionS
   'apply-m1': { kind: 'file', file: 'supabase/pending/M1_same_origin_signin.sql', confirmation: 'APPLY TNBS M1', pinned: false },
   'apply-m1b': { kind: 'file', file: 'supabase/pending/M1b_add_person.sql', confirmation: 'APPLY TNBS M1B', pinned: false },
   'apply-m1c': { kind: 'file', file: 'supabase/pending/M1c_batch_delete_audit.sql', confirmation: 'APPLY TNBS M1C', pinned: false },
+  'reapply-m1': { kind: 'file', file: 'supabase/pending/M1_same_origin_signin.sql', confirmation: 'REAPPLY TNBS M1 AFTER BACKOUT', pinned: false, reapply: 'm1' },
+  'reapply-m1b': { kind: 'file', file: 'supabase/pending/M1b_add_person.sql', confirmation: 'REAPPLY TNBS M1B AFTER BACKOUT', pinned: false, reapply: 'm1b' },
+  'reapply-m1c': { kind: 'file', file: 'supabase/pending/M1c_batch_delete_audit.sql', confirmation: 'REAPPLY TNBS M1C AFTER BACKOUT', pinned: false, reapply: 'm1c' },
   'role-matrix-m1': { kind: 'file', file: 'supabase/staging/m1/verify-role-matrix-m1.sql', confirmation: 'RUN TNBS M1 ROLE MATRIX', pinned: true },
   snapshot: { kind: 'snapshot', file: 'supabase/backout/pre-cutover-snapshot.sql', confirmation: 'TAKE TNBS PRE-CUTOVER SNAPSHOT', pinned: false },
   'window-on': {
@@ -191,7 +197,13 @@ export function planRebuiltSqlRun(input: {
     steps = [{ label: input.action, sql: spec.sql as string, transaction: true }];
   } else {
     const sql = readFileSync(resolve(REPOSITORY_ROOT, spec.file as string), 'utf8');
-    steps = [{ label: spec.file as string, sql: retargetSqlToRebuiltRef(sql, rebuiltRef, spec.pinned), transaction: false }];
+    const retargeted = retargetSqlToRebuiltRef(sql, rebuiltRef, spec.pinned);
+    steps = spec.reapply
+      ? [
+          { label: `${spec.file} (precheck)`, sql: REAPPLY_PRECHECKS[spec.reapply], transaction: false },
+          { label: `${spec.file} (idempotent re-apply)`, sql: idempotentReapplySql(retargeted), transaction: false },
+        ]
+      : [{ label: spec.file as string, sql: retargeted, transaction: false }];
   }
   const settings: Array<readonly [string, string]> = [
     ['app.staging_runner_verified_ref', target.projectRef],

@@ -23,7 +23,9 @@ import { STAGING_SQL_ACTIONS, planStagingSqlRun } from './staging-sql-runner.js'
 import { REBUILT_STAGING_SQL_ACTIONS, executeRebuiltSqlPlan, planRebuiltSqlRun, retargetSqlToRebuiltRef } from './staging-rebuilt.js';
 import { RECORDED_PROJECT_REFS, parseSupabaseDbTarget, verifyPipelineTarget } from './target-guard.js';
 import { readFileSync } from 'node:fs';
+import { REPOSITORY_ROOT } from './staging-rebuilt.js';
 import { RETENTION_RULES, runRetention, type Queryable } from './retention.js';
+import { REAPPLY_PRECHECKS, idempotentReapplySql } from './reapply.js';
 import { DENIED_STATEMENTS } from './retention-dry-run.js';
 import { retentionClientConfig, runRetentionForCron, runRetentionStep, type RetentionClient } from './retention-step.js';
 
@@ -535,6 +537,34 @@ test('location candidate queue excludes already-attempted no-match addresses', (
   const { sql } = buildCandidateQuery(100);
   assert.match(sql, /where geocode_addr_hash is distinct from address_hash/i);
   assert.doesNotMatch(sql, /geom is null or/i);
+});
+
+test('re-apply after backout: only idempotence guards are added; the reviewed files are not edited; unknown creators fail closed', () => {
+  const rebuilt = 'abcdefghijklmnopqrst';
+  const pooler = `postgresql://postgres.${rebuilt}:redacted-pw@aws-0-us-east-2.pooler.supabase.com:5432/postgres`;
+  for (const [action, pre] of [['reapply-m1', 'm1'], ['reapply-m1b', 'm1b'], ['reapply-m1c', 'm1c']] as const) {
+    const spec = REBUILT_STAGING_SQL_ACTIONS[action]!;
+    const plan = planRebuiltSqlRun({ action, dbUrl: pooler, confirm: spec.confirmation, recordedRebuiltRef: rebuilt });
+    assert.deepEqual(plan.steps.map((st) => st.transaction), [false, false]);
+    assert.equal(plan.steps[0]!.sql, REAPPLY_PRECHECKS[pre]);
+    const sent = plan.steps[1]!.sql;
+    const original = readFileSync(resolve(REPOSITORY_ROOT, spec.file!), 'utf8').replace(/\r\n/g, '\n');
+    // Undoing exactly the guards gives back the reviewed file (compared with every `create [or replace] function` unified).
+    const undone = sent
+      .replace(/^drop trigger if exists \w+ on [\w.]+;\n/gm, '')
+      .replace(/^create table if not exists internal\./gm, 'create table internal.')
+      .replace(/^create (unique )?index if not exists /gm, (_m, u) => `create ${u ?? ''}index `)
+      .replace(/^create or replace function\b/gm, 'create function')
+      .replace(/ on conflict do nothing;/g, ';');
+    assert.equal(undone, original.replace(/^create or replace function\b/gm, 'create function'), action);
+  }
+  assert.equal(
+    idempotentReapplySql('create table internal.t (a int);\ncreate index i on internal.t (a);\ncreate function f() returns int language sql as $$ select 1 $$;\ninsert into internal.roster_lock default values;'),
+    'create table if not exists internal.t (a int);\ncreate index if not exists i on internal.t (a);\ncreate or replace function f() returns int language sql as $$ select 1 $$;\ninsert into internal.roster_lock default values on conflict do nothing;',
+  );
+  assert.throws(() => idempotentReapplySql('create sequence internal.s;'), /unguarded creating statement/);
+  assert.throws(() => idempotentReapplySql("create type internal.t as enum ('a');"), /unguarded creating statement/);
+  assert.throws(() => idempotentReapplySql('create view internal.v as select 1;'), /unguarded creating statement/);
 });
 
 test('retention-dry-run: only as recruiter_maintenance on the rebuilt project; counts, never deletes, reports a failed check', async () => {
