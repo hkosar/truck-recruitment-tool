@@ -11,9 +11,14 @@
 // - The prompt needs an interactive terminal; it refuses piped or redirected input.
 // - A name that is already set in the environment is refused (a literal in the shell is the leak this
 //   tool exists to avoid): close that terminal window and open a new one.
-// - The child's output is scrubbed line by line: the secret, its URL-encoded form and, for a URL, its
-//   host, user and password are replaced with <masked>. This is best effort. Do not rely on it to make
-//   raw output safe to paste anywhere; report only event names, counts and pass/fail.
+// - What is shown from the child is a FIXED ALLOW-LIST (see allowListLine): known `staging-sql.*` JSON events with
+//   fixed keys, short plain values and, for errors, only a known guard message or the error code; the seeding
+//   script's progress lines. Every other line is withheld and only counted. The secret, its URL-encoded form and,
+//   for a URL, its host, user and password are also replaced with <masked>, but that is defense in depth only: it
+//   cannot catch fragments, re-encodings or values split across lines, and the owner procedure must not rely on it.
+//   Report only PASS/FAIL, check names and counts.
+//   Not a vault: the child's environment is readable by the child and by local tools with enough rights, and the
+//   terminal window's own scrollback and any clipboard history are outside this tool.
 // - Exit status is the child's.
 
 import { spawn } from 'node:child_process';
@@ -81,18 +86,80 @@ export function scrub(line, targets) {
   return out;
 }
 
-function lineScrubber(sink, targets) {
+// ---- What the owner's screen shows: a FIXED ALLOW-LIST, not a scrubbed copy of the child's output.
+// A child line is shown only if it is (a) a JSON event whose `msg` is `staging-sql.<name>`, rebuilt from a fixed
+// list of keys whose values are short plain words/numbers/booleans (anything else in a value is replaced by
+// <withheld>), with a free-text `err` reduced to a known guard message from this repository or its trailing
+// error code, or (b) one of the exact progress lines the fixture seeding script prints. Every other line, such as
+// a driver error, a stack trace or a server message, is NOT shown; it is only counted. Masking (scrub) is still
+// applied to what is shown, as defense in depth only: it replaces exact values and a few forms of them, and it
+// cannot catch a fragment, a re-encoding or a value split across lines. The allow-list is what keeps output safe.
+const EVENT_KEYS = ['msg', 'action', 'step', 'steps', 'target', 'check', 'ok', 'case', 'checks', 'failed', 'failed_checks', 'expected', 'found', 'exact_match', 'note', 'hint', 'detail', 'count', 'n'];
+const SAFE_WORDS = /^[A-Za-z0-9_ .,;/()=+'<>-]{0,160}$/; // no colon or @: a URL, host:port or user@host never qualifies
+const GUARD_MESSAGES = [
+  /^ledger preflight: \d+ check\(s\) failed; (the replay must not run|refusing to replay)$/,
+  /^re-apply M1c refused: .{0,260}$/,
+  /^re-apply M1[bc]? refused: .{0,200}$/,
+  /^public\.profiles already exists; the baseline replay only runs on an empty project$/,
+  /^supabase_migrations\.schema_migrations is not empty; the baseline replay only runs on a clean ledger$/,
+  /^migration ledger does not hold exactly the reviewed \(version, name\) pairs$/,
+  /^Staging SQL runner requires --confirm="[A-Z0-9 ]{1,80}" for [a-z0-9-]{1,40}$/,
+  /^Staging SQL runner (only targets the recorded (rebuilt )?staging project|refuses the production Carrier Recruiter project|requires a session connection on port 5432 \(not the 6543 transaction pooler\))$/,
+  /^The rebuilt staging project ref is not recorded yet \(target-guard\.ts\); refusing every rebuilt action$/,
+  /^STAGING_DB_URL is required$/,
+  /^Unknown argument --[a-z-]{1,20}$/,
+  /^Unknown rebuilt staging SQL action "[A-Za-z0-9-]{1,40}" (expected [A-Za-z0-9, -]{1,600})$/,
+];
+const ERROR_CODE = /\[([0-9A-Z]{5}|E[A-Z0-9_]{2,30})\]$/;
+const SEED_LINES = [
+  /^created [A-Za-z0-9 _.-]{1,40} fixture for run [A-Za-z0-9_-]{1,64}$/,
+  /^created \d{1,3} fictional users; expires [0-9T:.+Z-]{10,40}$/,
+  /^password generated or supplied at runtime and intentionally not printed$/,
+];
+
+function allowedValue(v) {
+  if (typeof v === 'boolean' || (typeof v === 'number' && Number.isFinite(v))) return v;
+  if (typeof v === 'string') return SAFE_WORDS.test(v) ? v : '<withheld>';
+  if (Array.isArray(v) && v.length <= 40) return v.map((x) => (typeof x === 'string' ? (SAFE_WORDS.test(x) ? x : '<withheld>') : typeof x === 'number' || typeof x === 'boolean' ? x : '<withheld>'));
+  return '<withheld>';
+}
+
+/** Returns the line to show, or null when the line is not on the allow-list. */
+export function allowListLine(raw) {
+  const line = raw.replace(/\r?\n$/, '');
+  if (SEED_LINES.some((re) => re.test(line))) return line;
+  let obj;
+  try { obj = JSON.parse(line); } catch { return null; }
+  if (obj === null || typeof obj !== 'object' || Array.isArray(obj) || typeof obj.msg !== 'string' || !/^staging-sql\.[a-z0-9_]{1,60}$/.test(obj.msg)) return null;
+  const out = {};
+  for (const k of EVENT_KEYS) if (k in obj) out[k] = allowedValue(obj[k]);
+  if (typeof obj.err === 'string') {
+    const code = ERROR_CODE.exec(obj.err);
+    const text = code ? obj.err.slice(0, code.index).trimEnd() : obj.err;
+    if (GUARD_MESSAGES.some((re) => re.test(text))) out.err = text;
+    else out.err = '<withheld>';
+    if (code) out.err_code = code[1];
+  }
+  return JSON.stringify(out);
+}
+
+function filteringSink(sink, targets, counter) {
   let pending = '';
+  const emit = (l) => {
+    const shown = allowListLine(l);
+    if (shown === null) { counter.withheld += 1; return; }
+    sink.write(`${scrub(shown, targets)}\n`);
+  };
   return {
     write(chunk) {
       pending += chunk.toString('utf8');
       let idx;
       while ((idx = pending.indexOf('\n')) >= 0) {
-        sink.write(scrub(pending.slice(0, idx + 1), targets));
+        emit(pending.slice(0, idx));
         pending = pending.slice(idx + 1);
       }
     },
-    end() { if (pending) sink.write(scrub(pending, targets)); pending = ''; },
+    end() { if (pending) emit(pending); pending = ''; },
   };
 }
 
@@ -136,12 +203,19 @@ export async function main({ argv, env = process.env, stdin = process.stdin, std
   const sortedTargets = [...new Set(targets)].sort((a, b) => b.length - a.length);
   return new Promise((done, fail) => {
     const child = spawn(nodeBinary, childArgs, { cwd: cwd ? resolve(cwd) : process.cwd(), env: childEnv, stdio: ['ignore', 'pipe', 'pipe'], shell: false });
-    const out = lineScrubber(stdout, sortedTargets);
-    const err = lineScrubber(stderr, sortedTargets);
+    const counter = { withheld: 0 };
+    const out = filteringSink(stdout, sortedTargets, counter);
+    const err = filteringSink(stderr, sortedTargets, counter);
     child.stdout.on('data', (c) => out.write(c));
     child.stderr.on('data', (c) => err.write(c));
     child.on('error', (e) => fail(new Error(scrub(String(e.message), sortedTargets))));
-    child.on('close', (code) => { out.end(); err.end(); done(code ?? 1); });
+    child.on('close', (code) => {
+      out.end(); err.end();
+      // The only lines this tool adds itself: fixed text and two numbers.
+      stdout.write(`run-with-secrets: exit code ${code ?? 1}; ${counter.withheld} output line(s) withheld (not on the allow-list)
+`);
+      done(code ?? 1);
+    });
   });
 }
 

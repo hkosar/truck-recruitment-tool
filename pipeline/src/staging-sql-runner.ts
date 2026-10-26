@@ -112,7 +112,9 @@ export async function executeStagingSqlPlan(plan: StagingSqlPlan): Promise<void>
 /**
  * What is printed when the runner refuses or fails. Our own guard messages carry no secret, but a driver or network
  * error can include the server address or account. This masks the whole connection string, its host, user and
- * password, any IPv4 address and any Supabase host name. Best effort: reports should still carry only event names,
+ * password, any IPv4 address and any Supabase host name. Best effort and defense in depth only (a fragment, another encoding
+ * or a value split across lines is not caught): the owner procedure shows only the wrapper's allow-list of events and codes,
+ * and reports should still carry only event names,
  * counts and pass/fail, and a person with the terminal inspects anything else locally.
  */
 export function sanitizeRunnerError(err: unknown, dbUrl: string | undefined): string {
@@ -120,6 +122,7 @@ export function sanitizeRunnerError(err: unknown, dbUrl: string | undefined): st
   const targets = new Set<string>();
   if (dbUrl) {
     targets.add(dbUrl);
+    try { targets.add(encodeURIComponent(dbUrl)); } catch { /* lone surrogate: skip */ }
     try {
       const u = new URL(dbUrl);
       const decode = (v: string) => { try { return decodeURIComponent(v); } catch { return v; } };

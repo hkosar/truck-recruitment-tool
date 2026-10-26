@@ -4,7 +4,7 @@
 import assert from 'node:assert/strict';
 import { PassThrough } from 'node:stream';
 import { test } from 'node:test';
-import { ALLOWED, main, maskTargets, parseArgs, readHidden, scrub } from './run-with-secrets.mjs';
+import { ALLOWED, allowListLine, main, maskTargets, parseArgs, readHidden, scrub } from './run-with-secrets.mjs';
 
 function fakeTty() {
   const s = new PassThrough();
@@ -69,15 +69,19 @@ test('a secret already set in the environment is refused before anything is read
   );
 });
 
-test('end to end: the child gets the secret in its environment only; output is scrubbed; exit status passes through', async () => {
+test('end to end: the child gets the secret in its environment only; only allow-listed lines are shown, everything else is withheld and counted; exit status passes through', async () => {
   const stdin = fakeTty();
   const out = sink();
   const err = sink();
   const childCode = [
     'const v = process.env.STAGING_DB_URL;',
-    'console.log(JSON.stringify({ msg: "child.event", has: v.length > 0, argvHasIt: process.argv.some((a) => a.includes("Secret-Pw")) }));',
+    'const pw = decodeURIComponent(new URL(v).password);',
+    'console.log(JSON.stringify({ msg: "staging-sql.probe", ok: v.length > 0, exact_match: process.argv.some((a) => a.includes("Secret-Pw")) }));',
+    'console.log(JSON.stringify({ msg: "other.event", has: true }));',
     'console.log("echo " + v);',
-    'console.error("error mentions " + new URL(v).hostname + " and " + decodeURIComponent(new URL(v).password));',
+    'console.log("fragment " + pw.slice(0, 9) + " " + new URL(v).hostname.slice(4, 22));',
+    'console.log(JSON.stringify({ msg: "staging-sql.refused", err: "password authentication failed for user " + new URL(v).username + " [28P01]" }));',
+    'console.error("error mentions " + new URL(v).hostname + " and " + pw);',
     'process.exit(3);',
   ].join('\n');
   const run = main({ argv: ['--secret', 'STAGING_DB_URL', '--', 'node', '-e', childCode], env: { PATH: process.env.PATH }, stdin, stdout: out.stream, stderr: err.stream });
@@ -86,8 +90,25 @@ test('end to end: the child gets the secret in its environment only; output is s
   assert.equal(await run, 3);
   await new Promise((r) => setImmediate(r));
   const shown = out.text() + err.text();
-  assert.match(out.text(), /"msg":"child.event","has":true,"argvHasIt":false/);
-  for (const leak of ['Zq%40x', 'Zq@x-Secret', 'Secret-Pw', 'pooler.supabase.com', 'abcdefghijklmnopqrst']) assert.ok(!shown.includes(leak), `leaked ${leak}`);
-  assert.match(shown, /echo <masked>/);
+  assert.match(out.text(), /"msg":"staging-sql.probe","ok":true,"exact_match":false/);
+  assert.match(out.text(), /"msg":"staging-sql.refused","err":"<withheld>","err_code":"28P01"/);
+  for (const leak of ['Zq%40x', 'Zq@x-Secret', 'Secret-Pw', 'Zq@x-Secr', 'pooler.supabase.com', 'abcdefghijklmnopqrst', 'echo', 'fragment', 'other.event', 'authentication failed']) assert.ok(!shown.includes(leak), `leaked or passed through ${leak}`);
+  assert.match(out.text(), /run-with-secrets: exit code 3; 4 output line\(s\) withheld/);
   assert.ok(out.text().includes('Enter STAGING_DB_URL'), 'the prompt text itself is shown (it carries no value)');
+});
+
+test('allow-list: events keep only fixed keys and plain values; free text is reduced to a known guard message or a code; seed progress lines pass; the rest is null', () => {
+  const ev = (o) => JSON.parse(allowListLine(JSON.stringify(o)));
+  assert.deepEqual(ev({ msg: 'staging-sql.ledger_preflight_check', check: 'runner_owns_ledger_table', ok: false }), { msg: 'staging-sql.ledger_preflight_check', check: 'runner_owns_ledger_table', ok: false });
+  assert.deepEqual(ev({ msg: 'staging-sql.ledger_preflight', case: 'table_present', ok: false, checks: 15, failed: 1, secretish: 'x', host: 'db.example.supabase.co' }), { msg: 'staging-sql.ledger_preflight', case: 'table_present', ok: false, checks: 15, failed: 1 });
+  assert.deepEqual(ev({ msg: 'staging-sql.step_failed', step: 'supabase/pending/M1c_batch_delete_audit.sql (precheck)' }).step, 'supabase/pending/M1c_batch_delete_audit.sql (precheck)');
+  assert.equal(ev({ msg: 'staging-sql.step_failed', step: 'postgresql://u:p@h/db' }).step, '<withheld>');
+  assert.equal(ev({ msg: 'staging-sql.step_failed', step: 'a\nb' }).step, '<withheld>');
+  assert.equal(ev({ msg: 'staging-sql.refused', err: 'ledger preflight: 2 check(s) failed; the replay must not run' }).err, 'ledger preflight: 2 check(s) failed; the replay must not run');
+  assert.deepEqual(ev({ msg: 'staging-sql.refused', err: 'connect ECONNREFUSED 10.0.0.5:5432 [ECONNREFUSED]' }), { msg: 'staging-sql.refused', err: '<withheld>', err_code: 'ECONNREFUSED' });
+  assert.deepEqual(ev({ msg: 'staging-sql.refused', err: 'something unexpected with a value' }), { msg: 'staging-sql.refused', err: '<withheld>' });
+  assert.deepEqual(ev({ msg: 'staging-sql.m1c_partial_state_refused', failed_checks: ['triggers', 'postgresql://x'] }).failed_checks, ['triggers', '<withheld>']);
+  assert.equal(allowListLine('created owner fixture for run r20261026-a'), 'created owner fixture for run r20261026-a');
+  assert.equal(allowListLine('created 8 fictional users; expires 2026-11-26T00:00:00.000Z'), 'created 8 fictional users; expires 2026-11-26T00:00:00.000Z');
+  for (const bad of ['', 'plain text', 'Error: connect ECONNREFUSED 10.0.0.5:5432', '    at Object.<anonymous> (file.js:1:1)', '{"msg":"other.event"}', '{"msg":"staging-sql.x"} trailing', '[1,2]', 'null', '{"msg":5}', 'created x fixture for run ;rm -rf']) assert.equal(allowListLine(bad), null, `should be withheld: ${bad}`);
 });

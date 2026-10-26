@@ -102,13 +102,22 @@ when needed, $0; (c) transfer it to a Free organization and pause it, $0, restor
    reads the ledger back and requires exactly the 20 reviewed (version, name) pairs in order
    (names are the file name without the timestamp and `.sql`), printing
    `staging-sql.ledger_verified` with counts and `exact_match`; a wrong or missing pair fails the run.
-   *Secret input:* run every hosted runner command through `scripts/run-with-secrets.mjs`, which takes
+   *Secret input and output:* run every hosted runner command through `scripts/run-with-secrets.mjs`, which takes
    the database URL (and, for `scripts/seed-auth-users.ts`, the service-role key and the fixture
-   password) from a hidden prompt, passes it to the child process environment only, and masks it in the
-   child's output. A secret is never typed as a command, saved in a file or pasted in chat. The runner's
-   refusal text masks the connection string, host, user, password, IP addresses and Supabase host names
-   (best effort); chat reports carry only event names, counts and pass/fail, and anything else is
-   inspected locally by the operator.
+   password) from a hidden prompt, passes it to the child process environment only, and shows **only a fixed
+   allow-list of the child's output**: known `staging-sql.*` events with fixed keys and plain values (an error
+   reduced to a known guard message or its error code), the seeding script's progress lines, and one closing
+   line with the exit code and the number of withheld lines. Everything else (driver errors, stack traces,
+   server messages) is withheld and only counted. The owner never pastes raw output: the owner reports
+   fixed labels only (PASS/FAIL, event and check names, counts, the exit code). Masking of the secret and its
+   URL-encoded and host/user/password forms is applied as defense in depth only; it cannot catch a fragment,
+   another encoding or a value split across lines, and the procedure does not rely on it. Limits: the secret
+   is in the child process environment (readable by the child and by local tools with enough rights), the
+   terminal's own scrollback and clipboard history are outside the tool, and the hidden prompt was tested only
+   with a fake terminal in code; the operator checks it once in the real PowerShell window before any hosted
+   use (a Git Bash window that hands Node a pipe instead of a terminal makes the tool refuse safely).
+   A failure whose cause is not visible in the allow-list is diagnosed by the operator at the terminal or
+   by a dry run, never by the owner pasting output.
 5. *Operator:* fictional fixtures, the staging identity marker and the hosted Auth fixture
    accounts for A5b (doc 11 commands, new ref), in their supported order (profile fixtures, then
    the marker, then the reset, then the Auth fixtures); expect `staging-sql.done`.
