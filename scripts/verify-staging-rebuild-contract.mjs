@@ -92,6 +92,7 @@ if (runner) {
     'ledger?: { version: string; name: string }',
     "'retention-dry-run'",
     "'ledger-preflight'",
+    "'environment-preflight'",
     'runLedgerPreflight',
     "'reapply-m1'",
     "'reapply-m1b'",

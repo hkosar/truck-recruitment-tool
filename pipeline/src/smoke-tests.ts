@@ -731,6 +731,38 @@ test('ledger preflight: every uncertain or incompatible ledger shape is a failed
   assert.equal(assessLedger({ ...LEDGER_CLI, version_key: undefined as unknown as boolean }, 0).ok, false);
 });
 
+test('environment preflight action: read-only, reports identifiers/booleans/counts only, is a report (no pass/fail), and is a recorded-ref, typed-confirmation action', async () => {
+  const rebuilt = 'abcdefghijklmnopqrst';
+  const url = `postgresql://postgres.${rebuilt}:redacted-pw@aws-0-us-east-2.pooler.supabase.com:5432/postgres`;
+  const spec = REBUILT_STAGING_SQL_ACTIONS['environment-preflight']!;
+  assert.equal(spec.confirmation, 'RUN TNBS ENVIRONMENT PREFLIGHT');
+  assert.throws(() => planRebuiltSqlRun({ action: 'environment-preflight', dbUrl: url, confirm: 'wrong', recordedRebuiltRef: rebuilt }), /requires --confirm/);
+  assert.throws(() => planRebuiltSqlRun({ action: 'environment-preflight', dbUrl: url.replace(rebuilt, 'zzzzzzzzzzzzzzzzzzzz'), confirm: spec.confirmation, recordedRebuiltRef: rebuilt }), /only targets the recorded rebuilt/);
+  const plan = planRebuiltSqlRun({ action: 'environment-preflight', dbUrl: url, confirm: spec.confirmation, recordedRebuiltRef: rebuilt });
+  assert.equal(plan.kind, 'environment-preflight');
+  const sent: string[] = [];
+  const client = {
+    async connect() {},
+    async query(sql: string) {
+      sent.push(sql);
+      if (/from pg_event_trigger/.test(sql)) return { rows: [{ name: 'pgrst_ddl_watch', event: 'ddl_command_end', enabled: 'O', function: 'pgrst_ddl_watch', enables_rls: false }, { name: 'weird name with spaces', event: 'ddl_command_end', enabled: 'O', function: 'rls_auto_enable', enables_rls: true }] };
+      if (/from pg_default_acl/.test(sql)) return { rows: [{ role: 'anon', tables_public: true, sequences_public: true, functions_public: false, tables_global: false, sequences_global: false, functions_global: false }] };
+      if (/authenticator_exists/.test(sql)) return { rows: [{ authenticator_exists: true, schema_list_entries: 1, public_listed: null, api_roles_present: 3 }] };
+      return { rows: [] };
+    },
+    async end() {},
+  };
+  const lines: string[] = []; const l = console.log;
+  console.log = (...a: unknown[]) => { lines.push(String(a[0])); };
+  try { await executeRebuiltSqlPlan(plan, () => client); } finally { console.log = l; }
+  assert.ok(sent.includes('begin read only') && sent.includes('rollback') && sent.every((q) => !/^(insert|create|alter|drop|update|delete|grant|revoke)/i.test(q.trim())));
+  assert.ok(lines.some((x) => /"msg":"staging-sql.environment_event_triggers","count":2,"enables_rls":1/.test(x)));
+  assert.ok(lines.some((x) => /"name":"other"/.test(x)), 'a name that is not a plain identifier is never printed');
+  assert.ok(lines.some((x) => /"msg":"staging-sql.environment_default_privileges","role":"anon","tables_public":true,"sequences_public":true,"functions_public":false/.test(x)));
+  assert.ok(lines.some((x) => /"msg":"staging-sql.environment_data_api".*"public_listed":"unknown"/.test(x)));
+  assert.ok(lines.every((x) => !/weird name|redacted-pw|pooler/.test(x)));
+});
+
 test('ledger preflight action: read-only, reports check names and counts, stops the replay when a check fails, verifies the full (version, name) set', async () => {
   const rebuilt = 'abcdefghijklmnopqrst';
   const url = `postgresql://postgres.${rebuilt}:redacted-pw@aws-0-us-east-2.pooler.supabase.com:5432/postgres`;

@@ -3,6 +3,7 @@ import { existsSync, readFileSync, readdirSync, writeFileSync } from 'node:fs';
 import { isAbsolute, relative, resolve } from 'node:path';
 import pg from 'pg';
 import { M1C_POSTCONDITION_SQL, M1C_STATE_PROBE_SQL, REAPPLY_POST_SQL, REAPPLY_PRECHECKS, classifyM1cState, idempotentReapplySql, type M1cStateFacts, type ReapplyTarget } from './reapply.js';
+import { reportEnvironmentPreflight, runEnvironmentPreflight } from './environment-preflight.js';
 import { reportLedgerPreflight, runLedgerPreflight } from './ledger-preflight.js';
 import { MAINTENANCE_ROLE, roleOf } from './retention-step.js';
 import { runRetentionDryRun, type DryRunReport } from './retention-dry-run.js';
@@ -23,7 +24,7 @@ import { RECORDED_PROJECT_REFS, parseSupabaseDbTarget, type SupabaseDbTarget } f
 export const REPOSITORY_ROOT = resolve(import.meta.dirname, '..', '..');
 const REBUILT_REF_PATTERN = /^[a-z]{20}$/;
 
-type RebuiltKind = 'file' | 'migrations' | 'inline' | 'snapshot' | 'retention' | 'ledger-preflight';
+type RebuiltKind = 'file' | 'migrations' | 'inline' | 'snapshot' | 'retention' | 'ledger-preflight' | 'environment-preflight';
 
 interface RebuiltActionSpec {
   kind: RebuiltKind;
@@ -43,6 +44,8 @@ export const REBUILT_STAGING_SQL_ACTIONS: Readonly<Record<string, RebuiltActionS
   'apply-migrations': { kind: 'migrations', confirmation: 'APPLY TNBS BASELINE MIGRATIONS', pinned: false },
   // Read-only catalogue assessment of the migration ledger as the runner login; run (and PASSed by the manager) before apply-migrations --execute.
   'ledger-preflight': { kind: 'ledger-preflight', confirmation: 'RUN TNBS LEDGER PREFLIGHT', pinned: false },
+  // Read-only report of event triggers, default privileges and Data API exposure (project switches the creation screen pre-selects); every line is a manager decision gate.
+  'environment-preflight': { kind: 'environment-preflight', confirmation: 'RUN TNBS ENVIRONMENT PREFLIGHT', pinned: false },
   // Connects AS recruiter_maintenance (STAGING_DB_URL must be that login): counts, never deletes.
   'retention-dry-run': { kind: 'retention', confirmation: 'RUN TNBS RETENTION DRY RUN', pinned: false },
   'install-marker': { kind: 'file', file: 'supabase/staging/install-staging-identity-marker.sql', confirmation: 'INSTALL TNBS STAGING IDENTITY MARKER', confirmationSetting: 'app.staging_marker_install_confirmation', pinned: true },
@@ -196,8 +199,8 @@ export function planRebuiltSqlRun(input: {
   let steps: RebuiltSqlStep[];
   if (spec.kind === 'retention') {
     steps = [{ label: 'retention-dry-run', sql: '', transaction: false }];
-  } else if (spec.kind === 'ledger-preflight') {
-    steps = [{ label: 'ledger-preflight', sql: '', transaction: false }];
+  } else if (spec.kind === 'ledger-preflight' || spec.kind === 'environment-preflight') {
+    steps = [{ label: spec.kind, sql: '', transaction: false }];
   } else if (spec.kind === 'migrations') {
     steps = verifiedMigrationSteps();
   } else if (spec.kind === 'inline') {
@@ -259,6 +262,15 @@ export async function executeRebuiltSqlPlan(plan: RebuiltSqlPlan, clientFactory:
         const assessment = await runLedgerPreflight(client);
         reportLedgerPreflight(assessment);
         if (!assessment.ok) throw new Error(`ledger preflight: ${assessment.checks.filter((c) => !c.ok).length} check(s) failed; the replay must not run`);
+      } finally {
+        await client.query('rollback');
+      }
+      return;
+    }
+    if (plan.kind === 'environment-preflight') {
+      await client.query('begin read only');
+      try {
+        reportEnvironmentPreflight(await runEnvironmentPreflight(client));
       } finally {
         await client.query('rollback');
       }

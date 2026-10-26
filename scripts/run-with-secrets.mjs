@@ -94,7 +94,10 @@ export function scrub(line, targets) {
 // a driver error, a stack trace or a server message, is NOT shown; it is only counted. Masking (scrub) is still
 // applied to what is shown, as defense in depth only: it replaces exact values and a few forms of them, and it
 // cannot catch a fragment, a re-encoding or a value split across lines. The allow-list is what keeps output safe.
-const EVENT_KEYS = ['msg', 'action', 'step', 'steps', 'target', 'check', 'ok', 'case', 'checks', 'failed', 'failed_checks', 'expected', 'found', 'exact_match', 'note', 'hint', 'detail', 'count', 'n'];
+const EVENT_KEYS = ['msg', 'action', 'step', 'steps', 'target', 'check', 'ok', 'case', 'checks', 'failed', 'failed_checks', 'expected', 'found', 'exact_match', 'note', 'hint', 'detail', 'count', 'n',
+  // environment-preflight (identifiers and booleans only)
+  'name', 'event', 'enabled', 'function', 'enables_rls', 'role', 'tables_public', 'sequences_public', 'functions_public', 'tables_global', 'sequences_global', 'functions_global',
+  'authenticator_exists', 'schema_list_entries', 'public_listed', 'api_roles_present'];
 const SAFE_WORDS = /^[A-Za-z0-9_ .,;/()=+'<>-]{0,160}$/; // no colon or @: a URL, host:port or user@host never qualifies
 const GUARD_MESSAGES = [
   /^ledger preflight: \d+ check\(s\) failed; (the replay must not run|refusing to replay)$/,

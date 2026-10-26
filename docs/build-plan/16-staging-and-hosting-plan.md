@@ -74,11 +74,38 @@ when needed, $0; (c) transfer it to a Free organization and pause it, $0, restor
    and its ref is recorded in `pipeline/src/target-guard.ts` (the reviewed commit of step 3); the runner refuses
    any other ref.
 3. *Operator:* the reviewed tooling commit (§5 item 1): new staging ref, and runner actions
-   `ledger-preflight`, `apply-migrations`, `apply-m1`, `apply-m1b`, `apply-m1c`, `role-matrix-m1`, `snapshot`,
+   `environment-preflight`, `ledger-preflight`, `apply-migrations`, `apply-m1`, `apply-m1b`, `apply-m1c`, `role-matrix-m1`, `snapshot`,
    `window-on`, `window-off`, `retention-dry-run` and the three backouts, all with the runner's
    existing guards (production refusal, exact staging ref, session port 5432, typed
    confirmation, dry run first).
-4. *Operator:* first the **ledger preflight** (`ledger-preflight`, dry run then `--execute`):
+4. *Operator:* first the **environment preflight**, then the **ledger preflight**.
+   *Before the ledger preflight, the read-only environment preflight* (`environment-preflight`, dry run then
+   `--execute`, confirmation `RUN TNBS ENVIRONMENT PREFLIGHT`). The creation screen pre-selects three
+   switches (Data API, "Automatically expose new tables", "Enable automatic RLS") whose values the owner does
+   not know, so the runner reports, as the actual runner login and read-only (it prints only identifiers,
+   booleans and counts, and does not itself pass or fail): (a) every database event trigger (name, event,
+   enabled, function name) and whether its function text enables row-level security; (b) for objects this login
+   creates, whether `anon`, `authenticated` and `service_role` receive tables, sequences and functions by default,
+   in schema `public` and globally; (c) whether the schema list set on the `authenticator` role names `public`
+   (unknown, shown as `"unknown"`, means the owner checks the dashboard instead). Expected values, from the
+   reviewed migrations: no RLS-enabling event trigger (the migrations enable RLS and write policies explicitly;
+   a Supabase built-in trigger such as the PostgREST schema-cache watcher is normal and is judged by name);
+   `service_role` receives tables, sequences and functions by default in `public` once
+   `20260720001500_service_role_pipeline_grants.sql` has run (before the replay it does not, so `false` is
+   normal here); `anon` and `authenticated` are not granted by any migration (`20260720001200_rls.sql` states RLS
+   alone gates tables and relies on the platform default), so the legacy rehearsal frontend (approval 5) needs
+   `authenticated` to receive tables and sequences by default (expected `true` when "Automatically expose new
+   tables" is on; `false` means the owner or manager decides before approval 5, not before the replay); and the
+   Data API is expected to list `public` (the legacy frontend and M1 transition use it; M1 later closes it).
+   **Manager PASS gates, each with its remedy owner:** (a) an RLS-enabling event trigger is a STOP, the manager
+   decides, and the owner changes the project switch in the dashboard or the manager approves a documented
+   exception; (b) a default-privilege result that differs from the expected values above is decided by the manager,
+   and only the owner can change the dashboard switch (the operator never alters default privileges); (c) `public`
+   missing from the Data API list is decided by the manager, and the owner changes it in the dashboard (the
+   Settings → Data API page; label not verified). No `--execute` that writes runs before the manager records
+   PASS for all three.
+   Then the ledger preflight:
+   (`ledger-preflight`, dry run then `--execute`):
    a read-only catalogue assessment, as the actual runner login, of
    `supabase_migrations.schema_migrations`. The contract is exact and narrow, and every point is something
    the replay's own statements need (`create schema if not exists`, `create table if not exists`, two
