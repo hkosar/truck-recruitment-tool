@@ -9,6 +9,7 @@ import assert from 'node:assert/strict';
 import { randomBytes } from 'node:crypto';
 import pg from 'pg';
 import { runRetention } from './retention.js';
+import { runRetentionDryRun } from './retention-dry-run.js';
 
 const ADMIN = process.env.RETENTION_A3_ADMIN_URL;
 const MAINT = process.env.RETENTION_A3_MAINT_URL;
@@ -54,6 +55,16 @@ async function main(): Promise<void> {
     await admin.query(`insert into internal.email_events (provider_event_id, recipient_email, event_type, occurred_at, received_at) values
       ($1 || '-old', 'ra3@example.invalid', 'delivered', now() - interval '200 days', now() - interval '200 days'),
       ($1 || '-new', 'ra3@example.invalid', 'delivered', now(), now())`, [tag]);
+
+    // Dry run (the runner's retention-dry-run action): counts the aged rows, passes every
+    // least-privilege check, and deletes nothing.
+    const before = async () => Number((await admin.query(`select count(*)::int as n from internal.signin_links where token_hash like $1`, [`${tag}%`])).rows[0].n);
+    const beforeCount = await before();
+    const dry = await runRetentionDryRun(maint, 'recruiter_maintenance');
+    assert.deepEqual(dry.checks.filter((c) => !c.ok), [], 'every dry-run check passes');
+    assert.equal(dry.ok, true);
+    assert.ok(dry.wouldDelete.signin_links! >= 1 && dry.wouldDelete.app_sessions! >= 1 && dry.wouldDelete.email_events! >= 1 && dry.wouldDelete.request_buckets! >= 1 && dry.wouldDelete.recovery_failures! >= 1);
+    assert.equal(await before(), beforeCount, 'the dry run deleted nothing');
 
     const result = await runRetention(maint);
     assert.deepEqual(result.failed, [], 'no rule failed');

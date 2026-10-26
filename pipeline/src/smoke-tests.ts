@@ -24,6 +24,7 @@ import { REBUILT_STAGING_SQL_ACTIONS, executeRebuiltSqlPlan, planRebuiltSqlRun, 
 import { RECORDED_PROJECT_REFS, parseSupabaseDbTarget, verifyPipelineTarget } from './target-guard.js';
 import { readFileSync } from 'node:fs';
 import { RETENTION_RULES, runRetention, type Queryable } from './retention.js';
+import { DENIED_STATEMENTS } from './retention-dry-run.js';
 import { retentionClientConfig, runRetentionForCron, runRetentionStep, type RetentionClient } from './retention-step.js';
 
 type Test = { name: string; run: () => void | Promise<void> };
@@ -298,7 +299,7 @@ test('rebuilt staging runner: refused until a ref is recorded, then only that ex
   for (const [action, spec] of Object.entries(REBUILT_STAGING_SQL_ACTIONS)) {
     const p = planRebuiltSqlRun({
       action,
-      dbUrl: pooler(rebuilt),
+      dbUrl: spec.kind === 'retention' ? pooler(rebuilt).replace('postgres.', 'recruiter_maintenance.') : pooler(rebuilt),
       confirm: spec.confirmation,
       recordedRebuiltRef: rebuilt,
       ...(spec.kind === 'snapshot' ? { out: resolve(tmpdir(), `tnbs-snapshot-test-${process.pid}.json`) } : {}),
@@ -534,6 +535,56 @@ test('location candidate queue excludes already-attempted no-match addresses', (
   const { sql } = buildCandidateQuery(100);
   assert.match(sql, /where geocode_addr_hash is distinct from address_hash/i);
   assert.doesNotMatch(sql, /geom is null or/i);
+});
+
+test('retention-dry-run: only as recruiter_maintenance on the rebuilt project; counts, never deletes, reports a failed check', async () => {
+  const rebuilt = 'abcdefghijklmnopqrst';
+  const url = (role: string) => `postgresql://${role}.${rebuilt}:redacted-pw@aws-0-us-east-2.pooler.supabase.com:5432/postgres`;
+  const confirm = REBUILT_STAGING_SQL_ACTIONS['retention-dry-run']!.confirmation;
+  const plan = (dbUrl: string, over: Record<string, unknown> = {}) => planRebuiltSqlRun({ action: 'retention-dry-run', dbUrl, confirm, recordedRebuiltRef: rebuilt, ...over });
+  assert.equal(plan(url('recruiter_maintenance')).kind, 'retention');
+  assert.throws(() => plan(url('postgres')), /must connect as recruiter_maintenance/);
+  assert.throws(() => plan(url('recruiter_app')), /must connect as recruiter_maintenance/);
+  assert.throws(() => plan(url('recruiter_maintenance').replace(':5432/', ':6543/')), /port 5432/);
+  assert.throws(() => plan(url('recruiter_maintenance'), { confirm: 'nope' }), /--confirm=/);
+  assert.throws(() => plan(url('recruiter_maintenance'), { out: '/x' }), /only valid for snapshot/);
+
+  // Fake session: counts come back, every denied statement is refused with 42501.
+  const sent: string[] = [];
+  const session = (refuseAll: boolean) => ({
+    async connect() {},
+    async end() {},
+    async query(sql: string, params?: unknown[]) {
+      sent.push(sql);
+      if (/current_user as u/.test(sql)) return { rows: [{ u: 'recruiter_maintenance' }] };
+      if (/count\(\*\)::int/.test(sql)) return { rows: [{ n: 3 }] };
+      if (/has_table_privilege/.test(sql)) return { rows: [{ s: true, d: true, i: false, u: false, t: false }] };
+      if (DENIED.some((d) => sql === d)) {
+        if (refuseAll) throw Object.assign(new Error('permission denied'), { code: '42501' });
+        return { rows: [] };
+      }
+      return { rows: [] };
+    },
+  });
+  const DENIED = DENIED_STATEMENTS.map((d) => d.sql);
+  const lines: string[] = [];
+  const origLog = console.log; console.log = (m: string) => lines.push(m);
+  try {
+    await executeRebuiltSqlPlan(plan(url('recruiter_maintenance')), () => session(true));
+  } finally { console.log = origLog; }
+  const report = JSON.parse(lines.find((l) => l.includes('retention_dry_run'))!);
+  assert.equal(report.ok, true);
+  assert.deepEqual(Object.keys(report.wouldDelete).sort(), ['app_sessions', 'email_events', 'recovery_failures', 'request_buckets', 'signin_links']);
+  assert.ok(Object.values(report.wouldDelete).every((n) => n === 3));
+  assert.ok(!sent.some((q) => /^\s*delete/i.test(q)), 'never deletes');
+  assert.equal(sent.filter((q) => q === 'rollback').length, 2);
+  assert.ok(!sent.includes('commit'));
+  assert.ok(!lines.join('').includes('redacted-pw'));
+  // A role that is NOT refused fails the run.
+  console.log = () => undefined;
+  try {
+    await assert.rejects(executeRebuiltSqlPlan(plan(url('recruiter_maintenance')), () => session(false)), /check\(s\) failed/);
+  } finally { console.log = origLog; }
 });
 
 test('rebuilt staging runner: every migration is one transaction that also records its version and name in the ledger', async () => {

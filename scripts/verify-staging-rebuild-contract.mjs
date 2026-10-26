@@ -90,6 +90,7 @@ if (runner) {
     'migration-checksums.sha256',
     'supabase_migrations.schema_migrations',
     'ledger?: { version: string; name: string }',
+    "'retention-dry-run'",
     "'window-on'",
     "'window-off'",
     "'backout-m1c'",

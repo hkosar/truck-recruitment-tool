@@ -2,6 +2,8 @@ import { createHash } from 'node:crypto';
 import { existsSync, readFileSync, readdirSync, writeFileSync } from 'node:fs';
 import { isAbsolute, relative, resolve } from 'node:path';
 import pg from 'pg';
+import { MAINTENANCE_ROLE, roleOf } from './retention-step.js';
+import { runRetentionDryRun, type DryRunReport } from './retention-dry-run.js';
 import { RECORDED_PROJECT_REFS, parseSupabaseDbTarget, type SupabaseDbTarget } from './target-guard.js';
 
 /**
@@ -19,7 +21,7 @@ import { RECORDED_PROJECT_REFS, parseSupabaseDbTarget, type SupabaseDbTarget } f
 export const REPOSITORY_ROOT = resolve(import.meta.dirname, '..', '..');
 const REBUILT_REF_PATTERN = /^[a-z]{20}$/;
 
-type RebuiltKind = 'file' | 'migrations' | 'inline' | 'snapshot';
+type RebuiltKind = 'file' | 'migrations' | 'inline' | 'snapshot' | 'retention';
 
 interface RebuiltActionSpec {
   kind: RebuiltKind;
@@ -35,6 +37,8 @@ interface RebuiltActionSpec {
 
 export const REBUILT_STAGING_SQL_ACTIONS: Readonly<Record<string, RebuiltActionSpec>> = {
   'apply-migrations': { kind: 'migrations', confirmation: 'APPLY TNBS BASELINE MIGRATIONS', pinned: false },
+  // Connects AS recruiter_maintenance (STAGING_DB_URL must be that login): counts, never deletes.
+  'retention-dry-run': { kind: 'retention', confirmation: 'RUN TNBS RETENTION DRY RUN', pinned: false },
   'install-marker': { kind: 'file', file: 'supabase/staging/install-staging-identity-marker.sql', confirmation: 'INSTALL TNBS STAGING IDENTITY MARKER', confirmationSetting: 'app.staging_marker_install_confirmation', pinned: true },
   'profile-fixtures': { kind: 'file', file: 'supabase/staging/profile-fixtures.sql', confirmation: 'INSTALL TNBS PROFILE FIXTURES', pinned: false },
   'install-shutdown-fixtures': { kind: 'file', file: 'supabase/staging/rebuild/install-shutdown-fixtures.sql', confirmation: 'INSTALL TNBS SHUTDOWN TEST FIXTURES', confirmationSetting: 'app.staging_shutdown_fixtures_confirmation', pinned: true },
@@ -174,8 +178,14 @@ export function planRebuiltSqlRun(input: {
     throw new Error('--out is only valid for snapshot');
   }
 
+  if (spec.kind === 'retention' && roleOf(target.user) !== MAINTENANCE_ROLE) {
+    throw new Error(`retention-dry-run must connect as ${MAINTENANCE_ROLE} (STAGING_DB_URL user), not another role`);
+  }
+
   let steps: RebuiltSqlStep[];
-  if (spec.kind === 'migrations') {
+  if (spec.kind === 'retention') {
+    steps = [{ label: 'retention-dry-run', sql: '', transaction: false }];
+  } else if (spec.kind === 'migrations') {
     steps = verifiedMigrationSteps();
   } else if (spec.kind === 'inline') {
     steps = [{ label: input.action, sql: spec.sql as string, transaction: true }];
@@ -213,6 +223,13 @@ export async function executeRebuiltSqlPlan(plan: RebuiltSqlPlan, clientFactory:
   const client = clientFactory(plan.target);
   await client.connect();
   try {
+    if (plan.kind === 'retention') {
+      const report: DryRunReport = await runRetentionDryRun(client, MAINTENANCE_ROLE);
+      // Counts and pass/fail only.
+      console.log(JSON.stringify({ msg: 'staging-sql.retention_dry_run', ...report }));
+      if (!report.ok) throw new Error(`retention dry run: ${report.checks.filter((c) => !c.ok).length} check(s) failed`);
+      return;
+    }
     for (const [name, value] of plan.settings) {
       await client.query('select set_config($1, $2, false)', [name, value]);
     }
