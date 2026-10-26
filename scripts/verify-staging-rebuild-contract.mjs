@@ -93,6 +93,8 @@ if (runner) {
     "'retention-dry-run'",
     "'ledger-preflight'",
     "'environment-preflight'",
+    "'owner-login-check'",
+    "'owner-promote'",
     'runLedgerPreflight',
     "'reapply-m1'",
     "'reapply-m1b'",
@@ -114,6 +116,20 @@ const guard = read('pipeline/src/target-guard.ts');
 const recordedRef = guard && /const REBUILT_STAGING_PROJECT_REF: string \| null = '([a-z]{20})';/.exec(guard);
 if (!recordedRef) failures.push('target-guard.ts: REBUILT_STAGING_PROJECT_REF must be a single 20-letter literal');
 else if (recordedRef[1] === PRODUCTION_REF || recordedRef[1] === OLD_STAGING_REF) failures.push('target-guard.ts: the rebuilt ref equals the production or old staging ref');
+
+// Owner login bootstrap (doc 16 approval 4, G1): the Auth call goes only to the address derived from the recorded ref, follows no
+// redirect, confirms the email and sends no invitation or mail; the promotion uses the transaction-local service-role claim and row
+// locks; nothing in the module reads the environment or deletes an account.
+const owner = read('pipeline/src/owner-bootstrap.ts');
+if (!owner) failures.push('owner-bootstrap.ts is missing');
+else {
+  for (const required of ['baseUrl: `https://${input.ref}.supabase.co`', "redirect: 'error'", 'email_confirm: true', '/auth/v1/admin/users', "set_config('request.jwt.claims'", 'for update', "set local lock_timeout", 'assessOwnerPromoted', "await client.query('commit')"]) {
+    if (!owner.includes(required)) failures.push(`owner-bootstrap.ts is missing: ${required}`);
+  }
+  for (const forbidden of [/invite/i, /generateLink/, /magiclink/i, /process.env/, /deleteUser/, /deletes+from/i, /drop/i, /truncate/i]) {
+    if (forbidden.test(owner)) failures.push(`owner-bootstrap.ts must not contain ${forbidden}`);
+  }
+}
 
 if (failures.length) {
   for (const f of failures) console.error(`FAIL ${f}`);

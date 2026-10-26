@@ -162,7 +162,34 @@ when needed, $0; (c) transfer it to a Free organization and pause it, $0, restor
    by a dry run, never by the owner pasting output.
 5. *Operator:* fictional fixtures, the staging identity marker and the hosted Auth fixture
    accounts for A5b (doc 11 commands, new ref), in their supported order (profile fixtures, then
-   the marker, then the reset, then the Auth fixtures); expect `staging-sql.done`.
+   the marker, then the owner login, then the reset, then the Auth fixtures); expect `staging-sql.done`.
+   **Owner login (G1; between the marker and the reset).** The reset requires, as separate checks, exactly one
+   auth account with a password, exactly one approved manager profile for the owner's email and seven fixture
+   profiles; nothing there proves the first two are the same account. The reviewed bootstrap (`pipeline/src/owner-bootstrap.ts`,
+   Codex option 1) makes them one account in two separate commits, and any failure or unknown result **stops** for a
+   read-only reconciliation; nothing is deleted or re-created automatically:
+   (1) `owner-login-check` (read-only; confirmation `RUN TNBS OWNER LOGIN CHECK`) must report `no_owner_login`;
+   (2) `owner-auth-create` (confirmation `CREATE TNBS STAGING OWNER LOGIN`; `--project=rebuilt`; no database login, secrets
+   `SUPABASE_SERVICE_ROLE_KEY` and `OWNER_STAGING_PASSWORD` through the hidden prompt) makes ONE supported Auth Admin
+   create-user request, with the email confirmed and no invitation or message, for exactly the approved owner email at
+   the address derived from the recorded rebuilt ref; it is created only on a 2xx whose body names that email and an id,
+   a definite rejection (400, 401, 403, 404, 409, 422) is "not created", and everything else (5xx, a dropped connection,
+   a timeout, a redirect, a body that does not match) is "unknown"; none is retried; the existing trigger then creates a
+   pending guest profile; (3) `owner-login-check` must now report `ready_to_promote`; (4) `owner-promote`
+   (confirmation `PROMOTE TNBS STAGING OWNER`) runs one transaction: transaction-local service-role claim (the reviewed
+   `auth.role()` pattern; connecting as a privileged SQL role is not what the guard checks), row locks on the exact auth
+   user and its profile, every pre-check (staging marker names this project; exactly one auth user with the approved email,
+   with a non-empty password and confirmed email, not SSO/anonymous; it is the only password account; auth users are
+   the owner plus the seven fixtures; exactly one joined profile with the same email that is still a pristine pending
+   guest; exactly seven passwordless fixture profiles; no other profile; no approved manager profile for the owner yet),
+   then updates only that profile (`manager`/`approved`, approved by itself, timestamp), then requires the joined
+   postconditions before committing; (5) `owner-login-check` reports `promoted`. A refused or failed promotion
+   rolls back and leaves the account pending and unable to enter the app; a failed commit is reported as `unknown` and
+   needs `owner-login-check` before anything else. Proved locally on a real PostgreSQL 16 database
+   (`pipeline/src/owner-bootstrap-a3.test.ts`, 28 checks) and, for the Auth call, against a local fake HTTP server only
+   (`pipeline/src/smoke-tests.ts`). **Not verified:** the hosted Auth API's actual behaviour and response, the hosted
+   auth schema (for example `auth.identities`), the hosted runner login's privileges on `auth.users`, and that the
+   resulting password can sign in (login is proven in a later approved phase).
    **The 12 eligible T-SHUTDOWN fixture identities (§1.5 row 10) are NOT part of this step.**
    `supabase/staging/rebuild/install-shutdown-fixtures.sql` requires `team_add_person` (M1b) and
    `batch_delete` (M1c) and refuses until M1, M1b and M1c are applied, and §1.4 applies them
