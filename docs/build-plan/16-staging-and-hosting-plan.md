@@ -355,7 +355,36 @@ guards only; existing rows and the single-row control tables such as `backout_wi
 touched). `reapply-m1c` ends with one extra step,
 `revoke execute on function internal.batch_delete_audit_append_only() from service_role;`,
 because M1's blanket grant to `service_role` reaches that retained trigger-only function, which a
-fresh apply creates later and never grants. These steps are not atomic: if `reapply-m1c` is interrupted after the M1c file committed but before the revoke ran, running `reapply-m1c` again detects exactly that state (every M1c object present and `service_role` still holding EXECUTE) and sends only the revoke; any other partly-applied state is refused and needs a human. Proved locally: a fresh apply and a backout followed
+fresh apply creates later and never grants. These steps are **not atomic**: the M1c file commits
+before the revoke runs. Before `reapply-m1c` sends anything it reads the live catalogue (real
+queries, not object names alone) and accepts exactly two states; any other state is refused before
+anything is changed, and the refusal names only the failed check names:
+
+- *Backed out* (`public.batch_delete` absent): the retained audit guards must be intact, then the
+  normal precheck, file and revoke run. If the audit table itself is absent, the plan's own
+  precheck refuses with the plain-apply hint.
+- *Interrupted* (M1c file committed, revoke not run): `public.batch_delete` present, the same guards
+  intact, and the **only** unexpected privilege is a direct `service_role` EXECUTE entry on
+  `internal.batch_delete_audit_append_only()`; then only the revoke is sent.
+
+"Guards intact" means: the trigger function is the reviewed plpgsql trigger function
+(not SECURITY DEFINER, `search_path = internal, pg_temp`, body is the append-only raise); the audit
+table has exactly the two triggers `batch_delete_audit_no_update_delete` (BEFORE UPDATE OR DELETE,
+FOR EACH ROW) and `batch_delete_audit_no_truncate` (BEFORE TRUNCATE, FOR EACH STATEMENT), both
+enabled, both on that function, with no arguments, WHEN clause or column list; the table has the six
+reviewed columns; PUBLIC, `anon`, `authenticated` and `recruiter_api` hold nothing on the table and no
+EXECUTE on the function (ACL and effective); `recruiter_api` has no DELETE on `public.batches` and
+(when it exists) keeps EXECUTE on `batch_delete` while PUBLIC/`anon`/`authenticated` have none; and
+`service_role` has no EXECUTE path other than a direct entry (not via PUBLIC, an inherited role,
+ownership or a default ACL). After the revoke the tool re-reads the effective privilege and reports
+success only if `service_role` has lost EXECUTE. It does not revoke PUBLIC or inherited grants to
+compensate. What is not checked: the full body of `batch_delete`, ownership of the objects, other
+objects in the schema. The hosted catalogue may differ from the local one (for example extra
+default ACL entries); a refusal there is safe and means a human inspects. Proved locally on a real
+PostgreSQL 16 catalogue (`pipeline/src/reapply-m1c-a3.test.ts`, 17 states: disabled, wrong-function
+and wrong-timing triggers, restored DELETE on batches, PUBLIC and inherited EXECUTE, table/function
+privileges for `recruiter_api`, missing trigger/function/disabled trigger with `batch_delete`
+absent, plus the valid interrupted and backed-out states). Also proved locally: a fresh apply and a backout followed
 by the three re-applies give snapshots identical after normalization, with the role matrix 62/62.
 
 **Staging rehearsal (T-REPLAY, approval 15)** runs against the **new** staging project and

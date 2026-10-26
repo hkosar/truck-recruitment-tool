@@ -539,34 +539,55 @@ test('location candidate queue excludes already-attempted no-match addresses', (
   assert.doesNotMatch(sql, /geom is null or/i);
 });
 
-test('reapply-m1c interrupted-run recovery: only the exact state (all M1c objects present AND service_role EXECUTE) sends the revoke alone', async () => {
-  const all = { audit_table: true, trigger_function: true, triggers: true, batch_delete: true, service_role_execute: true };
-  assert.equal(classifyM1cState({ ...all, batch_delete: false, service_role_execute: false }), 'normal');
-  assert.equal(classifyM1cState({ ...all, batch_delete: false }), 'normal');
-  assert.equal(classifyM1cState(all), 'recover');
-  assert.equal(classifyM1cState({ ...all, service_role_execute: false }), 'refuse');
-  assert.equal(classifyM1cState({ ...all, audit_table: false }), 'refuse');
-  assert.equal(classifyM1cState({ ...all, trigger_function: false }), 'refuse');
-  assert.equal(classifyM1cState({ ...all, triggers: false }), 'refuse');
+test('reapply-m1c state classification: backed-out state and the interrupted-run state are the only accepted ones; every guard fact must be true', async () => {
+  const intact = { audit_table: true, trigger_function: true, triggers: true, table_shape: true, table_acl_clean: true, function_acl_clean: true, batch_delete: false, batch_delete_acl_ok: true, batches_delete_clean: true, service_role_direct_execute: false, service_role_other_path_execute: false };
+  const interrupted = { ...intact, batch_delete: true, service_role_direct_execute: true };
+  // backed-out state (batch_delete absent): normal when the retained guards are intact, with or without the direct entry
+  assert.equal(classifyM1cState(intact).state, 'normal');
+  assert.equal(classifyM1cState({ ...intact, service_role_direct_execute: true }).state, 'normal');
+  assert.equal(classifyM1cState({ ...intact, audit_table: false, trigger_function: false, triggers: false, table_shape: false }).state, 'normal'); // the plan's own precheck then refuses
+  for (const k of ['trigger_function', 'triggers', 'table_shape', 'table_acl_clean', 'function_acl_clean'] as const) {
+    const c = classifyM1cState({ ...intact, [k]: false });
+    assert.equal(c.state, 'refuse', `backed-out with ${k} false`);
+    assert.deepEqual(c.failed, [k]);
+  }
+  assert.equal(classifyM1cState({ ...intact, service_role_other_path_execute: true }).state, 'refuse');
+  // interrupted state: exactly one accepted shape
+  assert.equal(classifyM1cState(interrupted).state, 'recover');
+  for (const k of ['audit_table', 'trigger_function', 'triggers', 'table_shape', 'table_acl_clean', 'function_acl_clean', 'batch_delete_acl_ok', 'batches_delete_clean', 'service_role_direct_execute'] as const) {
+    assert.equal(classifyM1cState({ ...interrupted, [k]: false }).state, 'refuse', `interrupted with ${k} false`);
+  }
+  assert.equal(classifyM1cState({ ...interrupted, service_role_other_path_execute: true }).state, 'refuse');
+  assert.equal(classifyM1cState({ ...interrupted, triggers: undefined as unknown as boolean }).state, 'refuse');
+  // plan + executor against a fake client
   const rebuilt = 'abcdefghijklmnopqrst';
   const url = `postgresql://postgres.${rebuilt}:redacted-pw@aws-0-us-east-2.pooler.supabase.com:5432/postgres`;
   const spec = REBUILT_STAGING_SQL_ACTIONS['reapply-m1c']!;
   const plan = planRebuiltSqlRun({ action: 'reapply-m1c', dbUrl: url, confirm: spec.confirmation, recordedRebuiltRef: rebuilt });
-  const run = async (facts: Record<string, boolean>) => {
+  const run = async (facts: Record<string, boolean>, stillExecutes = false) => {
     const sent: string[] = [];
     const client = {
       async connect() {},
-      async query(sql: string) { sent.push(sql); return /audit_table/.test(sql) ? { rows: [facts] } : { rows: [] }; },
+      async query(sql: string) {
+        sent.push(sql);
+        if (/audit_table/.test(sql)) return { rows: [facts] };
+        if (/as service_role_execute/.test(sql)) return { rows: [{ service_role_execute: stillExecutes }] };
+        return { rows: [] };
+      },
       async end() {},
     };
     const logs = console.log; const errs = console.error; console.log = () => undefined; console.error = () => undefined;
     try { await executeRebuiltSqlPlan(plan, () => client); } finally { console.log = logs; console.error = errs; }
-    return sent.filter((q) => !/set_config|audit_table/.test(q));
+    return sent.filter((q) => !/set_config|audit_table|as service_role_execute/.test(q));
   };
-  assert.deepEqual(await run({ ...all, batch_delete: false }), plan.steps.map((st) => st.sql));
-  assert.deepEqual(await run(all), [plan.steps[2]!.sql]);
-  await assert.rejects(run({ ...all, service_role_execute: false }), /refused/);
-  await assert.rejects(run({ ...all, triggers: false }), /refused/);
+  assert.deepEqual(await run(intact), plan.steps.map((st) => st.sql));
+  assert.deepEqual(await run(interrupted), [plan.steps[plan.steps.length - 1]!.sql]);
+  await assert.rejects(run({ ...interrupted, triggers: false }), /refused/);
+  await assert.rejects(run({ ...intact, triggers: false }), /refused/);
+  await assert.rejects(run({ ...interrupted, service_role_other_path_execute: true }), /refused/);
+  // postcondition: after the revoke, effective EXECUTE must be gone or the run does not report success
+  await assert.rejects(run(interrupted, true), /still has effective EXECUTE/);
+  await assert.rejects(run(intact, true), /still has effective EXECUTE/);
 });
 
 test('re-apply after backout: only idempotence guards are added; the reviewed files are not edited; unknown creators fail closed', () => {

@@ -2,7 +2,7 @@ import { createHash } from 'node:crypto';
 import { existsSync, readFileSync, readdirSync, writeFileSync } from 'node:fs';
 import { isAbsolute, relative, resolve } from 'node:path';
 import pg from 'pg';
-import { M1C_STATE_PROBE_SQL, REAPPLY_POST_SQL, REAPPLY_PRECHECKS, classifyM1cState, idempotentReapplySql, type M1cStateFacts, type ReapplyTarget } from './reapply.js';
+import { M1C_POSTCONDITION_SQL, M1C_STATE_PROBE_SQL, REAPPLY_POST_SQL, REAPPLY_PRECHECKS, classifyM1cState, idempotentReapplySql, type M1cStateFacts, type ReapplyTarget } from './reapply.js';
 import { MAINTENANCE_ROLE, roleOf } from './retention-step.js';
 import { runRetentionDryRun, type DryRunReport } from './retention-dry-run.js';
 import { RECORDED_PROJECT_REFS, parseSupabaseDbTarget, type SupabaseDbTarget } from './target-guard.js';
@@ -274,13 +274,13 @@ export async function executeRebuiltSqlPlan(plan: RebuiltSqlPlan, clientFactory:
     let steps = plan.steps;
     if (plan.m1cRecoveryStep !== undefined) {
       const probe = await client.query(M1C_STATE_PROBE_SQL);
-      const state = classifyM1cState(probe.rows[0] as M1cStateFacts);
+      const { state, failed } = classifyM1cState(probe.rows[0] as M1cStateFacts);
       if (state === 'recover') {
-        console.log(JSON.stringify({ msg: 'staging-sql.m1c_interrupted_run_detected', note: 'M1c is applied and service_role still has EXECUTE; sending only the revoke' }));
+        console.log(JSON.stringify({ msg: 'staging-sql.m1c_interrupted_run_detected', note: 'M1c guards intact; only the direct service_role EXECUTE entry is unexpected; sending only the revoke' }));
         steps = [plan.steps[plan.m1cRecoveryStep]!];
       } else if (state === 'refuse') {
-        console.error(JSON.stringify({ msg: 'staging-sql.m1c_partial_state_refused' }));
-        throw new Error('re-apply M1c refused: M1c is already applied and this is not the interrupted-run state (grant already restored, or objects missing); inspect by hand');
+        console.error(JSON.stringify({ msg: 'staging-sql.m1c_partial_state_refused', failed_checks: failed }));
+        throw new Error('re-apply M1c refused: the retained M1c audit guards or privileges are not in a state this tool recognises (neither the backed-out state nor the interrupted-run state); inspect by hand');
       }
     }
     for (const step of steps) {
@@ -296,6 +296,14 @@ export async function executeRebuiltSqlPlan(plan: RebuiltSqlPlan, clientFactory:
         throw err;
       }
       console.log(JSON.stringify({ msg: 'staging-sql.step_done', step: step.label }));
+    }
+    if (plan.m1cRecoveryStep !== undefined) {
+      const after = await client.query(M1C_POSTCONDITION_SQL);
+      if (after.rows[0]?.service_role_execute !== false) {
+        console.error(JSON.stringify({ msg: 'staging-sql.m1c_postcondition_failed' }));
+        throw new Error('re-apply M1c: the revoke ran but service_role still has effective EXECUTE on the trigger function; inspect by hand');
+      }
+      console.log(JSON.stringify({ msg: 'staging-sql.m1c_postcondition_ok' }));
     }
   } finally {
     await client.end();
