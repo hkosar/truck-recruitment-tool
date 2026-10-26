@@ -59,7 +59,7 @@ if (remove) {
     "u.email = 'shutdown-' || lpad(n::text, 2, '0') || '@tnbs-recruiter.example.invalid'",
     "u.raw_user_meta_data->>'test_only' = 'true'",
     "u.raw_user_meta_data->>'test_run_id' = 'stg-db-20260723-0042'",
-    "(select count(*) from tmp_shutdown_fixtures) <> 12",
+    "(select count(*) from tmp_shutdown_fixtures) not in (0, 12)",
   ]) {
     if (!c.includes(required)) failures.push(`remove: missing fixture scope condition: ${required}`);
   }

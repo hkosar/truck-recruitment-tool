@@ -29,8 +29,8 @@ begin
   if to_regclass('staging_identity.marker') is null then
     raise exception 'shutdown fixture removal refused: this database has no staging identity marker';
   end if;
-  if (select count(*) from tmp_shutdown_fixtures) <> 12 then
-    raise exception 'shutdown fixture removal refused: expected exactly 12 matching fixture identities, found %', (select count(*) from tmp_shutdown_fixtures);
+  if (select count(*) from tmp_shutdown_fixtures) not in (0, 12) then
+    raise exception 'shutdown fixture removal refused: expected exactly 12 matching fixture identities (or none), found %', (select count(*) from tmp_shutdown_fixtures);
   end if;
   if exists (select 1 from public.contact_logs where user_id in (select id from tmp_shutdown_fixtures))
      or exists (select 1 from public.batch_activity where actor_id in (select id from tmp_shutdown_fixtures))
