@@ -259,8 +259,8 @@ export async function executeRebuiltSqlPlan(plan: RebuiltSqlPlan, clientFactory:
   try {
     if (plan.kind === 'retention') {
       const report: DryRunReport = await runRetentionDryRun(client, MAINTENANCE_ROLE);
-      // Counts and pass/fail only.
-      console.log(JSON.stringify({ msg: 'staging-sql.retention_dry_run', ...report }));
+      // Pass/fail, check counts and the per-rule would-delete counts only (rule names are repository constants).
+      console.log(JSON.stringify({ msg: 'staging-sql.retention_dry_run', ok: report.ok, checks: report.checks.length, failed: report.checks.filter((c) => !c.ok).length, would_delete: report.wouldDelete }));
       if (!report.ok) throw new RunnerRefusal('retention_dry_run_failed', `retention dry run: ${report.checks.filter((c) => !c.ok).length} check(s) failed`);
       return;
     }
@@ -338,7 +338,7 @@ export async function executeRebuiltSqlPlan(plan: RebuiltSqlPlan, clientFactory:
       const probe = await client.query(M1C_STATE_PROBE_SQL);
       const { state, failed } = classifyM1cState(probe.rows[0] as M1cStateFacts);
       if (state === 'recover') {
-        console.log(JSON.stringify({ msg: 'staging-sql.m1c_interrupted_run_detected', note: 'M1c guards intact; only the direct service_role EXECUTE entry is unexpected; sending only the revoke' }));
+        console.log(JSON.stringify({ msg: 'staging-sql.m1c_interrupted_run_detected' }));
         steps = [plan.steps[plan.m1cRecoveryStep]!];
       } else if (state === 'refuse') {
         console.error(JSON.stringify({ msg: 'staging-sql.m1c_partial_state_refused', failed_checks: failed }));

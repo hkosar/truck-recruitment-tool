@@ -115,6 +115,7 @@ test('allow-list: only enumerated events with their own keys; every value fits i
   assert.equal(run({ msg: 'staging-sql.m1c_partial_state_refused', failed_checks: ['triggers', 'postgresql://x'] }).shown.failed_checks, '<withheld>');
   // values a loose character filter would accept but the per-key patterns do not
   assert.equal(run({ msg: 'staging-sql.environment_event_trigger', name: 'evil.host.example.com', event: 'a', enabled: 'O', function: 'f' }).shown.name, '<withheld>');
+  assert.equal(run({ msg: 'staging-sql.environment_event_trigger', position: 1, name: 'tokenFragmentQ7', event: 'ddl_command_end', enabled: 'O', function: 'rls_auto_enable' }).shown.name, '<withheld>', 'an identifier-shaped fragment is not a reviewed name');
   assert.equal(run({ msg: 'staging-sql.environment_default_acl', role: 'someone_else', role_present: true }).shown.role, '<withheld>');
   assert.deepEqual(run({ msg: 'staging-sql.environment_default_acl', role: 'anon', role_present: true, tables_public: ['SELECT', 'password123'] }).shown.tables_public, '<withheld>');
   assert.equal(run({ msg: 'staging-sql.verified', action: 'reset', steps: 1, target: 'recorded rebuilt staging project', file: '/c/Users/someone/file.sql' }).fields, 1);

@@ -4,8 +4,8 @@
  * two lists equal). A failure is reported as
  *   - one of these identifiers when the runner raised it itself (RunnerRefusal), or when the database raised one of
  *     the six complete, known re-apply refusal messages (matched whole, never by prefix), and
- *   - otherwise only the generic identifier `server_or_driver_error` plus a validated 5-character SQLSTATE or an
- *     `E...` driver code. No part of any other message, however it starts, is ever forwarded.
+ *   - otherwise only the generic identifier `server_or_driver_error` plus a 5-character SQLSTATE (server-chosen characters, shape
+ *     checked) or one of the enumerated DRIVER_CODES. No part of any other message, however it starts, is ever forwarded.
  */
 export const REFUSAL_IDS = [
   'plan_refused',
@@ -59,7 +59,11 @@ export const KNOWN_SERVER_REFUSALS: Readonly<Record<string, RefusalId>> = {
   're-apply M1c refused: M1c is still applied; run its backout first': 'reapply_m1c_still_applied',
 };
 
-const CODE = /^([0-9A-Z]{5}|E[A-Z0-9_]{2,30})$/;
+/** The only non-SQLSTATE codes ever forwarded: Node/driver network error codes. Keep equal to DRIVER_CODES in scripts/run-with-secrets.mjs (a test compares them). */
+export const DRIVER_CODES = ['ECONNREFUSED', 'ECONNRESET', 'ECONNABORTED', 'ETIMEDOUT', 'ENOTFOUND', 'EAI_AGAIN', 'EPIPE', 'EHOSTUNREACH', 'ENETUNREACH', 'ENETDOWN', 'EADDRNOTAVAIL'] as const;
+/** A SQLSTATE is five characters chosen by the server (the shape is checked, the characters are not an enumerated list). */
+const SQLSTATE = /^[0-9A-Z]{5}$/;
+const isForwardableCode = (code: string): boolean => SQLSTATE.test(code) || (DRIVER_CODES as readonly string[]).includes(code);
 
 /** What may be printed about any failure: an identifier and, for a database/driver failure, a validated code. */
 export function classifyRunnerFailure(err: unknown): { refusal: RefusalId; err_code?: string } {
@@ -67,7 +71,7 @@ export function classifyRunnerFailure(err: unknown): { refusal: RefusalId; err_c
   const known = err instanceof Error && Object.prototype.hasOwnProperty.call(KNOWN_SERVER_REFUSALS, err.message) ? KNOWN_SERVER_REFUSALS[err.message] : undefined;
   if (known) return { refusal: known };
   const code = typeof err === 'object' && err !== null ? (err as { code?: unknown }).code : undefined;
-  return typeof code === 'string' && CODE.test(code) ? { refusal: 'server_or_driver_error', err_code: code } : { refusal: 'server_or_driver_error' };
+  return typeof code === 'string' && isForwardableCode(code) ? { refusal: 'server_or_driver_error', err_code: code } : { refusal: 'server_or_driver_error' };
 }
 
 /** Runs a pure planning step; any failure that is not already a RunnerRefusal becomes `plan_refused` (its message is kept off the screen). */

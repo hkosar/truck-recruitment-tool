@@ -111,6 +111,22 @@ export const REFUSAL_IDS = [
   'owner_bootstrap_target_refused', 'server_or_driver_error',
 ];
 
+/** Keep equal to pipeline/src/refusals.ts DRIVER_CODES (a test compares them). */
+export const DRIVER_CODES = ['ECONNREFUSED', 'ECONNRESET', 'ECONNABORTED', 'ETIMEDOUT', 'ENOTFOUND', 'EAI_AGAIN', 'EPIPE', 'EHOSTUNREACH', 'ENETUNREACH', 'ENETDOWN', 'EADDRNOTAVAIL'];
+/** Keep equal to the action tables in pipeline/src/staging-sql-runner.ts and staging-rebuilt.ts plus owner-auth-create (a test compares them). */
+export const ACTIONS = ['install-marker', 'reset', 'cleanup', 'apply-migrations', 'ledger-preflight', 'environment-preflight', 'owner-login-check', 'owner-promote', 'retention-dry-run', 'profile-fixtures', 'install-shutdown-fixtures', 'remove-shutdown-fixtures', 'cleanup-ledgers-m1', 'apply-m1', 'apply-m1b', 'apply-m1c', 'reapply-m1', 'reapply-m1b', 'reapply-m1c', 'role-matrix-m1', 'snapshot', 'window-on', 'window-off', 'backout-m1c', 'backout-m1b', 'backout-m1', 'owner-auth-create'];
+/** Keep equal to pipeline/src/environment-preflight.ts REVIEWED_EVENT_TRIGGER_* (a test compares them). */
+export const EVENT_TRIGGER_NAMES = ['issue_graphql_placeholder', 'issue_pg_cron_access', 'issue_pg_graphql_access', 'issue_pg_net_access', 'pgrst_ddl_watch', 'pgrst_drop_watch', 'ensure_rls'];
+export const EVENT_TRIGGER_FUNCTIONS = ['set_graphql_placeholder', 'grant_pg_cron_access', 'grant_pg_graphql_access', 'grant_pg_net_access', 'pgrst_ddl_watch', 'pgrst_drop_watch', 'rls_auto_enable'];
+/** Keep equal to pipeline/src/owner-bootstrap.ts OWNER_CHECK_IDS (a test compares them). */
+export const OWNER_CHECK_IDS = [
+  'staging_marker_names_this_project', 'exactly_one_auth_user_with_the_approved_email', 'owner_has_a_nonempty_password_and_confirmed_email', 'owner_is_not_sso_or_anonymous',
+  'the_owner_is_the_only_password_account', 'auth_users_are_the_owner_plus_seven_fixtures', 'exactly_one_profile_joined_to_the_owner_auth_user', 'owner_profile_is_still_pristine_pending_guest',
+  'exactly_seven_passwordless_fixture_profiles', 'no_other_profiles', 'no_approved_manager_profile_for_the_owner_yet', 'the_same_account_has_the_approved_manager_profile', 'the_profile_is_approved_by_the_owner_account_itself',
+];
+/** Keep equal to RETENTION_RULES names in pipeline/src/retention.ts (a test compares them). */
+export const RETENTION_RULE_NAMES = ['app_sessions', 'email_events', 'recovery_failures', 'request_buckets', 'signin_links'];
+
 const PRIVILEGES = ['SELECT', 'INSERT', 'UPDATE', 'DELETE', 'TRUNCATE', 'REFERENCES', 'TRIGGER', 'MAINTAIN', 'USAGE', 'EXECUTE', 'CREATE', 'OTHER'];
 const bool = (v) => typeof v === 'boolean';
 const int = (v) => Number.isSafeInteger(v) && v >= -1 && v <= 1_000_000_000;
@@ -118,10 +134,13 @@ const pat = (re) => (v) => typeof v === 'string' && re.test(v);
 const oneOf = (list) => (v) => typeof v === 'string' && list.includes(v);
 const listOf = (item, max) => (v) => Array.isArray(v) && v.length <= max && v.every(item);
 const ident = pat(/^[A-Za-z0-9_]{1,63}$/);
-const action = pat(/^[a-z0-9-]{1,40}$/);
+const action = (v) => typeof v === 'string' && ACTIONS.includes(v);
 const word = pat(/^[a-z_]{1,24}$/);
 const step = pat(/^[A-Za-z0-9_./-]{1,100}( \((precheck|idempotent re-apply|restore fresh-apply grants)\))?$/);
-const code = pat(/^([0-9A-Z]{5}|E[A-Z0-9_]{2,30})$/);
+// A SQLSTATE is five server-chosen characters (shape checked only); every other code is on an enumerated driver list.
+const code = (v) => typeof v === 'string' && (/^[0-9A-Z]{5}$/.test(v) || DRIVER_CODES.includes(v));
+const ownerCheck = (v) => typeof v === 'string' && OWNER_CHECK_IDS.includes(v);
+const wouldDelete = (v) => typeof v === 'object' && v !== null && !Array.isArray(v) && Object.keys(v).every((k) => RETENTION_RULE_NAMES.includes(k) && int(v[k]));
 const detail = pat(/^(\d{1,9}|unreadable)$/);
 const privs = listOf(oneOf(PRIVILEGES), 12);
 const phase = oneOf(['before', 'after']);
@@ -137,13 +156,16 @@ const EVENTS = {
   'staging-sql.ledger_verified': { expected: int, found: int, exact_match: bool },
   'staging-sql.ledger_preflight_check': { check: ident, ok: bool, detail },
   'staging-sql.ledger_preflight': { case: ident, ok: bool, checks: int, failed: int },
-  'staging-sql.retention_dry_run': { ok: bool },
+  'staging-sql.retention_dry_run': { ok: bool, checks: int, failed: int, would_delete: wouldDelete },
   'staging-sql.m1c_interrupted_run_detected': {},
   'staging-sql.m1c_partial_state_refused': { failed_checks: listOf(ident, 40) },
   'staging-sql.m1c_postcondition_ok': {},
   'staging-sql.m1c_postcondition_failed': {},
   'staging-sql.environment_event_triggers': { count: int, listed: int, truncated: bool },
-  'staging-sql.environment_event_trigger': { name: ident, event: ident, enabled: ident, function: ident },
+  'staging-sql.environment_event_trigger': {
+    position: int, name: oneOf([...EVENT_TRIGGER_NAMES, 'unlisted']), event: oneOf(['ddl_command_start', 'ddl_command_end', 'sql_drop', 'table_rewrite', 'other']),
+    enabled: oneOf(['O', 'D', 'R', 'A', 'other']), function: oneOf([...EVENT_TRIGGER_FUNCTIONS, 'unlisted']),
+  },
   'staging-sql.environment_default_acl': {
     role: oneOf(['anon', 'authenticated', 'service_role', 'PUBLIC']), role_present: bool,
     tables_public: privs, sequences_public: privs, functions_public: privs, tables_global: privs, sequences_global: privs, functions_global: privs, grant_option: bool,
@@ -158,7 +180,7 @@ const EVENTS = {
     state: oneOf(['ready_to_promote', 'promoted', 'no_owner_login', 'other']), marker_ok: bool, owner_auth_users: int, owner_has_password: bool, owner_email_confirmed: bool,
     password_users: int, auth_users_total: int, owner_profiles: int, owner_profile_role: word, owner_profile_status: word, fixture_profiles: int, other_profiles: int, owner_manager_approved: int,
   },
-  'staging-sql.owner_check': { phase, check: ident, ok: bool },
+  'staging-sql.owner_check': { phase, check: ownerCheck, ok: bool },
   'staging-sql.owner_checks': { phase, ok: bool, checks: int, failed: int },
   'staging-sql.owner_promote_result': { result: oneOf(['committed', 'rolled_back', 'rollback_not_confirmed', 'unknown']) },
 };

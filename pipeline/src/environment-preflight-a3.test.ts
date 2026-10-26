@@ -102,6 +102,11 @@ async function main(): Promise<void> {
     await c.query("create event trigger zz_indirect on ddl_command_end execute function public.zz_rls_helper()");
     const one = await run();
     check('event triggers: one trigger (an indirect helper) is listed by name with no heuristic verdict', one.eventTriggers.total === 1 && one.eventTriggers.listed[0]!.name === 'zz_indirect' && one.eventTriggers.listed[0]!.function === 'zz_rls_helper' && !('enables_rls' in one.eventTriggers.listed[0]!));
+    const oneOut: string[] = [];
+    const lg = console.log;
+    console.log = (...x: unknown[]) => { oneOut.push(String(x[0])); };
+    try { reportEnvironmentPreflight(one); } finally { console.log = lg; }
+    check('event triggers: a real catalogue trigger that is not on the reviewed list prints as "unlisted" with its position, never its name or function', oneOut.some((x) => /"msg":"staging-sql.environment_event_trigger","position":1,"name":"unlisted","event":"ddl_command_end","enabled":"O","function":"unlisted"/.test(x)) && oneOut.every((x) => !/zz_indirect|zz_rls_helper/.test(x)));
     for (let i = 0; i < LIST_LIMIT + 2; i += 1) await c.query(`create event trigger zz_t${String(i).padStart(3, '0')} on ddl_command_end execute function public.zz_rls_helper()`);
     const many = await run();
     const out2: string[] = [];

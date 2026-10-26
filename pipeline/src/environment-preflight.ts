@@ -2,8 +2,8 @@
 // step 4a). It reports; it does not pass, fail or interpret anything, and it does NOT establish the three project
 // switches the creation screen pre-selects (Data API, "Automatically expose new tables", "Enable automatic RLS"):
 // those are owner dashboard checks with a STOP gate (draft approval-4 step 3). What it can prove from SQL:
-//   1. event triggers: the complete count and, up to LIST_LIMIT, each trigger's name, event, enabled state and
-//      function NAME. Nothing is inferred from function text (a body can delegate to a helper, build its statement
+//   1. event triggers: the complete count and, up to LIST_LIMIT, each trigger's position, event, enabled state and
+//      name / function name (names only when reviewed; otherwise `unlisted`). Nothing is inferred from function text (a body can delegate to a helper, build its statement
 //      from pieces or only mention the words in a comment). Zero is a valid result. `truncated` says when the list
 //      is cut off. Every listed trigger needs an explicit human assessment; a name alone verifies nothing.
 //   2. default privileges: the explicit pg_default_acl entries of THIS login, as the full set of privilege types that
@@ -15,12 +15,25 @@
 //   3. authenticator role settings: how many pgrst.db_schemas settings exist on the `authenticator` role (role-wide and
 //      for this database) and, only when exactly one exists, whether it names `public`. That is a fact about that
 //      setting. It is NOT the Data API on/off switch, the exposed-schema list the running API uses, or proof either way.
-// It prints only fixed keys, identifiers and enumerated words (never a connection detail) and changes nothing.
+// It prints only fixed keys, enumerated words, booleans and counts: a database-derived name is shown only when it is on the reviewed
+// lists above, otherwise as `unlisted` (never a connection detail, never arbitrary catalogue text). It changes nothing.
 
 import type { RebuiltSqlClient } from './staging-rebuilt.js';
 
 export const ENV_ROLES = ['anon', 'authenticated', 'service_role'] as const;
 export const LIST_LIMIT = 50;
+/**
+ * Display contract for database-derived names (review r7 finding 3): an event trigger or function name is printed only when
+ * it is EXACTLY one of these reviewed names; any other name prints as the fixed word `unlisted` plus its position in the
+ * ordered list, and the manager stops for a separately reviewed diagnostic. Nothing the database chooses is shown except
+ * what is on these lists. The names are the ones Supabase's own platform event triggers are believed to use and are NOT
+ * verified against the new project: an unexpected name only causes a STOP, never a pass. Keep equal to
+ * scripts/run-with-secrets.mjs (a test compares them).
+ */
+export const REVIEWED_EVENT_TRIGGER_NAMES = ['issue_graphql_placeholder', 'issue_pg_cron_access', 'issue_pg_graphql_access', 'issue_pg_net_access', 'pgrst_ddl_watch', 'pgrst_drop_watch', 'ensure_rls'] as const;
+export const REVIEWED_EVENT_TRIGGER_FUNCTIONS = ['set_graphql_placeholder', 'grant_pg_cron_access', 'grant_pg_graphql_access', 'grant_pg_net_access', 'pgrst_ddl_watch', 'pgrst_drop_watch', 'rls_auto_enable'] as const;
+export const EVENT_TRIGGER_EVENTS = ['ddl_command_start', 'ddl_command_end', 'sql_drop', 'table_rewrite'] as const;
+export const EVENT_TRIGGER_ENABLED_STATES = ['O', 'D', 'R', 'A'] as const;
 export const PRIVILEGE_TYPES = ['SELECT', 'INSERT', 'UPDATE', 'DELETE', 'TRUNCATE', 'REFERENCES', 'TRIGGER', 'MAINTAIN', 'USAGE', 'EXECUTE', 'CREATE', 'OTHER'] as const;
 
 export const EVENT_TRIGGERS_SQL = `select e.evtname::text as name, e.evtevent::text as event, e.evtenabled::text as enabled,
@@ -76,7 +89,7 @@ export async function runEnvironmentPreflight(client: RebuiltSqlClient): Promise
   return { eventTriggers: { total, listed: triggerRows }, rolesPresent, defaults: { rows }, authenticator };
 }
 
-const ident = (v: unknown): string => (typeof v === 'string' && /^[A-Za-z0-9_]{1,63}$/.test(v) ? v : 'other');
+const listed = (v: unknown, reviewed: readonly string[], fallback: string): string => (typeof v === 'string' && reviewed.includes(v) ? v : fallback);
 const priv = (v: unknown): string => (typeof v === 'string' && (PRIVILEGE_TYPES as readonly string[]).includes(v) ? v : 'OTHER');
 const KIND: Record<string, ObjKind | undefined> = { r: 'tables', S: 'sequences', f: 'functions' };
 
@@ -103,7 +116,11 @@ export function reportEnvironmentPreflight(r: EnvironmentReport): void {
   const line = (o: Record<string, unknown>) => console.log(JSON.stringify(o));
   const total = Number.isSafeInteger(r.eventTriggers.total) ? r.eventTriggers.total : -1;
   line({ msg: 'staging-sql.environment_event_triggers', count: total, listed: r.eventTriggers.listed.length, truncated: total > r.eventTriggers.listed.length });
-  for (const e of r.eventTriggers.listed) line({ msg: 'staging-sql.environment_event_trigger', name: ident(e.name), event: ident(e.event), enabled: ident(e.enabled), function: ident(e.function) });
+  r.eventTriggers.listed.forEach((e, i) => line({
+    msg: 'staging-sql.environment_event_trigger', position: i + 1,
+    name: listed(e.name, REVIEWED_EVENT_TRIGGER_NAMES, 'unlisted'), event: listed(e.event, EVENT_TRIGGER_EVENTS, 'other'),
+    enabled: listed(e.enabled, EVENT_TRIGGER_ENABLED_STATES, 'other'), function: listed(e.function, REVIEWED_EVENT_TRIGGER_FUNCTIONS, 'unlisted'),
+  }));
   const sum = summariseDefaults(r.defaults.rows);
   for (const role of ENV_ROLES) {
     const cells = sum.byGrantee[role]!;

@@ -22,15 +22,17 @@ import {
 import { parse as parsePgConnectionString } from 'pg-connection-string';
 import { STAGING_SQL_ACTIONS, planStagingSqlRun } from './staging-sql-runner.js';
 import { REBUILT_STAGING_SQL_ACTIONS, executeRebuiltSqlPlan, planRebuiltSqlRun, requireRecordedRebuiltRef, retargetSqlToRebuiltRef } from './staging-rebuilt.js';
-import { APPROVED_OWNER_EMAIL, OWNER_AUTH_CREATE_CONFIRMATION, planOwnerAuthCreate, runOwnerAuthCreate, type OwnerFetch } from './owner-bootstrap.js';
+import { OWNER_CHECK_IDS, APPROVED_OWNER_EMAIL, OWNER_AUTH_CREATE_CONFIRMATION, planOwnerAuthCreate, runOwnerAuthCreate, type OwnerFetch } from './owner-bootstrap.js';
 import { RECORDED_PROJECT_REFS, parseSupabaseDbTarget, verifyPipelineTarget } from './target-guard.js';
 import { readFileSync } from 'node:fs';
+import { pathToFileURL } from 'node:url';
 import { REPOSITORY_ROOT } from './staging-rebuilt.js';
 import { RETENTION_RULES, runRetention, type Queryable } from './retention.js';
 import { AUDIT_FN_BODY_M1C, AUDIT_FN_DEF_M1C, AUDIT_FN_DEF_M1_PINNED, TABLE_CANON_M1C, collapseWhitespace } from './reapply-m1c-expected.js';
 import { REAPPLY_PRECHECKS, classifyM1cState, idempotentReapplySql } from './reapply.js';
 import { assessLedger, type LedgerFacts } from './ledger-preflight.js';
-import { KNOWN_SERVER_REFUSALS, REFUSAL_IDS, RunnerRefusal, classifyRunnerFailure } from './refusals.js';
+import { REVIEWED_EVENT_TRIGGER_FUNCTIONS, REVIEWED_EVENT_TRIGGER_NAMES } from './environment-preflight.js';
+import { DRIVER_CODES, KNOWN_SERVER_REFUSALS, REFUSAL_IDS, RunnerRefusal, classifyRunnerFailure } from './refusals.js';
 import { DENIED_STATEMENTS } from './retention-dry-run.js';
 import { retentionClientConfig, runRetentionForCron, runRetentionStep, type RetentionClient } from './retention-step.js';
 
@@ -682,8 +684,13 @@ test('retention-dry-run: only as recruiter_maintenance on the rebuilt project; c
   } finally { console.log = origLog; }
   const report = JSON.parse(lines.find((l) => l.includes('retention_dry_run'))!);
   assert.equal(report.ok, true);
-  assert.deepEqual(Object.keys(report.wouldDelete).sort(), ['app_sessions', 'email_events', 'recovery_failures', 'request_buckets', 'signin_links']);
-  assert.ok(Object.values(report.wouldDelete).every((n) => n === 3));
+  assert.deepEqual(Object.keys(report.would_delete).sort(), ['app_sessions', 'email_events', 'recovery_failures', 'request_buckets', 'signin_links']);
+  assert.ok(Object.values(report.would_delete).every((n) => n === 3));
+  assert.ok(report.failed === 0 && report.checks > 0 && !('currentUser' in report) && !('checks' in report && Array.isArray(report.checks)), 'only counts, never check names or the login name');
+  const w = await wrapperModule();
+  const retentionCounter = { fields: 0 };
+  assert.notEqual(w.allowListLine(lines.find((l) => l.includes('retention_dry_run'))!, retentionCounter), null);
+  assert.equal(retentionCounter.fields, 0, 'the real retention event passes the output wrapper with no field withheld');
   assert.ok(!sent.some((q) => /^\s*delete/i.test(q)), 'never deletes');
   assert.equal(sent.filter((q) => q === 'rollback').length, 2);
   assert.ok(!sent.includes('commit'));
@@ -747,8 +754,8 @@ test('environment preflight action: read-only, reports identifiers/booleans/coun
     async connect() {},
     async query(sql: string) {
       sent.push(sql);
-      if (/join pg_proc/.test(sql)) return { rows: [{ name: 'pgrst_ddl_watch', event: 'ddl_command_end', enabled: 'O', function: 'pgrst_ddl_watch' }, { name: 'weird name with spaces', event: 'ddl_command_end', enabled: 'O', function: 'rls_auto_enable' }] };
-      if (sql.includes('as total from pg_event_trigger')) return { rows: [{ total: 2 }] };
+      if (/join pg_proc/.test(sql)) return { rows: [{ name: 'pgrst_ddl_watch', event: 'ddl_command_end', enabled: 'O', function: 'pgrst_ddl_watch' }, { name: 'weird name with spaces', event: 'ddl_command_end', enabled: 'O', function: 'rls_auto_enable' }, { name: 'tokenFragmentQ7', event: 'sql_drop', enabled: 'O', function: 'helperFragmentZ9' }] };
+      if (sql.includes('as total from pg_event_trigger')) return { rows: [{ total: 3 }] };
       if (sql.includes('where r.rolname in')) return { rows: [{ role: 'anon' }, { role: 'authenticated' }, { role: 'authenticator' }] };
       if (/from pg_default_acl/.test(sql)) return { rows: [{ grantee: 'anon', objtype: 'r', scope: 'public', privilege: 'SELECT', grantable: false }, { grantee: 'anon', objtype: 'r', scope: 'public', privilege: 'INSERT', grantable: false }, { grantee: 'PUBLIC', objtype: 'f', scope: 'global', privilege: 'EXECUTE', grantable: false }, { grantee: 'anon', objtype: 'n', scope: 'public', privilege: 'USAGE', grantable: false }] };
       if (/authenticator_exists/.test(sql)) return { rows: [{ authenticator_exists: true, role_wide_entries: 1, this_database_entries: 0, names_public_if_single: true }] };
@@ -760,9 +767,16 @@ test('environment preflight action: read-only, reports identifiers/booleans/coun
   console.log = (...a: unknown[]) => { lines.push(String(a[0])); };
   try { await executeRebuiltSqlPlan(plan, () => client); } finally { console.log = l; }
   assert.ok(sent.includes('begin read only') && sent.includes('rollback') && sent.every((q) => !/^(insert|create|alter|drop|update|delete|grant|revoke)/i.test(q.trim())));
-  assert.ok(lines.some((x) => /"msg":"staging-sql.environment_event_triggers","count":2,"listed":2,"truncated":false/.test(x)));
+  assert.ok(lines.some((x) => /"msg":"staging-sql.environment_event_triggers","count":3,"listed":3,"truncated":false/.test(x)));
   assert.ok(lines.every((x) => !/enables_rls/.test(x)), 'no heuristic verdict about function text is printed');
-  assert.ok(lines.some((x) => /"name":"other"/.test(x)), 'a name that is not a plain identifier is never printed');
+  assert.ok(lines.some((x) => /"position":2,"name":"unlisted"/.test(x)), 'a name that is not on the reviewed list is shown only as unlisted');
+  assert.ok(lines.some((x) => /"position":3,"name":"unlisted","event":"sql_drop","enabled":"O","function":"unlisted"/.test(x)), 'an identifier-shaped unreviewed name and function never reach the screen');
+  assert.ok(lines.some((x) => /"position":1,"name":"pgrst_ddl_watch".*"function":"pgrst_ddl_watch"/.test(x)), 'a reviewed name is shown');
+  assert.ok(lines.every((x) => !/tokenFragmentQ7|helperFragmentZ9/.test(x)));
+  const wEnv = await wrapperModule();
+  const envCounter = { fields: 0 };
+  for (const x of lines) assert.notEqual(wEnv.allowListLine(x, envCounter), null, x);
+  assert.equal(envCounter.fields, 0, 'every real environment-preflight line passes the output wrapper with no field withheld');
   assert.ok(lines.some((x) => x.includes('"msg":"staging-sql.environment_default_acl","role":"anon","role_present":true,"tables_public":["INSERT","SELECT"],"sequences_public":[],"functions_public":[]')), 'full privilege types, not a boolean');
   assert.ok(lines.some((x) => /"msg":"staging-sql.environment_default_acl","role":"service_role","role_present":false/.test(x)), 'a missing role is reported as missing');
   assert.ok(lines.some((x) => x.includes('"role":"PUBLIC"') && x.includes('"functions_global":["EXECUTE"]')));
@@ -1164,6 +1178,51 @@ test('retention cron: a failure with no email delivered is flagged unalerted; de
   // healthy run and not-configured: nothing to alert
   assert.equal((await cron(stepHarness(), url, async () => false)).unalerted, false);
   assert.equal((await cron(stepHarness(), { MAINTENANCE_DATABASE_URL: undefined }, async () => false)).unalerted, false);
+});
+
+async function wrapperModule(): Promise<any> {
+  return import(pathToFileURL(resolve(REPOSITORY_ROOT, 'scripts/run-with-secrets.mjs')).href);
+}
+
+test('output wrapper enumerations equal the runner sources, and real emitted events pass it with no field withheld (review r7 findings 3 and 5)', async () => {
+  const w = await wrapperModule();
+  const sorted = (a: readonly string[]) => [...a].sort();
+  assert.deepEqual(sorted(w.ACTIONS), sorted([...new Set([...Object.keys(STAGING_SQL_ACTIONS), ...Object.keys(REBUILT_STAGING_SQL_ACTIONS), 'owner-auth-create'])]));
+  assert.deepEqual(sorted(w.DRIVER_CODES), sorted(DRIVER_CODES));
+  assert.deepEqual(sorted(w.EVENT_TRIGGER_NAMES), sorted(REVIEWED_EVENT_TRIGGER_NAMES));
+  assert.deepEqual(sorted(w.EVENT_TRIGGER_FUNCTIONS), sorted(REVIEWED_EVENT_TRIGGER_FUNCTIONS));
+  assert.deepEqual(sorted(w.OWNER_CHECK_IDS), sorted(OWNER_CHECK_IDS));
+  assert.deepEqual(sorted(w.RETENTION_RULE_NAMES), sorted(RETENTION_RULES.map((r) => r.name)));
+  // an arbitrary identifier-shaped value is withheld in every enumerated field
+  const one = (o: Record<string, unknown>) => { const c = { fields: 0 }; const r = w.allowListLine(JSON.stringify(o), c); return { shown: r === null ? null : JSON.parse(r), fields: c.fields }; };
+  assert.equal(one({ msg: 'staging-sql.environment_event_trigger', position: 1, name: 'tokenFragmentQ7', event: 'ddl_command_end', enabled: 'O', function: 'rls_auto_enable' }).shown.name, '<withheld>');
+  assert.equal(one({ msg: 'staging-sql.done', action: 'tokenFragmentQ7' }).shown.action, '<withheld>');
+  assert.equal(one({ msg: 'staging-sql.owner_check', phase: 'before', check: 'tokenFragmentQ7', ok: true }).shown.check, '<withheld>');
+  assert.equal(one({ msg: 'staging-sql.refused', refusal: 'server_or_driver_error', err_code: 'ETOKENFRAGMENT' }).shown.err_code, '<withheld>');
+  assert.deepEqual(one({ msg: 'staging-sql.refused', refusal: 'server_or_driver_error', err_code: 'ECONNRESET' }), { shown: { msg: 'staging-sql.refused', refusal: 'server_or_driver_error', err_code: 'ECONNRESET' }, fields: 0 });
+  assert.deepEqual(classifyRunnerFailure(Object.assign(new Error('x'), { code: 'ETOKENFRAGMENT' })), { refusal: 'server_or_driver_error' });
+  // the real M1c interrupted-run recovery event (a legitimate recovery) is accepted exactly as emitted
+  const intact = { audit_table: true, trigger_function: true, trigger_function_pinned: true, triggers: true, table_shape: true, table_acl_clean: true, function_acl_clean: true, batch_delete: true, batch_delete_acl_ok: true, batches_delete_clean: true, service_role_direct_execute: true, service_role_other_path_execute: false };
+  const rebuilt = 'abcdefghijklmnopqrst';
+  const spec = REBUILT_STAGING_SQL_ACTIONS['reapply-m1c']!;
+  const plan = planRebuiltSqlRun({ action: 'reapply-m1c', dbUrl: `postgresql://postgres.${rebuilt}:redacted-pw@aws-0-us-east-2.pooler.supabase.com:5432/postgres`, confirm: spec.confirmation, recordedRebuiltRef: rebuilt });
+  const lines: string[] = []; const l = console.log;
+  console.log = (...a: unknown[]) => { lines.push(String(a[0])); };
+  try {
+    await executeRebuiltSqlPlan(plan, () => ({
+      async connect() {},
+      async query(sql: string) {
+        if (/with\s+fn as/.test(sql) && !/as service_role_execute/.test(sql)) return { rows: [intact] };
+        if (/as service_role_execute/.test(sql)) return { rows: [{ service_role_execute: false }] };
+        return { rows: [], rowCount: 0 };
+      },
+      async end() {},
+    }));
+  } finally { console.log = l; }
+  assert.ok(lines.some((x) => x.includes('m1c_interrupted_run_detected')) && lines.some((x) => x.includes('m1c_postcondition_ok')), 'the recovery path really ran: ' + lines.join(' | '));
+  const counter = { fields: 0 };
+  for (const x of lines) assert.notEqual(w.allowListLine(x, counter), null, x);
+  assert.equal(counter.fields, 0, 'a successful recovery withholds nothing');
 });
 
 let failed = 0;

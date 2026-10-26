@@ -221,6 +221,10 @@ export function assessOwnerPromoted(f: OwnerFacts): OwnerAssessment {
   ]);
 }
 
+/** Every check id the two assessments can print (derived, not hand-copied); the output wrapper enumerates exactly these. */
+const NO_FACTS = {} as OwnerFacts;
+export const OWNER_CHECK_IDS: readonly string[] = [...new Set([...assessOwnerPromotion(NO_FACTS).checks, ...assessOwnerPromoted(NO_FACTS).checks].map((c) => c.check))];
+
 export type OwnerState = 'ready_to_promote' | 'promoted' | 'no_owner_login' | 'other';
 export function ownerState(f: OwnerFacts): OwnerState {
   if (assessOwnerPromotion(f).ok) return 'ready_to_promote';
