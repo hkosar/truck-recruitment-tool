@@ -79,7 +79,9 @@ when needed, $0; (c) transfer it to a Free organization and pause it, $0, restor
    each, stopping on the first error; checksums as `scripts/verify-migration-baseline.mjs`.
 5. *Operator:* fictional fixtures, the staging identity marker, the hosted Auth fixture
    accounts for A5b, and the 12 eligible T-SHUTDOWN fixture identities (§1.5 row 10) (doc 11
-   commands, new ref); expect `staging-sql.done`.
+   commands, new ref); expect `staging-sql.done`. Removing the shutdown
+   fixtures accepts exactly those 12 identities or none (nothing installed is a no-op); any
+   other count, such as 11, or a stray identity in the reserved range is refused and rolls back.
 6. *Operator:* `snapshot` (`supabase/backout/pre-cutover-snapshot.sql`), stored outside the
    repo.
 7. **Legacy rehearsal frontend (approval 5).** The backout returns users to the old app, so the
@@ -343,6 +345,18 @@ auth.users.email` for every approved profile; expected because email edits were 
 Worker; production: the recorded pre-cutover frontend) → smoke test → tell the team. Data is
 preserved (people added stay; batch-delete records stay). Sessions closed by L1 stay closed;
 people sign in again with their passwords.
+
+**Re-applying after a backout** uses three runner actions, not the plain apply files (the
+backouts keep the sign-in ledgers, added people and batch-delete record, so the plain files fail
+on the first retained object): `reapply-m1`, `reapply-m1b`, `reapply-m1c`, in that order. Each
+first checks that the database looks backed out (retained tables present, live functions absent)
+and refuses otherwise, then sends the reviewed file in an in-memory idempotent form (existence
+guards only; existing rows and the single-row control tables such as `backout_window` are not
+touched). `reapply-m1c` ends with one extra step,
+`revoke execute on function internal.batch_delete_audit_append_only() from service_role;`,
+because M1's blanket grant to `service_role` reaches that retained trigger-only function, which a
+fresh apply creates later and never grants. Proved locally: a fresh apply and a backout followed
+by the three re-applies give snapshots identical after normalization, with the role matrix 62/62.
 
 **Staging rehearsal (T-REPLAY, approval 15)** runs against the **new** staging project and
 proves more than the snapshot: after the backout, **a staging fixture signs in on the legacy
