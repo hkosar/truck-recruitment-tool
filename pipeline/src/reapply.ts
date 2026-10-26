@@ -58,3 +58,12 @@ end $$;`,
   end if;
 end $$;`,
 };
+
+/**
+ * Statements sent AFTER the reapplied file, one extra step each. M1's blanket `grant execute on all functions
+ * in schema internal to service_role` also reaches the retained trigger-only function, which a fresh apply
+ * creates later (in M1c) and so never grants. This restores the fresh-apply ACL (manager decision, option b).
+ */
+export const REAPPLY_POST_SQL: Readonly<Partial<Record<ReapplyTarget, string>>> = {
+  m1c: 'revoke execute on function internal.batch_delete_audit_append_only() from service_role;',
+};

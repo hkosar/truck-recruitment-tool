@@ -2,7 +2,7 @@ import { createHash } from 'node:crypto';
 import { existsSync, readFileSync, readdirSync, writeFileSync } from 'node:fs';
 import { isAbsolute, relative, resolve } from 'node:path';
 import pg from 'pg';
-import { REAPPLY_PRECHECKS, idempotentReapplySql, type ReapplyTarget } from './reapply.js';
+import { REAPPLY_POST_SQL, REAPPLY_PRECHECKS, idempotentReapplySql, type ReapplyTarget } from './reapply.js';
 import { MAINTENANCE_ROLE, roleOf } from './retention-step.js';
 import { runRetentionDryRun, type DryRunReport } from './retention-dry-run.js';
 import { RECORDED_PROJECT_REFS, parseSupabaseDbTarget, type SupabaseDbTarget } from './target-guard.js';
@@ -202,6 +202,7 @@ export function planRebuiltSqlRun(input: {
       ? [
           { label: `${spec.file} (precheck)`, sql: REAPPLY_PRECHECKS[spec.reapply], transaction: false },
           { label: `${spec.file} (idempotent re-apply)`, sql: idempotentReapplySql(retargeted), transaction: false },
+          ...(REAPPLY_POST_SQL[spec.reapply] ? [{ label: `${spec.file} (restore fresh-apply grants)`, sql: REAPPLY_POST_SQL[spec.reapply] as string, transaction: false }] : []),
         ]
       : [{ label: spec.file as string, sql: retargeted, transaction: false }];
   }

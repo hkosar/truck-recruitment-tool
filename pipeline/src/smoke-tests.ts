@@ -545,7 +545,8 @@ test('re-apply after backout: only idempotence guards are added; the reviewed fi
   for (const [action, pre] of [['reapply-m1', 'm1'], ['reapply-m1b', 'm1b'], ['reapply-m1c', 'm1c']] as const) {
     const spec = REBUILT_STAGING_SQL_ACTIONS[action]!;
     const plan = planRebuiltSqlRun({ action, dbUrl: pooler, confirm: spec.confirmation, recordedRebuiltRef: rebuilt });
-    assert.deepEqual(plan.steps.map((st) => st.transaction), [false, false]);
+    assert.deepEqual(plan.steps.map((st) => st.transaction), pre === 'm1c' ? [false, false, false] : [false, false]);
+    if (pre === 'm1c') assert.equal(plan.steps[2]!.sql, 'revoke execute on function internal.batch_delete_audit_append_only() from service_role;');
     assert.equal(plan.steps[0]!.sql, REAPPLY_PRECHECKS[pre]);
     const sent = plan.steps[1]!.sql;
     const original = readFileSync(resolve(REPOSITORY_ROOT, spec.file!), 'utf8').replace(/\r\n/g, '\n');
