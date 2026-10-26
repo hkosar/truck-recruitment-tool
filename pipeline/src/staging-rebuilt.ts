@@ -306,7 +306,7 @@ export async function executeRebuiltSqlPlan(plan: RebuiltSqlPlan, clientFactory:
         steps = [plan.steps[plan.m1cRecoveryStep]!];
       } else if (state === 'refuse') {
         console.error(JSON.stringify({ msg: 'staging-sql.m1c_partial_state_refused', failed_checks: failed }));
-        throw new Error('re-apply M1c refused: the retained M1c audit guards or privileges are not in a state this tool recognises (neither the backed-out state nor the interrupted-run state); inspect by hand');
+        throw new Error('re-apply M1c refused: the retained M1c audit guards or privileges are not in a state this tool recognises (neither the backed-out state nor the interrupted-run state, or PostGIS lives outside schema public, which re-apply does not support); inspect by hand');
       }
     }
     for (const step of steps) {

@@ -398,24 +398,32 @@ anything is changed, and the refusal names only the failed check names:
   intact, and the **only** unexpected privilege is a direct `service_role` EXECUTE entry on
   `internal.batch_delete_audit_append_only()`; then only the revoke is sent.
 
-"Guards intact" means: the trigger function is the reviewed plpgsql trigger function
-(not SECURITY DEFINER, body is the append-only raise, `search_path` either the M1c one `internal, pg_temp` or `public, internal, pg_temp`, which M1's search-path pinning gives it in a backed-out database before the reapplied M1c file resets it; the interrupted state requires the M1c one); the audit
-table has exactly the two triggers `batch_delete_audit_no_update_delete` (BEFORE UPDATE OR DELETE,
-FOR EACH ROW) and `batch_delete_audit_no_truncate` (BEFORE TRUNCATE, FOR EACH STATEMENT), both
-enabled, both on that function, with no arguments, WHEN clause or column list; the table has the six
-reviewed columns; PUBLIC, `anon`, `authenticated` and `recruiter_api` hold nothing on the table and no
-EXECUTE on the function (ACL and effective); `recruiter_api` has no DELETE on `public.batches` and
-(when it exists) keeps EXECUTE on `batch_delete` while PUBLIC/`anon`/`authenticated` have none; and
+"Guards intact" means exact equality with the text a fresh local apply produces (`pipeline/src/reapply-m1c-expected.ts`), not a name or substring match:
+the trigger function's complete definition (`pg_get_functiondef`, whitespace collapsed: language, body, SECURITY, volatility and `SET` clause) equals the reviewed one with `search_path` either the M1c one
+`internal, pg_temp` or `public, internal, pg_temp` (which M1's search-path pinning gives it in a backed-out database before the reapplied M1c file resets it; the interrupted state requires the M1c one), and it is owned by
+the table's owner; the table's canonical description (every column with type, nullability, default, identity and generation, every constraint and index definition, relation kind, row security, persistence, rules,
+partitioning, inheritance) equals the fresh-apply text, so an added column, foreign key (cascading or not), default or changed type is refused; the table has exactly the two triggers
+`batch_delete_audit_no_update_delete` (BEFORE UPDATE OR DELETE, FOR EACH ROW) and `batch_delete_audit_no_truncate` (BEFORE TRUNCATE, FOR EACH STATEMENT), both
+enabled, both on that function, with no arguments, WHEN clause or column list; PUBLIC, `anon`, `authenticated` and `recruiter_api` hold nothing on the table (table ACL, column ACLs, effective table and column
+privileges) and no EXECUTE on the function (ACL and effective); `recruiter_api` has no DELETE on `public.batches` and
+(when it exists) has effective EXECUTE on `batch_delete` while `anon`/`authenticated` have none (including through a role they belong to) and PUBLIC holds none in its ACL; and
 `service_role` has no EXECUTE path other than a direct entry (not via PUBLIC, an inherited role,
 ownership or a default ACL). After the revoke the tool re-reads the effective privilege and reports
 success only if `service_role` has lost EXECUTE. It does not revoke PUBLIC or inherited grants to
-compensate. What is not checked: the full body of `batch_delete`, ownership of the objects, other
-objects in the schema. The hosted catalogue may differ from the local one (for example extra
-default ACL entries); a refusal there is safe and means a human inspects. Proved locally on a real
-PostgreSQL 16 catalogue (`pipeline/src/reapply-m1c-a3.test.ts`, 20 states: disabled, wrong-function
-and wrong-timing triggers, wrong function search paths, restored DELETE on batches, PUBLIC and inherited EXECUTE, table/function
-privileges for `recruiter_api`, missing trigger/function/disabled trigger with `batch_delete`
-absent, plus the valid interrupted and backed-out states). Also proved locally: a fresh apply and a backout followed
+compensate. **Not checked, and therefore not certified by this tool:** the body of `public.batch_delete` (only its
+privileges are checked; a separate manual comparison of its definition with the reviewed file is a required step
+of the separately approved M1c run, not of approval 4), other objects in the schema, and grants on objects other
+than those named. **Unsupported:** a database whose PostGIS extension lives outside schema `public` (M1 then pins
+a different `search_path`, including on the audit function); `reapply-m1c` refuses it at `trigger_function`, which
+is a safe stop, and a human handles it. The hosted catalogue may differ from the local one (for example extra
+default ACL entries, or a different PostgreSQL major version printing `pg_get_functiondef` differently); a
+refusal there is safe and means a human inspects. Proved locally on a real
+PostgreSQL 16 catalogue (`pipeline/src/reapply-m1c-a3.test.ts`, 34 states: the tampering counterexamples (the
+reviewed raise only in a comment, a swallowed exception, SECURITY DEFINER, another owner), an added cascading foreign key,
+column, changed type, dropped check, changed default and row security, column-level privileges, an inherited `anon` grant on `batch_delete`,
+disabled, wrong-function and wrong-timing triggers, wrong function search paths including the non-public PostGIS one, restored DELETE on batches,
+PUBLIC and inherited EXECUTE, table/function privileges for `recruiter_api`, missing trigger/function/disabled
+trigger with `batch_delete` absent, a whitespace-only change of the body (accepted), plus the valid interrupted and backed-out states). Also proved locally: a fresh apply and a backout followed
 by the three re-applies give snapshots identical after normalization, with the role matrix 62/62.
 
 **Staging rehearsal (T-REPLAY, approval 15)** runs against the **new** staging project and

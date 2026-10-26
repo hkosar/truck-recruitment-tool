@@ -15,6 +15,10 @@
 // Anything this does not understand fails closed: a creating statement left without a guard is
 // refused, so a future edit of the pending files cannot silently bypass the guards.
 
+import { AUDIT_FN_DEF_M1C, AUDIT_FN_DEF_M1_PINNED, TABLE_CANON_M1C, TABLE_CANON_SQL, collapseWhitespace } from './reapply-m1c-expected.js';
+
+const sqlLit = (v: string): string => `'${v.replace(/'/g, "''")}'`;
+
 export type ReapplyTarget = 'm1' | 'm1b' | 'm1c';
 
 const CONTROL_TABLES = ['roster_lock', 'backout_window', 'recovery_policy'];
@@ -74,34 +78,41 @@ export const REAPPLY_POST_SQL: Readonly<Partial<Record<ReapplyTarget, string>>> 
  * The reapplied M1c file commits before the separate revoke runs, so a dropped connection between them leaves
  * M1c applied with an extra DIRECT service_role EXECUTE entry still on the trigger-only function. These steps
  * are NOT atomic. Before the file or the revoke is sent, the retained audit guards are verified from the
- * catalogue (not by object names alone):
- *   trigger_function : internal.batch_delete_audit_append_only() is a plpgsql trigger function, not SECURITY
- *                      DEFINER, its body is the reviewed "append-only" raise, and its search_path is the M1c one
- *                      (internal, pg_temp) or the one M1's pinning step gives every function in a backed-out database
- *                      (public, internal, pg_temp; the reapplied M1c file resets it);
- *   trigger_function_pinned : its search_path is exactly the M1c one (internal, pg_temp), as after the M1c file;
+ * catalogue by EXACT comparison, not by names or substrings (reapply-m1c-expected.ts holds the expected text,
+ * derived from a fresh apply):
+ *   trigger_function : pg_get_functiondef (whitespace collapsed) equals the reviewed definition with the M1c
+ *                      search_path (internal, pg_temp) or the one M1's pinning step gives every function in a backed-out
+ *                      database (public, internal, pg_temp; the reapplied M1c file resets it), and the function is owned
+ *                      by the table owner. Body, language, SECURITY, volatility and SET clauses are all compared.
+ *   trigger_function_pinned : the definition equals the M1c one exactly (search_path internal, pg_temp), as after the M1c file;
  *   triggers         : on internal.batch_delete_audit there are exactly two non-internal triggers, both enabled
  *                      (tgenabled = 'O'), both bound to that function, no arguments, no WHEN clause, no column
  *                      list: no_update_delete = BEFORE UPDATE OR DELETE FOR EACH ROW,
  *                      no_truncate = BEFORE TRUNCATE FOR EACH STATEMENT;
- *   table_shape      : an ordinary table with the six reviewed columns, in order;
- *   table_acl_clean  : PUBLIC, anon, authenticated and recruiter_api hold nothing on that table (ACL, plus the
- *                      effective privilege of each named role);
+ *   table_shape      : the canonical table text (every column with type, nullability, default, identity and generation;
+ *                      every constraint and index definition; relkind, row security, persistence, rules, partitioning,
+ *                      inheritance) equals the fresh-apply text, so a new foreign key, column or default is refused;
+ *   table_acl_clean  : PUBLIC, anon, authenticated and recruiter_api hold nothing on that table (table ACL, column ACLs,
+ *                      and the effective table and column privileges of each named role);
  *   function_acl_clean : the same four hold no EXECUTE on the trigger function (ACL and effective);
- *   batch_delete_acl_ok: (only when public.batch_delete exists) PUBLIC, anon and authenticated have no EXECUTE on
- *                      it and recruiter_api has it;
+ *   batch_delete_acl_ok: (only when public.batch_delete exists) anon and authenticated have no effective EXECUTE on
+ *                      it, PUBLIC holds none in its ACL, and recruiter_api has it. The BODY of public.batch_delete is NOT
+ *                      verified by this probe (doc 16 section 3.3 requires a separate manual check);
  *   batches_delete_clean: recruiter_api has no DELETE on public.batches (M1c revokes it, so no unaudited delete);
  *   service_role_direct_execute : the ACL holds a DIRECT EXECUTE entry for service_role (the one entry that
  *                      REVOKE ... FROM service_role can remove);
  *   service_role_other_path_execute : service_role would STILL have EXECUTE without that direct entry (PUBLIC, an
  *                      inherited role, ownership, or a null/default ACL).
+ * Not supported: a database whose PostGIS extension lives outside schema public (M1 then pins a different search_path on
+ * the audit function); the probe refuses it at trigger_function (doc 16 section 3.3).
  */
 export const M1C_STATE_PROBE_SQL = `with
-fn as (select p.oid, p.proowner, p.prorettype, p.prolang, p.prosecdef, p.proconfig, p.prosrc,
-              coalesce(p.proacl, acldefault('f', p.proowner)) as acl
+fn as (select p.oid, p.proowner, coalesce(p.proacl, acldefault('f', p.proowner)) as acl,
+              btrim(regexp_replace(pg_get_functiondef(p.oid), '\\s+', ' ', 'g')) as def
          from pg_proc p where p.oid = to_regprocedure('internal.batch_delete_audit_append_only()')),
 fa as (select a.grantee, a.privilege_type from fn, aclexplode(fn.acl) a),
-tb as (select c.oid, c.relkind, coalesce(c.relacl, acldefault('r', c.relowner)) as acl
+tb as (select c.oid, c.relkind, c.relowner, c.relrowsecurity, c.relforcerowsecurity, c.relpersistence, c.relhasrules, c.relispartition,
+              coalesce(c.relacl, acldefault('r', c.relowner)) as acl
          from pg_class c where c.oid = to_regclass('internal.batch_delete_audit')),
 ta as (select a.grantee from tb, aclexplode(tb.acl) a),
 bd as (select p.oid, coalesce(p.proacl, acldefault('f', p.proowner)) as acl
@@ -112,24 +123,25 @@ tg as (select t.tgname, t.tgenabled, t.tgfoid, t.tgtype, t.tgnargs, t.tgqual, t.
          from pg_trigger t where t.tgrelid = to_regclass('internal.batch_delete_audit'))
 select
   exists (select 1 from tb) as audit_table,
-  exists (select 1 from fn where prorettype = 'trigger'::regtype and prolang = (select oid from pg_language where lanname = 'plpgsql')
-            and not prosecdef and proconfig in (array['search_path=internal, pg_temp'], array['search_path=public, internal, pg_temp'])
-            and prosrc like '%raise exception ''internal.batch_delete_audit is append-only''%') as trigger_function,
-  exists (select 1 from fn where proconfig = array['search_path=internal, pg_temp']) as trigger_function_pinned,
+  exists (select 1 from fn where def in (${sqlLit(collapseWhitespace(AUDIT_FN_DEF_M1C))}, ${sqlLit(collapseWhitespace(AUDIT_FN_DEF_M1_PINNED))})
+            and proowner = (select relowner from tb)) as trigger_function,
+  exists (select 1 from fn where def = ${sqlLit(collapseWhitespace(AUDIT_FN_DEF_M1C))}) as trigger_function_pinned,
   ((select count(*) from tg where not tgisinternal) = 2
     and exists (select 1 from tg where tgname = 'batch_delete_audit_no_update_delete' and tgenabled = 'O' and tgfoid = (select oid from fn)
                   and tgtype = 27 and tgnargs = 0 and tgqual is null and tgattr = '')
     and exists (select 1 from tg where tgname = 'batch_delete_audit_no_truncate' and tgenabled = 'O' and tgfoid = (select oid from fn)
                   and tgtype = 34 and tgnargs = 0 and tgqual is null and tgattr = '')) as triggers,
-  coalesce((select tb.relkind = 'r' and (select array_agg(a.attname::text order by a.attnum) from pg_attribute a
-              where a.attrelid = tb.oid and a.attnum > 0 and not a.attisdropped) = array['id', 'batch_id', 'batch_name', 'actor_id', 'deleted_at', 'member_count'] from tb), false) as table_shape,
-  (not exists (select 1 from ta where grantee = 0 or grantee in (select oid from guarded))
-    and not exists (select 1 from guarded g, tb where has_table_privilege(g.oid, tb.oid, 'select,insert,update,delete,truncate,references,trigger'))) as table_acl_clean,
-  (not exists (select 1 from fa where privilege_type = 'EXECUTE' and (grantee = 0 or grantee in (select oid from guarded)))
-    and not exists (select 1 from guarded g, fn where has_function_privilege(g.oid, fn.oid, 'execute'))) as function_acl_clean,
+  coalesce((select ${TABLE_CANON_SQL} = ${sqlLit(TABLE_CANON_M1C)} from tb), false) as table_shape,
+  coalesce((select not exists (select 1 from ta where grantee = 0 or grantee in (select oid from guarded))
+    and not exists (select 1 from pg_attribute a where a.attrelid = tb.oid and a.attnum > 0 and not a.attisdropped and a.attacl is not null)
+    and not exists (select 1 from guarded g where has_table_privilege(g.oid, tb.oid, 'select,insert,update,delete,truncate,references,trigger')
+                       or has_any_column_privilege(g.oid, tb.oid, 'select,insert,update,references')) from tb), false) as table_acl_clean,
+  coalesce((select not exists (select 1 from fa where privilege_type = 'EXECUTE' and (grantee = 0 or grantee in (select oid from guarded)))
+    and not exists (select 1 from guarded g where has_function_privilege(g.oid, fn.oid, 'execute')) from fn), false) as function_acl_clean,
   to_regprocedure('public.batch_delete(uuid)') is not null as batch_delete,
-  coalesce((select (not exists (select 1 from bda where grantee = 0 or grantee in (select oid from pg_roles where rolname in ('anon', 'authenticated')))
-                  and exists (select 1 from bda where grantee = (select oid from pg_roles where rolname = 'recruiter_api'))) from bd), true) as batch_delete_acl_ok,
+  coalesce((select (not exists (select 1 from bda where grantee = 0)
+                  and not exists (select 1 from pg_roles r where r.rolname in ('anon', 'authenticated') and has_function_privilege(r.oid, bd.oid, 'execute'))
+                  and coalesce((select has_function_privilege(r.oid, bd.oid, 'execute') from pg_roles r where r.rolname = 'recruiter_api'), false)) from bd), true) as batch_delete_acl_ok,
   not coalesce((select has_table_privilege(r.oid, 'public.batches', 'delete') from pg_roles r where r.rolname = 'recruiter_api'), false) as batches_delete_clean,
   exists (select 1 from fa where privilege_type = 'EXECUTE' and grantee = (select oid from pg_roles where rolname = 'service_role')) as service_role_direct_execute,
   exists (select 1 from fa where privilege_type = 'EXECUTE' and grantee <> coalesce((select oid from pg_roles where rolname = 'service_role'), -1)

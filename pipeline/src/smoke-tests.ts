@@ -25,6 +25,7 @@ import { RECORDED_PROJECT_REFS, parseSupabaseDbTarget, verifyPipelineTarget } fr
 import { readFileSync } from 'node:fs';
 import { REPOSITORY_ROOT } from './staging-rebuilt.js';
 import { RETENTION_RULES, runRetention, type Queryable } from './retention.js';
+import { AUDIT_FN_BODY_M1C, AUDIT_FN_DEF_M1C, AUDIT_FN_DEF_M1_PINNED, TABLE_CANON_M1C, collapseWhitespace } from './reapply-m1c-expected.js';
 import { REAPPLY_PRECHECKS, classifyM1cState, idempotentReapplySql } from './reapply.js';
 import { assessLedger, type LedgerFacts } from './ledger-preflight.js';
 import { sanitizeRunnerError } from './staging-sql-runner.js';
@@ -539,6 +540,16 @@ test('location candidate queue excludes already-attempted no-match addresses', (
   const { sql } = buildCandidateQuery(100);
   assert.match(sql, /where geocode_addr_hash is distinct from address_hash/i);
   assert.doesNotMatch(sql, /geom is null or/i);
+});
+
+test('reapply-m1c expected audit-function text is the reviewed M1c file text (offline drift guard)', () => {
+  const file = readFileSync(resolve(REPOSITORY_ROOT, 'supabase/pending/M1c_batch_delete_audit.sql'), 'utf8').replace(/\r\n/g, '\n');
+  const m = /create function internal\.batch_delete_audit_append_only\(\)\nreturns trigger\nlanguage plpgsql\nset search_path = internal, pg_temp\nas \$\$\n([\s\S]*?)\n\$\$;/.exec(file);
+  assert.ok(m, 'the reviewed M1c file no longer has the audit function in the expected form; update reapply-m1c-expected.ts from a fresh local apply');
+  assert.equal(m[1], AUDIT_FN_BODY_M1C);
+  assert.ok(collapseWhitespace(AUDIT_FN_DEF_M1C).includes(collapseWhitespace(AUDIT_FN_BODY_M1C)));
+  assert.ok(AUDIT_FN_DEF_M1_PINNED.includes("SET search_path TO 'public', 'internal', 'pg_temp'") && !AUDIT_FN_DEF_M1_PINNED.includes("TO 'internal', 'pg_temp'"));
+  for (const col of ['id', 'batch_id', 'batch_name', 'actor_id', 'deleted_at', 'member_count']) assert.ok(TABLE_CANON_M1C.includes(`${col} `));
 });
 
 test('reapply-m1c state classification: backed-out state and the interrupted-run state are the only accepted ones; every guard fact must be true', async () => {
