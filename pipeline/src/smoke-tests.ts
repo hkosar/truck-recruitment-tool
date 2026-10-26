@@ -20,7 +20,7 @@ import {
 } from './sources/safety.js';
 import { parse as parsePgConnectionString } from 'pg-connection-string';
 import { STAGING_SQL_ACTIONS, planStagingSqlRun } from './staging-sql-runner.js';
-import { REBUILT_STAGING_SQL_ACTIONS, planRebuiltSqlRun, retargetSqlToRebuiltRef } from './staging-rebuilt.js';
+import { REBUILT_STAGING_SQL_ACTIONS, executeRebuiltSqlPlan, planRebuiltSqlRun, retargetSqlToRebuiltRef } from './staging-rebuilt.js';
 import { RECORDED_PROJECT_REFS, parseSupabaseDbTarget, verifyPipelineTarget } from './target-guard.js';
 import { readFileSync } from 'node:fs';
 import { RETENTION_RULES, runRetention, type Queryable } from './retention.js';
@@ -534,6 +534,46 @@ test('location candidate queue excludes already-attempted no-match addresses', (
   const { sql } = buildCandidateQuery(100);
   assert.match(sql, /where geocode_addr_hash is distinct from address_hash/i);
   assert.doesNotMatch(sql, /geom is null or/i);
+});
+
+test('rebuilt staging runner: every migration is one transaction that also records its version and name in the ledger', async () => {
+  const rebuilt = 'abcdefghijklmnopqrst';
+  const url = `postgresql://postgres.${rebuilt}:redacted-pw@aws-0-us-east-2.pooler.supabase.com:5432/postgres`;
+  const spec = REBUILT_STAGING_SQL_ACTIONS['apply-migrations']!;
+  const plan = planRebuiltSqlRun({ action: 'apply-migrations', dbUrl: url, confirm: spec.confirmation, recordedRebuiltRef: rebuilt });
+  const files = plan.steps.map((s) => s.label);
+  assert.equal(files.length, 20);
+  for (const step of plan.steps) {
+    assert.equal(step.transaction, true, step.label);
+    assert.deepEqual(step.ledger, { version: step.label.slice(0, 14), name: step.label.slice(15, -'.sql'.length) });
+  }
+  // Order of what is sent: guard, ledger table, empty-ledger check, then per file begin / sql / insert / commit.
+  const sent: string[] = [];
+  const client = {
+    async connect() {},
+    async query(sql: string, params?: unknown[]) {
+      sent.push(params ? `${sql} ${JSON.stringify(params)}` : sql);
+      if (/to_regclass/.test(sql)) return { rows: [{ t: null }] };
+      if (/count\(\*\)::int/.test(sql)) return { rows: [{ n: 0 }] };
+      return { rows: [] };
+    },
+    async end() {},
+  };
+  await executeRebuiltSqlPlan({ ...plan, steps: plan.steps.slice(0, 2) }, () => client);
+  const afterGuards = sent.findIndex((q) => q === 'begin');
+  assert.deepEqual(
+    sent.slice(afterGuards).map((q) => (q.startsWith('insert into supabase_migrations') ? q.replace(/^.*\(\$1, \$2, array\[\]::text\[\]\)/, 'insert') : q === 'begin' || q === 'commit' ? q : 'sql')),
+    ['begin', 'sql', 'insert [\"20260720000100\",\"extensions\"]', 'commit', 'begin', 'sql', 'insert [\"20260720000200\",\"enums\"]', 'commit'],
+  );
+  // A failing file is rolled back (the insert never commits) and nothing later runs.
+  const failing = { ...client, async query(sql: string, params?: unknown[]) { sent.push(sql); if (/to_regclass/.test(sql)) return { rows: [{ t: null }] }; if (/count\(\*\)::int/.test(sql)) return { rows: [{ n: 0 }] }; if (sql.startsWith('-- fail')) throw new Error('boom'); return { rows: [] }; } };
+  sent.length = 0;
+  const bad = { ...plan, steps: [{ ...plan.steps[0]!, sql: '-- fail' }, plan.steps[1]!] };
+  const origError = console.error; console.error = () => undefined;
+  await assert.rejects(executeRebuiltSqlPlan(bad, () => failing), /boom/);
+  console.error = origError;
+  assert.ok(sent.includes('rollback') && !sent.includes('commit'));
+  assert.equal(sent.filter((q) => q === 'begin').length, 1);
 });
 
 // ---- Sign-in ledger retention (moved from app/server/scripts/retention.test.ts) -------------

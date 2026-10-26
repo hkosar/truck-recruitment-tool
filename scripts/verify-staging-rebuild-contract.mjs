@@ -88,6 +88,8 @@ if (runner) {
     "'remove-shutdown-fixtures'",
     "'apply-migrations'",
     'migration-checksums.sha256',
+    'supabase_migrations.schema_migrations',
+    'ledger?: { version: string; name: string }',
     "'window-on'",
     "'window-off'",
     "'backout-m1c'",

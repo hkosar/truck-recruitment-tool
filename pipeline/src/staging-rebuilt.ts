@@ -69,7 +69,17 @@ export interface RebuiltSqlStep {
   label: string;
   sql: string;
   transaction: boolean;
+  /** Migration replay: recorded in supabase_migrations.schema_migrations in the SAME transaction. */
+  ledger?: { version: string; name: string };
 }
+
+/** Same shape the Supabase CLI keeps (and doc 09's reviewed adoption script writes): version, name, statements. */
+const LEDGER_TABLE_SQL = `
+  create schema if not exists supabase_migrations;
+  create table if not exists supabase_migrations.schema_migrations (version text not null primary key);
+  alter table supabase_migrations.schema_migrations add column if not exists statements text[];
+  alter table supabase_migrations.schema_migrations add column if not exists name text;`;
+const LEDGER_INSERT_SQL = 'insert into supabase_migrations.schema_migrations (version, name, statements) values ($1, $2, array[]::text[])';
 
 export interface RebuiltSqlPlan {
   action: string;
@@ -110,8 +120,12 @@ function verifiedMigrationSteps(): RebuiltSqlStep[] {
       throw new Error(`migration ${file} does not match its reviewed checksum`);
     }
     const sql = raw.toString('utf8');
-    // A file that manages its own transaction is sent as written; the rest get one transaction each.
-    return { label: file, sql, transaction: !/^\s*(begin|commit)\b/im.test(sql) };
+    // Only a top-level `begin;` / `commit;` line means the file manages its own transaction (a bare
+    // `begin` also starts every plpgsql body). None of the 20 does, so each is applied and recorded
+    // in the ledger in one transaction; a self-managed file could not be recorded atomically.
+    if (/^\s*(begin|commit)\s*;/im.test(sql)) throw new Error(`migration ${file} manages its own transaction; cannot record it in the ledger atomically`);
+    const match = /^(\d{14})_([a-z0-9_]+)\.sql$/.exec(file)!;
+    return { label: file, sql, transaction: true, ledger: { version: match[1]!, name: match[2]! } };
   });
 }
 
@@ -177,16 +191,26 @@ export function planRebuiltSqlRun(input: {
   return { action: input.action, kind: spec.kind, target, settings, steps, ...(outPath ? { outPath } : {}) };
 }
 
-export async function executeRebuiltSqlPlan(plan: RebuiltSqlPlan): Promise<void> {
-  const client = new pg.Client({
-    host: plan.target.host,
-    port: plan.target.port,
-    user: plan.target.user,
-    password: plan.target.password,
-    database: plan.target.database,
+/** The part of pg.Client the executor uses; tests (and the local-database proof) inject their own. */
+export interface RebuiltSqlClient {
+  connect(): Promise<unknown>;
+  query(sql: string, params?: unknown[]): Promise<any>;
+  end(): Promise<void>;
+}
+
+const defaultClientFactory = (target: SupabaseDbTarget): RebuiltSqlClient =>
+  new pg.Client({
+    host: target.host,
+    port: target.port,
+    user: target.user,
+    password: target.password,
+    database: target.database,
     // Same relaxed pooler TLS setting as the pipeline (see db.ts TODO(live-db)).
     ssl: { rejectUnauthorized: false },
   });
+
+export async function executeRebuiltSqlPlan(plan: RebuiltSqlPlan, clientFactory: (target: SupabaseDbTarget) => RebuiltSqlClient = defaultClientFactory): Promise<void> {
+  const client = clientFactory(plan.target);
   await client.connect();
   try {
     for (const [name, value] of plan.settings) {
@@ -196,6 +220,9 @@ export async function executeRebuiltSqlPlan(plan: RebuiltSqlPlan): Promise<void>
       // Refuse to replay onto a database that already has the baseline.
       const present = await client.query("select to_regclass('public.profiles') as t");
       if (present.rows[0]?.t !== null) throw new Error('public.profiles already exists; the baseline replay only runs on an empty project');
+      await client.query(LEDGER_TABLE_SQL);
+      const recorded = await client.query('select count(*)::int as n from supabase_migrations.schema_migrations');
+      if (recorded.rows[0]?.n !== 0) throw new Error('supabase_migrations.schema_migrations is not empty; the baseline replay only runs on a clean ledger');
     }
     if (plan.kind === 'snapshot') {
       await client.query('begin read only');
@@ -216,6 +243,7 @@ export async function executeRebuiltSqlPlan(plan: RebuiltSqlPlan): Promise<void>
       if (step.transaction) await client.query('begin');
       try {
         await client.query(step.sql);
+        if (step.ledger) await client.query(LEDGER_INSERT_SQL, [step.ledger.version, step.ledger.name]);
         if (step.transaction) await client.query('commit');
       } catch (err) {
         if (step.transaction) await client.query('rollback').catch(() => undefined);
