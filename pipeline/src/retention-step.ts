@@ -8,7 +8,8 @@
 //   or fragment), use session port 5432 and TLS, name the SAME project the pipeline already verified, and log in as
 //   recruiter_maintenance (checked again with current_user after connecting).
 // - Never fails the pipeline: refusals and errors are logged (counts and reasons only, never the
-//   URL) and alerted; the run continues.
+//   URL) and alerted; the run continues. If no alert email can be sent, runRetentionForCron reports
+//   it so run.ts exits non-zero AFTER ingestion is complete (Render's cron failure notification).
 
 import pg from 'pg';
 import type { Config } from './config.js';
@@ -103,4 +104,43 @@ export async function runRetentionStep(
   } finally {
     if (connected) await client.end().catch(() => undefined);
   }
+}
+
+export interface CronRetentionDeps extends Omit<RetentionStepDeps, 'alert'> {
+  /** Sends the owner alert; resolves true only if it was actually sent, false if skipped (not configured). */
+  sendAlert: (message: string) => Promise<boolean>;
+}
+
+/**
+ * Runs the retention step for the nightly cron and reports whether a problem went UNALERTED.
+ * Retention failure must never fail ingestion, but it must still reach the owner. Email is the
+ * existing alert path; when it is not configured or cannot be sent, the caller sets a non-zero
+ * exit code AFTER the whole chain has finished and been recorded, so Render's cron failure
+ * notification (the existing fallback) fires while the ingested data and pipeline_runs rows stay
+ * as they are. This function never throws.
+ */
+export async function runRetentionForCron(
+  config: Pick<Config, 'MAINTENANCE_DATABASE_URL'>,
+  verifiedProjectRef: string,
+  deps: CronRetentionDeps,
+): Promise<{ outcome: RetentionOutcome; unalerted: boolean }> {
+  let problem = false;
+  let delivered = false;
+  const alert = async (message: string): Promise<void> => {
+    problem = true;
+    try {
+      if (await deps.sendAlert(message)) delivered = true;
+    } catch {
+      deps.log.error('retention.alert_failed', {});
+    }
+  };
+  let outcome: RetentionOutcome;
+  try {
+    outcome = await runRetentionStep(config, verifiedProjectRef, { ...deps, alert });
+  } catch {
+    deps.log.error('retention.failed', { reason: 'unexpected_error' });
+    outcome = { status: 'failed', reason: 'connect_or_query_error' };
+    await alert('Retention failed: unexpected error');
+  }
+  return { outcome, unalerted: problem && !delivered };
 }

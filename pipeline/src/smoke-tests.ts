@@ -24,7 +24,7 @@ import { REBUILT_STAGING_SQL_ACTIONS, planRebuiltSqlRun, retargetSqlToRebuiltRef
 import { RECORDED_PROJECT_REFS, parseSupabaseDbTarget, verifyPipelineTarget } from './target-guard.js';
 import { readFileSync } from 'node:fs';
 import { RETENTION_RULES, runRetention, type Queryable } from './retention.js';
-import { retentionClientConfig, runRetentionStep, type RetentionClient } from './retention-step.js';
+import { retentionClientConfig, runRetentionForCron, runRetentionStep, type RetentionClient } from './retention-step.js';
 
 type Test = { name: string; run: () => void | Promise<void> };
 const tests: Test[] = [];
@@ -699,6 +699,24 @@ test('retention step: refuses if the session is not recruiter_maintenance; a DB 
   assert.deepEqual(await runRetentionStep({ MAINTENANCE_DATABASE_URL: maintUrl('recruiter_maintenance', PROD) }, PROD, down.deps), { status: 'failed', reason: 'connect_or_query_error' });
   assert.equal(down.alerts.length, 1);
   assert.equal(down.ended(), 1);
+});
+
+test('retention cron: a failure with no email delivered is flagged unalerted; delivered or healthy is not; never throws', async () => {
+  const url = { MAINTENANCE_DATABASE_URL: maintUrl('recruiter_maintenance', PROD) };
+  const cron = async (h: ReturnType<typeof stepHarness>, config: { MAINTENANCE_DATABASE_URL: string | undefined }, sendAlert: (m: string) => Promise<boolean>) =>
+    runRetentionForCron(config, PROD, { log: h.deps.log, createClient: h.deps.createClient, sendAlert });
+  const down = () => stepHarness('recruiter_maintenance', true);
+  // email not configured (sendFailureEmail returns false): unalerted
+  assert.equal((await cron(down(), url, async () => false)).unalerted, true);
+  // email send throws: unalerted, and nothing escapes
+  assert.equal((await cron(down(), url, async () => { throw new Error('resend down'); })).unalerted, true);
+  // email delivered: alerted, no non-zero exit needed
+  assert.equal((await cron(down(), url, async () => true)).unalerted, false);
+  // refusal (malformed URL) with no email: unalerted
+  assert.equal((await cron(stepHarness(), { MAINTENANCE_DATABASE_URL: 'not a url' }, async () => false)).unalerted, true);
+  // healthy run and not-configured: nothing to alert
+  assert.equal((await cron(stepHarness(), url, async () => false)).unalerted, false);
+  assert.equal((await cron(stepHarness(), { MAINTENANCE_DATABASE_URL: undefined }, async () => false)).unalerted, false);
 });
 
 let failed = 0;

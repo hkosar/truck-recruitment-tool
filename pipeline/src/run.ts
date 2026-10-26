@@ -10,7 +10,7 @@ import { runGeocode } from './geocode.js';
 import { runFacets } from './facets.js';
 import { runDqReport } from './dq-report.js';
 import { verifyPipelineTarget } from './target-guard.js';
-import { runRetentionStep } from './retention-step.js';
+import { runRetentionForCron } from './retention-step.js';
 import { sendFailureEmail } from './runs.js';
 
 /**
@@ -237,10 +237,18 @@ async function main(): Promise<void> {
         await runChain(ctx, socrata, 'nightly', NIGHTLY_STEPS, args);
         // After a successful chain only (a failed chain throws above and skips it; the next night
         // catches up). Its own connection and role; it never fails or rolls back the run.
-        await runRetentionStep(config, target.projectRef, {
-          log: ctx.log,
-          alert: (message) => sendFailureEmail(ctx, { job: 'nightly', step: 'retention' }, message).catch(() => undefined),
-        });
+        {
+          const { unalerted } = await runRetentionForCron(config, target.projectRef, {
+            log: ctx.log,
+            sendAlert: (message) => sendFailureEmail(ctx, { job: 'nightly', step: 'retention' }, message),
+          });
+          if (unalerted) {
+            // No email went out. Ingestion is complete and recorded, so exiting non-zero now only
+            // lets Render's cron failure notification (the existing fallback) reach the owner.
+            ctx.log.error('retention.unalerted_failure_exit', { note: 'ingestion completed; non-zero exit so the cron failure notification fires' });
+            process.exitCode = 1;
+          }
+        }
         break;
       case 'monthly':
         await runChain(ctx, socrata, 'monthly', MONTHLY_STEPS, args);
