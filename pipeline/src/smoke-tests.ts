@@ -1,4 +1,6 @@
 import { existsSync } from 'node:fs';
+import { tmpdir } from 'node:os';
+import { resolve } from 'node:path';
 import assert from 'node:assert/strict';
 import { parseArgs } from './run.js';
 import { loadConfig } from './config.js';
@@ -18,6 +20,7 @@ import {
 } from './sources/safety.js';
 import { parse as parsePgConnectionString } from 'pg-connection-string';
 import { STAGING_SQL_ACTIONS, planStagingSqlRun } from './staging-sql-runner.js';
+import { REBUILT_STAGING_SQL_ACTIONS, planRebuiltSqlRun, retargetSqlToRebuiltRef } from './staging-rebuilt.js';
 import { RECORDED_PROJECT_REFS, parseSupabaseDbTarget, verifyPipelineTarget } from './target-guard.js';
 import { readFileSync } from 'node:fs';
 import { RETENTION_RULES, runRetention, type Queryable } from './retention.js';
@@ -250,6 +253,72 @@ test('staging SQL runner verifies the staging project offline before any connect
   refuse({ action: 'cleanup', dbUrl: pooler(staging), confirm: reset.confirmation }, /--confirm=/);
   refuse({ action: 'reset', dbUrl: undefined, confirm: reset.confirmation }, /STAGING_DB_URL is required/);
   refuse({ action: 'drop-everything', dbUrl: pooler(staging), confirm: reset.confirmation }, /Unknown staging SQL action/);
+});
+
+test('rebuilt staging runner: refused until a ref is recorded, then only that exact ref, with the same guards', () => {
+  const { production, staging } = RECORDED_PROJECT_REFS;
+  const rebuilt = 'abcdefghijklmnopqrst';
+  const pooler = (ref: string, port = 5432) => `postgresql://postgres.${ref}:redacted@aws-0-us-east-2.pooler.supabase.com:${port}/postgres`;
+  const fixtures = REBUILT_STAGING_SQL_ACTIONS['install-shutdown-fixtures']!;
+  const plan = (over: Partial<Parameters<typeof planRebuiltSqlRun>[0]> = {}) =>
+    planRebuiltSqlRun({ action: 'install-shutdown-fixtures', dbUrl: pooler(rebuilt), confirm: fixtures.confirmation, recordedRebuiltRef: rebuilt, ...over });
+
+  // No rebuilt ref is recorded in this commit, so the real default refuses everything.
+  assert.equal(RECORDED_PROJECT_REFS.stagingRebuilt, null);
+  assert.throws(() => planRebuiltSqlRun({ action: 'window-on', dbUrl: pooler(rebuilt), confirm: REBUILT_STAGING_SQL_ACTIONS['window-on']!.confirmation }), /not recorded yet/);
+
+  const ok = plan();
+  assert.equal(ok.target.projectRef, rebuilt);
+  assert.deepEqual(ok.settings, [
+    ['app.staging_runner_verified_ref', rebuilt],
+    ['app.staging_project_ref', rebuilt],
+    ['app.staging_shutdown_fixtures_confirmation', fixtures.confirmation],
+  ]);
+  // The file is re-pinned in memory: the new ref replaces the old one, which must not remain.
+  const sql = ok.steps[0]!.sql;
+  assert.ok(sql.includes(`'${rebuilt}'`) && !sql.includes(staging) && !sql.includes(production));
+
+  const refuse = (over: Partial<Parameters<typeof planRebuiltSqlRun>[0]>, pattern: RegExp) => assert.throws(() => plan(over), pattern);
+  refuse({ dbUrl: pooler(production) }, /refuses the production/);
+  refuse({ dbUrl: pooler(staging) }, /only targets the recorded rebuilt/);
+  refuse({ dbUrl: pooler('zzzzzzzzzzzzzzzzzzzz') }, /only targets the recorded rebuilt/);
+  refuse({ dbUrl: pooler(rebuilt, 6543) }, /port 5432/);
+  refuse({ dbUrl: `${pooler(rebuilt)}?user=postgres.${production}` }, /query parameters/);
+  refuse({ dbUrl: undefined }, /STAGING_DB_URL is required/);
+  refuse({ confirm: 'yes' }, /--confirm=/);
+  refuse({ confirm: REBUILT_STAGING_SQL_ACTIONS['remove-shutdown-fixtures']!.confirmation }, /--confirm=/);
+  refuse({ action: 'drop-everything' }, /Unknown rebuilt/);
+  refuse({ out: '/tmp/x' }, /only valid for snapshot/);
+  // A recorded ref must itself be sane: never production, never the old staging project.
+  refuse({ recordedRebuiltRef: production, dbUrl: pooler(production) }, /invalid or equals/);
+  refuse({ recordedRebuiltRef: staging, dbUrl: pooler(staging) }, /invalid or equals/);
+  refuse({ recordedRebuiltRef: 'short', dbUrl: pooler(rebuilt) }, /invalid or equals/);
+
+  // Every action's file exists, and every pinned file re-pins cleanly.
+  for (const [action, spec] of Object.entries(REBUILT_STAGING_SQL_ACTIONS)) {
+    const p = planRebuiltSqlRun({
+      action,
+      dbUrl: pooler(rebuilt),
+      confirm: spec.confirmation,
+      recordedRebuiltRef: rebuilt,
+      ...(spec.kind === 'snapshot' ? { out: resolve(tmpdir(), `tnbs-snapshot-test-${process.pid}.json`) } : {}),
+    });
+    assert.ok(p.steps.length >= 1, action);
+    for (const step of p.steps) assert.ok(!step.sql.includes(staging) && !step.sql.includes(production), `${action}: ${step.label}`);
+  }
+  assert.equal(planRebuiltSqlRun({ action: 'apply-migrations', dbUrl: pooler(rebuilt), confirm: REBUILT_STAGING_SQL_ACTIONS['apply-migrations']!.confirmation, recordedRebuiltRef: rebuilt }).steps.length, 20);
+  // Snapshot output must be absolute, new, and outside the repository.
+  const snap = REBUILT_STAGING_SQL_ACTIONS.snapshot!;
+  const snapPlan = (out: string | undefined) => planRebuiltSqlRun({ action: 'snapshot', dbUrl: pooler(rebuilt), confirm: snap.confirmation, recordedRebuiltRef: rebuilt, out });
+  assert.throws(() => snapPlan(undefined), /requires --out/);
+  assert.throws(() => snapPlan('relative.json'), /requires --out/);
+  assert.throws(() => snapPlan(resolve(process.cwd(), 'snapshot.json')), /outside the repository/);
+  assert.throws(() => snapPlan(resolve(import.meta.dirname, '..', 'package.json')), /outside the repository/);
+
+  // The re-pin helper refuses a file that holds the production ref, or has nothing to re-pin.
+  assert.throws(() => retargetSqlToRebuiltRef(`select '${production}'`, rebuilt, false), /production/);
+  assert.throws(() => retargetSqlToRebuiltRef('select 1', rebuilt, true), /no pinned staging ref/);
+  assert.equal(retargetSqlToRebuiltRef(`select '${staging}'`, rebuilt, true), `select '${rebuilt}'`);
 });
 
 test('Socrata defaults to memory-safe 10k pages', async () => {

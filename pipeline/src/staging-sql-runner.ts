@@ -2,6 +2,7 @@ import { readFileSync } from 'node:fs';
 import { resolve } from 'node:path';
 import { pathToFileURL } from 'node:url';
 import pg from 'pg';
+import { executeRebuiltSqlPlan, planRebuiltSqlRun } from './staging-rebuilt.js';
 import { RECORDED_PROJECT_REFS, parseSupabaseDbTarget, type SupabaseDbTarget } from './target-guard.js';
 
 /**
@@ -108,21 +109,38 @@ export async function executeStagingSqlPlan(plan: StagingSqlPlan): Promise<void>
   }
 }
 
-function parseRunnerArgs(argv: readonly string[]): { action: string; confirm: string | undefined; execute: boolean } {
+function parseRunnerArgs(argv: readonly string[]): { action: string; confirm: string | undefined; execute: boolean; project: string; out: string | undefined } {
   let action = '';
   let confirm: string | undefined;
   let execute = false;
+  let project = 'current';
+  let out: string | undefined;
   for (const arg of argv) {
     if (arg.startsWith('--action=')) action = arg.slice('--action='.length);
     else if (arg.startsWith('--confirm=')) confirm = arg.slice('--confirm='.length);
+    else if (arg.startsWith('--project=')) project = arg.slice('--project='.length);
+    else if (arg.startsWith('--out=')) out = arg.slice('--out='.length);
     else if (arg === '--execute') execute = true;
     else throw new Error(`Unknown argument ${arg.split('=')[0]}`);
   }
-  return { action, confirm, execute };
+  if (project !== 'current' && project !== 'rebuilt') throw new Error('--project must be current or rebuilt');
+  return { action, confirm, execute, project, out };
 }
 
 async function main(): Promise<void> {
   const args = parseRunnerArgs(process.argv.slice(2));
+  if (args.project === 'rebuilt') {
+    // The rebuilt project has its own guarded planner (staging-rebuilt.ts); --out is snapshot-only.
+    const rebuilt = planRebuiltSqlRun({ action: args.action, dbUrl: process.env.STAGING_DB_URL, confirm: args.confirm, out: args.out });
+    console.log(JSON.stringify({ msg: 'staging-sql.verified', action: rebuilt.action, steps: rebuilt.steps.length, target: 'recorded rebuilt staging project' }));
+    if (!args.execute) {
+      console.log(JSON.stringify({ msg: 'staging-sql.plan_only', hint: 'add --execute to run' }));
+      return;
+    }
+    await executeRebuiltSqlPlan(rebuilt);
+    console.log(JSON.stringify({ msg: 'staging-sql.done', action: rebuilt.action }));
+    return;
+  }
   const plan = planStagingSqlRun({ action: args.action, dbUrl: process.env.STAGING_DB_URL, confirm: args.confirm });
   // Never print the connection string, password, or host.
   console.log(JSON.stringify({ msg: 'staging-sql.verified', action: plan.action, file: plan.file, target: 'recorded staging project' }));

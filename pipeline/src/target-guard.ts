@@ -1,5 +1,11 @@
 const PRODUCTION_PROJECT_REF = 'ejrfobddnojbijzrjbii';
 const STAGING_PROJECT_REF = 'yhyoxhtguyturgdhwywc';
+/**
+ * The rebuilt staging project (doc 16 section 1.3, R1). It does not exist until the owner creates it
+ * (approval 1); recording its ref here is a small reviewed commit of its own. While this is null
+ * the runner refuses every action aimed at the rebuilt project.
+ */
+const REBUILT_STAGING_PROJECT_REF: string | null = null;
 
 export type PipelineEnvironment = 'prod' | 'dev';
 
@@ -135,7 +141,7 @@ export function verifyPipelineTarget(input: TargetGuardInput): VerifiedTarget {
     if (!allowed.has(projectRef)) {
       throw new Error(`Dev project ref ${projectRef} is not in PIPELINE_ALLOWED_DEV_REFS`);
     }
-    if (projectRef === STAGING_PROJECT_REF && input.allowStagingWrites !== true) {
+    if ((projectRef === STAGING_PROJECT_REF || projectRef === REBUILT_STAGING_PROJECT_REF) && input.allowStagingWrites !== true) {
       throw new Error(
         'PIPELINE_ENV=dev refuses the shared staging project (fictional fixture data only) unless PIPELINE_ALLOW_STAGING_WRITES=true'
       );
@@ -147,4 +153,5 @@ export function verifyPipelineTarget(input: TargetGuardInput): VerifiedTarget {
 export const RECORDED_PROJECT_REFS = {
   production: PRODUCTION_PROJECT_REF,
   staging: STAGING_PROJECT_REF,
+  stagingRebuilt: REBUILT_STAGING_PROJECT_REF,
 } as const;
