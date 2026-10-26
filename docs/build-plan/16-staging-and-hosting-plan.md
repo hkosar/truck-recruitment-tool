@@ -77,13 +77,21 @@ when needed, $0; (c) transfer it to a Free organization and pause it, $0, restor
    confirmation, dry run first).
 4. *Operator:* dry run, then `--execute`: replay the 20 migrations in order, one transaction
    each, stopping on the first error; checksums as `scripts/verify-migration-baseline.mjs`.
-5. *Operator:* fictional fixtures, the staging identity marker, the hosted Auth fixture
-   accounts for A5b, and the 12 eligible T-SHUTDOWN fixture identities (§1.5 row 10) (doc 11
-   commands, new ref); expect `staging-sql.done`. Removing the shutdown
-   fixtures accepts exactly those 12 identities or none (nothing installed is a no-op); any
-   other count, such as 11, or a stray identity in the reserved range is refused and rolls back.
+5. *Operator:* fictional fixtures, the staging identity marker and the hosted Auth fixture
+   accounts for A5b (doc 11 commands, new ref), in their supported order (profile fixtures, then
+   the marker, then the reset, then the Auth fixtures); expect `staging-sql.done`.
+   **The 12 eligible T-SHUTDOWN fixture identities (§1.5 row 10) are NOT part of this step.**
+   `supabase/staging/rebuild/install-shutdown-fixtures.sql` requires `team_add_person` (M1b) and
+   `batch_delete` (M1c) and refuses until M1, M1b and M1c are applied, and §1.4 applies them
+   later, under the separately approved approval 6. So the shutdown fixtures are installed only
+   **after** §1.4 steps 1–3 have completed, as an operator follow-up whose authorization the
+   manager records (there is no separate numbered approval line for it); running M1 early to
+   satisfy this step is not allowed. Removing the shutdown fixtures accepts exactly those 12
+   identities or none (nothing installed is a no-op); any other count, such as 11, or a stray
+   identity in the reserved range is refused and rolls back.
 6. *Operator:* `snapshot` (`supabase/backout/pre-cutover-snapshot.sql`), stored outside the
-   repo.
+   repo. It is read-only but has no numbered approval line in §6: it is an operator follow-up
+   whose authorization the manager must record before it runs (it must be taken before M1).
 7. **Legacy rehearsal frontend (approval 5).** The backout returns users to the old app, so the
    rehearsal needs the old app **pointed at the new project**. The operator builds the pre-cutover
    SPA (the commit the current staging Worker serves, doc 11) with the **new** staging project's
@@ -105,6 +113,7 @@ when needed, $0; (c) transfer it to a Free organization and pause it, $0, restor
    applied.
 2. `supabase/pending/M1b_add_person.sql` (D8, approved).
 3. `supabase/pending/M1c_batch_delete_audit.sql` (Hunter "yes", 2026-10-23).
+   After these three have completed, the T-SHUTDOWN fixtures (§1.3 step 5) may be installed.
 4. *Owner (out of band, Supabase SQL editor):* set the `recruiter_app` password (LOGIN) and,
    separately, the `recruiter_maintenance` password (LOGIN). Each value goes only to the Render
    variable that uses it (§2.3 and §4).
@@ -440,8 +449,8 @@ closure are separate lines. **25 approvals.**
    exists.
 2. Engineering: the four reviewed code items of §5 · **yes** · $0.
 3. Push `wave1/integration` once, after item 2's reviews · **yes** · $0.
-4. Replay migrations, fixtures, marker and Auth fixtures on the new staging project · **yes** ·
-   $0.
+4. Replay migrations, fixtures, marker and Auth fixtures on the new staging project (the
+   T-SHUTDOWN fixtures are installed later, after approval 6; §1.3 step 5) · **yes** · $0.
 5. Legacy rehearsal frontend: an isolated Worker of the pre-cutover app pointed at the new
    project, configuration proven before M1 (§1.3 step 7) · **yes** · cost: the owner confirms
    the Cloudflare plan (not recorded in the repo).
