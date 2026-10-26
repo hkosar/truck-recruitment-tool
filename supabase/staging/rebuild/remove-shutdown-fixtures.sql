@@ -6,13 +6,17 @@
 
 begin;
 
+-- The twelve exact identities: each id must carry its own expected label, address and test metadata.
+-- Nothing else in the reserved id range is selected (a stray row there makes the final check refuse).
 create temporary table tmp_shutdown_fixtures on commit drop as
-select u.id from auth.users u
- where u.id::text like '71000000-0000-4000-8000-0000000002%'
+select u.id
+  from generate_series(1, 12) n
+  join auth.users u
+    on u.id = ('71000000-0000-4000-8000-0000000002' || lpad(n::text, 2, '0'))::uuid
+   and u.raw_user_meta_data->>'label' = 'shutdown-' || lpad(n::text, 2, '0')
+   and u.email = 'shutdown-' || lpad(n::text, 2, '0') || '@tnbs-recruiter.example.invalid'
    and u.raw_user_meta_data->>'test_only' = 'true'
-   and u.raw_user_meta_data->>'test_run_id' = 'stg-db-20260723-0042'
-   and u.raw_user_meta_data->>'label' like 'shutdown-%'
-   and u.email like 'shutdown-%@tnbs-recruiter.example.invalid';
+   and u.raw_user_meta_data->>'test_run_id' = 'stg-db-20260723-0042';
 
 do $$
 begin
@@ -24,6 +28,9 @@ begin
   end if;
   if to_regclass('staging_identity.marker') is null then
     raise exception 'shutdown fixture removal refused: this database has no staging identity marker';
+  end if;
+  if (select count(*) from tmp_shutdown_fixtures) <> 12 then
+    raise exception 'shutdown fixture removal refused: expected exactly 12 matching fixture identities, found %', (select count(*) from tmp_shutdown_fixtures);
   end if;
   if exists (select 1 from public.contact_logs where user_id in (select id from tmp_shutdown_fixtures))
      or exists (select 1 from public.batch_activity where actor_id in (select id from tmp_shutdown_fixtures))

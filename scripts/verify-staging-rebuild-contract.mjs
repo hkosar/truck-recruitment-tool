@@ -51,16 +51,20 @@ if (remove) {
   const c = code(remove);
   if (!c.includes("'REMOVE TNBS SHUTDOWN TEST FIXTURES'")) failures.push('remove: confirmation phrase missing');
   if (/\btruncate\b|\bdrop\s+(table|schema|function|role|database|column|constraint|index)\b/i.test(c)) failures.push('remove: must not truncate or drop');
-  // Scope: the fixtures are selected by id range, test metadata, label and address.
+  // Scope: the twelve exact identities, each with its own expected id, label, address and metadata.
   for (const required of [
-    "u.id::text like '71000000-0000-4000-8000-0000000002%'",
-    "raw_user_meta_data->>'test_only' = 'true'",
-    "raw_user_meta_data->>'test_run_id' = 'stg-db-20260723-0042'",
-    "raw_user_meta_data->>'label' like 'shutdown-%'",
-    "u.email like 'shutdown-%@tnbs-recruiter.example.invalid'",
+    "from generate_series(1, 12) n",
+    "on u.id = ('71000000-0000-4000-8000-0000000002' || lpad(n::text, 2, '0'))::uuid",
+    "u.raw_user_meta_data->>'label' = 'shutdown-' || lpad(n::text, 2, '0')",
+    "u.email = 'shutdown-' || lpad(n::text, 2, '0') || '@tnbs-recruiter.example.invalid'",
+    "u.raw_user_meta_data->>'test_only' = 'true'",
+    "u.raw_user_meta_data->>'test_run_id' = 'stg-db-20260723-0042'",
+    "(select count(*) from tmp_shutdown_fixtures) <> 12",
   ]) {
     if (!c.includes(required)) failures.push(`remove: missing fixture scope condition: ${required}`);
   }
+  // No wildcard selection of identities (like) in the selection.
+  if (/u\.(id::text|email)\s+like|raw_user_meta_data->>'label'\s+like/.test(c)) failures.push('remove: fixtures must be selected by exact id, label and address, not by wildcard');
   // Every delete is limited to the temp list of fixture ids.
   for (const match of c.matchAll(/delete\s+from\s+([\s\S]*?);/gi)) {
     if (!match[0].includes('tmp_shutdown_fixtures')) failures.push(`remove: unscoped delete: ${match[0].slice(0, 80)}`);
