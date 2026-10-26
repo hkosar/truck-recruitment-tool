@@ -25,7 +25,7 @@ import { RECORDED_PROJECT_REFS, parseSupabaseDbTarget, verifyPipelineTarget } fr
 import { readFileSync } from 'node:fs';
 import { REPOSITORY_ROOT } from './staging-rebuilt.js';
 import { RETENTION_RULES, runRetention, type Queryable } from './retention.js';
-import { REAPPLY_PRECHECKS, idempotentReapplySql } from './reapply.js';
+import { REAPPLY_PRECHECKS, classifyM1cState, idempotentReapplySql } from './reapply.js';
 import { DENIED_STATEMENTS } from './retention-dry-run.js';
 import { retentionClientConfig, runRetentionForCron, runRetentionStep, type RetentionClient } from './retention-step.js';
 
@@ -537,6 +537,36 @@ test('location candidate queue excludes already-attempted no-match addresses', (
   const { sql } = buildCandidateQuery(100);
   assert.match(sql, /where geocode_addr_hash is distinct from address_hash/i);
   assert.doesNotMatch(sql, /geom is null or/i);
+});
+
+test('reapply-m1c interrupted-run recovery: only the exact state (all M1c objects present AND service_role EXECUTE) sends the revoke alone', async () => {
+  const all = { audit_table: true, trigger_function: true, triggers: true, batch_delete: true, service_role_execute: true };
+  assert.equal(classifyM1cState({ ...all, batch_delete: false, service_role_execute: false }), 'normal');
+  assert.equal(classifyM1cState({ ...all, batch_delete: false }), 'normal');
+  assert.equal(classifyM1cState(all), 'recover');
+  assert.equal(classifyM1cState({ ...all, service_role_execute: false }), 'refuse');
+  assert.equal(classifyM1cState({ ...all, audit_table: false }), 'refuse');
+  assert.equal(classifyM1cState({ ...all, trigger_function: false }), 'refuse');
+  assert.equal(classifyM1cState({ ...all, triggers: false }), 'refuse');
+  const rebuilt = 'abcdefghijklmnopqrst';
+  const url = `postgresql://postgres.${rebuilt}:redacted-pw@aws-0-us-east-2.pooler.supabase.com:5432/postgres`;
+  const spec = REBUILT_STAGING_SQL_ACTIONS['reapply-m1c']!;
+  const plan = planRebuiltSqlRun({ action: 'reapply-m1c', dbUrl: url, confirm: spec.confirmation, recordedRebuiltRef: rebuilt });
+  const run = async (facts: Record<string, boolean>) => {
+    const sent: string[] = [];
+    const client = {
+      async connect() {},
+      async query(sql: string) { sent.push(sql); return /audit_table/.test(sql) ? { rows: [facts] } : { rows: [] }; },
+      async end() {},
+    };
+    const logs = console.log; const errs = console.error; console.log = () => undefined; console.error = () => undefined;
+    try { await executeRebuiltSqlPlan(plan, () => client); } finally { console.log = logs; console.error = errs; }
+    return sent.filter((q) => !/set_config|audit_table/.test(q));
+  };
+  assert.deepEqual(await run({ ...all, batch_delete: false }), plan.steps.map((st) => st.sql));
+  assert.deepEqual(await run(all), [plan.steps[2]!.sql]);
+  await assert.rejects(run({ ...all, service_role_execute: false }), /refused/);
+  await assert.rejects(run({ ...all, triggers: false }), /refused/);
 });
 
 test('re-apply after backout: only idempotence guards are added; the reviewed files are not edited; unknown creators fail closed', () => {

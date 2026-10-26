@@ -67,3 +67,35 @@ end $$;`,
 export const REAPPLY_POST_SQL: Readonly<Partial<Record<ReapplyTarget, string>>> = {
   m1c: 'revoke execute on function internal.batch_delete_audit_append_only() from service_role;',
 };
+
+/**
+ * Interrupted `reapply-m1c` recovery. The reapplied M1c file commits before the separate revoke runs, so a
+ * dropped connection between them leaves M1c applied with the extra grant still in place. This is NOT atomic;
+ * the probe below lets a re-run recognise exactly that state and send only the revoke.
+ */
+export const M1C_STATE_PROBE_SQL = `select
+  to_regclass('internal.batch_delete_audit') is not null as audit_table,
+  to_regprocedure('internal.batch_delete_audit_append_only()') is not null as trigger_function,
+  exists (select 1 from pg_trigger where tgrelid = to_regclass('internal.batch_delete_audit') and tgname in ('batch_delete_audit_no_update_delete', 'batch_delete_audit_no_truncate') and not tgisinternal having count(*) = 2) as triggers,
+  to_regprocedure('public.batch_delete(uuid)') is not null as batch_delete,
+  coalesce(has_function_privilege('service_role', to_regprocedure('internal.batch_delete_audit_append_only()'), 'execute'), false) as service_role_execute`;
+
+export interface M1cStateFacts {
+  audit_table: boolean;
+  trigger_function: boolean;
+  triggers: boolean;
+  batch_delete: boolean;
+  service_role_execute: boolean;
+}
+
+/**
+ * 'normal'  : public.batch_delete is absent -> the usual precheck + reapply + revoke sequence runs.
+ * 'recover' : every M1c object present AND service_role still has EXECUTE -> send only the revoke.
+ * 'refuse'  : anything else (M1c applied with the grant already gone, or only partly applied) -> the plan's own
+ *             precheck / a human decides; nothing is changed by this tool.
+ */
+export function classifyM1cState(f: M1cStateFacts): 'normal' | 'recover' | 'refuse' {
+  if (!f.batch_delete) return 'normal';
+  if (f.audit_table && f.trigger_function && f.triggers && f.service_role_execute) return 'recover';
+  return 'refuse';
+}

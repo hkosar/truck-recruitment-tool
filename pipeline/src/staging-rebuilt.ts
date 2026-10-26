@@ -2,7 +2,7 @@ import { createHash } from 'node:crypto';
 import { existsSync, readFileSync, readdirSync, writeFileSync } from 'node:fs';
 import { isAbsolute, relative, resolve } from 'node:path';
 import pg from 'pg';
-import { REAPPLY_POST_SQL, REAPPLY_PRECHECKS, idempotentReapplySql, type ReapplyTarget } from './reapply.js';
+import { M1C_STATE_PROBE_SQL, REAPPLY_POST_SQL, REAPPLY_PRECHECKS, classifyM1cState, idempotentReapplySql, type M1cStateFacts, type ReapplyTarget } from './reapply.js';
 import { MAINTENANCE_ROLE, roleOf } from './retention-step.js';
 import { runRetentionDryRun, type DryRunReport } from './retention-dry-run.js';
 import { RECORDED_PROJECT_REFS, parseSupabaseDbTarget, type SupabaseDbTarget } from './target-guard.js';
@@ -99,6 +99,8 @@ export interface RebuiltSqlPlan {
   steps: readonly RebuiltSqlStep[];
   /** Snapshot only: where the rows are written. Outside the repository. */
   outPath?: string;
+  /** reapply-m1c only: step index of the revoke that alone is sent when the interrupted-run state is detected. */
+  m1cRecoveryStep?: number;
 }
 
 /** Re-pin the old staging ref literal in a reviewed SQL file to the rebuilt ref, in memory only. */
@@ -211,7 +213,7 @@ export function planRebuiltSqlRun(input: {
     ['app.staging_project_ref', target.projectRef],
   ];
   if (spec.confirmationSetting) settings.push([spec.confirmationSetting, spec.confirmation]);
-  return { action: input.action, kind: spec.kind, target, settings, steps, ...(outPath ? { outPath } : {}) };
+  return { action: input.action, kind: spec.kind, target, settings, steps, ...(outPath ? { outPath } : {}), ...(spec.reapply === 'm1c' ? { m1cRecoveryStep: steps.length - 1 } : {}) };
 }
 
 /** The part of pg.Client the executor uses; tests (and the local-database proof) inject their own. */
@@ -269,7 +271,19 @@ export async function executeRebuiltSqlPlan(plan: RebuiltSqlPlan, clientFactory:
       }
       return;
     }
-    for (const step of plan.steps) {
+    let steps = plan.steps;
+    if (plan.m1cRecoveryStep !== undefined) {
+      const probe = await client.query(M1C_STATE_PROBE_SQL);
+      const state = classifyM1cState(probe.rows[0] as M1cStateFacts);
+      if (state === 'recover') {
+        console.log(JSON.stringify({ msg: 'staging-sql.m1c_interrupted_run_detected', note: 'M1c is applied and service_role still has EXECUTE; sending only the revoke' }));
+        steps = [plan.steps[plan.m1cRecoveryStep]!];
+      } else if (state === 'refuse') {
+        console.error(JSON.stringify({ msg: 'staging-sql.m1c_partial_state_refused' }));
+        throw new Error('re-apply M1c refused: M1c is already applied and this is not the interrupted-run state (grant already restored, or objects missing); inspect by hand');
+      }
+    }
+    for (const step of steps) {
       if (step.transaction) await client.query('begin');
       try {
         await client.query(step.sql);

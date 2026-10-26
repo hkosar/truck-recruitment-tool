@@ -355,7 +355,7 @@ guards only; existing rows and the single-row control tables such as `backout_wi
 touched). `reapply-m1c` ends with one extra step,
 `revoke execute on function internal.batch_delete_audit_append_only() from service_role;`,
 because M1's blanket grant to `service_role` reaches that retained trigger-only function, which a
-fresh apply creates later and never grants. Proved locally: a fresh apply and a backout followed
+fresh apply creates later and never grants. These steps are not atomic: if `reapply-m1c` is interrupted after the M1c file committed but before the revoke ran, running `reapply-m1c` again detects exactly that state (every M1c object present and `service_role` still holding EXECUTE) and sends only the revoke; any other partly-applied state is refused and needs a human. Proved locally: a fresh apply and a backout followed
 by the three re-applies give snapshots identical after normalization, with the role matrix 62/62.
 
 **Staging rehearsal (T-REPLAY, approval 15)** runs against the **new** staging project and
