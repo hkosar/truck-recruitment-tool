@@ -82,28 +82,36 @@ when needed, $0; (c) transfer it to a Free organization and pause it, $0, restor
    *Before the ledger preflight, the read-only environment preflight* (`environment-preflight`, dry run then
    `--execute`, confirmation `RUN TNBS ENVIRONMENT PREFLIGHT`). The creation screen pre-selects three
    switches (Data API, "Automatically expose new tables", "Enable automatic RLS") whose values the owner does
-   not know, so the runner reports, as the actual runner login and read-only (it prints only identifiers,
-   booleans and counts, and does not itself pass or fail): (a) every database event trigger (name, event,
-   enabled, function name) and whether its function text enables row-level security; (b) for objects this login
-   creates, whether `anon`, `authenticated` and `service_role` receive tables, sequences and functions by default,
-   in schema `public` and globally; (c) whether the schema list set on the `authenticator` role names `public`
-   (unknown, shown as `"unknown"`, means the owner checks the dashboard instead). Expected values, from the
-   reviewed migrations: no RLS-enabling event trigger (the migrations enable RLS and write policies explicitly;
-   a Supabase built-in trigger such as the PostgREST schema-cache watcher is normal and is judged by name);
-   `service_role` receives tables, sequences and functions by default in `public` once
-   `20260720001500_service_role_pipeline_grants.sql` has run (before the replay it does not, so `false` is
-   normal here); `anon` and `authenticated` are not granted by any migration (`20260720001200_rls.sql` states RLS
-   alone gates tables and relies on the platform default), so the legacy rehearsal frontend (approval 5) needs
-   `authenticated` to receive tables and sequences by default (expected `true` when "Automatically expose new
-   tables" is on; `false` means the owner or manager decides before approval 5, not before the replay); and the
-   Data API is expected to list `public` (the legacy frontend and M1 transition use it; M1 later closes it).
-   **Manager PASS gates, each with its remedy owner:** (a) an RLS-enabling event trigger is a STOP, the manager
-   decides, and the owner changes the project switch in the dashboard or the manager approves a documented
-   exception; (b) a default-privilege result that differs from the expected values above is decided by the manager,
-   and only the owner can change the dashboard switch (the operator never alters default privileges); (c) `public`
-   missing from the Data API list is decided by the manager, and the owner changes it in the dashboard (the
-   Settings → Data API page; label not verified). No `--execute` that writes runs before the manager records
-   PASS for all three.
+   not know. **SQL cannot establish those switches**, so they are owner dashboard checks with a STOP gate (the
+   owner reads each setting on its dashboard page, under reviewed instructions, and reports the value to the
+   manager; a setting the owner cannot find or read is a STOP). The runner adds only catalogue facts, as the
+   actual runner login and read-only, printed as identifiers, enumerated words, booleans and counts, never
+   passing or failing anything: (a) the complete event-trigger count and, up to 50, each trigger's name, event,
+   enabled state and function name, with `truncated` when the list is cut off (zero is a valid result; nothing is
+   inferred from function text, since a body can call a helper, build its statement from pieces or only mention
+   the words in a comment; every listed trigger needs an explicit human assessment, a name alone verifies
+   nothing); (b) for objects this login creates, the full set of privilege types in the login's explicit
+   default-ACL entries for `anon`, `authenticated`, `service_role` and `PUBLIC` on tables, sequences and
+   functions, in schema `public` and globally, whether any entry is grantable, the entry count, and how many
+   entries fall outside those cells (implicit defaults, such as EXECUTE on functions for PUBLIC when no entry
+   exists, and the effective access of existing objects are NOT visible there and are not reported); (c) how
+   many `pgrst.db_schemas` settings exist on the `authenticator` role (role-wide and for this database) and,
+   only when exactly one exists, whether it names `public`, otherwise `"unknown"`; this is a fact about that
+   setting and is explicitly not the Data API switch or the exposed-schema list the running API uses.
+   Expected values, from the reviewed migrations, for the manager's comparison only:
+   `20260720001500_service_role_pipeline_grants.sql` grants `service_role` table DML, sequence USAGE+SELECT and
+   function EXECUTE by default in `public` for the executing creator (explicit entries need not exist before
+   that file runs); `20260722223300_security_hardening.sql` revokes existing PUBLIC/anon function access and
+   attempts a schema-specific default revocation; `20260720001200_rls.sql` states that RLS gates tables and relies
+   on the platform default for table access, while also containing explicit column UPDATE and view SELECT
+   grants. So the legacy rehearsal frontend (approval 5) needs the owner-confirmed dashboard setting
+   "Automatically expose new tables" and the Data API listing `public`; that is an approval-5 prerequisite and
+   not proof that either is on now. An automatic-RLS helper is a conservative policy question, not something the
+   migrations prove must be absent. **Manager PASS gates, each with its remedy owner:** every listed event
+   trigger and each of the three owner-confirmed switch values is assessed and recorded; a deferral to approval 5
+   must be written down before PASS (no `--execute` that writes runs before the manager records PASS or a
+   recorded deferral of the approval-5-only items); only the owner changes a dashboard switch, and the operator
+   never alters default privileges.
    Then the ledger preflight:
    (`ledger-preflight`, dry run then `--execute`):
    a read-only catalogue assessment, as the actual runner login, of

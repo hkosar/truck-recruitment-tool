@@ -745,9 +745,11 @@ test('environment preflight action: read-only, reports identifiers/booleans/coun
     async connect() {},
     async query(sql: string) {
       sent.push(sql);
-      if (/from pg_event_trigger/.test(sql)) return { rows: [{ name: 'pgrst_ddl_watch', event: 'ddl_command_end', enabled: 'O', function: 'pgrst_ddl_watch', enables_rls: false }, { name: 'weird name with spaces', event: 'ddl_command_end', enabled: 'O', function: 'rls_auto_enable', enables_rls: true }] };
-      if (/from pg_default_acl/.test(sql)) return { rows: [{ role: 'anon', tables_public: true, sequences_public: true, functions_public: false, tables_global: false, sequences_global: false, functions_global: false }] };
-      if (/authenticator_exists/.test(sql)) return { rows: [{ authenticator_exists: true, schema_list_entries: 1, public_listed: null, api_roles_present: 3 }] };
+      if (/join pg_proc/.test(sql)) return { rows: [{ name: 'pgrst_ddl_watch', event: 'ddl_command_end', enabled: 'O', function: 'pgrst_ddl_watch' }, { name: 'weird name with spaces', event: 'ddl_command_end', enabled: 'O', function: 'rls_auto_enable' }] };
+      if (sql.includes('as total from pg_event_trigger')) return { rows: [{ total: 2 }] };
+      if (sql.includes('where r.rolname in')) return { rows: [{ role: 'anon' }, { role: 'authenticated' }, { role: 'authenticator' }] };
+      if (/from pg_default_acl/.test(sql)) return { rows: [{ grantee: 'anon', objtype: 'r', scope: 'public', privilege: 'SELECT', grantable: false }, { grantee: 'anon', objtype: 'r', scope: 'public', privilege: 'INSERT', grantable: false }, { grantee: 'PUBLIC', objtype: 'f', scope: 'global', privilege: 'EXECUTE', grantable: false }, { grantee: 'anon', objtype: 'n', scope: 'public', privilege: 'USAGE', grantable: false }] };
+      if (/authenticator_exists/.test(sql)) return { rows: [{ authenticator_exists: true, role_wide_entries: 1, this_database_entries: 0, names_public_if_single: true }] };
       return { rows: [] };
     },
     async end() {},
@@ -756,10 +758,14 @@ test('environment preflight action: read-only, reports identifiers/booleans/coun
   console.log = (...a: unknown[]) => { lines.push(String(a[0])); };
   try { await executeRebuiltSqlPlan(plan, () => client); } finally { console.log = l; }
   assert.ok(sent.includes('begin read only') && sent.includes('rollback') && sent.every((q) => !/^(insert|create|alter|drop|update|delete|grant|revoke)/i.test(q.trim())));
-  assert.ok(lines.some((x) => /"msg":"staging-sql.environment_event_triggers","count":2,"enables_rls":1/.test(x)));
+  assert.ok(lines.some((x) => /"msg":"staging-sql.environment_event_triggers","count":2,"listed":2,"truncated":false/.test(x)));
+  assert.ok(lines.every((x) => !/enables_rls/.test(x)), 'no heuristic verdict about function text is printed');
   assert.ok(lines.some((x) => /"name":"other"/.test(x)), 'a name that is not a plain identifier is never printed');
-  assert.ok(lines.some((x) => /"msg":"staging-sql.environment_default_privileges","role":"anon","tables_public":true,"sequences_public":true,"functions_public":false/.test(x)));
-  assert.ok(lines.some((x) => /"msg":"staging-sql.environment_data_api".*"public_listed":"unknown"/.test(x)));
+  assert.ok(lines.some((x) => x.includes('"msg":"staging-sql.environment_default_acl","role":"anon","role_present":true,"tables_public":["INSERT","SELECT"],"sequences_public":[],"functions_public":[]')), 'full privilege types, not a boolean');
+  assert.ok(lines.some((x) => /"msg":"staging-sql.environment_default_acl","role":"service_role","role_present":false/.test(x)), 'a missing role is reported as missing');
+  assert.ok(lines.some((x) => x.includes('"role":"PUBLIC"') && x.includes('"functions_global":["EXECUTE"]')));
+  assert.ok(lines.some((x) => /"msg":"staging-sql.environment_default_acl_total","entries":4,"outside_these_cells":1/.test(x)));
+  assert.ok(lines.some((x) => /"msg":"staging-sql.environment_authenticator_setting".*"names_public":true,"is_the_data_api_switch":false/.test(x)));
   assert.ok(lines.every((x) => !/weird name|redacted-pw|pooler/.test(x)));
 });
 
