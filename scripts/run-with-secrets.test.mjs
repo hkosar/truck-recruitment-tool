@@ -4,7 +4,8 @@
 import assert from 'node:assert/strict';
 import { PassThrough } from 'node:stream';
 import { test } from 'node:test';
-import { ALLOWED, allowListLine, main, maskTargets, parseArgs, readHidden, scrub } from './run-with-secrets.mjs';
+import { readFileSync } from 'node:fs';
+import { ALLOWED, REFUSAL_IDS, allowListLine, main, maskTargets, parseArgs, readHidden, scrub } from './run-with-secrets.mjs';
 
 function fakeTty() {
   const s = new PassThrough();
@@ -52,7 +53,7 @@ test('arguments: only allowed secret names, only a `node` child, no duplicates, 
     ['--', 'node', 'x'],
     ['--secret', 'STAGING_DB_URL'],
   ]) assert.throws(() => parseArgs(bad), `${bad.join(' ')} must be refused`);
-  assert.deepEqual(ALLOWED, ['STAGING_DB_URL', 'SUPABASE_SERVICE_ROLE_KEY', 'TEST_USER_PASSWORD']);
+  assert.deepEqual(ALLOWED, ['STAGING_DB_URL', 'SUPABASE_SERVICE_ROLE_KEY', 'TEST_USER_PASSWORD', 'OWNER_STAGING_PASSWORD']);
 });
 
 test('scrub: the value, its URL-encoded form and a URL secret host, user and password are all masked', () => {
@@ -76,11 +77,12 @@ test('end to end: the child gets the secret in its environment only; only allow-
   const childCode = [
     'const v = process.env.STAGING_DB_URL;',
     'const pw = decodeURIComponent(new URL(v).password);',
-    'console.log(JSON.stringify({ msg: "staging-sql.probe", ok: v.length > 0, exact_match: process.argv.some((a) => a.includes("Secret-Pw")) }));',
+    'console.log(JSON.stringify({ msg: "staging-sql.selftest", ok: v.length > 0, exact_match: process.argv.some((a) => a.includes("Secret-Pw")) }));',
     'console.log(JSON.stringify({ msg: "other.event", has: true }));',
     'console.log("echo " + v);',
     'console.log("fragment " + pw.slice(0, 9) + " " + new URL(v).hostname.slice(4, 22));',
-    'console.log(JSON.stringify({ msg: "staging-sql.refused", err: "password authentication failed for user " + new URL(v).username + " [28P01]" }));',
+    'console.log(JSON.stringify({ msg: "staging-sql.refused", refusal: "server_or_driver_error", err_code: "28P01", err: "password authentication failed for user " + new URL(v).username }));',
+    'console.log(JSON.stringify({ msg: "staging-sql.step_failed", step: pw }));',
     'console.error("error mentions " + new URL(v).hostname + " and " + pw);',
     'process.exit(3);',
   ].join('\n');
@@ -90,25 +92,44 @@ test('end to end: the child gets the secret in its environment only; only allow-
   assert.equal(await run, 3);
   await new Promise((r) => setImmediate(r));
   const shown = out.text() + err.text();
-  assert.match(out.text(), /"msg":"staging-sql.probe","ok":true,"exact_match":false/);
-  assert.match(out.text(), /"msg":"staging-sql.refused","err":"<withheld>","err_code":"28P01"/);
-  for (const leak of ['Zq%40x', 'Zq@x-Secret', 'Secret-Pw', 'Zq@x-Secr', 'pooler.supabase.com', 'abcdefghijklmnopqrst', 'echo', 'fragment', 'other.event', 'authentication failed']) assert.ok(!shown.includes(leak), `leaked or passed through ${leak}`);
-  assert.match(out.text(), /run-with-secrets: exit code 3; 4 output line\(s\) withheld/);
+  assert.match(out.text(), /"msg":"staging-sql.selftest","ok":true\}/);
+  assert.match(out.text(), /"msg":"staging-sql.refused","refusal":"server_or_driver_error","err_code":"28P01"\}/);
+  assert.match(out.text(), /"msg":"staging-sql.step_failed","step":"<withheld>"/);
+  for (const leak of ['Zq%40x', 'Zq@x-Secret', 'Secret-Pw', 'Zq@x-Secr', 'pooler.supabase.com', 'abcdefghijklmnopqrst', 'echo', 'fragment', 'other.event', 'authentication failed', 'exact_match']) assert.ok(!shown.includes(leak), `leaked or passed through ${leak}`);
+  // 4 lines withheld whole (other.event, echo, fragment, stderr); 3 fields withheld inside accepted lines (exact_match key, err key, step value)
+  assert.match(out.text(), /run-with-secrets: exit code 3; 4 output line\(s\) withheld; 3 field\(s\) withheld \(not on the allow-list\)/);
   assert.ok(out.text().includes('Enter STAGING_DB_URL'), 'the prompt text itself is shown (it carries no value)');
 });
 
-test('allow-list: events keep only fixed keys and plain values; free text is reduced to a known guard message or a code; seed progress lines pass; the rest is null', () => {
-  const ev = (o) => JSON.parse(allowListLine(JSON.stringify(o)));
-  assert.deepEqual(ev({ msg: 'staging-sql.ledger_preflight_check', check: 'runner_owns_ledger_table', ok: false }), { msg: 'staging-sql.ledger_preflight_check', check: 'runner_owns_ledger_table', ok: false });
-  assert.deepEqual(ev({ msg: 'staging-sql.ledger_preflight', case: 'table_present', ok: false, checks: 15, failed: 1, secretish: 'x', host: 'db.example.supabase.co' }), { msg: 'staging-sql.ledger_preflight', case: 'table_present', ok: false, checks: 15, failed: 1 });
-  assert.deepEqual(ev({ msg: 'staging-sql.step_failed', step: 'supabase/pending/M1c_batch_delete_audit.sql (precheck)' }).step, 'supabase/pending/M1c_batch_delete_audit.sql (precheck)');
-  assert.equal(ev({ msg: 'staging-sql.step_failed', step: 'postgresql://u:p@h/db' }).step, '<withheld>');
-  assert.equal(ev({ msg: 'staging-sql.step_failed', step: 'a\nb' }).step, '<withheld>');
-  assert.equal(ev({ msg: 'staging-sql.refused', err: 'ledger preflight: 2 check(s) failed; the replay must not run' }).err, 'ledger preflight: 2 check(s) failed; the replay must not run');
-  assert.deepEqual(ev({ msg: 'staging-sql.refused', err: 'connect ECONNREFUSED 10.0.0.5:5432 [ECONNREFUSED]' }), { msg: 'staging-sql.refused', err: '<withheld>', err_code: 'ECONNREFUSED' });
-  assert.deepEqual(ev({ msg: 'staging-sql.refused', err: 'something unexpected with a value' }), { msg: 'staging-sql.refused', err: '<withheld>' });
-  assert.deepEqual(ev({ msg: 'staging-sql.m1c_partial_state_refused', failed_checks: ['triggers', 'postgresql://x'] }).failed_checks, ['triggers', '<withheld>']);
-  assert.equal(allowListLine('created owner fixture for run r20261026-a'), 'created owner fixture for run r20261026-a');
-  assert.equal(allowListLine('created 8 fictional users; expires 2026-11-26T00:00:00.000Z'), 'created 8 fictional users; expires 2026-11-26T00:00:00.000Z');
-  for (const bad of ['', 'plain text', 'Error: connect ECONNREFUSED 10.0.0.5:5432', '    at Object.<anonymous> (file.js:1:1)', '{"msg":"other.event"}', '{"msg":"staging-sql.x"} trailing', '[1,2]', 'null', '{"msg":5}', 'created x fixture for run ;rm -rf']) assert.equal(allowListLine(bad), null, `should be withheld: ${bad}`);
+test('allow-list: only enumerated events with their own keys; every value fits its pattern; nothing else, and the counters say how much was dropped', () => {
+  const run = (o) => { const counter = { fields: 0 }; const raw = allowListLine(JSON.stringify(o), counter); return { shown: raw === null ? null : JSON.parse(raw), fields: counter.fields }; };
+  assert.deepEqual(run({ msg: 'staging-sql.ledger_preflight_check', check: 'runner_owns_ledger_table', ok: false }), { shown: { msg: 'staging-sql.ledger_preflight_check', check: 'runner_owns_ledger_table', ok: false }, fields: 0 });
+  assert.deepEqual(run({ msg: 'staging-sql.ledger_preflight', case: 'table_present', ok: false, checks: 15, failed: 1, secretish: 'x', host: 'db.example.supabase.co' }), { shown: { msg: 'staging-sql.ledger_preflight', case: 'table_present', ok: false, checks: 15, failed: 1 }, fields: 2 });
+  assert.equal(run({ msg: 'staging-sql.step_failed', step: 'supabase/pending/M1c_batch_delete_audit.sql (precheck)' }).shown.step, 'supabase/pending/M1c_batch_delete_audit.sql (precheck)');
+  for (const bad of ['postgresql://u:p@h/db', 'a\nb', 'x (anything)', 'db.abcdefghijklmnopqrst.supabase.co:5432']) { const r = run({ msg: 'staging-sql.step_failed', step: bad }); assert.equal(r.shown.step, '<withheld>'); assert.equal(r.fields, 1); }
+  // refusal: an identifier from the fixed list, never text
+  assert.deepEqual(run({ msg: 'staging-sql.refused', refusal: 'ledger_preflight_failed' }).shown, { msg: 'staging-sql.refused', refusal: 'ledger_preflight_failed' });
+  assert.deepEqual(run({ msg: 'staging-sql.refused', refusal: 're-apply M1c refused: the retained audit table is missing; fragment-Zq9981' }), { shown: { msg: 'staging-sql.refused', refusal: '<withheld>' }, fields: 1 });
+  assert.deepEqual(run({ msg: 'staging-sql.refused', err: 're-apply M1c refused: M1c is still applied; run its backout first fragment-Zq9981 [P0001]', err_code: 'P0001' }), { shown: { msg: 'staging-sql.refused', err_code: 'P0001' }, fields: 1 });
+  assert.equal(run({ msg: 'staging-sql.refused', err_code: 'secret: abc' }).shown.err_code, '<withheld>');
+  assert.equal(run({ msg: 'staging-sql.m1c_partial_state_refused', failed_checks: ['triggers', 'postgresql://x'] }).shown.failed_checks, '<withheld>');
+  // values a loose character filter would accept but the per-key patterns do not
+  assert.equal(run({ msg: 'staging-sql.environment_event_trigger', name: 'evil.host.example.com', event: 'a', enabled: 'O', function: 'f' }).shown.name, '<withheld>');
+  assert.equal(run({ msg: 'staging-sql.environment_default_acl', role: 'someone_else', role_present: true }).shown.role, '<withheld>');
+  assert.deepEqual(run({ msg: 'staging-sql.environment_default_acl', role: 'anon', role_present: true, tables_public: ['SELECT', 'password123'] }).shown.tables_public, '<withheld>');
+  assert.equal(run({ msg: 'staging-sql.verified', action: 'reset', steps: 1, target: 'recorded rebuilt staging project', file: '/c/Users/someone/file.sql' }).fields, 1);
+  assert.equal(run({ msg: 'staging-sql.verified', action: 'reset', steps: 1, target: 'some other target' }).shown.target, '<withheld>');
+  // seed progress lines are exact
+  assert.equal(allowListLine('created manager fixture for run R20261026_A'), null, 'the run id pattern is lower-case letters, digits and hyphens only');
+  assert.equal(allowListLine('created manager fixture for run tnbs-stg2-a5b-01'), 'created manager fixture for run tnbs-stg2-a5b-01');
+  assert.equal(allowListLine('created 6 fictional users; expires 2026-11-26T00:00:00.000Z'), 'created 6 fictional users; expires 2026-11-26T00:00:00.000Z');
+  for (const bad of ['', 'plain text', 'Error: connect ECONNREFUSED 10.0.0.5:5432', '    at Object.<anonymous> (file.js:1:1)', '{"msg":"other.event"}', '{"msg":"staging-sql.x"}', '{"msg":"staging-sql.done"} trailing', '[1,2]', 'null', '{"msg":5}', 'created x fixture for run ;rm -rf', 'created owner fixture for run r1', 'created 6 fictional users; expires tomorrow', '{"msg":"staging-sql.__proto__"}', '{"msg":"staging-sql.constructor"}']) assert.equal(allowListLine(bad), null, `should be withheld: ${bad}`);
+});
+
+test('the refusal identifiers in the wrapper equal the runner list (pipeline/src/refusals.ts)', () => {
+  const src = readFileSync(new URL('../pipeline/src/refusals.ts', import.meta.url), 'utf8');
+  const block = /export const REFUSAL_IDS = \[([\s\S]*?)\] as const;/.exec(src)[1];
+  const runnerIds = [...block.matchAll(/'([a-z0-9_]+)'/g)].map((m) => m[1]);
+  assert.deepEqual([...REFUSAL_IDS].sort(), [...runnerIds].sort());
+  assert.equal(new Set(runnerIds).size, runnerIds.length);
 });

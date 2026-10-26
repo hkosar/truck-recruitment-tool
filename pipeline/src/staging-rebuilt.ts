@@ -7,6 +7,7 @@ import { reportEnvironmentPreflight, runEnvironmentPreflight } from './environme
 import { reportLedgerPreflight, runLedgerPreflight } from './ledger-preflight.js';
 import { MAINTENANCE_ROLE, roleOf } from './retention-step.js';
 import { runRetentionDryRun, type DryRunReport } from './retention-dry-run.js';
+import { RunnerRefusal } from './refusals.js';
 import { RECORDED_PROJECT_REFS, parseSupabaseDbTarget, type SupabaseDbTarget } from './target-guard.js';
 
 /**
@@ -157,29 +158,29 @@ export function planRebuiltSqlRun(input: {
   recordedRebuiltRef?: string | null;
 }): RebuiltSqlPlan {
   if (!Object.prototype.hasOwnProperty.call(REBUILT_STAGING_SQL_ACTIONS, input.action)) {
-    throw new Error(`Unknown rebuilt staging SQL action "${input.action}" (expected ${Object.keys(REBUILT_STAGING_SQL_ACTIONS).join(', ')})`);
+    throw new RunnerRefusal('unknown_action', `Unknown rebuilt staging SQL action "${input.action}" (expected ${Object.keys(REBUILT_STAGING_SQL_ACTIONS).join(', ')})`);
   }
   const spec = REBUILT_STAGING_SQL_ACTIONS[input.action] as RebuiltActionSpec;
   const rebuiltRef = input.recordedRebuiltRef === undefined ? RECORDED_PROJECT_REFS.stagingRebuilt : input.recordedRebuiltRef;
   if (rebuiltRef === null) {
-    throw new Error('The rebuilt staging project ref is not recorded yet (target-guard.ts); refusing every rebuilt action');
+    throw new RunnerRefusal('ref_not_recorded', 'The rebuilt staging project ref is not recorded yet (target-guard.ts); refusing every rebuilt action');
   }
   if (!REBUILT_REF_PATTERN.test(rebuiltRef) || rebuiltRef === RECORDED_PROJECT_REFS.production || rebuiltRef === RECORDED_PROJECT_REFS.staging) {
-    throw new Error('The recorded rebuilt staging ref is invalid or equals a different recorded project');
+    throw new RunnerRefusal('ref_invalid', 'The recorded rebuilt staging ref is invalid or equals a different recorded project');
   }
-  if (!input.dbUrl) throw new Error('STAGING_DB_URL is required');
+  if (!input.dbUrl) throw new RunnerRefusal('db_url_required', 'STAGING_DB_URL is required');
   const target = parseSupabaseDbTarget(input.dbUrl);
   if (target.projectRef === RECORDED_PROJECT_REFS.production) {
-    throw new Error('Staging SQL runner refuses the production Carrier Recruiter project');
+    throw new RunnerRefusal('production_refused', 'Staging SQL runner refuses the production Carrier Recruiter project');
   }
   if (target.projectRef !== rebuiltRef) {
-    throw new Error('Staging SQL runner only targets the recorded rebuilt staging project');
+    throw new RunnerRefusal('target_not_recorded_staging', 'Staging SQL runner only targets the recorded rebuilt staging project');
   }
   if (target.port !== 5432) {
-    throw new Error('Staging SQL runner requires a session connection on port 5432 (not the 6543 transaction pooler)');
+    throw new RunnerRefusal('port_must_be_5432', 'Staging SQL runner requires a session connection on port 5432 (not the 6543 transaction pooler)');
   }
   if (input.confirm !== spec.confirmation) {
-    throw new Error(`Staging SQL runner requires --confirm="${spec.confirmation}" for ${input.action}`);
+    throw new RunnerRefusal('confirmation_required', `Staging SQL runner requires --confirm="${spec.confirmation}" for ${input.action}`);
   }
   let outPath: string | undefined;
   if (spec.kind === 'snapshot') {
@@ -250,7 +251,7 @@ export async function executeRebuiltSqlPlan(plan: RebuiltSqlPlan, clientFactory:
       const report: DryRunReport = await runRetentionDryRun(client, MAINTENANCE_ROLE);
       // Counts and pass/fail only.
       console.log(JSON.stringify({ msg: 'staging-sql.retention_dry_run', ...report }));
-      if (!report.ok) throw new Error(`retention dry run: ${report.checks.filter((c) => !c.ok).length} check(s) failed`);
+      if (!report.ok) throw new RunnerRefusal('retention_dry_run_failed', `retention dry run: ${report.checks.filter((c) => !c.ok).length} check(s) failed`);
       return;
     }
     for (const [name, value] of plan.settings) {
@@ -261,7 +262,7 @@ export async function executeRebuiltSqlPlan(plan: RebuiltSqlPlan, clientFactory:
       try {
         const assessment = await runLedgerPreflight(client);
         reportLedgerPreflight(assessment);
-        if (!assessment.ok) throw new Error(`ledger preflight: ${assessment.checks.filter((c) => !c.ok).length} check(s) failed; the replay must not run`);
+        if (!assessment.ok) throw new RunnerRefusal('ledger_preflight_failed', `ledger preflight: ${assessment.checks.filter((c) => !c.ok).length} check(s) failed; the replay must not run`);
       } finally {
         await client.query('rollback');
       }
@@ -286,13 +287,13 @@ export async function executeRebuiltSqlPlan(plan: RebuiltSqlPlan, clientFactory:
         await client.query('rollback');
       }
       reportLedgerPreflight(assessment);
-      if (!assessment.ok) throw new Error(`ledger preflight: ${assessment.checks.filter((c) => !c.ok).length} check(s) failed; refusing to replay`);
+      if (!assessment.ok) throw new RunnerRefusal('ledger_preflight_failed', `ledger preflight: ${assessment.checks.filter((c) => !c.ok).length} check(s) failed; refusing to replay`);
       // Refuse to replay onto a database that already has the baseline.
       const present = await client.query("select to_regclass('public.profiles') as t");
-      if (present.rows[0]?.t !== null) throw new Error('public.profiles already exists; the baseline replay only runs on an empty project');
+      if (present.rows[0]?.t !== null) throw new RunnerRefusal('profiles_already_exist', 'public.profiles already exists; the baseline replay only runs on an empty project');
       await client.query(LEDGER_TABLE_SQL);
       const recorded = await client.query('select count(*)::int as n from supabase_migrations.schema_migrations');
-      if (recorded.rows[0]?.n !== 0) throw new Error('supabase_migrations.schema_migrations is not empty; the baseline replay only runs on a clean ledger');
+      if (recorded.rows[0]?.n !== 0) throw new RunnerRefusal('ledger_not_empty', 'supabase_migrations.schema_migrations is not empty; the baseline replay only runs on a clean ledger');
     }
     if (plan.kind === 'snapshot') {
       await client.query('begin read only');
@@ -318,7 +319,7 @@ export async function executeRebuiltSqlPlan(plan: RebuiltSqlPlan, clientFactory:
         steps = [plan.steps[plan.m1cRecoveryStep]!];
       } else if (state === 'refuse') {
         console.error(JSON.stringify({ msg: 'staging-sql.m1c_partial_state_refused', failed_checks: failed }));
-        throw new Error('re-apply M1c refused: the retained M1c audit guards or privileges are not in a state this tool recognises (neither the backed-out state nor the interrupted-run state, or PostGIS lives outside schema public, which re-apply does not support); inspect by hand');
+        throw new RunnerRefusal('m1c_state_unrecognised', 're-apply M1c refused: the retained M1c audit guards or privileges are not in a state this tool recognises (neither the backed-out state nor the interrupted-run state, or PostGIS lives outside schema public, which re-apply does not support); inspect by hand');
       }
     }
     for (const step of steps) {
@@ -342,13 +343,13 @@ export async function executeRebuiltSqlPlan(plan: RebuiltSqlPlan, clientFactory:
       const have = (got.rows as Array<{ version: string; name: string }>).map((r) => `${r.version}|${r.name}`);
       const same = have.length === want.length && have.every((v, i) => v === want[i]);
       console.log(JSON.stringify({ msg: 'staging-sql.ledger_verified', expected: want.length, found: have.length, exact_match: same }));
-      if (!same) throw new Error('migration ledger does not hold exactly the reviewed (version, name) pairs');
+      if (!same) throw new RunnerRefusal('ledger_not_exact', 'migration ledger does not hold exactly the reviewed (version, name) pairs');
     }
     if (plan.m1cRecoveryStep !== undefined) {
       const after = await client.query(M1C_POSTCONDITION_SQL);
       if (after.rows[0]?.service_role_execute !== false) {
         console.error(JSON.stringify({ msg: 'staging-sql.m1c_postcondition_failed' }));
-        throw new Error('re-apply M1c: the revoke ran but service_role still has effective EXECUTE on the trigger function; inspect by hand');
+        throw new RunnerRefusal('m1c_postcondition_failed', 're-apply M1c: the revoke ran but service_role still has effective EXECUTE on the trigger function; inspect by hand');
       }
       console.log(JSON.stringify({ msg: 'staging-sql.m1c_postcondition_ok' }));
     }

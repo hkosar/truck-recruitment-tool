@@ -11,21 +11,25 @@
 // - The prompt needs an interactive terminal; it refuses piped or redirected input.
 // - A name that is already set in the environment is refused (a literal in the shell is the leak this
 //   tool exists to avoid): close that terminal window and open a new one.
-// - What is shown from the child is a FIXED ALLOW-LIST (see allowListLine): known `staging-sql.*` JSON events with
-//   fixed keys, short plain values and, for errors, only a known guard message or the error code; the seeding
-//   script's progress lines. Every other line is withheld and only counted. The secret, its URL-encoded form and,
-//   for a URL, its host, user and password are also replaced with <masked>, but that is defense in depth only: it
-//   cannot catch fragments, re-encodings or values split across lines, and the owner procedure must not rely on it.
+// - What is shown from the child is a FIXED ALLOW-LIST (see allowListLine): JSON events whose `msg` is one of an enumerated
+//   list of `staging-sql.*` names, each with a fixed set of keys whose values must fit that key's own pattern or
+//   enumerated list (a failure is only ever a fixed refusal identifier plus a validated code; no message text is
+//   forwarded, whatever it starts with), and the seeding script's exact progress lines. Everything else is withheld:
+//   a whole line is counted as an "output line", and a key or value that is not allowed inside an accepted line is
+//   counted as a "field". Both counts are printed at the end; the owner procedure continues only when both are 0.
+//   The secret, its URL-encoded form and, for a URL, its host, user and password are also replaced with <masked>, but
+//   that is defense in depth only: it cannot catch fragments, re-encodings or values split across lines.
 //   Report only PASS/FAIL, check names and counts.
-//   Not a vault: the child's environment is readable by the child and by local tools with enough rights, and the
-//   terminal window's own scrollback and any clipboard history are outside this tool.
+//   Not a vault: the child's environment is readable by the child and by local tools with enough rights. The hidden
+//   prompt is meant not to echo, but the terminal window itself, a clipboard manager and anything the operating
+//   system records are outside this tool.
 // - Exit status is the child's.
 
 import { spawn } from 'node:child_process';
 import { resolve } from 'node:path';
 import { fileURLToPath } from 'node:url';
 
-export const ALLOWED = ['STAGING_DB_URL', 'SUPABASE_SERVICE_ROLE_KEY', 'TEST_USER_PASSWORD'];
+export const ALLOWED = ['STAGING_DB_URL', 'SUPABASE_SERVICE_ROLE_KEY', 'TEST_USER_PASSWORD', 'OWNER_STAGING_PASSWORD'];
 
 /** Reads one line from a TTY without echoing it. Resolves to the text; rejects on Ctrl+C or end of input. */
 export function readHidden(prompt, stdin, stdout) {
@@ -87,61 +91,101 @@ export function scrub(line, targets) {
 }
 
 // ---- What the owner's screen shows: a FIXED ALLOW-LIST, not a scrubbed copy of the child's output.
-// A child line is shown only if it is (a) a JSON event whose `msg` is `staging-sql.<name>`, rebuilt from a fixed
-// list of keys whose values are short plain words/numbers/booleans (anything else in a value is replaced by
-// <withheld>), with a free-text `err` reduced to a known guard message from this repository or its trailing
-// error code, or (b) one of the exact progress lines the fixture seeding script prints. Every other line, such as
-// a driver error, a stack trace or a server message, is NOT shown; it is only counted. Masking (scrub) is still
-// applied to what is shown, as defense in depth only: it replaces exact values and a few forms of them, and it
-// cannot catch a fragment, a re-encoding or a value split across lines. The allow-list is what keeps output safe.
-const EVENT_KEYS = ['msg', 'action', 'step', 'steps', 'target', 'check', 'ok', 'case', 'checks', 'failed', 'failed_checks', 'expected', 'found', 'exact_match', 'note', 'hint', 'detail', 'count', 'n',
-  // environment-preflight (identifiers and booleans only)
-  'name', 'event', 'enabled', 'function', 'enables_rls', 'role', 'tables_public', 'sequences_public', 'functions_public', 'tables_global', 'sequences_global', 'functions_global',
-  'authenticator_exists', 'schema_list_entries', 'public_listed', 'api_roles_present'];
-const SAFE_WORDS = /^[A-Za-z0-9_ .,;/()=+'<>-]{0,160}$/; // no colon or @: a URL, host:port or user@host never qualifies
-const GUARD_MESSAGES = [
-  /^ledger preflight: \d+ check\(s\) failed; (the replay must not run|refusing to replay)$/,
-  /^re-apply M1c refused: .{0,260}$/,
-  /^re-apply M1[bc]? refused: .{0,200}$/,
-  /^public\.profiles already exists; the baseline replay only runs on an empty project$/,
-  /^supabase_migrations\.schema_migrations is not empty; the baseline replay only runs on a clean ledger$/,
-  /^migration ledger does not hold exactly the reviewed \(version, name\) pairs$/,
-  /^Staging SQL runner requires --confirm="[A-Z0-9 ]{1,80}" for [a-z0-9-]{1,40}$/,
-  /^Staging SQL runner (only targets the recorded (rebuilt )?staging project|refuses the production Carrier Recruiter project|requires a session connection on port 5432 \(not the 6543 transaction pooler\))$/,
-  /^The rebuilt staging project ref is not recorded yet \(target-guard\.ts\); refusing every rebuilt action$/,
-  /^STAGING_DB_URL is required$/,
-  /^Unknown argument --[a-z-]{1,20}$/,
-  /^Unknown rebuilt staging SQL action "[A-Za-z0-9-]{1,40}" (expected [A-Za-z0-9, -]{1,600})$/,
+// A child line is shown only if it is (a) a JSON object whose `msg` is on the enumerated EVENTS list below, rebuilt
+// from that event's own fixed keys, each value checked against the pattern or enumerated list for that key (anything
+// else is replaced by <withheld> and counted; unknown keys are dropped and counted), or (b) one of the exact progress
+// lines the fixture seeding script prints. Every other line, such as a driver error, a stack trace or a server message,
+// is NOT shown; it is only counted. A failure is shown only as a refusal identifier from the runner's own fixed list
+// (pipeline/src/refusals.ts; scripts/run-with-secrets.test.mjs keeps the two lists equal) and a validated code; the
+// runner never forwards message text, so there is nothing for a forged prefix to ride on. Masking (scrub) is still
+// applied to what is shown, as defense in depth only.
+
+/** Keep equal to pipeline/src/refusals.ts REFUSAL_IDS (a test compares them). */
+export const REFUSAL_IDS = [
+  'plan_refused', 'ref_not_recorded', 'ref_invalid', 'db_url_required', 'production_refused', 'target_not_recorded_staging',
+  'port_must_be_5432', 'confirmation_required', 'unknown_action', 'unknown_argument', 'bad_project_option', 'ledger_preflight_failed',
+  'profiles_already_exist', 'ledger_not_empty', 'ledger_not_exact', 'm1c_state_unrecognised', 'm1c_postcondition_failed',
+  'retention_dry_run_failed', 'reapply_m1_not_backed_out', 'reapply_m1_still_applied', 'reapply_m1b_not_backed_out',
+  'reapply_m1b_still_applied', 'reapply_m1c_not_backed_out', 'reapply_m1c_still_applied', 'owner_email_invalid',
+  'owner_password_too_short', 'owner_auth_not_created', 'owner_auth_unknown_result', 'owner_promotion_refused',
+  'owner_bootstrap_target_refused', 'server_or_driver_error',
 ];
-const ERROR_CODE = /\[([0-9A-Z]{5}|E[A-Z0-9_]{2,30})\]$/;
+
+const PRIVILEGES = ['SELECT', 'INSERT', 'UPDATE', 'DELETE', 'TRUNCATE', 'REFERENCES', 'TRIGGER', 'MAINTAIN', 'USAGE', 'EXECUTE', 'CREATE', 'OTHER'];
+const bool = (v) => typeof v === 'boolean';
+const int = (v) => Number.isSafeInteger(v) && v >= -1 && v <= 1_000_000_000;
+const pat = (re) => (v) => typeof v === 'string' && re.test(v);
+const oneOf = (list) => (v) => typeof v === 'string' && list.includes(v);
+const listOf = (item, max) => (v) => Array.isArray(v) && v.length <= max && v.every(item);
+const ident = pat(/^[A-Za-z0-9_]{1,63}$/);
+const action = pat(/^[a-z0-9-]{1,40}$/);
+const word = pat(/^[a-z_]{1,24}$/);
+const step = pat(/^[A-Za-z0-9_./-]{1,100}( \((precheck|idempotent re-apply|restore fresh-apply grants)\))?$/);
+const code = pat(/^([0-9A-Z]{5}|E[A-Z0-9_]{2,30})$/);
+const detail = pat(/^(\d{1,9}|unreadable)$/);
+const privs = listOf(oneOf(PRIVILEGES), 12);
+const phase = oneOf(['before', 'after']);
+
+const EVENTS = {
+  'staging-sql.selftest': { ok: bool },
+  'staging-sql.verified': { action, steps: int, target: oneOf(['recorded rebuilt staging project', 'recorded staging project']) },
+  'staging-sql.plan_only': { hint: oneOf(['add --execute to run']) },
+  'staging-sql.done': { action },
+  'staging-sql.refused': { refusal: oneOf(REFUSAL_IDS), err_code: code },
+  'staging-sql.step_done': { step },
+  'staging-sql.step_failed': { step },
+  'staging-sql.ledger_verified': { expected: int, found: int, exact_match: bool },
+  'staging-sql.ledger_preflight_check': { check: ident, ok: bool, detail },
+  'staging-sql.ledger_preflight': { case: ident, ok: bool, checks: int, failed: int },
+  'staging-sql.retention_dry_run': { ok: bool },
+  'staging-sql.m1c_interrupted_run_detected': {},
+  'staging-sql.m1c_partial_state_refused': { failed_checks: listOf(ident, 40) },
+  'staging-sql.m1c_postcondition_ok': {},
+  'staging-sql.m1c_postcondition_failed': {},
+  'staging-sql.environment_event_triggers': { count: int, listed: int, truncated: bool },
+  'staging-sql.environment_event_trigger': { name: ident, event: ident, enabled: ident, function: ident },
+  'staging-sql.environment_default_acl': {
+    role: oneOf(['anon', 'authenticated', 'service_role', 'PUBLIC']), role_present: bool,
+    tables_public: privs, sequences_public: privs, functions_public: privs, tables_global: privs, sequences_global: privs, functions_global: privs, grant_option: bool,
+  },
+  'staging-sql.environment_default_acl_total': { entries: int, outside_these_cells: int, scope: oneOf(['explicit_default_acl_entries_of_this_login_only']) },
+  'staging-sql.environment_authenticator_setting': {
+    authenticator_exists: bool, role_wide_entries: int, this_database_entries: int, names_public: (v) => bool(v) || v === 'unknown', is_the_data_api_switch: bool,
+  },
+  'staging-sql.environment_preflight': { scope: oneOf(['catalogue_facts_only_owner_checks_the_three_dashboard_switches']) },
+  'staging-sql.owner_auth_create': { result: oneOf(['created', 'not_created', 'unknown']), http_status: int, email_matches: bool, id_present: bool },
+  'staging-sql.owner_state': {
+    state: oneOf(['ready_to_promote', 'promoted', 'no_owner_login', 'other']), marker_ok: bool, owner_auth_users: int, owner_has_password: bool, owner_email_confirmed: bool,
+    password_users: int, auth_users_total: int, owner_profiles: int, owner_profile_role: word, owner_profile_status: word, fixture_profiles: int, other_profiles: int, owner_manager_approved: int,
+  },
+  'staging-sql.owner_check': { phase, check: ident, ok: bool },
+  'staging-sql.owner_checks': { phase, ok: bool, checks: int, failed: int },
+  'staging-sql.owner_promote_result': { result: oneOf(['committed', 'rolled_back', 'unknown']) },
+};
+
 const SEED_LINES = [
-  /^created [A-Za-z0-9 _.-]{1,40} fixture for run [A-Za-z0-9_-]{1,64}$/,
-  /^created \d{1,3} fictional users; expires [0-9T:.+Z-]{10,40}$/,
+  /^created (manager|editor|viewer|pending|guest|disabled) fixture for run [a-z0-9-]{1,40}$/,
+  /^created \d{1,3} fictional users; expires \d{4}-\d{2}-\d{2}T\d{2}:\d{2}:\d{2}\.\d{3}Z$/,
   /^password generated or supplied at runtime and intentionally not printed$/,
 ];
 
-function allowedValue(v) {
-  if (typeof v === 'boolean' || (typeof v === 'number' && Number.isFinite(v))) return v;
-  if (typeof v === 'string') return SAFE_WORDS.test(v) ? v : '<withheld>';
-  if (Array.isArray(v) && v.length <= 40) return v.map((x) => (typeof x === 'string' ? (SAFE_WORDS.test(x) ? x : '<withheld>') : typeof x === 'number' || typeof x === 'boolean' ? x : '<withheld>'));
-  return '<withheld>';
-}
-
-/** Returns the line to show, or null when the line is not on the allow-list. */
-export function allowListLine(raw) {
+/**
+ * Returns the line to show, or null when the whole line is not on the allow-list. `counter.fields` (optional) is
+ * increased for every key dropped and every value replaced inside an accepted line.
+ */
+export function allowListLine(raw, counter = { fields: 0 }) {
   const line = raw.replace(/\r?\n$/, '');
   if (SEED_LINES.some((re) => re.test(line))) return line;
   let obj;
   try { obj = JSON.parse(line); } catch { return null; }
-  if (obj === null || typeof obj !== 'object' || Array.isArray(obj) || typeof obj.msg !== 'string' || !/^staging-sql\.[a-z0-9_]{1,60}$/.test(obj.msg)) return null;
-  const out = {};
-  for (const k of EVENT_KEYS) if (k in obj) out[k] = allowedValue(obj[k]);
-  if (typeof obj.err === 'string') {
-    const code = ERROR_CODE.exec(obj.err);
-    const text = code ? obj.err.slice(0, code.index).trimEnd() : obj.err;
-    if (GUARD_MESSAGES.some((re) => re.test(text))) out.err = text;
-    else out.err = '<withheld>';
-    if (code) out.err_code = code[1];
+  if (obj === null || typeof obj !== 'object' || Array.isArray(obj) || typeof obj.msg !== 'string' || !Object.prototype.hasOwnProperty.call(EVENTS, obj.msg)) return null;
+  const spec = EVENTS[obj.msg];
+  const out = { msg: obj.msg };
+  for (const key of Object.keys(obj)) {
+    if (key === 'msg') continue;
+    if (!Object.prototype.hasOwnProperty.call(spec, key)) { counter.fields += 1; continue; }
+    if (spec[key](obj[key])) out[key] = obj[key];
+    else { out[key] = '<withheld>'; counter.fields += 1; }
   }
   return JSON.stringify(out);
 }
@@ -149,8 +193,8 @@ export function allowListLine(raw) {
 function filteringSink(sink, targets, counter) {
   let pending = '';
   const emit = (l) => {
-    const shown = allowListLine(l);
-    if (shown === null) { counter.withheld += 1; return; }
+    const shown = allowListLine(l, counter);
+    if (shown === null) { counter.lines += 1; return; }
     sink.write(`${scrub(shown, targets)}\n`);
   };
   return {
@@ -206,7 +250,7 @@ export async function main({ argv, env = process.env, stdin = process.stdin, std
   const sortedTargets = [...new Set(targets)].sort((a, b) => b.length - a.length);
   return new Promise((done, fail) => {
     const child = spawn(nodeBinary, childArgs, { cwd: cwd ? resolve(cwd) : process.cwd(), env: childEnv, stdio: ['ignore', 'pipe', 'pipe'], shell: false });
-    const counter = { withheld: 0 };
+    const counter = { lines: 0, fields: 0 };
     const out = filteringSink(stdout, sortedTargets, counter);
     const err = filteringSink(stderr, sortedTargets, counter);
     child.stdout.on('data', (c) => out.write(c));
@@ -214,8 +258,8 @@ export async function main({ argv, env = process.env, stdin = process.stdin, std
     child.on('error', (e) => fail(new Error(scrub(String(e.message), sortedTargets))));
     child.on('close', (code) => {
       out.end(); err.end();
-      // The only lines this tool adds itself: fixed text and two numbers.
-      stdout.write(`run-with-secrets: exit code ${code ?? 1}; ${counter.withheld} output line(s) withheld (not on the allow-list)
+      // The only lines this tool adds itself: fixed text and three numbers.
+      stdout.write(`run-with-secrets: exit code ${code ?? 1}; ${counter.lines} output line(s) withheld; ${counter.fields} field(s) withheld (not on the allow-list)
 `);
       done(code ?? 1);
     });

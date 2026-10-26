@@ -2,6 +2,7 @@ import { readFileSync } from 'node:fs';
 import { resolve } from 'node:path';
 import { pathToFileURL } from 'node:url';
 import pg from 'pg';
+import { RunnerRefusal, asPlanRefusal, classifyRunnerFailure } from './refusals.js';
 import { executeRebuiltSqlPlan, planRebuiltSqlRun } from './staging-rebuilt.js';
 import { RECORDED_PROJECT_REFS, parseSupabaseDbTarget, type SupabaseDbTarget } from './target-guard.js';
 
@@ -58,22 +59,22 @@ function isStagingSqlAction(value: string): value is StagingSqlAction {
 /** Pure, offline verification. Throws before anything could connect. */
 export function planStagingSqlRun(input: { action: string; dbUrl: string | undefined; confirm: string | undefined }): StagingSqlPlan {
   if (!isStagingSqlAction(input.action)) {
-    throw new Error(`Unknown staging SQL action "${input.action}" (expected ${Object.keys(STAGING_SQL_ACTIONS).join(', ')})`);
+    throw new RunnerRefusal('unknown_action', `Unknown staging SQL action "${input.action}" (expected ${Object.keys(STAGING_SQL_ACTIONS).join(', ')})`);
   }
-  if (!input.dbUrl) throw new Error('STAGING_DB_URL is required');
+  if (!input.dbUrl) throw new RunnerRefusal('db_url_required', 'STAGING_DB_URL is required');
   const target = parseSupabaseDbTarget(input.dbUrl);
   if (target.projectRef === RECORDED_PROJECT_REFS.production) {
-    throw new Error('Staging SQL runner refuses the production Carrier Recruiter project');
+    throw new RunnerRefusal('production_refused', 'Staging SQL runner refuses the production Carrier Recruiter project');
   }
   if (target.projectRef !== RECORDED_PROJECT_REFS.staging) {
-    throw new Error('Staging SQL runner only targets the recorded staging project');
+    throw new RunnerRefusal('target_not_recorded_staging', 'Staging SQL runner only targets the recorded staging project');
   }
   if (target.port !== 5432) {
-    throw new Error('Staging SQL runner requires a session connection on port 5432 (not the 6543 transaction pooler)');
+    throw new RunnerRefusal('port_must_be_5432', 'Staging SQL runner requires a session connection on port 5432 (not the 6543 transaction pooler)');
   }
   const spec = STAGING_SQL_ACTIONS[input.action];
   if (input.confirm !== spec.confirmation) {
-    throw new Error(`Staging SQL runner requires --confirm="${spec.confirmation}" for ${input.action}`);
+    throw new RunnerRefusal('confirmation_required', `Staging SQL runner requires --confirm="${spec.confirmation}" for ${input.action}`);
   }
   return {
     action: input.action,
@@ -110,31 +111,9 @@ export async function executeStagingSqlPlan(plan: StagingSqlPlan): Promise<void>
 }
 
 /**
- * What is printed when the runner refuses or fails. Our own guard messages carry no secret, but a driver or network
- * error can include the server address or account. This masks the whole connection string, its host, user and
- * password, any IPv4 address and any Supabase host name. Best effort and defense in depth only (a fragment, another encoding
- * or a value split across lines is not caught): the owner procedure shows only the wrapper's allow-list of events and codes,
- * and reports should still carry only event names,
- * counts and pass/fail, and a person with the terminal inspects anything else locally.
+ * Failures are printed ONLY as a fixed identifier plus, for a database or driver failure, a validated code (refusals.ts).
+ * No part of an error message is ever forwarded, so a driver or server message cannot carry an address, account or key.
  */
-export function sanitizeRunnerError(err: unknown, dbUrl: string | undefined): string {
-  let msg = err instanceof Error ? err.message : String(err);
-  const targets = new Set<string>();
-  if (dbUrl) {
-    targets.add(dbUrl);
-    try { targets.add(encodeURIComponent(dbUrl)); } catch { /* lone surrogate: skip */ }
-    try {
-      const u = new URL(dbUrl);
-      const decode = (v: string) => { try { return decodeURIComponent(v); } catch { return v; } };
-      for (const part of [u.hostname, u.username, u.password, decode(u.username), decode(u.password)]) if (part) targets.add(part);
-    } catch { /* not a URL */ }
-  }
-  for (const t of [...targets].filter((x) => x.length >= 4).sort((a, b) => b.length - a.length)) msg = msg.split(t).join('<masked>');
-  msg = msg.replace(/\b\d{1,3}(?:\.\d{1,3}){3}\b/g, '<ip>').replace(/[A-Za-z0-9.-]+\.supabase\.(?:com|co)\b/g, '<host>');
-  const code = typeof err === 'object' && err !== null && typeof (err as { code?: unknown }).code === 'string' ? ((err as { code: string }).code) : undefined;
-  return code ? `${msg} [${code}]` : msg;
-}
-
 function parseRunnerArgs(argv: readonly string[]): { action: string; confirm: string | undefined; execute: boolean; project: string; out: string | undefined } {
   let action = '';
   let confirm: string | undefined;
@@ -147,9 +126,9 @@ function parseRunnerArgs(argv: readonly string[]): { action: string; confirm: st
     else if (arg.startsWith('--project=')) project = arg.slice('--project='.length);
     else if (arg.startsWith('--out=')) out = arg.slice('--out='.length);
     else if (arg === '--execute') execute = true;
-    else throw new Error(`Unknown argument ${arg.split('=')[0]}`);
+    else throw new RunnerRefusal('unknown_argument', 'Unknown argument');
   }
-  if (project !== 'current' && project !== 'rebuilt') throw new Error('--project must be current or rebuilt');
+  if (project !== 'current' && project !== 'rebuilt') throw new RunnerRefusal('bad_project_option', '--project must be current or rebuilt');
   return { action, confirm, execute, project, out };
 }
 
@@ -157,7 +136,7 @@ async function main(): Promise<void> {
   const args = parseRunnerArgs(process.argv.slice(2));
   if (args.project === 'rebuilt') {
     // The rebuilt project has its own guarded planner (staging-rebuilt.ts); --out is snapshot-only.
-    const rebuilt = planRebuiltSqlRun({ action: args.action, dbUrl: process.env.STAGING_DB_URL, confirm: args.confirm, out: args.out });
+    const rebuilt = asPlanRefusal(() => planRebuiltSqlRun({ action: args.action, dbUrl: process.env.STAGING_DB_URL, confirm: args.confirm, out: args.out }));
     console.log(JSON.stringify({ msg: 'staging-sql.verified', action: rebuilt.action, steps: rebuilt.steps.length, target: 'recorded rebuilt staging project' }));
     if (!args.execute) {
       console.log(JSON.stringify({ msg: 'staging-sql.plan_only', hint: 'add --execute to run' }));
@@ -167,7 +146,7 @@ async function main(): Promise<void> {
     console.log(JSON.stringify({ msg: 'staging-sql.done', action: rebuilt.action }));
     return;
   }
-  const plan = planStagingSqlRun({ action: args.action, dbUrl: process.env.STAGING_DB_URL, confirm: args.confirm });
+  const plan = asPlanRefusal(() => planStagingSqlRun({ action: args.action, dbUrl: process.env.STAGING_DB_URL, confirm: args.confirm }));
   // Never print the connection string, password, or host.
   console.log(JSON.stringify({ msg: 'staging-sql.verified', action: plan.action, file: plan.file, target: 'recorded staging project' }));
   if (!args.execute) {
@@ -181,7 +160,7 @@ async function main(): Promise<void> {
 const isDirectInvocation = process.argv[1] !== undefined && import.meta.url === pathToFileURL(process.argv[1]).href;
 if (isDirectInvocation) {
   main().catch((err: unknown) => {
-    console.error(JSON.stringify({ msg: 'staging-sql.refused', err: sanitizeRunnerError(err, process.env.STAGING_DB_URL) }));
+    console.error(JSON.stringify({ msg: 'staging-sql.refused', ...classifyRunnerFailure(err) }));
     process.exitCode = 1;
   });
 }

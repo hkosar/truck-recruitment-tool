@@ -143,11 +143,15 @@ when needed, $0; (c) transfer it to a Free organization and pause it, $0, restor
    *Secret input and output:* run every hosted runner command through `scripts/run-with-secrets.mjs`, which takes
    the database URL (and, for `scripts/seed-auth-users.ts`, the service-role key and the fixture
    password) from a hidden prompt, passes it to the child process environment only, and shows **only a fixed
-   allow-list of the child's output**: known `staging-sql.*` events with fixed keys and plain values (an error
-   reduced to a known guard message or its error code), the seeding script's progress lines, and one closing
-   line with the exit code and the number of withheld lines. Everything else (driver errors, stack traces,
-   server messages) is withheld and only counted. The owner never pastes raw output: the owner reports
-   fixed labels only (PASS/FAIL, event and check names, counts, the exit code). Masking of the secret and its
+   allow-list of the child's output**: an enumerated list of `staging-sql.*` events, each with fixed keys
+   whose values must fit that key's own pattern or enumerated list; a failure is shown only as an identifier from
+   the runner's fixed refusal list (`pipeline/src/refusals.ts`) plus a validated SQLSTATE/driver code, and the
+   runner never forwards message text (a server message that merely begins like a known refusal is generic); the
+   seeding script's exact progress lines; and one closing line with the exit code, the number of output lines
+   withheld and the number of fields (keys or values inside an accepted line) withheld. Everything else (driver
+   errors, stack traces, server messages) is withheld and only counted. The owner never pastes raw output: the
+   owner reports fixed labels only (PASS/FAIL, event and check names, counts, the exit code), and continues only
+   when both withheld counts are 0. This is a filter, not a proof that nothing sensitive can reach the screen.Masking of the secret and its
    URL-encoded and host/user/password forms is applied as defense in depth only; it cannot catch a fragment,
    another encoding or a value split across lines, and the procedure does not rely on it. Limits: the secret
    is in the child process environment (readable by the child and by local tools with enough rights), the
@@ -474,7 +478,7 @@ than those named. **Unsupported:** a database whose PostGIS extension lives outs
 a different `search_path`, including on the audit function); `reapply-m1c` refuses it at `trigger_function`, which
 is a safe stop, and a human handles it. The hosted catalogue may differ from the local one (for example extra
 default ACL entries, or a different PostgreSQL major version printing `pg_get_functiondef` differently); a
-refusal there is safe and means a human inspects. Proved locally on a real
+refusal there is safe and means a human inspects. The expected text was produced by a fresh PostgreSQL 16 catalogue in a session with the default search path; the deparsing functions (`pg_get_functiondef`, `pg_get_expr`, `pg_get_constraintdef`, `pg_get_indexdef`, `format_type`) are not a cross-version serialization contract, so a different minor version, an extension that changes qualification, or a different session `search_path` can also change the text. Nothing is proved about hosted minor versions. A mismatch makes the equality fact false and the classifier refuses before any file or revoke is sent; it is never relaxed to pass, a human inspects the hosted text and a new canonical form is reviewed. Proved locally on a real
 PostgreSQL 16 catalogue (`pipeline/src/reapply-m1c-a3.test.ts`, 34 states: the tampering counterexamples (the
 reviewed raise only in a comment, a swallowed exception, SECURITY DEFINER, another owner), an added cascading foreign key,
 column, changed type, dropped check, changed default and row security, column-level privileges, an inherited `anon` grant on `batch_delete`,

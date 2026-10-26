@@ -28,7 +28,7 @@ import { RETENTION_RULES, runRetention, type Queryable } from './retention.js';
 import { AUDIT_FN_BODY_M1C, AUDIT_FN_DEF_M1C, AUDIT_FN_DEF_M1_PINNED, TABLE_CANON_M1C, collapseWhitespace } from './reapply-m1c-expected.js';
 import { REAPPLY_PRECHECKS, classifyM1cState, idempotentReapplySql } from './reapply.js';
 import { assessLedger, type LedgerFacts } from './ledger-preflight.js';
-import { sanitizeRunnerError } from './staging-sql-runner.js';
+import { KNOWN_SERVER_REFUSALS, REFUSAL_IDS, RunnerRefusal, classifyRunnerFailure } from './refusals.js';
 import { DENIED_STATEMENTS } from './retention-dry-run.js';
 import { retentionClientConfig, runRetentionForCron, runRetentionStep, type RetentionClient } from './retention-step.js';
 
@@ -825,13 +825,25 @@ test('ledger preflight action: read-only, reports check names and counts, stops 
   }
 });
 
-test('runner error text: the connection string, host, user, password, IP addresses and Supabase host names are masked', () => {
+test('failure output: only a fixed identifier and a validated code are ever produced; no part of a message is forwarded', () => {
   const url = 'postgresql://postgres.abcdefghijklmnopqrst:Zq%40x-Secret-Pw-9981@aws-0-us-east-2.pooler.supabase.com:5432/postgres';
-  const err = Object.assign(new Error(`connect ECONNREFUSED 10.20.30.40:5432 for ${url} host aws-0-us-east-2.pooler.supabase.com user postgres.abcdefghijklmnopqrst pw Zq@x-Secret-Pw-9981 at db.abcdefghijklmnopqrst.supabase.co`), { code: 'ECONNREFUSED' });
-  const out = sanitizeRunnerError(err, url);
-  for (const leak of ['Zq%40x', 'Zq@x-Secret', 'Secret-Pw', 'pooler.supabase.com', 'abcdefghijklmnopqrst', '10.20.30.40', 'supabase.co']) assert.ok(!out.includes(leak), `leaked ${leak}: ${out}`);
-  assert.match(out, /\[ECONNREFUSED\]$/);
-  assert.equal(sanitizeRunnerError(new Error('Staging SQL runner only targets the recorded rebuilt staging project'), undefined), 'Staging SQL runner only targets the recorded rebuilt staging project');
+  const driver = Object.assign(new Error(`connect ECONNREFUSED 10.20.30.40:5432 for ${url}`), { code: 'ECONNREFUSED' });
+  assert.deepEqual(classifyRunnerFailure(driver), { refusal: 'server_or_driver_error', err_code: 'ECONNREFUSED' });
+  assert.deepEqual(classifyRunnerFailure(new Error('anything at all')), { refusal: 'server_or_driver_error' });
+  assert.deepEqual(classifyRunnerFailure(Object.assign(new Error('x'), { code: 'not a code; secret' })), { refusal: 'server_or_driver_error' });
+  assert.deepEqual(classifyRunnerFailure(new RunnerRefusal('port_must_be_5432', 'a long message')), { refusal: 'port_must_be_5432' });
+  // a server exception that merely STARTS like a known refusal (the forged-prefix case) is generic, whatever follows
+  const forged = Object.assign(new Error('re-apply M1c refused: the retained audit table is missing (this is not a backed-out database); use the plain apply action fragment-Zq9981-xyz'), { code: 'P0001' });
+  assert.deepEqual(classifyRunnerFailure(forged), { refusal: 'server_or_driver_error', err_code: 'P0001' });
+  assert.ok(!JSON.stringify(classifyRunnerFailure(forged)).includes('fragment'));
+  // ...but the complete known message is recognised
+  const exact = new Error('re-apply M1c refused: M1c is still applied; run its backout first');
+  assert.deepEqual(classifyRunnerFailure(exact), { refusal: 'reapply_m1c_still_applied' });
+  // every known server message is really raised by the re-apply prechecks, and every id used is on the list
+  const raised = Object.values(REAPPLY_PRECHECKS).flatMap((sql) => [...sql.matchAll(/raise exception '([^']+)'/g)].map((m) => m[1]));
+  assert.deepEqual([...raised].sort(), Object.keys(KNOWN_SERVER_REFUSALS).sort());
+  for (const id of Object.values(KNOWN_SERVER_REFUSALS)) assert.ok((REFUSAL_IDS as readonly string[]).includes(id));
+  assert.equal(new Set(REFUSAL_IDS).size, REFUSAL_IDS.length);
 });
 
 test('rebuilt staging runner: every migration is one transaction that also records its version and name in the ledger', async () => {
