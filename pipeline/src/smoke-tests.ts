@@ -261,7 +261,7 @@ test('staging SQL runner verifies the staging project offline before any connect
   refuse({ action: 'drop-everything', dbUrl: pooler(staging), confirm: reset.confirmation }, /Unknown staging SQL action/);
 });
 
-test('rebuilt staging runner: refused until a ref is recorded, then only that exact ref, with the same guards', () => {
+test('rebuilt staging runner: the recorded ref is the exact reviewed value, and only that ref (with the same guards) is accepted', () => {
   const { production, staging } = RECORDED_PROJECT_REFS;
   const rebuilt = 'abcdefghijklmnopqrst';
   const pooler = (ref: string, port = 5432) => `postgresql://postgres.${ref}:redacted@aws-0-us-east-2.pooler.supabase.com:${port}/postgres`;
@@ -269,9 +269,20 @@ test('rebuilt staging runner: refused until a ref is recorded, then only that ex
   const plan = (over: Partial<Parameters<typeof planRebuiltSqlRun>[0]> = {}) =>
     planRebuiltSqlRun({ action: 'install-shutdown-fixtures', dbUrl: pooler(rebuilt), confirm: fixtures.confirmation, recordedRebuiltRef: rebuilt, ...over });
 
-  // No rebuilt ref is recorded in this commit, so the real default refuses everything.
-  assert.equal(RECORDED_PROJECT_REFS.stagingRebuilt, null);
-  assert.throws(() => planRebuiltSqlRun({ action: 'window-on', dbUrl: pooler(rebuilt), confirm: REBUILT_STAGING_SQL_ACTIONS['window-on']!.confirmation }), /not recorded yet/);
+  // The recorded rebuilt ref (doc 16 R1 step 2) is exactly this reviewed value, 20 letters, and differs from production, the old staging and the test fixture.
+  const recorded = String(RECORDED_PROJECT_REFS.stagingRebuilt);
+  assert.equal(recorded, 'ojqtsftfclhxauhjwott');
+  assert.match(String(recorded), /^[a-z]{20}$/);
+  const others: string[] = [production, staging, rebuilt];
+  assert.ok(!others.includes(recorded));
+  // With the real default, the recorded ref is accepted and the test fixture ref (and any other) is refused.
+  const real = planRebuiltSqlRun({ action: 'window-on', dbUrl: pooler(recorded), confirm: REBUILT_STAGING_SQL_ACTIONS['window-on']!.confirmation });
+  assert.equal(real.target.projectRef, recorded);
+  assert.throws(() => planRebuiltSqlRun({ action: 'window-on', dbUrl: pooler(production), confirm: REBUILT_STAGING_SQL_ACTIONS['window-on']!.confirmation }), /refuses the production/);
+  assert.throws(() => planRebuiltSqlRun({ action: 'window-on', dbUrl: pooler(staging), confirm: REBUILT_STAGING_SQL_ACTIONS['window-on']!.confirmation }), /only targets the recorded rebuilt/);
+  assert.throws(() => planRebuiltSqlRun({ action: 'window-on', dbUrl: pooler('zzzzzzzzzzzzzzzzzzzz'), confirm: REBUILT_STAGING_SQL_ACTIONS['window-on']!.confirmation }), /only targets the recorded rebuilt/);
+  assert.throws(() => planRebuiltSqlRun({ action: 'window-on', dbUrl: pooler(rebuilt), confirm: REBUILT_STAGING_SQL_ACTIONS['window-on']!.confirmation }), /only targets the recorded rebuilt/); // the fixture ref is not the recorded one
+  assert.throws(() => planRebuiltSqlRun({ action: 'window-on', dbUrl: pooler(rebuilt), confirm: REBUILT_STAGING_SQL_ACTIONS['window-on']!.confirmation, recordedRebuiltRef: null }), /not recorded yet/); // the unrecorded state still refuses
 
   const ok = plan();
   assert.equal(ok.target.projectRef, rebuilt);

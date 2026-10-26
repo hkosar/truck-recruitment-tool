@@ -70,6 +70,9 @@ when needed, $0; (c) transfer it to a Free organization and pause it, $0, restor
    applied list (evidence only).
 2. *Owner:* create project `truck-recruitment-tool-staging-2` in the same organization, region
    us-east-2, Micro compute; the database password goes to the owner's password manager only.
+   **Done:** the project exists (confirmed from the owner's dashboard: region us-east-2, Micro compute, healthy)
+   and its ref is recorded in `pipeline/src/target-guard.ts` (the reviewed commit of step 3); the runner refuses
+   any other ref.
 3. *Operator:* the reviewed tooling commit (§5 item 1): new staging ref, and runner actions
    `ledger-preflight`, `apply-migrations`, `apply-m1`, `apply-m1b`, `apply-m1c`, `role-matrix-m1`, `snapshot`,
    `window-on`, `window-off`, `retention-dry-run` and the three backouts, all with the runner's

@@ -108,6 +108,12 @@ if (runner) {
   }
 }
 
+// The recorded rebuilt staging ref (doc 16 R1 step 2): exactly one 20-letter literal, not the production or old staging ref.
+const guard = read('pipeline/src/target-guard.ts');
+const recordedRef = guard && /const REBUILT_STAGING_PROJECT_REF: string \| null = '([a-z]{20})';/.exec(guard);
+if (!recordedRef) failures.push('target-guard.ts: REBUILT_STAGING_PROJECT_REF must be a single 20-letter literal');
+else if (recordedRef[1] === PRODUCTION_REF || recordedRef[1] === OLD_STAGING_REF) failures.push('target-guard.ts: the rebuilt ref equals the production or old staging ref');
+
 if (failures.length) {
   for (const f of failures) console.error(`FAIL ${f}`);
   process.exit(1);

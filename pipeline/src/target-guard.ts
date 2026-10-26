@@ -1,11 +1,11 @@
 const PRODUCTION_PROJECT_REF = 'ejrfobddnojbijzrjbii';
 const STAGING_PROJECT_REF = 'yhyoxhtguyturgdhwywc';
 /**
- * The rebuilt staging project (doc 16 section 1.3, R1). It does not exist until the owner creates it
- * (approval 1); recording its ref here is a small reviewed commit of its own. While this is null
- * the runner refuses every action aimed at the rebuilt project.
+ * The rebuilt staging project (doc 16 section 1.3, R1 step 2): created by the owner, confirmed from the owner's
+ * dashboard (region us-east-2, Micro compute, healthy). Its ref is recorded here by its own reviewed commit; every
+ * rebuilt-project action is refused for any other ref (staging-rebuilt.ts).
  */
-const REBUILT_STAGING_PROJECT_REF: string | null = null;
+const REBUILT_STAGING_PROJECT_REF: string | null = 'ojqtsftfclhxauhjwott';
 
 export type PipelineEnvironment = 'prod' | 'dev';
 
