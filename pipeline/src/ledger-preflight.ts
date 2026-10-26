@@ -6,8 +6,14 @@
 //   alter table ... add column if not exists statements text[];  alter table ... add column if not exists name text;
 //   insert into ...schema_migrations (version, name, statements) values ($1, $2, array[]::text[])
 // so this checks, from the catalogue and as the actual runner login (current_user), that those statements will
-// behave exactly as designed. Anything uncertain is a failed check: the tool stops and a human decides.
-// It never changes anything and reports only fixed check names, true/false and counts.
+// succeed. The contract is EXACT and deliberately narrow: an existing ledger must have only the reviewed columns
+// (version text not null, statements text[] or absent, name text or absent) with no default, identity or generation,
+// version as its only key, no other constraint, index, trigger, rule or row security, be OWNED BY the runner login
+// itself (the unconditional ALTER TABLE ... ADD COLUMN IF NOT EXISTS needs ownership even when the column exists;
+// membership in the owner role is not accepted), and be empty. Anything else, or anything uncertain, is a failed
+// check: the tool stops and a human decides. The local test runs the real initialization and a ledger insert as
+// the same low-privilege login for every scenario that passes. It never changes anything and reports only fixed
+// check names, true/false and counts.
 
 import type { RebuiltSqlClient } from './staging-rebuilt.js';
 
@@ -22,14 +28,15 @@ export interface LedgerFacts {
   version_text_not_null: boolean | null;
   statements_type: string | null;
   name_type: string | null;
-  extra_required_columns: number | null;
+  other_columns: number | null;
+  special_columns: number | null;
   version_key: boolean | null;
   other_constraints: number | null;
   other_indexes: number | null;
   has_triggers_rules_rls: boolean | null;
   can_select: boolean | null;
   can_insert: boolean | null;
-  is_owner_member: boolean | null;
+  owner_is_runner: boolean | null;
 }
 
 export const LEDGER_PREFLIGHT_SQL = `with
@@ -53,14 +60,15 @@ select
   (select exists (select 1 from cols where attname = 'version' and attnotnull and typ = 'text') where exists (select 1 from tbl)) as version_text_not_null,
   (select case when exists (select 1 from cols where attname = 'statements') then (select typ from cols where attname = 'statements') else 'absent' end where exists (select 1 from tbl)) as statements_type,
   (select case when exists (select 1 from cols where attname = 'name') then (select typ from cols where attname = 'name') else 'absent' end where exists (select 1 from tbl)) as name_type,
-  (select count(*)::int from cols where attname not in ('version', 'statements', 'name') and attnotnull and not atthasdef and attidentity = '' and attgenerated = '' and exists (select 1 from tbl)) as extra_required_columns,
+  (select count(*)::int from cols where attname not in ('version', 'statements', 'name') and exists (select 1 from tbl)) as other_columns,
+  (select count(*)::int from cols where attname in ('version', 'statements', 'name') and (atthasdef or attidentity <> '' or attgenerated <> '') and exists (select 1 from tbl)) as special_columns,
   (select exists (select 1 from vkey) where exists (select 1 from tbl)) as version_key,
   (select count(*)::int from keyc where oid not in (select oid from vkey) and exists (select 1 from tbl)) as other_constraints,
   (select count(*)::int from pg_index i where i.indrelid = (select oid from tbl) and i.indexrelid not in (select conindid from vkey) and exists (select 1 from tbl)) as other_indexes,
   (select (relhastriggers or relrowsecurity or exists (select 1 from pg_rewrite r where r.ev_class = tbl.oid and r.rulename <> '_RETURN')) from tbl) as has_triggers_rules_rls,
   (select has_table_privilege(current_user, (select oid from tbl), 'SELECT') where exists (select 1 from tbl)) as can_select,
   (select has_table_privilege(current_user, (select oid from tbl), 'INSERT') where exists (select 1 from tbl)) as can_insert,
-  (select pg_has_role(current_user, relowner, 'member') from tbl) as is_owner_member`;
+  (select relowner = (select oid from pg_roles where rolname = current_user) from tbl) as owner_is_runner`;
 
 export const LEDGER_COUNT_SQL = 'select count(*)::int as n from supabase_migrations.schema_migrations';
 
@@ -75,22 +83,25 @@ export interface LedgerAssessment {
 /** Pure decision from the catalogue facts (and the row count when the table could be read). Every check must be exactly true. */
 export function assessLedger(f: LedgerFacts, rows: number | null): LedgerAssessment {
   const kase: LedgerCase = f.schema_exists !== true ? 'schema_absent' : f.table_exists !== true ? 'table_absent' : 'table_present';
-  const checks: LedgerAssessment['checks'] = [{ check: 'public_profiles_absent', ok: f.profiles_absent === true }];
+  // CREATE on the database is needed in EVERY case: PostgreSQL checks it before it looks at IF NOT EXISTS, so
+  // `create schema if not exists` fails for a login without it even when the schema is already there.
+  const checks: LedgerAssessment['checks'] = [{ check: 'public_profiles_absent', ok: f.profiles_absent === true }, { check: 'runner_can_create_schema', ok: f.db_create === true }];
   if (kase === 'schema_absent') {
-    checks.push({ check: 'runner_can_create_schema', ok: f.db_create === true });
+    // nothing further: the database-level CREATE above is the whole requirement
   } else if (kase === 'table_absent') {
     checks.push({ check: 'runner_schema_usage', ok: f.schema_usage === true }, { check: 'runner_can_create_table_in_schema', ok: f.schema_create === true });
   } else {
-    const typed = (name: string, got: string | null, want: string) => ({ check: name, ok: got === 'absent' || got === want, detail: got ?? 'unknown' });
-    const absentColumns = f.statements_type === 'absent' || f.name_type === 'absent';
+    // The column type text is catalogue-derived, so it is never printed: only the pass/fail of the comparison is.
+    const typed = (name: string, got: string | null, want: string) => ({ check: name, ok: got === 'absent' || got === want });
     checks.push(
       { check: 'runner_schema_usage', ok: f.schema_usage === true },
       { check: 'ledger_is_ordinary_table', ok: f.table_ordinary === true },
       { check: 'version_is_text_not_null', ok: f.version_text_not_null === true },
       typed('statements_is_text_array_or_absent', f.statements_type, 'text[]'),
       typed('name_is_text_or_absent', f.name_type, 'text'),
-      { check: 'runner_owns_table_if_columns_must_be_added', ok: !absentColumns || f.is_owner_member === true },
-      { check: 'no_extra_required_columns_without_default', ok: f.extra_required_columns === 0, detail: String(f.extra_required_columns) },
+      { check: 'runner_owns_ledger_table', ok: f.owner_is_runner === true },
+      { check: 'only_the_reviewed_columns', ok: f.other_columns === 0, detail: String(f.other_columns) },
+      { check: 'reviewed_columns_have_no_default_identity_or_generation', ok: f.special_columns === 0, detail: String(f.special_columns) },
       { check: 'version_is_the_primary_or_unique_key', ok: f.version_key === true },
       { check: 'no_other_constraints', ok: f.other_constraints === 0, detail: String(f.other_constraints) },
       { check: 'no_other_indexes', ok: f.other_indexes === 0, detail: String(f.other_indexes) },

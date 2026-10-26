@@ -77,16 +77,26 @@ when needed, $0; (c) transfer it to a Free organization and pause it, $0, restor
    confirmation, dry run first).
 4. *Operator:* first the **ledger preflight** (`ledger-preflight`, dry run then `--execute`):
    a read-only catalogue assessment, as the actual runner login, of
-   `supabase_migrations.schema_migrations`. It checks `public.profiles` is absent; if the schema is
-   absent, that the login may create schemas; if the table is absent, that it may create tables in the
-   schema; if the table exists, that it is an ordinary table, `version` is `text not null` and its sole
-   primary/unique key, `statements` is `text[]` (element type checked) and `name` is `text` or absent
-   (and the login owns the table if the replay would have to add them), there is no extra required column
-   without a default, no other constraint, index, trigger, rule or row-level security, the login can
-   select and insert, and the ledger is empty. It prints only fixed check names, true/false and counts.
-   Any failed or unreadable check is a stop. **The manager records an explicit PASS before the replay's
+   `supabase_migrations.schema_migrations`. The contract is exact and narrow, and every point is something
+   the replay's own statements need (`create schema if not exists`, `create table if not exists`, two
+   unconditional `alter table ... add column if not exists`, and one `insert` per file): `public.profiles`
+   is absent; the login has CREATE on the database (PostgreSQL checks this before `IF NOT EXISTS`, so it is
+   needed even when the schema exists); if the schema exists but the table does not, USAGE and CREATE on the
+   schema; if the table exists: it is an ordinary table **owned by the runner login itself** (the `alter table`
+   needs ownership even when the columns already exist; membership in the owner role is not accepted), it has
+   **only** the columns `version` (`text not null`), `statements` (`text[]`, or absent) and `name` (`text`,
+   or absent), none of them with a default, identity or generation, `version` is its sole primary/unique key,
+   there is no other constraint, index, trigger, rule or row-level security, the login can select and
+   insert, and the ledger is empty. Anything outside this (an extra column even with a default, a
+   different owner) is a stop for a human, not something the tool tries to accept. It prints only fixed
+   check names, true/false and counts. Any failed or unreadable check is a stop.
+   **The manager records an explicit PASS before the replay's
    `--execute`; on any failure or uncertainty the replay does not run and nothing is bypassed.** The
-   replay repeats the same assessment in its own session and refuses on any failed check. Then dry
+   replay repeats the same assessment in its own session and refuses on any failed check. (The tool does not
+   verify a manager message: the PASS is a procedural gate.) Locally, for every one of 34 catalogue
+   scenarios the real initialization and a ledger insert are run as the same low-privilege login: a PASS is
+   never followed by a failure there (`pipeline/src/ledger-preflight-a3.test.ts`). The hosted ledger and
+   login are still unverified until the preflight runs against the real project. Then dry
    run, then `--execute`: replay the 20 migrations in order, one transaction each, stopping on the
    first error; checksums as `scripts/verify-migration-baseline.mjs`. After the last file the tool
    reads the ledger back and requires exactly the 20 reviewed (version, name) pairs in order

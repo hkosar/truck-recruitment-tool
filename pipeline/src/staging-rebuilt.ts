@@ -87,12 +87,12 @@ export interface RebuiltSqlStep {
 }
 
 /** Same shape the Supabase CLI keeps (and doc 09's reviewed adoption script writes): version, name, statements. */
-const LEDGER_TABLE_SQL = `
+export const LEDGER_TABLE_SQL = `
   create schema if not exists supabase_migrations;
   create table if not exists supabase_migrations.schema_migrations (version text not null primary key);
   alter table supabase_migrations.schema_migrations add column if not exists statements text[];
   alter table supabase_migrations.schema_migrations add column if not exists name text;`;
-const LEDGER_INSERT_SQL = 'insert into supabase_migrations.schema_migrations (version, name, statements) values ($1, $2, array[]::text[])';
+export const LEDGER_INSERT_SQL = 'insert into supabase_migrations.schema_migrations (version, name, statements) values ($1, $2, array[]::text[])';
 
 export interface RebuiltSqlPlan {
   action: string;

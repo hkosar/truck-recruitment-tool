@@ -682,8 +682,8 @@ test('retention-dry-run: only as recruiter_maintenance on the rebuilt project; c
   } finally { console.log = origLog; }
 });
 
-const LEDGER_ABSENT: LedgerFacts = { profiles_absent: true, schema_exists: false, table_exists: false, db_create: true, schema_usage: null, schema_create: null, table_ordinary: null, version_text_not_null: null, statements_type: null, name_type: null, extra_required_columns: null, version_key: null, other_constraints: null, other_indexes: null, has_triggers_rules_rls: null, can_select: null, can_insert: null, is_owner_member: null };
-const LEDGER_CLI: LedgerFacts = { ...LEDGER_ABSENT, schema_exists: true, table_exists: true, schema_usage: true, schema_create: true, table_ordinary: true, version_text_not_null: true, statements_type: 'text[]', name_type: 'text', extra_required_columns: 0, version_key: true, other_constraints: 0, other_indexes: 0, has_triggers_rules_rls: false, can_select: true, can_insert: true, is_owner_member: true };
+const LEDGER_ABSENT: LedgerFacts = { profiles_absent: true, schema_exists: false, table_exists: false, db_create: true, schema_usage: null, schema_create: null, table_ordinary: null, version_text_not_null: null, statements_type: null, name_type: null, other_columns: null, special_columns: null, version_key: null, other_constraints: null, other_indexes: null, has_triggers_rules_rls: null, can_select: null, can_insert: null, owner_is_runner: null };
+const LEDGER_CLI: LedgerFacts = { ...LEDGER_ABSENT, schema_exists: true, table_exists: true, schema_usage: true, schema_create: true, table_ordinary: true, version_text_not_null: true, statements_type: 'text[]', name_type: 'text', other_columns: 0, special_columns: 0, version_key: true, other_constraints: 0, other_indexes: 0, has_triggers_rules_rls: false, can_select: true, can_insert: true, owner_is_runner: true };
 
 test('ledger preflight: every uncertain or incompatible ledger shape is a failed check; only the known shapes pass', () => {
   const failing = (f: Partial<LedgerFacts>, rows: number | null = 0) => assessLedger({ ...LEDGER_CLI, ...f }, rows).checks.filter((c) => !c.ok).map((c) => c.check);
@@ -694,7 +694,10 @@ test('ledger preflight: every uncertain or incompatible ledger shape is a failed
   assert.deepEqual(assessLedger({ ...LEDGER_ABSENT, schema_exists: true, schema_usage: true, schema_create: false }, null).checks.filter((c) => !c.ok).map((c) => c.check), ['runner_can_create_table_in_schema']);
   assert.equal(assessLedger(LEDGER_CLI, 0).ok, true);
   assert.equal(assessLedger({ ...LEDGER_CLI, statements_type: 'absent', name_type: 'absent' }, 0).ok, true);
-  assert.deepEqual(failing({ statements_type: 'absent', is_owner_member: false }), ['runner_owns_table_if_columns_must_be_added']);
+  assert.deepEqual(failing({ db_create: false }), ['runner_can_create_schema']); // checked before IF NOT EXISTS, so also when the schema and table exist
+  assert.deepEqual(failing({ owner_is_runner: false }), ['runner_owns_ledger_table']); // even when no column has to be added: the ALTER ... IF NOT EXISTS is unconditional
+  assert.deepEqual(failing({ statements_type: 'absent', owner_is_runner: false }), ['runner_owns_ledger_table']);
+  assert.deepEqual(failing({ owner_is_runner: null }), ['runner_owns_ledger_table']);
   assert.deepEqual(failing({}, 1), ['ledger_is_empty']);
   assert.deepEqual(failing({}, null), ['ledger_is_empty']);
   assert.deepEqual(failing({ profiles_absent: false }), ['public_profiles_absent']);
@@ -702,7 +705,10 @@ test('ledger preflight: every uncertain or incompatible ledger shape is a failed
   assert.deepEqual(failing({ statements_type: 'integer[]' }), ['statements_is_text_array_or_absent']);
   assert.deepEqual(failing({ name_type: 'integer' }), ['name_is_text_or_absent']);
   assert.deepEqual(failing({ version_text_not_null: false }), ['version_is_text_not_null']);
-  assert.deepEqual(failing({ extra_required_columns: 1 }), ['no_extra_required_columns_without_default']);
+  assert.deepEqual(failing({ other_columns: 1 }), ['only_the_reviewed_columns']);
+  assert.deepEqual(failing({ special_columns: 1 }), ['reviewed_columns_have_no_default_identity_or_generation']);
+  // the catalogue-derived type text is never part of the printed output
+  assert.ok(assessLedger({ ...LEDGER_CLI, statements_type: 'secret-looking-type' }, 0).checks.every((c) => c.detail === undefined || /^([0-9]+|unreadable)$/.test(c.detail)));
   assert.deepEqual(failing({ version_key: false }), ['version_is_the_primary_or_unique_key']);
   assert.deepEqual(failing({ other_constraints: 1 }), ['no_other_constraints']);
   assert.deepEqual(failing({ other_indexes: 1 }), ['no_other_indexes']);
