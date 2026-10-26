@@ -109,6 +109,29 @@ export async function executeStagingSqlPlan(plan: StagingSqlPlan): Promise<void>
   }
 }
 
+/**
+ * What is printed when the runner refuses or fails. Our own guard messages carry no secret, but a driver or network
+ * error can include the server address or account. This masks the whole connection string, its host, user and
+ * password, any IPv4 address and any Supabase host name. Best effort: reports should still carry only event names,
+ * counts and pass/fail, and a person with the terminal inspects anything else locally.
+ */
+export function sanitizeRunnerError(err: unknown, dbUrl: string | undefined): string {
+  let msg = err instanceof Error ? err.message : String(err);
+  const targets = new Set<string>();
+  if (dbUrl) {
+    targets.add(dbUrl);
+    try {
+      const u = new URL(dbUrl);
+      const decode = (v: string) => { try { return decodeURIComponent(v); } catch { return v; } };
+      for (const part of [u.hostname, u.username, u.password, decode(u.username), decode(u.password)]) if (part) targets.add(part);
+    } catch { /* not a URL */ }
+  }
+  for (const t of [...targets].filter((x) => x.length >= 4).sort((a, b) => b.length - a.length)) msg = msg.split(t).join('<masked>');
+  msg = msg.replace(/\b\d{1,3}(?:\.\d{1,3}){3}\b/g, '<ip>').replace(/[A-Za-z0-9.-]+\.supabase\.(?:com|co)\b/g, '<host>');
+  const code = typeof err === 'object' && err !== null && typeof (err as { code?: unknown }).code === 'string' ? ((err as { code: string }).code) : undefined;
+  return code ? `${msg} [${code}]` : msg;
+}
+
 function parseRunnerArgs(argv: readonly string[]): { action: string; confirm: string | undefined; execute: boolean; project: string; out: string | undefined } {
   let action = '';
   let confirm: string | undefined;
@@ -155,7 +178,7 @@ async function main(): Promise<void> {
 const isDirectInvocation = process.argv[1] !== undefined && import.meta.url === pathToFileURL(process.argv[1]).href;
 if (isDirectInvocation) {
   main().catch((err: unknown) => {
-    console.error(JSON.stringify({ msg: 'staging-sql.refused', err: err instanceof Error ? err.message : String(err) }));
+    console.error(JSON.stringify({ msg: 'staging-sql.refused', err: sanitizeRunnerError(err, process.env.STAGING_DB_URL) }));
     process.exitCode = 1;
   });
 }

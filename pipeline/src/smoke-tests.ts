@@ -26,6 +26,8 @@ import { readFileSync } from 'node:fs';
 import { REPOSITORY_ROOT } from './staging-rebuilt.js';
 import { RETENTION_RULES, runRetention, type Queryable } from './retention.js';
 import { REAPPLY_PRECHECKS, classifyM1cState, idempotentReapplySql } from './reapply.js';
+import { assessLedger, type LedgerFacts } from './ledger-preflight.js';
+import { sanitizeRunnerError } from './staging-sql-runner.js';
 import { DENIED_STATEMENTS } from './retention-dry-run.js';
 import { retentionClientConfig, runRetentionForCron, runRetentionStep, type RetentionClient } from './retention-step.js';
 
@@ -669,6 +671,103 @@ test('retention-dry-run: only as recruiter_maintenance on the rebuilt project; c
   } finally { console.log = origLog; }
 });
 
+const LEDGER_ABSENT: LedgerFacts = { profiles_absent: true, schema_exists: false, table_exists: false, db_create: true, schema_usage: null, schema_create: null, table_ordinary: null, version_text_not_null: null, statements_type: null, name_type: null, extra_required_columns: null, version_key: null, other_constraints: null, other_indexes: null, has_triggers_rules_rls: null, can_select: null, can_insert: null, is_owner_member: null };
+const LEDGER_CLI: LedgerFacts = { ...LEDGER_ABSENT, schema_exists: true, table_exists: true, schema_usage: true, schema_create: true, table_ordinary: true, version_text_not_null: true, statements_type: 'text[]', name_type: 'text', extra_required_columns: 0, version_key: true, other_constraints: 0, other_indexes: 0, has_triggers_rules_rls: false, can_select: true, can_insert: true, is_owner_member: true };
+
+test('ledger preflight: every uncertain or incompatible ledger shape is a failed check; only the known shapes pass', () => {
+  const failing = (f: Partial<LedgerFacts>, rows: number | null = 0) => assessLedger({ ...LEDGER_CLI, ...f }, rows).checks.filter((c) => !c.ok).map((c) => c.check);
+  assert.equal(assessLedger(LEDGER_ABSENT, null).ok, true);
+  assert.equal(assessLedger(LEDGER_ABSENT, null).case, 'schema_absent');
+  assert.deepEqual(assessLedger({ ...LEDGER_ABSENT, db_create: false }, null).checks.filter((c) => !c.ok).map((c) => c.check), ['runner_can_create_schema']);
+  assert.equal(assessLedger({ ...LEDGER_ABSENT, schema_exists: true, schema_usage: true, schema_create: true }, null).ok, true);
+  assert.deepEqual(assessLedger({ ...LEDGER_ABSENT, schema_exists: true, schema_usage: true, schema_create: false }, null).checks.filter((c) => !c.ok).map((c) => c.check), ['runner_can_create_table_in_schema']);
+  assert.equal(assessLedger(LEDGER_CLI, 0).ok, true);
+  assert.equal(assessLedger({ ...LEDGER_CLI, statements_type: 'absent', name_type: 'absent' }, 0).ok, true);
+  assert.deepEqual(failing({ statements_type: 'absent', is_owner_member: false }), ['runner_owns_table_if_columns_must_be_added']);
+  assert.deepEqual(failing({}, 1), ['ledger_is_empty']);
+  assert.deepEqual(failing({}, null), ['ledger_is_empty']);
+  assert.deepEqual(failing({ profiles_absent: false }), ['public_profiles_absent']);
+  assert.deepEqual(failing({ statements_type: 'text' }), ['statements_is_text_array_or_absent']);
+  assert.deepEqual(failing({ statements_type: 'integer[]' }), ['statements_is_text_array_or_absent']);
+  assert.deepEqual(failing({ name_type: 'integer' }), ['name_is_text_or_absent']);
+  assert.deepEqual(failing({ version_text_not_null: false }), ['version_is_text_not_null']);
+  assert.deepEqual(failing({ extra_required_columns: 1 }), ['no_extra_required_columns_without_default']);
+  assert.deepEqual(failing({ version_key: false }), ['version_is_the_primary_or_unique_key']);
+  assert.deepEqual(failing({ other_constraints: 1 }), ['no_other_constraints']);
+  assert.deepEqual(failing({ other_indexes: 1 }), ['no_other_indexes']);
+  assert.deepEqual(failing({ has_triggers_rules_rls: true }), ['no_triggers_rules_or_row_security']);
+  assert.deepEqual(failing({ can_insert: false }), ['runner_can_insert']);
+  assert.deepEqual(failing({ can_select: false }, null), ['runner_can_select', 'ledger_is_empty']);
+  assert.deepEqual(failing({ table_ordinary: false }), ['ledger_is_ordinary_table']);
+  // a missing fact is a failure, never a pass
+  assert.equal(assessLedger({ ...LEDGER_CLI, version_key: undefined as unknown as boolean }, 0).ok, false);
+});
+
+test('ledger preflight action: read-only, reports check names and counts, stops the replay when a check fails, verifies the full (version, name) set', async () => {
+  const rebuilt = 'abcdefghijklmnopqrst';
+  const url = `postgresql://postgres.${rebuilt}:redacted-pw@aws-0-us-east-2.pooler.supabase.com:5432/postgres`;
+  const pre = REBUILT_STAGING_SQL_ACTIONS['ledger-preflight']!;
+  const prePlan = planRebuiltSqlRun({ action: 'ledger-preflight', dbUrl: url, confirm: pre.confirmation, recordedRebuiltRef: rebuilt });
+  assert.equal(prePlan.kind, 'ledger-preflight');
+  const mig = planRebuiltSqlRun({ action: 'apply-migrations', dbUrl: url, confirm: REBUILT_STAGING_SQL_ACTIONS['apply-migrations']!.confirmation, recordedRebuiltRef: rebuilt });
+  const make = (facts: LedgerFacts, ledgerRows: Array<{ version: string; name: string }>) => {
+    const sent: string[] = [];
+    const client = {
+      async connect() {},
+      async query(sql: string) {
+        sent.push(sql);
+        if (/from pg_namespace n where n.nspname = 'supabase_migrations'/.test(sql)) return { rows: [facts] };
+        if (/order by version/.test(sql)) return { rows: ledgerRows };
+        if (/to_regclass/.test(sql)) return { rows: [{ t: null }] };
+        if (/count\(\*\)::int/.test(sql)) return { rows: [{ n: 0 }] };
+        return { rows: [] };
+      },
+      async end() {},
+    };
+    return { client, sent };
+  };
+  const quiet = async <T>(fn: () => Promise<T>): Promise<{ result?: T; error?: unknown; lines: string[] }> => {
+    const lines: string[] = []; const l = console.log; const e = console.error;
+    console.log = (...a: unknown[]) => { lines.push(String(a[0])); }; console.error = (...a: unknown[]) => { lines.push(String(a[0])); };
+    try { return { result: await fn(), lines }; } catch (error) { return { error, lines }; } finally { console.log = l; console.error = e; }
+  };
+  // preflight alone: passes on an absent ledger, sends only reads, prints names and counts
+  const ok = make(LEDGER_ABSENT, []);
+  const r1 = await quiet(() => executeRebuiltSqlPlan(prePlan, () => ok.client));
+  assert.equal(r1.error, undefined);
+  assert.ok(r1.lines.some((x) => /"msg":"staging-sql.ledger_preflight".*"ok":true.*"failed":0/.test(x)));
+  assert.ok(ok.sent.every((q) => !/^(insert|create|alter|drop|update|delete)/i.test(q.trim())) && ok.sent.includes('begin read only') && ok.sent.includes('rollback'));
+  // a failing check stops both the preflight action and the replay before any file is sent
+  const bad = { ...LEDGER_CLI, statements_type: 'text' };
+  for (const plan of [prePlan, mig]) {
+    const m = make(bad, []);
+    const r = await quiet(() => executeRebuiltSqlPlan(plan, () => m.client));
+    assert.match(String((r.error as Error).message), /ledger preflight: 1 check\(s\) failed/);
+    assert.ok(r.lines.some((x) => x.includes('statements_is_text_array_or_absent') && x.includes('"ok":false')));
+    assert.ok(!m.sent.includes('begin') && !m.sent.some((q) => /create schema/.test(q)), 'nothing was written');
+  }
+  // the replay verifies the exact pairs: a wrong name or a missing row is a failure
+  const wanted = mig.steps.map((st) => st.ledger!);
+  const good = make(LEDGER_ABSENT, wanted);
+  const r2 = await quiet(() => executeRebuiltSqlPlan(mig, () => good.client));
+  assert.equal(r2.error, undefined);
+  assert.ok(r2.lines.some((x) => /"msg":"staging-sql.ledger_verified","expected":20,"found":20,"exact_match":true/.test(x)));
+  for (const rows of [wanted.slice(0, 19), [...wanted.slice(0, 19), { ...wanted[19]!, name: 'other' }]]) {
+    const w = make(LEDGER_ABSENT, rows);
+    const r = await quiet(() => executeRebuiltSqlPlan(mig, () => w.client));
+    assert.match(String((r.error as Error).message), /exactly the reviewed/);
+  }
+});
+
+test('runner error text: the connection string, host, user, password, IP addresses and Supabase host names are masked', () => {
+  const url = 'postgresql://postgres.abcdefghijklmnopqrst:Zq%40x-Secret-Pw-9981@aws-0-us-east-2.pooler.supabase.com:5432/postgres';
+  const err = Object.assign(new Error(`connect ECONNREFUSED 10.20.30.40:5432 for ${url} host aws-0-us-east-2.pooler.supabase.com user postgres.abcdefghijklmnopqrst pw Zq@x-Secret-Pw-9981 at db.abcdefghijklmnopqrst.supabase.co`), { code: 'ECONNREFUSED' });
+  const out = sanitizeRunnerError(err, url);
+  for (const leak of ['Zq%40x', 'Zq@x-Secret', 'Secret-Pw', 'pooler.supabase.com', 'abcdefghijklmnopqrst', '10.20.30.40', 'supabase.co']) assert.ok(!out.includes(leak), `leaked ${leak}: ${out}`);
+  assert.match(out, /\[ECONNREFUSED\]$/);
+  assert.equal(sanitizeRunnerError(new Error('Staging SQL runner only targets the recorded rebuilt staging project'), undefined), 'Staging SQL runner only targets the recorded rebuilt staging project');
+});
+
 test('rebuilt staging runner: every migration is one transaction that also records its version and name in the ledger', async () => {
   const rebuilt = 'abcdefghijklmnopqrst';
   const url = `postgresql://postgres.${rebuilt}:redacted-pw@aws-0-us-east-2.pooler.supabase.com:5432/postgres`;
@@ -686,6 +785,8 @@ test('rebuilt staging runner: every migration is one transaction that also recor
     async connect() {},
     async query(sql: string, params?: unknown[]) {
       sent.push(params ? `${sql} ${JSON.stringify(params)}` : sql);
+      if (/from pg_namespace n where n.nspname = 'supabase_migrations'/.test(sql)) return { rows: [LEDGER_ABSENT] };
+      if (/order by version/.test(sql)) return { rows: plan.steps.slice(0, 2).map((st) => st.ledger!) };
       if (/to_regclass/.test(sql)) return { rows: [{ t: null }] };
       if (/count\(\*\)::int/.test(sql)) return { rows: [{ n: 0 }] };
       return { rows: [] };
@@ -693,13 +794,14 @@ test('rebuilt staging runner: every migration is one transaction that also recor
     async end() {},
   };
   await executeRebuiltSqlPlan({ ...plan, steps: plan.steps.slice(0, 2) }, () => client);
+  assert.ok(sent.indexOf('begin read only') >= 0 && sent.indexOf('begin read only') < sent.indexOf('begin'), 'the read-only ledger preflight runs before the first file');
   const afterGuards = sent.findIndex((q) => q === 'begin');
   assert.deepEqual(
-    sent.slice(afterGuards).map((q) => (q.startsWith('insert into supabase_migrations') ? q.replace(/^.*\(\$1, \$2, array\[\]::text\[\]\)/, 'insert') : q === 'begin' || q === 'commit' ? q : 'sql')),
+    sent.slice(afterGuards).filter((q) => !/order by version/.test(q)).map((q) => (q.startsWith('insert into supabase_migrations') ? q.replace(/^.*\(\$1, \$2, array\[\]::text\[\]\)/, 'insert') : q === 'begin' || q === 'commit' ? q : 'sql')),
     ['begin', 'sql', 'insert [\"20260720000100\",\"extensions\"]', 'commit', 'begin', 'sql', 'insert [\"20260720000200\",\"enums\"]', 'commit'],
   );
   // A failing file is rolled back (the insert never commits) and nothing later runs.
-  const failing = { ...client, async query(sql: string, params?: unknown[]) { sent.push(sql); if (/to_regclass/.test(sql)) return { rows: [{ t: null }] }; if (/count\(\*\)::int/.test(sql)) return { rows: [{ n: 0 }] }; if (sql.startsWith('-- fail')) throw new Error('boom'); return { rows: [] }; } };
+  const failing = { ...client, async query(sql: string, params?: unknown[]) { sent.push(sql); if (/from pg_namespace n where n.nspname = 'supabase_migrations'/.test(sql)) return { rows: [LEDGER_ABSENT] }; if (/to_regclass/.test(sql)) return { rows: [{ t: null }] }; if (/count\(\*\)::int/.test(sql)) return { rows: [{ n: 0 }] }; if (sql.startsWith('-- fail')) throw new Error('boom'); return { rows: [] }; } };
   sent.length = 0;
   const bad = { ...plan, steps: [{ ...plan.steps[0]!, sql: '-- fail' }, plan.steps[1]!] };
   const origError = console.error; console.error = () => undefined;

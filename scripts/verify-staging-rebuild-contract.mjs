@@ -91,6 +91,8 @@ if (runner) {
     'supabase_migrations.schema_migrations',
     'ledger?: { version: string; name: string }',
     "'retention-dry-run'",
+    "'ledger-preflight'",
+    'runLedgerPreflight',
     "'reapply-m1'",
     "'reapply-m1b'",
     "'reapply-m1c'",

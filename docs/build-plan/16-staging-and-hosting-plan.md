@@ -71,12 +71,34 @@ when needed, $0; (c) transfer it to a Free organization and pause it, $0, restor
 2. *Owner:* create project `truck-recruitment-tool-staging-2` in the same organization, region
    us-east-2, Micro compute; the database password goes to the owner's password manager only.
 3. *Operator:* the reviewed tooling commit (§5 item 1): new staging ref, and runner actions
-   `apply-migrations`, `apply-m1`, `apply-m1b`, `apply-m1c`, `role-matrix-m1`, `snapshot`,
+   `ledger-preflight`, `apply-migrations`, `apply-m1`, `apply-m1b`, `apply-m1c`, `role-matrix-m1`, `snapshot`,
    `window-on`, `window-off`, `retention-dry-run` and the three backouts, all with the runner's
    existing guards (production refusal, exact staging ref, session port 5432, typed
    confirmation, dry run first).
-4. *Operator:* dry run, then `--execute`: replay the 20 migrations in order, one transaction
-   each, stopping on the first error; checksums as `scripts/verify-migration-baseline.mjs`.
+4. *Operator:* first the **ledger preflight** (`ledger-preflight`, dry run then `--execute`):
+   a read-only catalogue assessment, as the actual runner login, of
+   `supabase_migrations.schema_migrations`. It checks `public.profiles` is absent; if the schema is
+   absent, that the login may create schemas; if the table is absent, that it may create tables in the
+   schema; if the table exists, that it is an ordinary table, `version` is `text not null` and its sole
+   primary/unique key, `statements` is `text[]` (element type checked) and `name` is `text` or absent
+   (and the login owns the table if the replay would have to add them), there is no extra required column
+   without a default, no other constraint, index, trigger, rule or row-level security, the login can
+   select and insert, and the ledger is empty. It prints only fixed check names, true/false and counts.
+   Any failed or unreadable check is a stop. **The manager records an explicit PASS before the replay's
+   `--execute`; on any failure or uncertainty the replay does not run and nothing is bypassed.** The
+   replay repeats the same assessment in its own session and refuses on any failed check. Then dry
+   run, then `--execute`: replay the 20 migrations in order, one transaction each, stopping on the
+   first error; checksums as `scripts/verify-migration-baseline.mjs`. After the last file the tool
+   reads the ledger back and requires exactly the 20 reviewed (version, name) pairs in order
+   (names are the file name without the timestamp and `.sql`), printing
+   `staging-sql.ledger_verified` with counts and `exact_match`; a wrong or missing pair fails the run.
+   *Secret input:* run every hosted runner command through `scripts/run-with-secrets.mjs`, which takes
+   the database URL (and, for `scripts/seed-auth-users.ts`, the service-role key and the fixture
+   password) from a hidden prompt, passes it to the child process environment only, and masks it in the
+   child's output. A secret is never typed as a command, saved in a file or pasted in chat. The runner's
+   refusal text masks the connection string, host, user, password, IP addresses and Supabase host names
+   (best effort); chat reports carry only event names, counts and pass/fail, and anything else is
+   inspected locally by the operator.
 5. *Operator:* fictional fixtures, the staging identity marker and the hosted Auth fixture
    accounts for A5b (doc 11 commands, new ref), in their supported order (profile fixtures, then
    the marker, then the reset, then the Auth fixtures); expect `staging-sql.done`.

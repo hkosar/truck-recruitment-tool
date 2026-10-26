@@ -3,6 +3,7 @@ import { existsSync, readFileSync, readdirSync, writeFileSync } from 'node:fs';
 import { isAbsolute, relative, resolve } from 'node:path';
 import pg from 'pg';
 import { M1C_POSTCONDITION_SQL, M1C_STATE_PROBE_SQL, REAPPLY_POST_SQL, REAPPLY_PRECHECKS, classifyM1cState, idempotentReapplySql, type M1cStateFacts, type ReapplyTarget } from './reapply.js';
+import { reportLedgerPreflight, runLedgerPreflight } from './ledger-preflight.js';
 import { MAINTENANCE_ROLE, roleOf } from './retention-step.js';
 import { runRetentionDryRun, type DryRunReport } from './retention-dry-run.js';
 import { RECORDED_PROJECT_REFS, parseSupabaseDbTarget, type SupabaseDbTarget } from './target-guard.js';
@@ -22,7 +23,7 @@ import { RECORDED_PROJECT_REFS, parseSupabaseDbTarget, type SupabaseDbTarget } f
 export const REPOSITORY_ROOT = resolve(import.meta.dirname, '..', '..');
 const REBUILT_REF_PATTERN = /^[a-z]{20}$/;
 
-type RebuiltKind = 'file' | 'migrations' | 'inline' | 'snapshot' | 'retention';
+type RebuiltKind = 'file' | 'migrations' | 'inline' | 'snapshot' | 'retention' | 'ledger-preflight';
 
 interface RebuiltActionSpec {
   kind: RebuiltKind;
@@ -40,6 +41,8 @@ interface RebuiltActionSpec {
 
 export const REBUILT_STAGING_SQL_ACTIONS: Readonly<Record<string, RebuiltActionSpec>> = {
   'apply-migrations': { kind: 'migrations', confirmation: 'APPLY TNBS BASELINE MIGRATIONS', pinned: false },
+  // Read-only catalogue assessment of the migration ledger as the runner login; run (and PASSed by the manager) before apply-migrations --execute.
+  'ledger-preflight': { kind: 'ledger-preflight', confirmation: 'RUN TNBS LEDGER PREFLIGHT', pinned: false },
   // Connects AS recruiter_maintenance (STAGING_DB_URL must be that login): counts, never deletes.
   'retention-dry-run': { kind: 'retention', confirmation: 'RUN TNBS RETENTION DRY RUN', pinned: false },
   'install-marker': { kind: 'file', file: 'supabase/staging/install-staging-identity-marker.sql', confirmation: 'INSTALL TNBS STAGING IDENTITY MARKER', confirmationSetting: 'app.staging_marker_install_confirmation', pinned: true },
@@ -193,6 +196,8 @@ export function planRebuiltSqlRun(input: {
   let steps: RebuiltSqlStep[];
   if (spec.kind === 'retention') {
     steps = [{ label: 'retention-dry-run', sql: '', transaction: false }];
+  } else if (spec.kind === 'ledger-preflight') {
+    steps = [{ label: 'ledger-preflight', sql: '', transaction: false }];
   } else if (spec.kind === 'migrations') {
     steps = verifiedMigrationSteps();
   } else if (spec.kind === 'inline') {
@@ -248,7 +253,28 @@ export async function executeRebuiltSqlPlan(plan: RebuiltSqlPlan, clientFactory:
     for (const [name, value] of plan.settings) {
       await client.query('select set_config($1, $2, false)', [name, value]);
     }
+    if (plan.kind === 'ledger-preflight') {
+      await client.query('begin read only');
+      try {
+        const assessment = await runLedgerPreflight(client);
+        reportLedgerPreflight(assessment);
+        if (!assessment.ok) throw new Error(`ledger preflight: ${assessment.checks.filter((c) => !c.ok).length} check(s) failed; the replay must not run`);
+      } finally {
+        await client.query('rollback');
+      }
+      return;
+    }
     if (plan.kind === 'migrations') {
+      // Same read-only assessment, in the same session, so a mismatched ledger is refused before the first file.
+      await client.query('begin read only');
+      let assessment;
+      try {
+        assessment = await runLedgerPreflight(client);
+      } finally {
+        await client.query('rollback');
+      }
+      reportLedgerPreflight(assessment);
+      if (!assessment.ok) throw new Error(`ledger preflight: ${assessment.checks.filter((c) => !c.ok).length} check(s) failed; refusing to replay`);
       // Refuse to replay onto a database that already has the baseline.
       const present = await client.query("select to_regclass('public.profiles') as t");
       if (present.rows[0]?.t !== null) throw new Error('public.profiles already exists; the baseline replay only runs on an empty project');
@@ -296,6 +322,15 @@ export async function executeRebuiltSqlPlan(plan: RebuiltSqlPlan, clientFactory:
         throw err;
       }
       console.log(JSON.stringify({ msg: 'staging-sql.step_done', step: step.label }));
+    }
+    if (plan.kind === 'migrations' && steps === plan.steps) {
+      // The full set, not a count: the ledger must hold exactly the reviewed (version, name) pairs, in order.
+      const got = await client.query('select version, name from supabase_migrations.schema_migrations order by version');
+      const want = plan.steps.map((st) => `${st.ledger!.version}|${st.ledger!.name}`);
+      const have = (got.rows as Array<{ version: string; name: string }>).map((r) => `${r.version}|${r.name}`);
+      const same = have.length === want.length && have.every((v, i) => v === want[i]);
+      console.log(JSON.stringify({ msg: 'staging-sql.ledger_verified', expected: want.length, found: have.length, exact_match: same }));
+      if (!same) throw new Error('migration ledger does not hold exactly the reviewed (version, name) pairs');
     }
     if (plan.m1cRecoveryStep !== undefined) {
       const after = await client.query(M1C_POSTCONDITION_SQL);
