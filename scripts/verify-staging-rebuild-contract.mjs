@@ -131,6 +131,18 @@ else {
   }
 }
 
+// Review r7: the promotion postcondition names the approver; an unacknowledged rollback is its own result; doc 16 states that the
+// Data API must be on before the hosted Auth fixture seeder and that a negative check after an unknown create never authorizes a retry.
+if (owner) {
+  for (const required of ['owner_profile_approved_by_self', 'the_profile_is_approved_by_the_owner_account_itself', 'rollback_not_confirmed']) {
+    if (!owner.includes(required)) failures.push(`owner-bootstrap.ts is missing: ${required}`);
+  }
+}
+const doc16 = read('docs/build-plan/16-staging-and-hosting-plan.md');
+for (const required of ['Data API must already be enabled with', 'never authorizes another create', 'rollback_not_confirmed']) {
+  if (!doc16 || !doc16.replace(/\s+/g, ' ').includes(required)) failures.push('doc 16 is missing: ' + required);
+}
+
 if (failures.length) {
   for (const f of failures) console.error(`FAIL ${f}`);
   process.exit(1);

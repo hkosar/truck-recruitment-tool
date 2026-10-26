@@ -86,8 +86,11 @@ when needed, $0; (c) transfer it to a Free organization and pause it, $0, restor
    owner reads each setting on its dashboard page, under reviewed instructions, and reports the value to the
    manager; a setting the owner cannot find or read is a STOP). The runner adds only catalogue facts, as the
    actual runner login and read-only, printed as identifiers, enumerated words, booleans and counts, never
-   passing or failing anything: (a) the complete event-trigger count and, up to 50, each trigger's name, event,
-   enabled state and function name, with `truncated` when the list is cut off (zero is a valid result; nothing is
+   passing or failing anything: (a) the complete event-trigger count and, up to 50, each trigger's position, event,
+   enabled state and name and function name, with `truncated` when the list is cut off; a name or function name is printed
+   only when it is exactly on the reviewed list in `pipeline/src/environment-preflight.ts` (believed Supabase platform
+   names, not verified against the new project) and otherwise as the fixed word `unlisted`, in which case the manager
+   stops for a separately reviewed diagnostic (no catalogue text chosen by the database is displayed) (zero is a valid result; nothing is
    inferred from function text, since a body can call a helper, build its statement from pieces or only mention
    the words in a comment; every listed trigger needs an explicit human assessment, a name alone verifies
    nothing); (b) for objects this login creates, the full set of privilege types in the login's explicit
@@ -104,13 +107,17 @@ when needed, $0; (c) transfer it to a Free organization and pause it, $0, restor
    that file runs); `20260722223300_security_hardening.sql` revokes existing PUBLIC/anon function access and
    attempts a schema-specific default revocation; `20260720001200_rls.sql` states that RLS gates tables and relies
    on the platform default for table access, while also containing explicit column UPDATE and view SELECT
-   grants. So the legacy rehearsal frontend (approval 5) needs the owner-confirmed dashboard setting
-   "Automatically expose new tables" and the Data API listing `public`; that is an approval-5 prerequisite and
-   not proof that either is on now. An automatic-RLS helper is a conservative policy question, not something the
+   grants. The hosted Auth fixture seeder used in approval 4 (`scripts/seed-auth-users.ts`) updates `public.profiles`
+   through the Supabase client's REST endpoint after each Auth create, so **the Data API must already be enabled with
+   `public` exposed before that seeding step**: it is an approval-4 prerequisite confirmed by the owner on the dashboard,
+   and it cannot be deferred (an off API makes the seeder fail after it created a user; SQL grants cannot enable an
+   HTTP API). Only the separate "Automatically expose new tables" switch may be deferred to approval 5, because the
+   baseline explicitly grants `service_role` access to the existing public tables; neither value is proved by SQL. An automatic-RLS helper is a conservative policy question, not something the
    migrations prove must be absent. **Manager PASS gates, each with its remedy owner:** every listed event
-   trigger and each of the three owner-confirmed switch values is assessed and recorded; a deferral to approval 5
-   must be written down before PASS (no `--execute` that writes runs before the manager records PASS or a
-   recorded deferral of the approval-5-only items); only the owner changes a dashboard switch, and the operator
+   trigger and each of the three owner-confirmed switch values is assessed and recorded; a deferral of the
+   approval-5-only item ("Automatically expose new tables") must be written down before PASS; Data API enabled and
+   `public` exposed must be recorded before the Auth fixture seeding step (no `--execute` that writes runs before the
+   manager records PASS or a recorded deferral of the approval-5-only item); only the owner changes a dashboard switch, and the operator
    never alters default privileges.
    Then the ledger preflight:
    (`ledger-preflight`, dry run then `--execute`):
@@ -145,13 +152,15 @@ when needed, $0; (c) transfer it to a Free organization and pause it, $0, restor
    password) from a hidden prompt, passes it to the child process environment only, and shows **only a fixed
    allow-list of the child's output**: an enumerated list of `staging-sql.*` events, each with fixed keys
    whose values must fit that key's own pattern or enumerated list; a failure is shown only as an identifier from
-   the runner's fixed refusal list (`pipeline/src/refusals.ts`) plus a validated SQLSTATE/driver code, and the
+   the runner's fixed refusal list (`pipeline/src/refusals.ts`) plus a five-character SQLSTATE (server-chosen characters; only
+   its shape is checked) or one of an enumerated list of driver codes, and the
    runner never forwards message text (a server message that merely begins like a known refusal is generic); the
    seeding script's exact progress lines; and one closing line with the exit code, the number of output lines
    withheld and the number of fields (keys or values inside an accepted line) withheld. Everything else (driver
    errors, stack traces, server messages) is withheld and only counted. The owner never pastes raw output: the
    owner reports fixed labels only (PASS/FAIL, event and check names, counts, the exit code), and continues only
-   when both withheld counts are 0. This is a filter, not a proof that nothing sensitive can reach the screen.Masking of the secret and its
+   when both withheld counts are 0. Display contract: values chosen by the database (event trigger and function names) are shown only when exactly on a reviewed list, otherwise as `unlisted`; action names, owner check ids, driver codes, refusal identifiers and retention rule names are enumerated; check, case and step identifiers (`ledger_preflight_check`, `m1c_partial_state_refused`, `step_done`) are produced from repository constants and are only shape-checked, and a SQLSTATE is shape-checked only. This is a filter, not a proof that nothing sensitive can reach the screen.
+   Masking of the secret and its
    URL-encoded and host/user/password forms is applied as defense in depth only; it cannot catch a fragment,
    another encoding or a value split across lines, and the procedure does not rely on it. Limits: the secret
    is in the child process environment (readable by the child and by local tools with enough rights), the
@@ -174,7 +183,10 @@ when needed, $0; (c) transfer it to a Free organization and pause it, $0, restor
    create-user request, with the email confirmed and no invitation or message, for exactly the approved owner email at
    the address derived from the recorded rebuilt ref; it is created only on a 2xx whose body names that email and an id,
    a definite rejection (400, 401, 403, 404, 409, 422) is "not created", and everything else (5xx, a dropped connection,
-   a timeout, a redirect, a body that does not match) is "unknown"; none is retried; the existing trigger then creates a
+   a timeout, a redirect, a body that does not match) is "unknown"; none is retried. After an "unknown" result a read-only
+   `owner-login-check` showing no owner account is only a snapshot: the original request may still finish, so stay stopped; a
+   negative check alone never authorizes another create, and a reviewed reconciliation by the manager that establishes the
+   original request has finished is required first; the existing trigger then creates a
    pending guest profile; (3) `owner-login-check` must now report `ready_to_promote`; (4) `owner-promote`
    (confirmation `PROMOTE TNBS STAGING OWNER`) runs one transaction: transaction-local service-role claim (the reviewed
    `auth.role()` pattern; connecting as a privileged SQL role is not what the guard checks), row locks on the exact auth
@@ -183,10 +195,16 @@ when needed, $0; (c) transfer it to a Free organization and pause it, $0, restor
    the owner plus the seven fixtures; exactly one joined profile with the same email that is still a pristine pending
    guest; exactly seven passwordless fixture profiles; no other profile; no approved manager profile for the owner yet),
    then updates only that profile (`manager`/`approved`, approved by itself, timestamp), then requires the joined
-   postconditions before committing; (5) `owner-login-check` reports `promoted`. A refused or failed promotion
-   rolls back and leaves the account pending and unable to enter the app; a failed commit is reported as `unknown` and
-   needs `owner-login-check` before anything else. Proved locally on a real PostgreSQL 16 database
-   (`pipeline/src/owner-bootstrap-a3.test.ts`, 28 checks) and, for the Auth call, against a local fake HTTP server only
+   postconditions before committing (including that the profile is approved by the owner account's own id and that the
+   account is still not SSO/anonymous); (5) `owner-login-check` reports `promoted`. A refused or failed promotion
+   is rolled back, which preserves the state it started from (a pristine pending guest when the checks passed; the
+   refusal tests include an already-approved manager that is left unchanged); the result is `rolled_back` only when the
+   server acknowledged the ROLLBACK, otherwise `rollback_not_confirmed` (no COMMIT was sent, the runner closes the
+   connection, and the manager reads the state with `owner-login-check`); a failed commit or a commit whose
+   acknowledgement was lost is reported as `unknown` and needs `owner-login-check` before anything else. Run it with
+   exclusive access: no other administration of the project's accounts in parallel (row locks cover only the owner
+   row and profile; any unexpected state is a STOP). Proved locally on a real PostgreSQL 16 database
+   (`pipeline/src/owner-bootstrap-a3.test.ts`, 32 checks) and, for the Auth call, against a local fake HTTP server only
    (`pipeline/src/smoke-tests.ts`). **Not verified:** the hosted Auth API's actual behaviour and response, the hosted
    auth schema (for example `auth.identities`), the hosted runner login's privileges on `auth.users`, and that the
    resulting password can sign in (login is proven in a later approved phase).
