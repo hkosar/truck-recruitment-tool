@@ -3,7 +3,8 @@ import { resolve } from 'node:path';
 import { pathToFileURL } from 'node:url';
 import pg from 'pg';
 import { RunnerRefusal, asPlanRefusal, classifyRunnerFailure } from './refusals.js';
-import { executeRebuiltSqlPlan, planRebuiltSqlRun } from './staging-rebuilt.js';
+import { OWNER_AUTH_CREATE_ACTION, planOwnerAuthCreate, runOwnerAuthCreate } from './owner-bootstrap.js';
+import { executeRebuiltSqlPlan, planRebuiltSqlRun, requireRecordedRebuiltRef } from './staging-rebuilt.js';
 import { RECORDED_PROJECT_REFS, parseSupabaseDbTarget, type SupabaseDbTarget } from './target-guard.js';
 
 /**
@@ -134,6 +135,19 @@ function parseRunnerArgs(argv: readonly string[]): { action: string; confirm: st
 
 async function main(): Promise<void> {
   const args = parseRunnerArgs(process.argv.slice(2));
+  if (args.project === 'rebuilt' && args.action === OWNER_AUTH_CREATE_ACTION) {
+    // The Supabase Auth Admin create-user call for the owner login (owner-bootstrap.ts). It needs no database login: the
+    // address is always https://<recorded rebuilt ref>.supabase.co. The key and the owner password come from the hidden prompt.
+    const authPlan = asPlanRefusal(() => planOwnerAuthCreate({ ref: requireRecordedRebuiltRef(), confirm: args.confirm, serviceRoleKey: process.env.SUPABASE_SERVICE_ROLE_KEY, password: process.env.OWNER_STAGING_PASSWORD }));
+    console.log(JSON.stringify({ msg: 'staging-sql.verified', action: OWNER_AUTH_CREATE_ACTION, steps: 1, target: 'recorded rebuilt staging project' }));
+    if (!args.execute) {
+      console.log(JSON.stringify({ msg: 'staging-sql.plan_only', hint: 'add --execute to run' }));
+      return;
+    }
+    await runOwnerAuthCreate(authPlan);
+    console.log(JSON.stringify({ msg: 'staging-sql.done', action: OWNER_AUTH_CREATE_ACTION }));
+    return;
+  }
   if (args.project === 'rebuilt') {
     // The rebuilt project has its own guarded planner (staging-rebuilt.ts); --out is snapshot-only.
     const rebuilt = asPlanRefusal(() => planRebuiltSqlRun({ action: args.action, dbUrl: process.env.STAGING_DB_URL, confirm: args.confirm, out: args.out }));

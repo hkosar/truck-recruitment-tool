@@ -4,6 +4,7 @@ import { isAbsolute, relative, resolve } from 'node:path';
 import pg from 'pg';
 import { M1C_POSTCONDITION_SQL, M1C_STATE_PROBE_SQL, REAPPLY_POST_SQL, REAPPLY_PRECHECKS, classifyM1cState, idempotentReapplySql, type M1cStateFacts, type ReapplyTarget } from './reapply.js';
 import { reportEnvironmentPreflight, runEnvironmentPreflight } from './environment-preflight.js';
+import { OWNER_CHECK_CONFIRMATION, OWNER_PROMOTE_CONFIRMATION, runOwnerLoginCheck, runOwnerPromotion } from './owner-bootstrap.js';
 import { reportLedgerPreflight, runLedgerPreflight } from './ledger-preflight.js';
 import { MAINTENANCE_ROLE, roleOf } from './retention-step.js';
 import { runRetentionDryRun, type DryRunReport } from './retention-dry-run.js';
@@ -25,7 +26,7 @@ import { RECORDED_PROJECT_REFS, parseSupabaseDbTarget, type SupabaseDbTarget } f
 export const REPOSITORY_ROOT = resolve(import.meta.dirname, '..', '..');
 const REBUILT_REF_PATTERN = /^[a-z]{20}$/;
 
-type RebuiltKind = 'file' | 'migrations' | 'inline' | 'snapshot' | 'retention' | 'ledger-preflight' | 'environment-preflight';
+type RebuiltKind = 'file' | 'migrations' | 'inline' | 'snapshot' | 'retention' | 'ledger-preflight' | 'environment-preflight' | 'owner-check' | 'owner-promote';
 
 interface RebuiltActionSpec {
   kind: RebuiltKind;
@@ -47,6 +48,9 @@ export const REBUILT_STAGING_SQL_ACTIONS: Readonly<Record<string, RebuiltActionS
   'ledger-preflight': { kind: 'ledger-preflight', confirmation: 'RUN TNBS LEDGER PREFLIGHT', pinned: false },
   // Read-only report of event triggers, default privileges and Data API exposure (project switches the creation screen pre-selects); every line is a manager decision gate.
   'environment-preflight': { kind: 'environment-preflight', confirmation: 'RUN TNBS ENVIRONMENT PREFLIGHT', pinned: false },
+  // Owner login bootstrap (doc 16 approval 4, owner-bootstrap.ts): a read-only report of the exact owner identity, and the single reviewed promotion transaction. The Auth Admin create call is owner-auth-create (no database login; staging-sql-runner.ts).
+  'owner-login-check': { kind: 'owner-check', confirmation: OWNER_CHECK_CONFIRMATION, pinned: false },
+  'owner-promote': { kind: 'owner-promote', confirmation: OWNER_PROMOTE_CONFIRMATION, pinned: false },
   // Connects AS recruiter_maintenance (STAGING_DB_URL must be that login): counts, never deletes.
   'retention-dry-run': { kind: 'retention', confirmation: 'RUN TNBS RETENTION DRY RUN', pinned: false },
   'install-marker': { kind: 'file', file: 'supabase/staging/install-staging-identity-marker.sql', confirmation: 'INSTALL TNBS STAGING IDENTITY MARKER', confirmationSetting: 'app.staging_marker_install_confirmation', pinned: true },
@@ -148,6 +152,18 @@ function verifiedMigrationSteps(): RebuiltSqlStep[] {
   });
 }
 
+/** The recorded rebuilt ref, or a refusal. `override` is for tests only; production code reads target-guard.ts. */
+export function requireRecordedRebuiltRef(override?: string | null): string {
+  const rebuiltRef = override === undefined ? RECORDED_PROJECT_REFS.stagingRebuilt : override;
+  if (rebuiltRef === null) {
+    throw new RunnerRefusal('ref_not_recorded', 'The rebuilt staging project ref is not recorded yet (target-guard.ts); refusing every rebuilt action');
+  }
+  if (!REBUILT_REF_PATTERN.test(rebuiltRef) || rebuiltRef === RECORDED_PROJECT_REFS.production || rebuiltRef === RECORDED_PROJECT_REFS.staging) {
+    throw new RunnerRefusal('ref_invalid', 'The recorded rebuilt staging ref is invalid or equals a different recorded project');
+  }
+  return rebuiltRef;
+}
+
 /** Pure, offline verification for the rebuilt project. Throws before anything could connect. */
 export function planRebuiltSqlRun(input: {
   action: string;
@@ -161,13 +177,7 @@ export function planRebuiltSqlRun(input: {
     throw new RunnerRefusal('unknown_action', `Unknown rebuilt staging SQL action "${input.action}" (expected ${Object.keys(REBUILT_STAGING_SQL_ACTIONS).join(', ')})`);
   }
   const spec = REBUILT_STAGING_SQL_ACTIONS[input.action] as RebuiltActionSpec;
-  const rebuiltRef = input.recordedRebuiltRef === undefined ? RECORDED_PROJECT_REFS.stagingRebuilt : input.recordedRebuiltRef;
-  if (rebuiltRef === null) {
-    throw new RunnerRefusal('ref_not_recorded', 'The rebuilt staging project ref is not recorded yet (target-guard.ts); refusing every rebuilt action');
-  }
-  if (!REBUILT_REF_PATTERN.test(rebuiltRef) || rebuiltRef === RECORDED_PROJECT_REFS.production || rebuiltRef === RECORDED_PROJECT_REFS.staging) {
-    throw new RunnerRefusal('ref_invalid', 'The recorded rebuilt staging ref is invalid or equals a different recorded project');
-  }
+  const rebuiltRef = requireRecordedRebuiltRef(input.recordedRebuiltRef);
   if (!input.dbUrl) throw new RunnerRefusal('db_url_required', 'STAGING_DB_URL is required');
   const target = parseSupabaseDbTarget(input.dbUrl);
   if (target.projectRef === RECORDED_PROJECT_REFS.production) {
@@ -200,7 +210,7 @@ export function planRebuiltSqlRun(input: {
   let steps: RebuiltSqlStep[];
   if (spec.kind === 'retention') {
     steps = [{ label: 'retention-dry-run', sql: '', transaction: false }];
-  } else if (spec.kind === 'ledger-preflight' || spec.kind === 'environment-preflight') {
+  } else if (spec.kind === 'ledger-preflight' || spec.kind === 'environment-preflight' || spec.kind === 'owner-check' || spec.kind === 'owner-promote') {
     steps = [{ label: spec.kind, sql: '', transaction: false }];
   } else if (spec.kind === 'migrations') {
     steps = verifiedMigrationSteps();
@@ -275,6 +285,19 @@ export async function executeRebuiltSqlPlan(plan: RebuiltSqlPlan, clientFactory:
       } finally {
         await client.query('rollback');
       }
+      return;
+    }
+    if (plan.kind === 'owner-check') {
+      await client.query('begin read only');
+      try {
+        await runOwnerLoginCheck(client, plan.target.projectRef);
+      } finally {
+        await client.query('rollback');
+      }
+      return;
+    }
+    if (plan.kind === 'owner-promote') {
+      await runOwnerPromotion(client, plan.target.projectRef);
       return;
     }
     if (plan.kind === 'migrations') {

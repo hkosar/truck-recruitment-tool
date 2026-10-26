@@ -1,4 +1,5 @@
 import { existsSync } from 'node:fs';
+import { createServer } from 'node:http';
 import { tmpdir } from 'node:os';
 import { resolve } from 'node:path';
 import assert from 'node:assert/strict';
@@ -20,7 +21,8 @@ import {
 } from './sources/safety.js';
 import { parse as parsePgConnectionString } from 'pg-connection-string';
 import { STAGING_SQL_ACTIONS, planStagingSqlRun } from './staging-sql-runner.js';
-import { REBUILT_STAGING_SQL_ACTIONS, executeRebuiltSqlPlan, planRebuiltSqlRun, retargetSqlToRebuiltRef } from './staging-rebuilt.js';
+import { REBUILT_STAGING_SQL_ACTIONS, executeRebuiltSqlPlan, planRebuiltSqlRun, requireRecordedRebuiltRef, retargetSqlToRebuiltRef } from './staging-rebuilt.js';
+import { APPROVED_OWNER_EMAIL, OWNER_AUTH_CREATE_CONFIRMATION, planOwnerAuthCreate, runOwnerAuthCreate, type OwnerFetch } from './owner-bootstrap.js';
 import { RECORDED_PROJECT_REFS, parseSupabaseDbTarget, verifyPipelineTarget } from './target-guard.js';
 import { readFileSync } from 'node:fs';
 import { REPOSITORY_ROOT } from './staging-rebuilt.js';
@@ -767,6 +769,98 @@ test('environment preflight action: read-only, reports identifiers/booleans/coun
   assert.ok(lines.some((x) => /"msg":"staging-sql.environment_default_acl_total","entries":4,"outside_these_cells":1/.test(x)));
   assert.ok(lines.some((x) => /"msg":"staging-sql.environment_authenticator_setting".*"names_public":true,"is_the_data_api_switch":false/.test(x)));
   assert.ok(lines.every((x) => !/weird name|redacted-pw|pooler/.test(x)));
+});
+
+test('owner Auth create (G1 step 1): exact request to the recorded address, one attempt, created only on a matching body; every other outcome stops; tested against a LOCAL fake HTTP server only', async () => {
+  const ref = 'abcdefghijklmnopqrst';
+  const key = 'sb-test-service-role-key-0123456789';
+  const password = 'Owner-Test-Password-9981!';
+  assert.throws(() => planOwnerAuthCreate({ ref, confirm: 'wrong', serviceRoleKey: key, password }), /requires --confirm/);
+  assert.throws(() => planOwnerAuthCreate({ ref, confirm: OWNER_AUTH_CREATE_CONFIRMATION, serviceRoleKey: key, password: 'short' }), /at least 16/);
+  assert.throws(() => planOwnerAuthCreate({ ref, confirm: OWNER_AUTH_CREATE_CONFIRMATION, serviceRoleKey: key, password: ' leading-space-password ' }), /at least 16/);
+  assert.throws(() => planOwnerAuthCreate({ ref, confirm: OWNER_AUTH_CREATE_CONFIRMATION, serviceRoleKey: 'has space in it 0123456789', password }), /SUPABASE_SERVICE_ROLE_KEY/);
+  assert.throws(() => planOwnerAuthCreate({ ref, confirm: OWNER_AUTH_CREATE_CONFIRMATION, serviceRoleKey: undefined, password }), /SUPABASE_SERVICE_ROLE_KEY/);
+  // the address is derived from the verified recorded ref only; production, the old staging ref and malformed refs are refused first
+  assert.equal(requireRecordedRebuiltRef(), RECORDED_PROJECT_REFS.stagingRebuilt);
+  assert.throws(() => requireRecordedRebuiltRef(RECORDED_PROJECT_REFS.production), /invalid or equals/);
+  assert.throws(() => requireRecordedRebuiltRef(RECORDED_PROJECT_REFS.staging), /invalid or equals/);
+  assert.throws(() => requireRecordedRebuiltRef(null), /not recorded yet/);
+  assert.throws(() => requireRecordedRebuiltRef('short'), /invalid or equals/);
+  const plan = planOwnerAuthCreate({ ref, confirm: OWNER_AUTH_CREATE_CONFIRMATION, serviceRoleKey: key, password });
+  assert.equal(plan.baseUrl, `https://${ref}.supabase.co`);
+  assert.equal(plan.email, APPROVED_OWNER_EMAIL);
+
+  type Seen = { method?: string; url?: string; apikey?: string; auth?: string; body?: Record<string, unknown> };
+  const seen: Seen[] = [];
+  let behaviour: (req: import('node:http').IncomingMessage, res: import('node:http').ServerResponse) => void = () => undefined;
+  const server = createServer((req, res) => {
+    let raw = '';
+    req.on('data', (c) => { raw += String(c); });
+    req.on('end', () => {
+      seen.push({ method: req.method, url: req.url, apikey: String(req.headers.apikey), auth: String(req.headers.authorization), body: JSON.parse(raw) });
+      behaviour(req, res);
+    });
+  });
+  await new Promise<void>((done) => server.listen(0, '127.0.0.1', done));
+  const port = (server.address() as import('node:net').AddressInfo).port;
+  const requested: string[] = [];
+  // Only a loopback address is ever contacted: the production address is asserted, then rewritten to the fake server.
+  const toLocal = (timeoutMs?: number): OwnerFetch => (url, init) => {
+    requested.push(url);
+    return fetch(url.replace(`https://${ref}.supabase.co`, `http://127.0.0.1:${port}`), timeoutMs ? { ...init, signal: AbortSignal.timeout(timeoutMs) } : init);
+  };
+  const reply = (status: number, body: unknown) => (_q: unknown, res: import('node:http').ServerResponse) => { res.writeHead(status, { 'content-type': 'application/json' }); res.end(typeof body === 'string' ? body : JSON.stringify(body)); };
+  const uuid = '3f2504e0-4f89-41d3-9a0c-0305e82c3301';
+  const lines: string[] = []; const l = console.log;
+  const attempt = async (fetchImpl: OwnerFetch) => {
+    seen.length = 0; lines.length = 0;
+    console.log = (...a: unknown[]) => { lines.push(String(a[0])); };
+    try { return await runOwnerAuthCreate(plan, fetchImpl).then(() => undefined, (e: unknown) => e); } finally { console.log = l; }
+  };
+  try {
+    behaviour = reply(200, { id: uuid, email: APPROVED_OWNER_EMAIL, role: 'authenticated', aud: 'authenticated' });
+    assert.equal(await attempt(toLocal()), undefined);
+    assert.equal(seen.length, 1, 'exactly one request, no retry');
+    assert.deepEqual({ method: seen[0]!.method, url: seen[0]!.url, apikey: seen[0]!.apikey, auth: seen[0]!.auth }, { method: 'POST', url: '/auth/v1/admin/users', apikey: key, auth: `Bearer ${key}` });
+    assert.deepEqual(seen[0]!.body, { email: APPROVED_OWNER_EMAIL, password, email_confirm: true }, 'confirmed email, no invite, no other fields');
+    assert.equal(requested.at(-1), `https://${ref}.supabase.co/auth/v1/admin/users`);
+    assert.deepEqual(lines.map((x) => JSON.parse(x)), [{ msg: 'staging-sql.owner_auth_create', result: 'created', http_status: 200, email_matches: true, id_present: true }]);
+    assert.ok(lines.every((x) => !x.includes(key) && !x.includes(password) && !x.includes(uuid)), 'the key, the password and the new id are never printed');
+
+    behaviour = reply(200, { id: uuid, email: 'HUNTER@TWISTEDNAIL.COM' });
+    assert.equal(await attempt(toLocal()), undefined, 'a case difference in the echoed address is the same address');
+
+    for (const [label, status, body, want] of [
+      ['already registered', 422, { code: 'email_exists' }, 'owner_auth_not_created'],
+      ['bad key', 401, { message: 'invalid' }, 'owner_auth_not_created'],
+      ['server error', 500, { message: 'boom' }, 'owner_auth_unknown_result'],
+      ['bad gateway', 502, 'bad gateway', 'owner_auth_unknown_result'],
+      ['success but a different email', 200, { id: uuid, email: 'someone.else@example.invalid' }, 'owner_auth_unknown_result'],
+      ['success without an id', 200, { email: APPROVED_OWNER_EMAIL }, 'owner_auth_unknown_result'],
+      ['success with an unparsable body', 200, 'not json', 'owner_auth_unknown_result'],
+    ] as const) {
+      behaviour = reply(status, body);
+      const err = await attempt(toLocal());
+      assert.ok(err instanceof RunnerRefusal && err.id === want, `${label}: expected ${want}, got ${String(err)}`);
+      assert.equal(seen.length, 1, `${label}: no retry`);
+      assert.deepEqual(classifyRunnerFailure(err), { refusal: want });
+      assert.ok(lines.every((x) => !x.includes(key) && !x.includes(password)), `${label}: nothing secret printed`);
+    }
+    assert.match(lines[0]!, /"result":"unknown"/);
+    // connection dropped without a response, redirect, and a hung server (shortened timeout) are all unknown, one attempt each
+    behaviour = (req) => { req.socket.destroy(); };
+    let err = await attempt(toLocal());
+    assert.ok(err instanceof RunnerRefusal && err.id === 'owner_auth_unknown_result' && seen.length === 1, 'dropped connection is unknown');
+    behaviour = (_q, res) => { res.writeHead(302, { location: '/elsewhere' }); res.end(); };
+    err = await attempt(toLocal());
+    assert.ok(err instanceof RunnerRefusal && err.id === 'owner_auth_unknown_result' && seen.length === 1, 'a redirect is not followed and is unknown');
+    behaviour = () => undefined;
+    err = await attempt(toLocal(60));
+    assert.ok(err instanceof RunnerRefusal && err.id === 'owner_auth_unknown_result' && seen.length === 1, 'a timeout is unknown');
+  } finally {
+    server.closeAllConnections();
+    await new Promise<void>((done) => server.close(() => done()));
+  }
 });
 
 test('ledger preflight action: read-only, reports check names and counts, stops the replay when a check fails, verifies the full (version, name) set', async () => {
