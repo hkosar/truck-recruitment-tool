@@ -24,7 +24,7 @@ import { REBUILT_STAGING_SQL_ACTIONS, planRebuiltSqlRun, retargetSqlToRebuiltRef
 import { RECORDED_PROJECT_REFS, parseSupabaseDbTarget, verifyPipelineTarget } from './target-guard.js';
 import { readFileSync } from 'node:fs';
 import { RETENTION_RULES, runRetention, type Queryable } from './retention.js';
-import { runRetentionStep, type RetentionClient } from './retention-step.js';
+import { retentionClientConfig, runRetentionStep, type RetentionClient } from './retention-step.js';
 
 type Test = { name: string; run: () => void | Promise<void> };
 const tests: Test[] = [];
@@ -644,6 +644,7 @@ test('retention step: refuses another project, another role, and a query string;
     [maintUrl('recruiter_api', PROD), 'wrong_role'],
     [maintUrl('recruiter_maintenance', PROD, '?host=evil.example.com'), 'unparseable'],
     ['postgresql://recruiter_maintenance:pw@db.example.com:5432/postgres', 'unparseable'],
+    [maintUrl('recruiter_maintenance', PROD).replace(':5432/', ':6543/'), 'wrong_port'],
   ] as const) {
     const h = stepHarness();
     const out = await runRetentionStep({ MAINTENANCE_DATABASE_URL: url }, PROD, h.deps);
@@ -665,6 +666,13 @@ test('retention step: connects with explicit fields as recruiter_maintenance, ru
   assert.deepEqual(h.alerts, []);
   const done = h.events.find((e) => e.event === 'retention.done')!;
   assert.deepEqual(Object.keys(done.fields!).sort(), ['deleted', 'failed']);
+});
+
+test('retention step: the real client config sets TLS explicitly and uses only the verified fields', () => {
+  const cfg = retentionClientConfig({ host: 'h.pooler.supabase.com', port: 5432, user: 'recruiter_maintenance.x', password: 'pw', database: 'postgres' });
+  assert.deepEqual(cfg.ssl, { rejectUnauthorized: false });
+  assert.equal(cfg.port, 5432);
+  assert.equal(cfg.connectionString, undefined);
 });
 
 test('retention step: refuses if the session is not recruiter_maintenance; a DB error never throws', async () => {

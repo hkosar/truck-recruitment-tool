@@ -5,7 +5,7 @@
 //   five sign-in ledgers only). It never uses SUPABASE_DB_URL or the service-role client, so the
 //   pipeline's own permissions are unchanged.
 // - Fail closed on the target: the URL must parse with the pipeline's own guard (no query string
-//   or fragment), name the SAME project the pipeline already verified, and log in as
+//   or fragment), use session port 5432 and TLS, name the SAME project the pipeline already verified, and log in as
 //   recruiter_maintenance (checked again with current_user after connecting).
 // - Never fails the pipeline: refusals and errors are logged (counts and reasons only, never the
 //   URL) and alerted; the run continues.
@@ -17,9 +17,11 @@ import { parseSupabaseDbTarget } from './target-guard.js';
 
 export const MAINTENANCE_ROLE = 'recruiter_maintenance';
 
+export type RefusalReason = 'unparseable' | 'other_project' | 'wrong_port' | 'wrong_role' | 'connected_as_other_role';
+
 export type RetentionOutcome =
   | { status: 'skipped'; reason: 'not_configured' }
-  | { status: 'refused'; reason: 'unparseable' | 'other_project' | 'wrong_role' | 'connected_as_other_role' }
+  | { status: 'refused'; reason: RefusalReason }
   | { status: 'done'; result: RetentionResult }
   | { status: 'failed'; reason: 'connect_or_query_error' };
 
@@ -37,11 +39,19 @@ export interface RetentionStepDeps {
   createClient?: (fields: { host: string; port: number; user: string; password: string; database: string }) => RetentionClient;
 }
 
+/**
+ * The driver default is NO TLS, and query-string SSL settings are refused by the target guard, so
+ * TLS is set explicitly here. Same relaxed pooler certificate setting as db.ts (TODO(live-db)).
+ */
+export function retentionClientConfig(fields: { host: string; port: number; user: string; password: string; database: string }): pg.ClientConfig {
+  return { ...fields, ssl: { rejectUnauthorized: false }, application_name: 'tnbs-retention', connectionTimeoutMillis: 10_000 };
+}
+
 const defaultClient: NonNullable<RetentionStepDeps['createClient']> = (fields) =>
-  new pg.Client({ ...fields, application_name: 'tnbs-retention', connectionTimeoutMillis: 10_000 }) as unknown as RetentionClient;
+  new pg.Client(retentionClientConfig(fields)) as unknown as RetentionClient;
 
 /** The role part of a Supabase user name: `<role>.<ref>` on the shared pooler, `<role>` otherwise. */
-function roleOf(user: string): string {
+export function roleOf(user: string): string {
   const dot = user.lastIndexOf('.');
   return dot >= 0 ? user.slice(0, dot) : user;
 }
@@ -56,7 +66,7 @@ export async function runRetentionStep(
     deps.log.info('retention.skipped', { reason: 'not_configured' });
     return { status: 'skipped', reason: 'not_configured' };
   }
-  const refuse = async (reason: 'unparseable' | 'other_project' | 'wrong_role' | 'connected_as_other_role'): Promise<RetentionOutcome> => {
+  const refuse = async (reason: RefusalReason): Promise<RetentionOutcome> => {
     deps.log.error('retention.refused', { reason });
     await deps.alert(`Retention refused to run: ${reason}`);
     return { status: 'refused', reason };
@@ -69,6 +79,8 @@ export async function runRetentionStep(
     return refuse('unparseable');
   }
   if (target.projectRef !== verifiedProjectRef) return refuse('other_project');
+  // The statement timeout is a session setting: the 6543 transaction pooler would not keep it.
+  if (target.port !== 5432) return refuse('wrong_port');
   if (roleOf(target.user) !== MAINTENANCE_ROLE) return refuse('wrong_role');
 
   const client = (deps.createClient ?? defaultClient)({
