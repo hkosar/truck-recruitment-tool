@@ -41,11 +41,10 @@ const EnvSchema = z.object({
 
   /** Sign-in ledger retention (doc 15 §23, doc 16 §4): a SEPARATE login for the least-privilege
    *  recruiter_maintenance role, same project, session pooler. Optional: when absent the nightly
-   *  retention step only logs that it skipped. Never used for anything else. */
-  MAINTENANCE_DATABASE_URL: z
-    .string()
-    .regex(/^postgres(ql)?:\/\//, 'MAINTENANCE_DATABASE_URL must be a postgres:// connection string')
-    .optional(),
+   *  retention step only logs that it skipped. Never used for anything else. Deliberately NOT
+   *  format-checked here: a malformed value must be refused inside the retention failure boundary
+   *  (retention-step.ts), never stop ingestion, monthly or backfill. */
+  MAINTENANCE_DATABASE_URL: z.string().optional(),
 
   // ---- Socrata (data.transportation.gov, SODA v2.1) ---------------------------------
   /** Free app token; lifts anonymous IP throttling to 1,000 req/rolling-hour

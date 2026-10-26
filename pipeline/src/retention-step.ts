@@ -62,7 +62,7 @@ export async function runRetentionStep(
   deps: RetentionStepDeps,
 ): Promise<RetentionOutcome> {
   const raw = config.MAINTENANCE_DATABASE_URL;
-  if (!raw) {
+  if (!raw || raw.trim() === '') {
     deps.log.info('retention.skipped', { reason: 'not_configured' });
     return { status: 'skipped', reason: 'not_configured' };
   }

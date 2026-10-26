@@ -637,6 +637,22 @@ test('retention step: OFF unless MAINTENANCE_DATABASE_URL is set (no connection,
   assert.deepEqual(h.events.map((e) => e.event), ['retention.skipped']);
 });
 
+test('retention config: a malformed or empty MAINTENANCE_DATABASE_URL never stops config loading; the step refuses it', async () => {
+  for (const bad of ['not a url', 'mysql://x', '   ']) {
+    const config = loadConfig({
+      SUPABASE_URL: `https://${PROD}.supabase.co`,
+      SUPABASE_SERVICE_ROLE_KEY: 'x'.repeat(40),
+      SUPABASE_DB_URL: `postgresql://postgres.${PROD}:redacted@aws-0-us-east-2.pooler.supabase.com:5432/postgres`,
+      SOCRATA_APP_TOKEN: 'test-token',
+      MAINTENANCE_DATABASE_URL: bad,
+    } as NodeJS.ProcessEnv);
+    const h = stepHarness();
+    const out = await runRetentionStep(config, PROD, h.deps);
+    assert.ok(out.status === 'refused' || out.status === 'skipped', bad);
+    assert.equal(h.created.length, 0);
+  }
+});
+
 test('retention step: refuses another project, another role, and a query string; never connects; logs no URL', async () => {
   for (const [url, reason] of [
     [maintUrl('recruiter_maintenance', STAGING), 'other_project'],
