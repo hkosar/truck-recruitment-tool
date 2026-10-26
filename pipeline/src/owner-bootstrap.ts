@@ -126,6 +126,7 @@ export interface OwnerFacts {
   owner_profile_role: string | null;
   owner_profile_status: string | null;
   owner_profile_approved_by_null: boolean;
+  owner_profile_approved_by_self: boolean;
   owner_profile_approved_at_null: boolean;
   profiles_total: number;
   fixture_profiles: number;
@@ -162,6 +163,7 @@ select (select count(*) from u)::int as owner_users,
   (select role::text from p) as owner_profile_role,
   (select status::text from p) as owner_profile_status,
   coalesce((select approved_by is null from p), false) as owner_profile_approved_by_null,
+  coalesce((select approved_by = id from p), false) as owner_profile_approved_by_self,
   coalesce((select approved_at is null from p), false) as owner_profile_approved_at_null,
   (select count(*) from public.profiles)::int as profiles_total,
   (select count(*) from fx)::int as fixture_profiles,
@@ -209,9 +211,11 @@ export function assessOwnerPromoted(f: OwnerFacts): OwnerAssessment {
     { check: 'staging_marker_names_this_project', ok: f.marker_ok === true },
     { check: 'exactly_one_auth_user_with_the_approved_email', ok: f.owner_users === 1 && typeof f.owner_id === 'string' },
     { check: 'owner_has_a_nonempty_password_and_confirmed_email', ok: f.owner_has_password === true && f.owner_email_confirmed === true },
+    { check: 'owner_is_not_sso_or_anonymous', ok: f.owner_sso_or_anonymous === false },
     { check: 'the_owner_is_the_only_password_account', ok: f.password_users === 1 },
     { check: 'auth_users_are_the_owner_plus_seven_fixtures', ok: f.auth_users_total === 1 + EXPECTED_FIXTURE_PROFILES },
     { check: 'the_same_account_has_the_approved_manager_profile', ok: f.owner_profiles === 1 && f.owner_profile_email_exact === true && f.owner_profile_role === 'manager' && f.owner_profile_status === 'approved' && f.owner_profile_approved_at_null === false && f.owner_manager_approved === 1 },
+    { check: 'the_profile_is_approved_by_the_owner_account_itself', ok: f.owner_profile_approved_by_self === true },
     { check: 'exactly_seven_passwordless_fixture_profiles', ok: f.fixture_profiles === EXPECTED_FIXTURE_PROFILES },
     { check: 'no_other_profiles', ok: f.other_profiles === 0 && f.profiles_total === 1 + EXPECTED_FIXTURE_PROFILES },
   ]);
@@ -280,8 +284,12 @@ export async function runOwnerPromotion(client: RebuiltSqlClient, ref: string): 
       line({ msg: 'staging-sql.owner_promote_result', result: 'unknown' });
       throw err;
     }
-    await client.query('rollback').catch(() => undefined);
-    line({ msg: 'staging-sql.owner_promote_result', result: 'rolled_back' });
+    // 'rolled_back' only when the server acknowledged the ROLLBACK. If it could not be sent or answered, say so: no COMMIT was
+    // sent on this path and the runner closes the connection (the server then abandons the open transaction), but this
+    // process did not see that confirmed. The caller STOPS and runs owner-login-check either way.
+    let acknowledged = true;
+    await client.query('rollback').catch(() => { acknowledged = false; });
+    line({ msg: 'staging-sql.owner_promote_result', result: acknowledged ? 'rolled_back' : 'rollback_not_confirmed' });
     throw err;
   }
   line({ msg: 'staging-sql.owner_promote_result', result: 'committed' });

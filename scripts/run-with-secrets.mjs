@@ -160,7 +160,7 @@ const EVENTS = {
   },
   'staging-sql.owner_check': { phase, check: ident, ok: bool },
   'staging-sql.owner_checks': { phase, ok: bool, checks: int, failed: int },
-  'staging-sql.owner_promote_result': { result: oneOf(['committed', 'rolled_back', 'unknown']) },
+  'staging-sql.owner_promote_result': { result: oneOf(['committed', 'rolled_back', 'rollback_not_confirmed', 'unknown']) },
 };
 
 const SEED_LINES = [

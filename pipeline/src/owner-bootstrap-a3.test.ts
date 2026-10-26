@@ -164,6 +164,41 @@ async function main(): Promise<void> {
     o = await run('owner-promote');
     check('postcondition failure: refused, rolled back, data identical', refused(o) && rolledBack(o) && before === (await snapshot()) && failed(o, 'after').includes('the_same_account_has_the_approved_manager_profile'));
 
+    // ---- a trigger that keeps role/status/timestamp but rewrites ONLY approved_by is caught by the postcondition (review r7 finding 2)
+    for (const [label, expr] of [['NULL', 'null'], ['another existing profile', "'71000000-0000-4000-8000-000000000001'::uuid"]] as const) {
+      await cleanup();
+      await insertOwner();
+      await q(`create function public.zz_revert_owner() returns trigger language plpgsql as $f$ begin new.approved_by := ${expr}; return new; end $f$; create trigger zz_revert_owner before update on public.profiles for each row when (new.role = 'manager') execute function public.zz_revert_owner()`);
+      const snap = await snapshot();
+      o = await run('owner-promote');
+      check(`postcondition: approved_by rewritten to ${label} -> refused, rolled back, data identical`, refused(o) && rolledBack(o) && snap === (await snapshot()) && failed(o, 'after').includes('the_profile_is_approved_by_the_owner_account_itself'), `failed=${failed(o, 'after').join(',')}`);
+    }
+    await cleanup();
+
+    // ---- a rollback the server did not acknowledge is NOT reported as rolled back (review r7 finding 4)
+    await cleanup();
+    await insertOwner();
+    await asService("update public.profiles set role = 'manager', status = 'approved', approved_at = now() where id = $1", [OWNER_ID]);
+    o = await run('owner-promote', (c, sent) => ({
+      connect: () => c.connect(),
+      query: async (sql: string, p?: unknown[]) => { sent.push(sql); if (sql === 'rollback') throw new Error('connection terminated unexpectedly'); return c.query(sql, p); },
+      end: () => c.end(),
+    }));
+    check('rollback failure: reported as rollback_not_confirmed (never rolled_back), no commit was sent', refused(o) && o.events.some((e) => e.msg === 'staging-sql.owner_promote_result' && e.result === 'rollback_not_confirmed') && !rolledBack(o) && !o.sent.includes('commit'));
+
+    // ---- the commit really happens but its acknowledgement is lost: unknown, no retry, and the read-only check then sees the committed state
+    await cleanup();
+    await insertOwner();
+    const sentOnLostAck: string[] = [];
+    o = await run('owner-promote', (c, sent) => ({
+      connect: () => c.connect(),
+      query: async (sql: string, p?: unknown[]) => { sent.push(sql); sentOnLostAck.push(sql); const r = await c.query(sql, p); if (sql === 'commit') throw Object.assign(new Error('connection terminated unexpectedly'), { code: 'ECONNRESET' }); return r; },
+      end: () => c.end(),
+    }));
+    const lostAckRow = (await q('select role::text, status::text, approved_by::text from public.profiles where id = $1', [OWNER_ID])).rows[0];
+    const afterLostAck = await run('owner-login-check');
+    check('lost commit acknowledgement: reported unknown (not committed), one COMMIT, no rollback or retry, and the committed account is visible to the read-only check as "promoted"', o.events.some((e) => e.msg === 'staging-sql.owner_promote_result' && e.result === 'unknown') && !o.events.some((e) => e.msg === 'staging-sql.owner_promote_result' && e.result === 'committed') && sentOnLostAck.filter((s) => s === 'commit').length === 1 && !sentOnLostAck.includes('rollback') && lostAckRow.role === 'manager' && lostAckRow.approved_by === OWNER_ID && state(afterLostAck) === 'promoted');
+
     // ---- an unknown commit result stops without a rollback attempt or a retry
     await cleanup();
     await insertOwner();
