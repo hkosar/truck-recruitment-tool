@@ -4,7 +4,7 @@
 // process and in the child process's environment. It is for the owner/operator steps in doc 16
 // (the staging database URL, the Supabase service-role key, the fixture password).
 //
-//   node scripts/run-with-secrets.mjs [--cwd DIR] [--node-path DIR] --secret NAME [--secret NAME ...] -- node ARGS...
+//   node scripts/run-with-secrets.mjs [--from-env] [--cwd DIR] [--node-path DIR] --secret NAME [--secret NAME ...] -- node ARGS...
 //
 // - Only the names in ALLOWED can be requested. The command after `--` must start with the word `node`
 //   (it is run with this same Node binary, without a shell, so no quoting or expansion applies).
@@ -23,11 +23,30 @@
 //   Not a vault: the child's environment is readable by the child and by local tools with enough rights. The hidden
 //   prompt is meant not to echo, but the terminal window itself, a clipboard manager and anything the operating
 //   system records are outside this tool.
+// - STAGING-ONLY ALTERNATIVE, `--from-env` (explicit opt-in; without it nothing above changes): the secrets come from the
+//   environment that `doppler run --project truck-recruitment-tool --config stg -- ...` provides, not from the prompt, so
+//   an agent can run the staging steps without a person at a terminal (stdin may be non-interactive and no prompt is
+//   shown). Every requested --secret NAME must be present and non-empty, else a fixed refusal names only the variable.
+//   Proof of scope is required: DOPPLER_PROJECT must equal truck-recruitment-tool and DOPPLER_CONFIG must equal stg,
+//   otherwise a fixed refusal (no values); prd, dev and a missing value are all refused. That check is a guard against
+//   a wrong command, not a security boundary (anyone able to set the environment can set those two names); the boundary
+//   is the Doppler service token, which must be read-only and bound to the stg config, so production secrets are not
+//   reachable through this path at all. In this mode the child receives ONLY the minimal base environment named in
+//   FROM_ENV_BASE_NAMES (no secrets, matched case-insensitively) plus the requested secret names: every other variable
+//   from the parent (all other Doppler secrets, DOPPLER_PROJECT/CONFIG/ENVIRONMENT, DOPPLER_TOKEN, ...) is dropped.
+//   (The prompt path still passes the whole parent environment to the child, as before.) The output allow-list and
+//   masking apply to the secrets exactly as in the prompt path.
 // - Exit status is the child's.
 
 import { spawn } from 'node:child_process';
 import { resolve } from 'node:path';
 import { fileURLToPath } from 'node:url';
+
+/** --from-env only: the exact scope the Doppler environment must prove (doppler run sets DOPPLER_PROJECT and DOPPLER_CONFIG). */
+export const FROM_ENV_PROJECT = 'truck-recruitment-tool';
+export const FROM_ENV_CONFIG = 'stg';
+/** --from-env only: the only non-secret parent variables the child receives (compared in upper case, so Windows `Path` works). */
+export const FROM_ENV_BASE_NAMES = ['PATH', 'PATHEXT', 'SYSTEMROOT', 'SYSTEMDRIVE', 'WINDIR', 'COMSPEC', 'TEMP', 'TMP', 'HOME', 'USERPROFILE', 'APPDATA', 'LOCALAPPDATA'];
 
 export const ALLOWED = ['STAGING_DB_URL', 'SUPABASE_SERVICE_ROLE_KEY', 'TEST_USER_PASSWORD', 'OWNER_STAGING_PASSWORD'];
 
@@ -234,39 +253,55 @@ function filteringSink(sink, targets, counter) {
 
 export function parseArgs(argv) {
   const secrets = [];
-  let cwd; let nodePath;
+  let cwd; let nodePath; let fromEnv = false;
   let i = 0;
   for (; i < argv.length; i += 1) {
     const a = argv[i];
     if (a === '--') { i += 1; break; }
     if (a === '--secret') { secrets.push(argv[++i]); continue; }
+    if (a === '--from-env') { fromEnv = true; continue; }
     if (a === '--cwd') { cwd = argv[++i]; continue; }
     if (a === '--node-path') { nodePath = argv[++i]; continue; }
     throw new Error(`unknown option ${a}`);
   }
   const rest = argv.slice(i);
   if (secrets.length === 0 || rest.length < 2 || rest[0] !== 'node') {
-    throw new Error('usage: node scripts/run-with-secrets.mjs [--cwd DIR] [--node-path DIR] --secret NAME [--secret NAME ...] -- node ARGS...');
+    throw new Error('usage: node scripts/run-with-secrets.mjs [--from-env] [--cwd DIR] [--node-path DIR] --secret NAME [--secret NAME ...] -- node ARGS...');
   }
   for (const s of secrets) if (!ALLOWED.includes(s)) throw new Error(`refusing: ${String(s)} is not an allowed secret name (${ALLOWED.join(', ')})`);
   if (new Set(secrets).size !== secrets.length) throw new Error('refusing: a secret name was given twice');
-  return { secrets, cwd, nodePath, childArgs: rest.slice(1) };
+  return { secrets, cwd, nodePath, fromEnv, childArgs: rest.slice(1) };
 }
 
 export async function main({ argv, env = process.env, stdin = process.stdin, stdout = process.stdout, stderr = process.stderr, nodeBinary = process.execPath }) {
-  const { secrets, cwd, nodePath, childArgs } = parseArgs(argv);
-  for (const name of secrets) {
-    if (env[name] !== undefined && env[name] !== '') {
-      throw new Error(`refusing: ${name} is already set in this terminal. Close this window, open a new one and run the command again (a value typed into a shell can stay in its history).`);
-    }
-  }
-  const childEnv = { ...env };
+  const { secrets, cwd, nodePath, fromEnv, childArgs } = parseArgs(argv);
   const targets = [];
-  for (const name of secrets) {
-    const value = (await readHidden(`Enter ${name} (typing is hidden; paste, then press Enter): `, stdin, stdout)).trim();
-    if (!value) throw new Error(`no value entered for ${name}`);
-    childEnv[name] = value;
-    targets.push(...maskTargets(value));
+  let childEnv;
+  if (fromEnv) {
+    if (env.DOPPLER_PROJECT !== FROM_ENV_PROJECT || env.DOPPLER_CONFIG !== FROM_ENV_CONFIG) {
+      throw new Error(`refusing: --from-env is only for the staging Doppler scope (project ${FROM_ENV_PROJECT}, config ${FROM_ENV_CONFIG}); run it through doppler run with exactly that project and config`);
+    }
+    childEnv = {};
+    for (const [key, value] of Object.entries(env)) if (FROM_ENV_BASE_NAMES.includes(key.toUpperCase()) && typeof value === 'string') childEnv[key] = value;
+    for (const name of secrets) {
+      const value = env[name];
+      if (typeof value !== 'string' || value.trim() === '') throw new Error(`refusing: ${name} is missing or empty in the environment (--from-env)`);
+      childEnv[name] = value;
+      targets.push(...maskTargets(value));
+    }
+  } else {
+    for (const name of secrets) {
+      if (env[name] !== undefined && env[name] !== '') {
+        throw new Error(`refusing: ${name} is already set in this terminal. Close this window, open a new one and run the command again (a value typed into a shell can stay in its history).`);
+      }
+    }
+    childEnv = { ...env };
+    for (const name of secrets) {
+      const value = (await readHidden(`Enter ${name} (typing is hidden; paste, then press Enter): `, stdin, stdout)).trim();
+      if (!value) throw new Error(`no value entered for ${name}`);
+      childEnv[name] = value;
+      targets.push(...maskTargets(value));
+    }
   }
   if (nodePath) childEnv.NODE_PATH = resolve(nodePath);
   const sortedTargets = [...new Set(targets)].sort((a, b) => b.length - a.length);

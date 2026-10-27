@@ -318,6 +318,32 @@ Doc 14 §8.1 and §11.6, in this order, each phase its own approval:
 L1 is one-way for legacy sessions; the backout (§3.3) restores the email provider so people can
 sign in again with passwords.
 
+### 1.9 Doppler staging path for the runner (`--from-env`, staging only; owner decision 2026-10-26)
+
+For the staging steps only, the manager agent may run the runner without a person at a terminal. The three
+staging secrets (`STAGING_DB_URL`, `SUPABASE_SERVICE_ROLE_KEY`, `OWNER_STAGING_PASSWORD`) are stored in Doppler
+project `truck-recruitment-tool`, config `stg`, and supplied by `doppler run` using a **read-only service token bound
+to the `stg` config**. The command form is
+`doppler run --project truck-recruitment-tool --config stg -- node scripts/run-with-secrets.mjs --from-env --cwd pipeline --secret NAME -- node ...`.
+
+- **Opt-in and unchanged otherwise.** Without `--from-env` the wrapper behaves exactly as in §1.3 (hidden prompt;
+  a pre-set secret is refused). With it there is no prompt, and each requested `--secret` must be present and
+  non-empty, otherwise a fixed refusal names only the variable.
+- **Scope check.** The wrapper refuses unless `DOPPLER_PROJECT` is exactly `truck-recruitment-tool` and `DOPPLER_CONFIG`
+  is exactly `stg` (so `prd`, `dev`, any other value, or a missing value is refused with fixed text and no values).
+  This is a guard against a wrong command, not a security boundary: the boundary is the service token, which can read
+  only `stg`.
+- **Child environment.** The child receives only `PATH`, `PATHEXT`, `SYSTEMROOT`, `SYSTEMDRIVE`, `WINDIR`, `COMSPEC`,
+  `TEMP`, `TMP`, `HOME`, `USERPROFILE`, `APPDATA`, `LOCALAPPDATA` (when present) plus the requested secrets. Every other
+  Doppler secret, every `DOPPLER_*` variable and `DOPPLER_TOKEN` is dropped. (The prompt path still passes the whole
+  parent environment; that difference is deliberate, because here the parent holds more secrets than the child needs.)
+- **Output** is filtered and masked exactly as in §1.3.
+- **Production never uses this path.** No production secret is stored in Doppler for it, the token cannot read `prd`,
+  and the wrapper refuses any scope other than `stg`. Production steps stay owner-run with the hidden prompt.
+- Not verified here (no Doppler account contact): that `doppler run` sets `DOPPLER_PROJECT` and `DOPPLER_CONFIG` in the
+  child environment. Doppler documents these as automatically included secrets; the first dry run must show the wrapper
+  passing its scope check, and a refusal means the check must be revisited, not bypassed.
+
 ---
 
 ## 2 · Hosting on Render

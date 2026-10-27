@@ -5,7 +5,7 @@ import assert from 'node:assert/strict';
 import { PassThrough } from 'node:stream';
 import { test } from 'node:test';
 import { readFileSync } from 'node:fs';
-import { ALLOWED, REFUSAL_IDS, allowListLine, main, maskTargets, parseArgs, readHidden, scrub } from './run-with-secrets.mjs';
+import { ALLOWED, FROM_ENV_BASE_NAMES, REFUSAL_IDS, allowListLine, main, maskTargets, parseArgs, readHidden, scrub } from './run-with-secrets.mjs';
 
 function fakeTty() {
   const s = new PassThrough();
@@ -133,4 +133,99 @@ test('the refusal identifiers in the wrapper equal the runner list (pipeline/src
   const runnerIds = [...block.matchAll(/'([a-z0-9_]+)'/g)].map((m) => m[1]);
   assert.deepEqual([...REFUSAL_IDS].sort(), [...runnerIds].sort());
   assert.equal(new Set(runnerIds).size, runnerIds.length);
+});
+
+// ---- --from-env (staging Doppler path). Offline: the "Doppler environment" is a fake object.
+const STG = { DOPPLER_PROJECT: 'truck-recruitment-tool', DOPPLER_CONFIG: 'stg' };
+const nonTty = () => { const s = new PassThrough(); s.isTTY = false; return s; };
+const EXIT_0 = "console.log(JSON.stringify({ msg: 'staging-sql.selftest', ok: true }));console.error('stderr is withheld ' + process.env.STAGING_DB_URL);";
+const runFromEnv = async (env, extraArgs = ['--secret', 'STAGING_DB_URL'], childCode = EXIT_0) => {
+  const out = sink(); const err = sink();
+  const code = await main({ argv: ['--from-env', ...extraArgs, '--', 'node', '-e', childCode], env, stdin: nonTty(), stdout: out.stream, stderr: err.stream });
+  await new Promise((r) => setImmediate(r));
+  return { code, out: out.text(), err: err.text() };
+};
+
+test('from-env: the flag is parsed, and without it fromEnv is false', () => {
+  assert.equal(parseArgs(['--from-env', '--secret', 'STAGING_DB_URL', '--', 'node', 'x']).fromEnv, true);
+  assert.equal(parseArgs(['--secret', 'STAGING_DB_URL', '--', 'node', 'x']).fromEnv, false);
+});
+
+test('from-env: succeeds with no prompt on a non-terminal stdin; the secret is masked and the allow-list still applies', async () => {
+  const r = await runFromEnv({ ...STG, STAGING_DB_URL: URL_SECRET, PATH: process.env.PATH });
+  assert.equal(r.code, 0);
+  assert.ok(!r.out.includes('Enter STAGING_DB_URL'), 'no prompt is shown');
+  assert.match(r.out, /"msg":"staging-sql.selftest","ok":true\}/);
+  assert.match(r.out, /run-with-secrets: exit code 0; 1 output line\(s\) withheld; 0 field\(s\) withheld/);
+  assert.equal(r.err, '', 'the child stderr line is withheld, not shown');
+  assert.ok(!(r.out + r.err).includes('Zq@x-Secret'));
+});
+
+test('from-env: the child environment is limited to the base names plus the requested secret (asserted inside the child)', async () => {
+  const env = {
+    ...STG, DOPPLER_ENVIRONMENT: 'stg', DOPPLER_TOKEN: 'dp.st.stg.fake-token-value', STAGING_DB_URL: URL_SECRET, SUPABASE_SERVICE_ROLE_KEY: 'other-secret-not-requested', OWNER_STAGING_PASSWORD: 'owner-pw-not-requested',
+    NODE_OPTIONS: '', RANDOM_OTHER: 'x', PATH: process.env.PATH, TEMP: 't', HOME: 'h', COMSPEC: 'c',
+  };
+  if (process.env.SystemRoot) env.SystemRoot = process.env.SystemRoot; // a fake SystemRoot would stop node itself on Windows
+  // Windows itself adds a few variables (HOMEDRIVE, USERNAME, ...) to every new process, so the child checks the two things that matter:
+  // nothing from the parent outside the base list and the secret arrives, and what should arrive does arrive. Elsewhere it is exact.
+  const expected = ['COMSPEC', 'HOME', 'PATH', 'STAGING_DB_URL', 'TEMP', ...(env.SystemRoot ? ['SystemRoot'] : [])];
+  const code = `const keys = Object.keys(process.env);
+    const leaked = ['DOPPLER_PROJECT', 'DOPPLER_CONFIG', 'DOPPLER_ENVIRONMENT', 'DOPPLER_TOKEN', 'SUPABASE_SERVICE_ROLE_KEY', 'OWNER_STAGING_PASSWORD', 'NODE_OPTIONS', 'RANDOM_OTHER'].filter((k) => keys.includes(k));
+    const present = ${JSON.stringify(expected)}.every((k) => keys.includes(k));
+    const exact = process.platform === 'win32' || JSON.stringify([...keys].sort()) === JSON.stringify(${JSON.stringify([...expected].sort())});
+    console.log(JSON.stringify({ msg: 'staging-sql.selftest', ok: leaked.length === 0 && present && exact }));`;
+  const r = await runFromEnv(env, ['--secret', 'STAGING_DB_URL'], code);
+  assert.equal(r.code, 0);
+  assert.match(r.out, /"ok":true/, 'DOPPLER_*, DOPPLER_TOKEN, other secrets, NODE_OPTIONS and unknown names must not reach the child');
+  assert.ok(FROM_ENV_BASE_NAMES.every((n) => n === n.toUpperCase()));
+  assert.ok(!FROM_ENV_BASE_NAMES.some((n) => /DOPPLER|KEY|PASSWORD|TOKEN|SECRET|NODE/.test(n)));
+});
+
+test('from-env: DOPPLER_TOKEN and the other secrets are not passed even when the child asks for nothing else', async () => {
+  const code = "console.log(JSON.stringify({ msg: 'staging-sql.selftest', ok: ['DOPPLER_TOKEN', 'DOPPLER_CONFIG', 'DOPPLER_PROJECT', 'SUPABASE_SERVICE_ROLE_KEY'].every((k) => process.env[k] === undefined) }));";
+  const r = await runFromEnv({ ...STG, DOPPLER_TOKEN: 'dp.st.stg.fake', SUPABASE_SERVICE_ROLE_KEY: 'not-requested-value', STAGING_DB_URL: URL_SECRET, PATH: 'p' }, ['--secret', 'STAGING_DB_URL'], code);
+  assert.match(r.out, /"ok":true/);
+});
+
+test('from-env: several secrets are all passed and masked; each missing, empty or blank one is refused by variable name only', async () => {
+  const both = { ...STG, STAGING_DB_URL: URL_SECRET, SUPABASE_SERVICE_ROLE_KEY: 'service-role-fake-value-1234', PATH: 'p' };
+  const code = "console.log(JSON.stringify({ msg: 'staging-sql.selftest', ok: process.env.STAGING_DB_URL.length > 0 && process.env.SUPABASE_SERVICE_ROLE_KEY.length > 0 }));";
+  const r = await runFromEnv(both, ['--secret', 'STAGING_DB_URL', '--secret', 'SUPABASE_SERVICE_ROLE_KEY'], code);
+  assert.match(r.out, /"ok":true/);
+  for (const bad of [undefined, '', '   ']) {
+    await assert.rejects(runFromEnv({ ...STG, STAGING_DB_URL: bad, PATH: 'p' }), (e) => e.message === 'refusing: STAGING_DB_URL is missing or empty in the environment (--from-env)');
+  }
+  await assert.rejects(runFromEnv({ ...both, SUPABASE_SERVICE_ROLE_KEY: '' }, ['--secret', 'STAGING_DB_URL', '--secret', 'SUPABASE_SERVICE_ROLE_KEY']), /SUPABASE_SERVICE_ROLE_KEY is missing or empty/);
+});
+
+test('from-env: any scope other than project truck-recruitment-tool and config stg is refused with one fixed message that carries no value', async () => {
+  const fixed = 'refusing: --from-env is only for the staging Doppler scope (project truck-recruitment-tool, config stg); run it through doppler run with exactly that project and config';
+  for (const scope of [
+    { DOPPLER_PROJECT: 'truck-recruitment-tool', DOPPLER_CONFIG: 'prd' },
+    { DOPPLER_PROJECT: 'truck-recruitment-tool', DOPPLER_CONFIG: 'dev' },
+    { DOPPLER_PROJECT: 'truck-recruitment-tool' },
+    { DOPPLER_CONFIG: 'stg' },
+    { DOPPLER_PROJECT: 'other-project', DOPPLER_CONFIG: 'stg' },
+    { DOPPLER_PROJECT: 'truck-recruitment-tool', DOPPLER_CONFIG: 'stg_prd' },
+    { DOPPLER_PROJECT: 'truck-recruitment-tool', DOPPLER_CONFIG: 'STG' },
+    {},
+  ]) {
+    await assert.rejects(runFromEnv({ ...scope, STAGING_DB_URL: URL_SECRET, PATH: 'p' }), (e) => e.message === fixed);
+  }
+});
+
+test('prompt path is unchanged without the flag: a pre-set secret is still refused and the child still gets the whole parent environment', async () => {
+  await assert.rejects(
+    main({ argv: ['--secret', 'STAGING_DB_URL', '--', 'node', '-e', '0'], env: { ...STG, STAGING_DB_URL: 'already-here' }, stdin: fakeTty(), stdout: sink().stream, stderr: sink().stream }),
+    /already set in this terminal/,
+  );
+  const stdin = fakeTty(); const out = sink();
+  const code = "console.log(JSON.stringify({ msg: 'staging-sql.selftest', ok: process.env.EXTRA_PARENT_VAR === 'kept' && process.env.DOPPLER_CONFIG === 'prompt-path' }));";
+  const run = main({ argv: ['--secret', 'STAGING_DB_URL', '--', 'node', '-e', code], env: { PATH: process.env.PATH, EXTRA_PARENT_VAR: 'kept', DOPPLER_CONFIG: 'prompt-path' }, stdin, stdout: out.stream, stderr: sink().stream });
+  await new Promise((r) => setImmediate(r));
+  stdin.write(`${URL_SECRET}\r`);
+  assert.equal(await run, 0);
+  assert.match(out.text(), /"ok":true/);
+  assert.ok(out.text().includes('Enter STAGING_DB_URL'));
 });
