@@ -38,6 +38,7 @@
 //   masking apply to the secrets exactly as in the prompt path.
 // - Exit status is the child's.
 
+import { createHash } from 'node:crypto';
 import { spawn } from 'node:child_process';
 import { resolve } from 'node:path';
 import { fileURLToPath } from 'node:url';
@@ -48,7 +49,12 @@ export const FROM_ENV_CONFIG = 'stg';
 /** --from-env only: the only non-secret parent variables the child receives (compared in upper case, so Windows `Path` works). */
 export const FROM_ENV_BASE_NAMES = ['PATH', 'PATHEXT', 'SYSTEMROOT', 'SYSTEMDRIVE', 'WINDIR', 'COMSPEC', 'TEMP', 'TMP', 'HOME', 'USERPROFILE', 'APPDATA', 'LOCALAPPDATA'];
 
-export const ALLOWED = ['STAGING_DB_URL', 'SUPABASE_SERVICE_ROLE_KEY', 'TEST_USER_PASSWORD', 'OWNER_STAGING_PASSWORD'];
+export const ALLOWED = ['STAGING_DB_URL', 'SUPABASE_SERVICE_ROLE_KEY', 'TEST_USER_PASSWORD', 'OWNER_STAGING_PASSWORD', 'PRODUCTION_DB_URL'];
+/** Names that only the hidden prompt may supply: --from-env (the staging Doppler scope) refuses them, so production never comes from the environment. */
+export const PROMPT_ONLY = ['PRODUCTION_DB_URL'];
+/** The prompt path also hands the child a proof that a PROMPT_ONLY value was typed here (pipeline/src/first-manager-bootstrap.ts refuses a production URL without it). Keep equal to promptProof there (a test compares them). */
+export const PROMPT_PROOF_PREFIX = 'TNBS_PROMPT_PROOF_';
+export const promptProof = (value) => createHash('sha256').update(`tnbs-prompt-proof:${value}`).digest('hex');
 
 /** Reads one line from a TTY without echoing it. Resolves to the text; rejects on Ctrl+C or end of input. */
 export function readHidden(prompt, stdin, stdout) {
@@ -127,7 +133,7 @@ export const REFUSAL_IDS = [
   'retention_dry_run_failed', 'reapply_m1_not_backed_out', 'reapply_m1_still_applied', 'reapply_m1b_not_backed_out',
   'reapply_m1b_still_applied', 'reapply_m1c_not_backed_out', 'reapply_m1c_still_applied', 'owner_email_invalid',
   'owner_password_too_short', 'owner_auth_not_created', 'owner_auth_unknown_result', 'owner_promotion_refused',
-  'owner_bootstrap_target_refused', 'server_or_driver_error',
+  'owner_bootstrap_target_refused', 'bootstrap_target_required', 'target_not_recorded_production', 'first_manager_refused', 'server_or_driver_error',
 ];
 
 /** Keep equal to pipeline/src/refusals.ts DRIVER_CODES (a test compares them). */
@@ -143,6 +149,14 @@ export const OWNER_CHECK_IDS = [
   'the_owner_is_the_only_password_account', 'auth_users_are_the_owner_plus_seven_fixtures', 'exactly_one_profile_joined_to_the_owner_auth_user', 'owner_profile_is_still_pristine_pending_guest',
   'exactly_seven_passwordless_fixture_profiles', 'no_other_profiles', 'no_approved_manager_profile_for_the_owner_yet', 'the_same_account_has_the_approved_manager_profile', 'the_profile_is_approved_by_the_owner_account_itself',
 ];
+/** Keep equal to pipeline/src/first-manager-bootstrap.ts FIRST_MANAGER_CHECK_IDS / _STATES / _ACTIONS (a test compares them). */
+export const FIRST_MANAGER_CHECK_IDS = [
+  'm1_sign_in_tables_are_installed', 'm1_sign_in_functions_are_installed', 'the_roster_control_row_is_exactly_one', 'm1b_add_person_is_installed', 'the_profiles_account_link_is_dropped', 'no_manager_profile_exists_in_any_status', 'no_earlier_bootstrap_event_is_recorded',
+  'the_owner_address_is_not_blocked', 'the_owner_address_is_absent_or_one_pristine_pending_guest', 'exactly_one_manager_profile_exists', 'it_is_the_owner_address_approved_by_itself',
+  'the_sign_in_lookup_finds_exactly_that_person', 'the_roster_changed_by_exactly_the_expected_count', 'exactly_one_bootstrap_event_is_recorded',
+];
+export const FIRST_MANAGER_STATES = ['schema_not_ready', 'manager_exists', 'already_bootstrapped', 'address_blocked', 'address_on_roster', 'ready_to_create', 'ready_to_promote'];
+export const FIRST_MANAGER_ACTIONS = ['first-manager-check', 'first-manager-create'];
 /** Keep equal to RETENTION_RULES names in pipeline/src/retention.ts (a test compares them). */
 export const RETENTION_RULE_NAMES = ['app_sessions', 'email_events', 'recovery_failures', 'request_buckets', 'signin_links'];
 
@@ -202,6 +216,17 @@ const EVENTS = {
   'staging-sql.owner_check': { phase, check: ownerCheck, ok: bool },
   'staging-sql.owner_checks': { phase, ok: bool, checks: int, failed: int },
   'staging-sql.owner_promote_result': { result: oneOf(['committed', 'rolled_back', 'rollback_not_confirmed', 'unknown']) },
+  // First-manager bootstrap (pipeline/src/first-manager-bootstrap.ts): counts and enumerated words only, never the address, name or an id.
+  'first-manager.verified': { action: oneOf(FIRST_MANAGER_ACTIONS), target: oneOf(['staging', 'production']) },
+  'first-manager.plan_only': { hint: oneOf(['add --execute to run']) },
+  'first-manager.state': {
+    target: oneOf(['staging', 'production']), state: oneOf(FIRST_MANAGER_STATES), schema_ready: bool, profiles_total: int, managers: int, address_profiles: int, bootstrap_events: int,
+  },
+  'first-manager.check': { phase, check: oneOf(FIRST_MANAGER_CHECK_IDS), ok: bool },
+  'first-manager.checks': { phase, ok: bool, checks: int, failed: int },
+  'first-manager.result': { result: oneOf(['committed', 'rolled_back', 'rollback_not_confirmed', 'unknown']), path: oneOf(['insert', 'promote']) },
+  'first-manager.done': { action: oneOf(FIRST_MANAGER_ACTIONS), target: oneOf(['staging', 'production']) },
+  'first-manager.refused': { refusal: oneOf(REFUSAL_IDS), err_code: code },
 };
 
 const SEED_LINES = [
@@ -270,6 +295,7 @@ export function parseArgs(argv) {
   }
   for (const s of secrets) if (!ALLOWED.includes(s)) throw new Error(`refusing: ${String(s)} is not an allowed secret name (${ALLOWED.join(', ')})`);
   if (new Set(secrets).size !== secrets.length) throw new Error('refusing: a secret name was given twice');
+  if (fromEnv) for (const s of secrets) if (PROMPT_ONLY.includes(s)) throw new Error(`refusing: ${s} can only be entered at the hidden prompt, never taken from the environment (--from-env is staging only)`);
   return { secrets, cwd, nodePath, fromEnv, childArgs: rest.slice(1) };
 }
 
@@ -295,11 +321,22 @@ export async function main({ argv, env = process.env, stdin = process.stdin, std
         throw new Error(`refusing: ${name} is already set in this terminal. Close this window, open a new one and run the command again (a value typed into a shell can stay in its history).`);
       }
     }
+    // Windows looks environment names up case-insensitively, so every spelling of a secret name that is already set is refused,
+    // and every spelling of an inherited proof is removed (an exact-case delete would leave `tnbs_prompt_proof_...` for the child to read).
+    for (const name of secrets) {
+      const clash = Object.keys(env).find((k) => k !== name && k.toUpperCase() === name.toUpperCase() && env[k] !== undefined && env[k] !== '');
+      if (clash !== undefined) throw new Error(`refusing: ${name} is already set in this terminal under another capitalisation. Close this window, open a new one and run the command again.`);
+    }
     childEnv = { ...env };
+    const proofNames = new Set(PROMPT_ONLY.map((name) => (PROMPT_PROOF_PREFIX + name).toUpperCase()));
+    for (const key of Object.keys(childEnv)) {
+      if (proofNames.has(key.toUpperCase()) || secrets.some((name) => key.toUpperCase() === name.toUpperCase())) delete childEnv[key];
+    }
     for (const name of secrets) {
       const value = (await readHidden(`Enter ${name} (typing is hidden; paste, then press Enter): `, stdin, stdout)).trim();
       if (!value) throw new Error(`no value entered for ${name}`);
       childEnv[name] = value;
+      if (PROMPT_ONLY.includes(name)) childEnv[PROMPT_PROOF_PREFIX + name] = promptProof(value);
       targets.push(...maskTargets(value));
     }
   }

@@ -5,7 +5,7 @@ import assert from 'node:assert/strict';
 import { PassThrough } from 'node:stream';
 import { test } from 'node:test';
 import { readFileSync } from 'node:fs';
-import { ALLOWED, FROM_ENV_BASE_NAMES, REFUSAL_IDS, allowListLine, main, maskTargets, parseArgs, readHidden, scrub } from './run-with-secrets.mjs';
+import { ALLOWED, FROM_ENV_BASE_NAMES, PROMPT_ONLY, PROMPT_PROOF_PREFIX, REFUSAL_IDS, allowListLine, main, maskTargets, parseArgs, promptProof, readHidden, scrub } from './run-with-secrets.mjs';
 
 function fakeTty() {
   const s = new PassThrough();
@@ -53,7 +53,14 @@ test('arguments: only allowed secret names, only a `node` child, no duplicates, 
     ['--', 'node', 'x'],
     ['--secret', 'STAGING_DB_URL'],
   ]) assert.throws(() => parseArgs(bad), `${bad.join(' ')} must be refused`);
-  assert.deepEqual(ALLOWED, ['STAGING_DB_URL', 'SUPABASE_SERVICE_ROLE_KEY', 'TEST_USER_PASSWORD', 'OWNER_STAGING_PASSWORD']);
+  assert.deepEqual(ALLOWED, ['STAGING_DB_URL', 'SUPABASE_SERVICE_ROLE_KEY', 'TEST_USER_PASSWORD', 'OWNER_STAGING_PASSWORD', 'PRODUCTION_DB_URL']);
+});
+
+test('PRODUCTION_DB_URL is prompt-only: --from-env refuses it before anything runs, while the hidden-prompt path accepts the name', () => {
+  assert.throws(() => parseArgs(['--from-env', '--secret', 'PRODUCTION_DB_URL', '--', 'node', 'x']), /can only be entered at the hidden prompt/);
+  assert.throws(() => parseArgs(['--from-env', '--secret', 'STAGING_DB_URL', '--secret', 'PRODUCTION_DB_URL', '--', 'node', 'x']), /can only be entered at the hidden prompt/);
+  assert.deepEqual(parseArgs(['--secret', 'PRODUCTION_DB_URL', '--', 'node', 'x']).secrets, ['PRODUCTION_DB_URL']);
+  assert.equal(parseArgs(['--from-env', '--secret', 'STAGING_DB_URL', '--', 'node', 'x']).fromEnv, true);
 });
 
 test('scrub: the value, its URL-encoded form and a URL secret host, user and password are all masked', () => {
@@ -228,4 +235,68 @@ test('prompt path is unchanged without the flag: a pre-set secret is still refus
   assert.equal(await run, 0);
   assert.match(out.text(), /"ok":true/);
   assert.ok(out.text().includes('Enter STAGING_DB_URL'));
+});
+
+test('prompt proof: a prompted production URL reaches the child with a matching proof; a forged ambient proof is replaced, and a staging prompt carries none', async () => {
+  const PROOF = PROMPT_PROOF_PREFIX + PROMPT_ONLY[0];
+  const code = [
+    "const c = require('node:crypto');",
+    "const v = process.env.PRODUCTION_DB_URL;",
+    `const want = c.createHash('sha256').update('tnbs-prompt-proof:' + v).digest('hex');`,
+    `console.log(JSON.stringify({ msg: 'staging-sql.selftest', ok: process.env.${PROOF} === want }));`,
+  ].join('\n');
+  const stdin = fakeTty(); const out = sink();
+  const run = main({ argv: ['--secret', 'PRODUCTION_DB_URL', '--', 'node', '-e', code], env: { PATH: process.env.PATH, [PROOF]: 'forged' }, stdin, stdout: out.stream, stderr: sink().stream });
+  await new Promise((r) => setImmediate(r));
+  stdin.write(`${URL_SECRET}\r`);
+  assert.equal(await run, 0);
+  assert.match(out.text(), /"ok":true/);
+  assert.equal(promptProof(URL_SECRET).length, 64);
+  // A staging prompt run must not forward an ambient proof either.
+  const stdin2 = fakeTty(); const out2 = sink();
+  const code2 = `console.log(JSON.stringify({ msg: 'staging-sql.selftest', ok: process.env.${PROOF} === undefined }));`;
+  const run2 = main({ argv: ['--secret', 'STAGING_DB_URL', '--', 'node', '-e', code2], env: { PATH: process.env.PATH, [PROOF]: 'forged' }, stdin: stdin2, stdout: out2.stream, stderr: sink().stream });
+  await new Promise((r) => setImmediate(r));
+  stdin2.write(`${URL_SECRET}\r`);
+  assert.equal(await run2, 0);
+  assert.match(out2.text(), /"ok":true/);
+});
+
+test('prompt proof: every capitalisation of an inherited proof is removed (Windows reads environment names case-insensitively); no socket, synthetic values only', async () => {
+  const PROOF = PROMPT_PROOF_PREFIX + PROMPT_ONLY[0];
+  const synthetic = 'postgresql://postgres.syntheticref:synthetic-pw@synthetic.invalid:5432/postgres';
+  const spellings = [PROOF.toLowerCase(), PROOF.replace('PROOF', 'Proof'), PROOF];
+  // Another secret is prompted, so the wrapper does not write a proof of its own: the child must see no spelling of the proof at all.
+  const listProofs = `const names = Object.keys(process.env).filter((k) => k.toUpperCase() === '${PROOF}');
+console.log(JSON.stringify({ msg: 'staging-sql.selftest', ok: names.length === 0 }));`;
+  for (const spelling of spellings) {
+    const stdin = fakeTty(); const out = sink();
+    const run = main({ argv: ['--secret', 'TEST_USER_PASSWORD', '--', 'node', '-e', listProofs], env: { PATH: process.env.PATH, PRODUCTION_DB_URL: synthetic, [spelling]: promptProof(synthetic) }, stdin, stdout: out.stream, stderr: sink().stream });
+    await new Promise((r) => setImmediate(r));
+    stdin.write('synthetic-test-value\r');
+    assert.equal(await run, 0);
+    assert.match(out.text(), /"ok":true/, `inherited proof spelled ${spelling} must not reach the child`);
+  }
+  // A prompted production URL: only the canonical proof, equal to the proof of the typed value, remains whatever the inherited spelling was.
+  const exactlyOne = `const c = require('node:crypto');
+const names = Object.keys(process.env).filter((k) => k.toUpperCase() === '${PROOF}');
+const want = c.createHash('sha256').update('tnbs-prompt-proof:' + process.env.PRODUCTION_DB_URL).digest('hex');
+console.log(JSON.stringify({ msg: 'staging-sql.selftest', ok: names.length === 1 && names[0] === '${PROOF}' && process.env['${PROOF}'] === want }));`;
+  for (const spelling of spellings) {
+    const stdin = fakeTty(); const out = sink();
+    const run = main({ argv: ['--secret', 'PRODUCTION_DB_URL', '--', 'node', '-e', exactlyOne], env: { PATH: process.env.PATH, [spelling]: promptProof(synthetic) }, stdin, stdout: out.stream, stderr: sink().stream });
+    await new Promise((r) => setImmediate(r));
+    stdin.write(`${URL_SECRET}\r`);
+    assert.equal(await run, 0);
+    assert.match(out.text(), /"ok":true/, `inherited proof spelled ${spelling} must be replaced by the canonical proof of the typed value`);
+  }
+});
+
+test('a prompted secret already set under another capitalisation is refused before anything is read or run', async () => {
+  for (const name of ['production_db_url', 'Production_Db_Url']) {
+    await assert.rejects(
+      main({ argv: ['--secret', 'PRODUCTION_DB_URL', '--', 'node', '-e', '0'], env: { PATH: process.env.PATH, [name]: 'already-here' }, stdin: fakeTty(), stdout: sink().stream, stderr: sink().stream }),
+      /already set in this terminal under another capitalisation/,
+    );
+  }
 });
