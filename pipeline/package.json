@@ -10,7 +10,7 @@
   "scripts": {
     "build": "npm test && tsc -p tsconfig.json",
     "typecheck": "tsc --noEmit",
-    "test": "tsx src/smoke-tests.ts",
+    "test": "tsx src/smoke-tests.ts && tsx src/first-manager-bootstrap.test.ts",
     "verify": "npm run typecheck && npm run build",
     "start": "tsx src/run.ts nightly",
     "pipeline:render": "tsx src/run.ts ${PIPELINE_COMMAND:-nightly}",

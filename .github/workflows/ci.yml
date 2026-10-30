@@ -111,3 +111,10 @@ jobs:
 
       - name: Build
         run: npm run build
+
+      # Offline, no dependencies: the first-manager bootstrap contract (guard statements and test wiring) and the secrets-wrapper tests.
+      - name: First-manager contract and secrets wrapper (offline)
+        working-directory: .
+        run: |
+          node scripts/verify-first-manager-contract.mjs
+          node --test scripts/run-with-secrets.test.mjs

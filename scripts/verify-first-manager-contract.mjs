@@ -1,7 +1,7 @@
 #!/usr/bin/env node
 // Offline contract check for the first-manager bootstrap (cutover OPEN-2; docs/build-plan/18-first-manager-bootstrap.md):
 // pipeline/src/first-manager-bootstrap.ts, first-manager-runner.ts and their wiring in refusals.ts and scripts/run-with-secrets.mjs.
-// Text-level only; the behaviour is proven by first-manager-bootstrap.test.ts (offline) and first-manager-bootstrap-a3.test.ts (real PostgreSQL 16, loopback).
+// Text-level, but it checks the guard statements themselves (see 'Guard statements') and that the tests are wired into verification; the behaviour is proven by first-manager-bootstrap.test.ts (offline) and first-manager-bootstrap-a3.test.ts (real PostgreSQL 16, loopback).
 
 import { existsSync, readFileSync } from 'node:fs';
 import { resolve } from 'node:path';
@@ -106,6 +106,80 @@ if (wrapper) {
 if (pkg) {
   for (const required of ['"first-manager": "tsx src/first-manager-runner.ts"', '"test:first-manager": "tsx src/first-manager-bootstrap.test.ts"']) if (!pkg.includes(required)) failures.push(`pipeline/package.json is missing: ${required}`);
 }
+
+// ---------------------------------------------------------------------------------------------------------------
+// Guard statements. Each pattern below is the statement itself, not just a name that could survive in a comment or a disabled branch
+// (comments are stripped first). The behaviour is proven by the offline and real-PostgreSQL tests; this check makes sure none of the
+// guards was edited out, and that those tests are wired into the normal offline verification.
+// ---------------------------------------------------------------------------------------------------------------
+const need = (name, c, re, what) => { if (!c || !re.test(c)) failures.push(name + ' must keep: ' + what); };
+if (mod) {
+  const c = code(mod);
+  need('first-manager-bootstrap.ts', c, /if \(input\.confirm !== wanted\) \{\s*throw new RunnerRefusal\('confirmation_required'/, 'the exact-confirmation refusal (if (input.confirm !== wanted) throw confirmation_required)');
+  need('first-manager-bootstrap.ts', c, /if \(db\.port !== 5432\) throw new RunnerRefusal\('port_must_be_5432'/, 'the port 5432 refusal');
+  need('first-manager-bootstrap.ts', c, /if \(!isTarget\(input\.target\)\) \{\s*throw new RunnerRefusal\('bootstrap_target_required'/, 'the required-target refusal');
+  need('first-manager-bootstrap.ts', c, /if \(!pre\.ok\) throw new RunnerRefusal\('first_manager_refused'/, 'the precondition refusal (if (!pre.ok) throw first_manager_refused)');
+  need('first-manager-bootstrap.ts', c, /if \(!post\.ok\) throw new RunnerRefusal\('first_manager_refused'/, 'the postcondition refusal');
+  need('first-manager-bootstrap.ts', c, /if \(userId === undefined\) throw new RunnerRefusal\('first_manager_refused'/, 'the exactly-one-row write refusal');
+  need('first-manager-bootstrap.ts', c, /if \(!schemaReady\(schema\)\) \{[^]*?throw new RunnerRefusal\('first_manager_refused'/, 'the schema-not-ready refusal before any lock');
+  need('first-manager-bootstrap.ts', c, /const locked = await client\.query\('select 1 from internal\.roster_lock for update'\);[^]*?if \(locked\.rowCount !== 1\) \{[^]*?throw new RunnerRefusal\('first_manager_refused'/, 'the check that the locked roster control read returned exactly one row');
+  need('first-manager-bootstrap.ts', c, /s\?\.m1_tables === true && s\.m1_sign_in_functions === true && s\.m1b_function === true && s\.account_link_present === false && s\.roster_lock_rows === 1/, 'schemaReady requiring the sign-in functions and exactly one roster control row');
+  need('first-manager-bootstrap.ts', c, /to_regprocedure\('internal\.auth_mint_lock\(text,timestamptz,timestamptz\)'\)/, 'the schema probe for internal.auth_mint_lock');
+  need('first-manager-bootstrap.ts', c, /from internal\.auth_mint_lock\(\$1,/, 'the real sign-in lookup call (internal.auth_mint_lock)');
+  need('first-manager-bootstrap.ts', c, /assessFirstManagerPost\(before, await readRosterFacts\(client\), path, await readSignInLookup\(client, userId\)\)/, 'the postcondition fed by the real sign-in lookup');
+  need('first-manager-bootstrap.ts', c, /ok: is\(lookup, 1\) \}/, 'the sign-in lookup postcondition');
+  need('first-manager-bootstrap.ts', c, /if \(target === 'production' && value && env\[PRODUCTION_PROMPT_PROOF_VARIABLE\] !== promptProof\(value\)\) \{\s*throw new RunnerRefusal\('plan_refused'/, 'the refusal of a production URL that did not come from the hidden prompt');
+  // Order inside the write transaction: the refusal comes before the first write, the postcondition refusal before COMMIT.
+  const iPre = c.indexOf('if (!pre.ok) throw'); const iInsert = c.indexOf('client.query(INSERT_SQL'); const iPost = c.indexOf('if (!post.ok) throw'); const iCommit = c.indexOf("await client.query('commit')");
+  if (!(iPre > 0 && iPre < iInsert && iInsert < iPost && iPost < iCommit)) failures.push('first-manager-bootstrap.ts: precondition refusal, then the write, then the postcondition refusal, then COMMIT, in that order');
+}
+if (runner) {
+  const c = code(runner);
+  const from = c.indexOf('if (!args.execute)'); const to = c.indexOf('await executeFirstManagerPlan');
+  if (from < 0 || to < 0 || !/console\.log\(JSON\.stringify\(\{ msg: 'first-manager\.plan_only'[^\n]*\n\s*return;\s*\}/.test(c.slice(from, to))) failures.push('first-manager-runner.ts must keep: the plan-only block that prints plan_only and returns before executeFirstManagerPlan');
+  need('first-manager-runner.ts', c, /main\(process\.argv\.slice\(2\), process\.env\)/, 'the real process environment passed only at the direct-invocation entry, into main (which enforces the prompt proof through selectFirstManagerDbUrl)');
+  need('first-manager-runner.ts', c, /dbUrl: selectFirstManagerDbUrl\(args\.target, env\)/, 'the production URL selected through selectFirstManagerDbUrl');
+}
+if (wrapper) {
+  const c = code(wrapper);
+  need('run-with-secrets.mjs', c, /if \(fromEnv\) for \(const s of secrets\) if \(PROMPT_ONLY\.includes\(s\)\) throw new Error\(/, 'the PROMPT_ONLY refusal under --from-env');
+  need('run-with-secrets.mjs', c, /if \(env\[name\] !== undefined && env\[name\] !== ''\) \{\s*throw new Error\(\x60refusing: \$\{name\} is already set in this terminal/, 'the refusal of a secret already set in the environment');
+  need('run-with-secrets.mjs', c, /for \(const name of PROMPT_ONLY\) delete childEnv\[PROMPT_PROOF_PREFIX \+ name\];/, 'the removal of any ambient prompt proof');
+  need('run-with-secrets.mjs', c, /if \(PROMPT_ONLY\.includes\(name\)\) childEnv\[PROMPT_PROOF_PREFIX \+ name\] = promptProof\(value\);/, 'the prompt proof handed to the child for a prompted PROMPT_ONLY secret');
+  const proofOf = (src) => (src.match(/update\(\x60(tnbs-prompt-proof:\$\{value\})\x60\)/) ?? [])[1];
+  if (!mod || proofOf(wrapper) === undefined || proofOf(wrapper) !== proofOf(mod)) failures.push('the prompt proof formula must be identical in run-with-secrets.mjs and first-manager-bootstrap.ts');
+}
+const a3 = read('pipeline/src/first-manager-bootstrap-a3.test.ts');
+const a3urls = read('pipeline/src/first-manager-a3-urls.ts');
+const unit = read('pipeline/src/first-manager-bootstrap.test.ts');
+if (!a3urls) failures.push('missing pipeline/src/first-manager-a3-urls.ts');
+else for (const required of ['u.search || u.hash', '!LOOPBACK.includes(u.hostname)', 'app.port !== port', 'A3_APP_ROLE', 'adminDatabase']) if (!code(a3urls).includes(required)) failures.push('first-manager-a3-urls.ts is missing: ' + required);
+if (!a3) failures.push('missing the A3 test');
+else {
+  const c = code(a3);
+  const iValidate = c.indexOf('validateA3Urls(ADMIN, APP)'); const iClient = c.indexOf('new pg.Client');
+  if (iValidate < 0 || iClient < 0 || iValidate > iClient) failures.push('first-manager-bootstrap-a3.test.ts must call validateA3Urls(ADMIN, APP) before it creates any pg.Client');
+  for (const required of ['the_roster_control_row_is_exactly_one', 'm1_sign_in_functions_are_installed', 'the_sign_in_lookup_finds_exactly_that_person']) if (!c.includes(required)) failures.push('first-manager-bootstrap-a3.test.ts is missing the real-PostgreSQL refusal case for ' + required);
+}
+if (unit) {
+  for (const required of ['direct entry with an ambient PRODUCTION_DB_URL', 'the A3 test refuses ${name} before any client connects', 'the locked roster control read returns ${lockRows} rows', 'ambient PRODUCTION_DB_URL (${name}) is refused before any client is created', 'the real sign-in functions missing']) if (!unit.includes(required)) failures.push('first-manager-bootstrap.test.ts is missing the regression test: ' + required);
+}
+// Wiring: the behavioural tests and this contract must run in the normal offline verification route.
+if (pkg) {
+  const m = pkg.match(/"test": "([^"]*)"/);
+  if (!m || !m[1].includes('tsx src/smoke-tests.ts') || !m[1].includes('tsx src/first-manager-bootstrap.test.ts')) failures.push('pipeline/package.json: "test" (which "build" and "verify" run) must run the smoke tests and the first-manager offline tests');
+  const b = pkg.match(/"build": "([^"]*)"/); const v = pkg.match(/"verify": "([^"]*)"/);
+  if (!b || !b[1].includes('npm test') || !v || !v[1].includes('npm run build')) failures.push('pipeline/package.json: "build" must run "npm test" and "verify" must run "npm run build"');
+}
+const ci = read('.github/workflows/ci.yml');
+const safety = read('.github/ci/repository-safety.sh');
+if (!ci) failures.push('missing .github/workflows/ci.yml');
+else {
+  if (!/npm run build/.test(ci)) failures.push('.github/workflows/ci.yml must run "npm run build" in the pipeline job (it runs the first-manager offline tests)');
+  for (const required of ['node scripts/verify-first-manager-contract.mjs', 'node --test scripts/run-with-secrets.test.mjs']) if (!ci.includes(required)) failures.push('.github/workflows/ci.yml must run: ' + required);
+}
+if (!safety) failures.push('missing .github/ci/repository-safety.sh');
+else for (const required of ['verify-first-manager-contract.mjs', 'run-with-secrets.test.mjs']) if (!safety.includes(required)) failures.push('.github/ci/repository-safety.sh must run: ' + required);
 
 // The design note records the decisions this tool depends on.
 if (doc) {

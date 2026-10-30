@@ -5,7 +5,7 @@ import assert from 'node:assert/strict';
 import { PassThrough } from 'node:stream';
 import { test } from 'node:test';
 import { readFileSync } from 'node:fs';
-import { ALLOWED, FROM_ENV_BASE_NAMES, REFUSAL_IDS, allowListLine, main, maskTargets, parseArgs, readHidden, scrub } from './run-with-secrets.mjs';
+import { ALLOWED, FROM_ENV_BASE_NAMES, PROMPT_ONLY, PROMPT_PROOF_PREFIX, REFUSAL_IDS, allowListLine, main, maskTargets, parseArgs, promptProof, readHidden, scrub } from './run-with-secrets.mjs';
 
 function fakeTty() {
   const s = new PassThrough();
@@ -235,4 +235,29 @@ test('prompt path is unchanged without the flag: a pre-set secret is still refus
   assert.equal(await run, 0);
   assert.match(out.text(), /"ok":true/);
   assert.ok(out.text().includes('Enter STAGING_DB_URL'));
+});
+
+test('prompt proof: a prompted production URL reaches the child with a matching proof; a forged ambient proof is replaced, and a staging prompt carries none', async () => {
+  const PROOF = PROMPT_PROOF_PREFIX + PROMPT_ONLY[0];
+  const code = [
+    "const c = require('node:crypto');",
+    "const v = process.env.PRODUCTION_DB_URL;",
+    `const want = c.createHash('sha256').update('tnbs-prompt-proof:' + v).digest('hex');`,
+    `console.log(JSON.stringify({ msg: 'staging-sql.selftest', ok: process.env.${PROOF} === want }));`,
+  ].join('\n');
+  const stdin = fakeTty(); const out = sink();
+  const run = main({ argv: ['--secret', 'PRODUCTION_DB_URL', '--', 'node', '-e', code], env: { PATH: process.env.PATH, [PROOF]: 'forged' }, stdin, stdout: out.stream, stderr: sink().stream });
+  await new Promise((r) => setImmediate(r));
+  stdin.write(`${URL_SECRET}\r`);
+  assert.equal(await run, 0);
+  assert.match(out.text(), /"ok":true/);
+  assert.equal(promptProof(URL_SECRET).length, 64);
+  // A staging prompt run must not forward an ambient proof either.
+  const stdin2 = fakeTty(); const out2 = sink();
+  const code2 = `console.log(JSON.stringify({ msg: 'staging-sql.selftest', ok: process.env.${PROOF} === undefined }));`;
+  const run2 = main({ argv: ['--secret', 'STAGING_DB_URL', '--', 'node', '-e', code2], env: { PATH: process.env.PATH, [PROOF]: 'forged' }, stdin: stdin2, stdout: out2.stream, stderr: sink().stream });
+  await new Promise((r) => setImmediate(r));
+  stdin2.write(`${URL_SECRET}\r`);
+  assert.equal(await run2, 0);
+  assert.match(out2.text(), /"ok":true/);
 });

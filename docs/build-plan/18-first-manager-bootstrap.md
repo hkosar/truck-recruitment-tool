@@ -64,10 +64,14 @@ npm run first-manager -- --target=<staging|production> --action=<first-manager-c
   (`first-manager.verified`, `first-manager.plan_only`) and never connects.
 - **Connection string.** `STAGING_DB_URL` for staging, `PRODUCTION_DB_URL` for production, each through
   `scripts/run-with-secrets.mjs` and its hidden prompt. `PRODUCTION_DB_URL` is **prompt-only**: `--from-env` (the staging
-  Doppler path) refuses it. If both variables are present the run is refused (`plan_refused`, mixed environment).
-- **One transaction** (`begin` … `commit`): `lock_timeout` 10 s, `statement_timeout` 60 s; schema readiness read first;
+  Doppler path) refuses it, and the runner itself refuses a production URL that was not typed at that prompt: the wrapper
+  hands its child a proof (a hash of the value it just read; `TNBS_PROMPT_PROOF_PRODUCTION_DB_URL`) and `selectFirstManagerDbUrl`
+  refuses a `PRODUCTION_DB_URL` without the matching proof (`plan_refused`), so `npm run first-manager` with a value left in the
+  environment never reaches a connection. The proof stops accidents; it is not a defence against someone who forges it on purpose.
+  If both variables are present the run is refused (`plan_refused`, mixed environment).
+- **One transaction** (`begin` … `commit`): `lock_timeout` 10 s, `statement_timeout` 60 s; schema readiness read first (M1 tables, the real sign-in functions such as `internal.auth_mint_lock`, `team_add_person`, the account link gone, and exactly one `internal.roster_lock` control row; the locked read must also return exactly one row);
   `internal.roster_lock FOR UPDATE` (I1), then `LOCK TABLE public.profiles IN SHARE ROW EXCLUSIVE MODE` (I2); every
-  precondition re-read under those locks; the write; one audit row; every postcondition re-read; only then `commit`.
+  precondition re-read under those locks; the write; one audit row; every postcondition re-read, including a call to the real `internal.auth_mint_lock` that must return exactly the new person; only then `commit`.
 - **Single use.** The tool refuses if any manager profile exists (a `role = 'manager'` row in **any** status), **or** an
   `internal.auth_events` row of kind `first_manager_bootstrap` already exists (so demoting or disabling the manager later
   cannot re-open the door). Two simultaneous runs: one commits, the other is refused (tested).
@@ -117,11 +121,13 @@ pattern) — not part of this tool. Decision for Hunter before the cutover.
 
 ## 6 · What is and is not proven
 
-Proven locally: planner and executor against an in-memory fake (57 tests); the real SQL against a throwaway PostgreSQL 16
+Proven locally: planner and executor against an in-memory fake (77 tests, run by `npm test` in `pipeline/`, so by `npm run build`, `verify` and CI); the real SQL against a throwaway PostgreSQL 16
 cluster built from the 20 migrations, the profile fixtures, M1, M1b and M1c: insert path, promote path, every refusal,
 rollback on an injected error, two-at-once, the real `internal.auth_mint_lock` finding the new manager, and the new manager
 adding a person through a `recruiter_app` link session (`team_add_person`). The text-level contract is
-`scripts/verify-first-manager-contract.mjs`.
+`scripts/verify-first-manager-contract.mjs`; it checks the guard statements themselves (confirmation, precondition, plan-only return,
+prompt-only) and that the tests are wired into verification, and CI runs it. The A3 test validates both of its connection strings offline
+(`first-manager-a3-urls.ts`: loopback, no overrides, same owned cluster and database, app role `recruiter_app`) before any client exists.
 
 **Not proven (needs a hosted rehearsal):** the hosted runner login's privileges (the tool needs INSERT/UPDATE on
 `public.profiles` and `internal.auth_events`, FOR UPDATE on `internal.roster_lock`, LOCK TABLE on `public.profiles`);

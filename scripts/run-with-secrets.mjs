@@ -38,6 +38,7 @@
 //   masking apply to the secrets exactly as in the prompt path.
 // - Exit status is the child's.
 
+import { createHash } from 'node:crypto';
 import { spawn } from 'node:child_process';
 import { resolve } from 'node:path';
 import { fileURLToPath } from 'node:url';
@@ -51,6 +52,9 @@ export const FROM_ENV_BASE_NAMES = ['PATH', 'PATHEXT', 'SYSTEMROOT', 'SYSTEMDRIV
 export const ALLOWED = ['STAGING_DB_URL', 'SUPABASE_SERVICE_ROLE_KEY', 'TEST_USER_PASSWORD', 'OWNER_STAGING_PASSWORD', 'PRODUCTION_DB_URL'];
 /** Names that only the hidden prompt may supply: --from-env (the staging Doppler scope) refuses them, so production never comes from the environment. */
 export const PROMPT_ONLY = ['PRODUCTION_DB_URL'];
+/** The prompt path also hands the child a proof that a PROMPT_ONLY value was typed here (pipeline/src/first-manager-bootstrap.ts refuses a production URL without it). Keep equal to promptProof there (a test compares them). */
+export const PROMPT_PROOF_PREFIX = 'TNBS_PROMPT_PROOF_';
+export const promptProof = (value) => createHash('sha256').update(`tnbs-prompt-proof:${value}`).digest('hex');
 
 /** Reads one line from a TTY without echoing it. Resolves to the text; rejects on Ctrl+C or end of input. */
 export function readHidden(prompt, stdin, stdout) {
@@ -147,7 +151,7 @@ export const OWNER_CHECK_IDS = [
 ];
 /** Keep equal to pipeline/src/first-manager-bootstrap.ts FIRST_MANAGER_CHECK_IDS / _STATES / _ACTIONS (a test compares them). */
 export const FIRST_MANAGER_CHECK_IDS = [
-  'm1_sign_in_tables_are_installed', 'm1b_add_person_is_installed', 'the_profiles_account_link_is_dropped', 'no_manager_profile_exists_in_any_status', 'no_earlier_bootstrap_event_is_recorded',
+  'm1_sign_in_tables_are_installed', 'm1_sign_in_functions_are_installed', 'the_roster_control_row_is_exactly_one', 'm1b_add_person_is_installed', 'the_profiles_account_link_is_dropped', 'no_manager_profile_exists_in_any_status', 'no_earlier_bootstrap_event_is_recorded',
   'the_owner_address_is_not_blocked', 'the_owner_address_is_absent_or_one_pristine_pending_guest', 'exactly_one_manager_profile_exists', 'it_is_the_owner_address_approved_by_itself',
   'the_sign_in_lookup_finds_exactly_that_person', 'the_roster_changed_by_exactly_the_expected_count', 'exactly_one_bootstrap_event_is_recorded',
 ];
@@ -318,10 +322,12 @@ export async function main({ argv, env = process.env, stdin = process.stdin, std
       }
     }
     childEnv = { ...env };
+    for (const name of PROMPT_ONLY) delete childEnv[PROMPT_PROOF_PREFIX + name];
     for (const name of secrets) {
       const value = (await readHidden(`Enter ${name} (typing is hidden; paste, then press Enter): `, stdin, stdout)).trim();
       if (!value) throw new Error(`no value entered for ${name}`);
       childEnv[name] = value;
+      if (PROMPT_ONLY.includes(name)) childEnv[PROMPT_PROOF_PREFIX + name] = promptProof(value);
       targets.push(...maskTargets(value));
     }
   }

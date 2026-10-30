@@ -3,13 +3,15 @@
 // Run: npx tsx src/first-manager-bootstrap.test.ts   (npm run test:first-manager)
 
 import assert from 'node:assert/strict';
+import { spawnSync } from 'node:child_process';
 import { resolve } from 'node:path';
 import { pathToFileURL } from 'node:url';
 import {
   FIRST_MANAGER_ACTIONS, FIRST_MANAGER_CHECK_CONFIRMATION, FIRST_MANAGER_CHECK_IDS, FIRST_MANAGER_CREATE_CONFIRMATION, FIRST_MANAGER_EMAIL, FIRST_MANAGER_NAME, FIRST_MANAGER_STATES,
-  assessFirstManagerPre, executeFirstManagerPlan, firstManagerState, planFirstManager, selectFirstManagerDbUrl,
+  PRODUCTION_PROMPT_PROOF_VARIABLE, assessFirstManagerPre, executeFirstManagerPlan, firstManagerState, planFirstManager, promptProof, selectFirstManagerDbUrl,
   type FirstManagerPlan, type RosterFacts, type SchemaFacts,
 } from './first-manager-bootstrap.js';
+import { validateA3Urls } from './first-manager-a3-urls.js';
 import { main as runnerMain, parseFirstManagerArgs } from './first-manager-runner.js';
 import { DRIVER_CODES, REFUSAL_IDS, RunnerRefusal, classifyRunnerFailure } from './refusals.js';
 import { REPOSITORY_ROOT, type RebuiltSqlClient } from './staging-rebuilt.js';
@@ -51,8 +53,8 @@ check('a recorded staging ref equal to production is invalid', refusalOf(() => p
 check('a connection string with query parameters is refused', (() => { try { planProd({ dbUrl: `${url(RECORDED_PROJECT_REFS.production)}?host=evil.example` }); return false; } catch { return true; } })());
 check('arguments: only the four known options; no default target', parseFirstManagerArgs(['--action=x']).target === undefined && refusalOf(() => parseFirstManagerArgs(['--db-url=x'])) === 'unknown_argument' && parseFirstManagerArgs(['--target=production', '--action=a', '--confirm=c', '--execute']).execute === true);
 check('each target reads its own variable; the other one present is a mixed environment and refused',
-  selectFirstManagerDbUrl('staging', { STAGING_DB_URL: 's' }) === 's' && selectFirstManagerDbUrl('production', { PRODUCTION_DB_URL: 'p' }) === 'p'
-  && refusalOf(() => selectFirstManagerDbUrl('production', { PRODUCTION_DB_URL: 'p', STAGING_DB_URL: 's' })) === 'plan_refused'
+  selectFirstManagerDbUrl('staging', { STAGING_DB_URL: 's' }) === 's' && selectFirstManagerDbUrl('production', { PRODUCTION_DB_URL: 'p', [PRODUCTION_PROMPT_PROOF_VARIABLE]: promptProof('p') }) === 'p'
+  && refusalOf(() => selectFirstManagerDbUrl('production', { PRODUCTION_DB_URL: 'p', [PRODUCTION_PROMPT_PROOF_VARIABLE]: promptProof('p'), STAGING_DB_URL: 's' })) === 'plan_refused'
   && refusalOf(() => selectFirstManagerDbUrl('staging', { PRODUCTION_DB_URL: 'p', STAGING_DB_URL: 's' })) === 'plan_refused');
 check('a staging run never reads the production variable', (() => { try { selectFirstManagerDbUrl('staging', { PRODUCTION_DB_URL: 'p' }); return false; } catch (e) { return e instanceof RunnerRefusal && e.id === 'plan_refused'; } })());
 check('the address is a constant, not an input', FIRST_MANAGER_EMAIL === 'hunter@twistednail.com' && FIRST_MANAGER_NAME === 'Hunter Kosar' && FIRST_MANAGER_EMAIL === FIRST_MANAGER_EMAIL.toLowerCase());
@@ -61,16 +63,17 @@ check('the address is a constant, not an input', FIRST_MANAGER_EMAIL === 'hunter
 // Fake client: models the rows the tool reads, keyed on the statements it sends
 // ---------------------------------------------------------------------------------------------------------------
 
-const READY_SCHEMA: SchemaFacts = { m1_tables: true, m1b_function: true, account_link_present: false };
-const EMPTY: RosterFacts = { profiles_total: 0, managers: 0, email_profiles: 0, email_exact_lower: 0, email_pristine_guest: 0, owner_manager_self_approved: 0, sign_in_matches: 0, email_blocked: 0, bootstrap_events: 0 };
+const READY_SCHEMA: SchemaFacts = { m1_tables: true, m1_sign_in_functions: true, m1b_function: true, account_link_present: false, roster_lock_rows: 1 };
+const EMPTY: RosterFacts = { profiles_total: 0, managers: 0, email_profiles: 0, email_exact_lower: 0, email_pristine_guest: 0, owner_manager_self_approved: 0, email_blocked: 0, bootstrap_events: 0 };
 const PRISTINE_GUEST: RosterFacts = { ...EMPTY, profiles_total: 1, email_profiles: 1, email_exact_lower: 1, email_pristine_guest: 1 };
 
-interface Fault { failOn?: RegExp; commitFails?: boolean; rollbackFails?: boolean; zeroRows?: boolean; breakPost?: boolean }
+interface Fault { lockRows?: number; failOn?: RegExp; commitFails?: boolean; rollbackFails?: boolean; zeroRows?: boolean; breakPost?: boolean }
 function fakeClient(schema: SchemaFacts, start: RosterFacts, fault: Fault = {}) {
   let roster = { ...start };
   let saved = { ...start };
   const sent: string[] = [];
-  const mkOwner = (r: RosterFacts) => ({ ...r, managers: 1, email_profiles: 1, email_exact_lower: 1, email_pristine_guest: 0, owner_manager_self_approved: 1, sign_in_matches: fault.breakPost ? 2 : 1 });
+  let lastId = '';
+  const mkOwner = (r: RosterFacts) => ({ ...r, managers: 1, email_profiles: 1, email_exact_lower: 1, email_pristine_guest: 0, owner_manager_self_approved: 1 });
   const client: RebuiltSqlClient = {
     async connect() { return undefined; },
     async end() { sent.push('<end>'); },
@@ -82,15 +85,20 @@ function fakeClient(schema: SchemaFacts, start: RosterFacts, fault: Fault = {}) 
       if (text === 'commit') { if (fault.commitFails) throw new Error('connection lost'); return { rows: [], rowCount: 0 }; }
       if (text === 'rollback') { if (fault.rollbackFails) throw new Error('connection lost'); roster = { ...saved }; return { rows: [], rowCount: 0 }; }
       if (text.includes("to_regclass('internal.roster_lock')")) return { rows: [{ ...schema }], rowCount: 1 };
+      if (text === 'select count(*)::int as n from internal.roster_lock') return { rows: [{ n: schema.roster_lock_rows }], rowCount: 1 };
+      if (text === 'select 1 from internal.roster_lock for update') return { rows: [], rowCount: fault.lockRows ?? 1 };
+      if (text.includes('internal.auth_mint_lock(')) return fault.breakPost ? { rows: [{ user_id: lastId }, { user_id: lastId }], rowCount: 2 } : { rows: [{ user_id: lastId }], rowCount: 1 };
       if (text.includes('as profiles_total')) return { rows: [{ ...roster }], rowCount: 1 };
       if (text.startsWith('with n as (select gen_random_uuid()')) {
         if (fault.zeroRows) return { rows: [], rowCount: 0 };
         roster = { ...mkOwner(roster), profiles_total: roster.profiles_total + 1 };
+        lastId = '11111111-1111-4111-8111-111111111111';
         return { rows: [{ id: '11111111-1111-4111-8111-111111111111' }], rowCount: 1 };
       }
       if (text.startsWith('update public.profiles set role')) {
         if (fault.zeroRows) return { rows: [], rowCount: 0 };
         roster = mkOwner(roster);
+        lastId = '22222222-2222-4222-8222-222222222222';
         return { rows: [{ id: '22222222-2222-4222-8222-222222222222' }], rowCount: 1 };
       }
       if (text.startsWith('insert into internal.auth_events')) { roster = { ...roster, bootstrap_events: roster.bootstrap_events + 1 }; return { rows: [], rowCount: 1 }; }
@@ -147,7 +155,7 @@ async function main(): Promise<void> {
   await refuse('a manager already exists (any status)', READY_SCHEMA, { ...EMPTY, profiles_total: 3, managers: 1 }, 'no_manager_profile_exists_in_any_status');
   await refuse('an earlier bootstrap event is recorded', READY_SCHEMA, { ...EMPTY, bootstrap_events: 1 }, 'no_earlier_bootstrap_event_is_recorded');
   await refuse('the address is blocked', READY_SCHEMA, { ...EMPTY, email_blocked: 1 }, 'the_owner_address_is_not_blocked');
-  await refuse('the address is already an approved editor', READY_SCHEMA, { ...EMPTY, profiles_total: 1, email_profiles: 1, email_exact_lower: 1, sign_in_matches: 1 }, 'the_owner_address_is_absent_or_one_pristine_pending_guest');
+  await refuse('the address is already an approved editor', READY_SCHEMA, { ...EMPTY, profiles_total: 1, email_profiles: 1, email_exact_lower: 1 }, 'the_owner_address_is_absent_or_one_pristine_pending_guest');
   await refuse('the address appears twice', READY_SCHEMA, { ...PRISTINE_GUEST, profiles_total: 2, email_profiles: 2 }, 'the_owner_address_is_absent_or_one_pristine_pending_guest');
   await refuse('the stored address is not lower case', READY_SCHEMA, { ...PRISTINE_GUEST, email_exact_lower: 0 }, 'the_owner_address_is_absent_or_one_pristine_pending_guest');
   {
@@ -155,12 +163,29 @@ async function main(): Promise<void> {
     for (const [name, schema, id] of [
       ['M1 tables missing', { ...READY_SCHEMA, m1_tables: false }, 'm1_sign_in_tables_are_installed'],
       ['M1b function missing', { ...READY_SCHEMA, m1b_function: false }, 'm1b_add_person_is_installed'],
+      ['the real sign-in functions missing (internal.auth_mint_lock and the rest)', { ...READY_SCHEMA, m1_sign_in_functions: false }, 'm1_sign_in_functions_are_installed'],
+      ['the roster control table has no row', { ...READY_SCHEMA, roster_lock_rows: 0 }, 'the_roster_control_row_is_exactly_one'],
+      ['the roster control table has two rows', { ...READY_SCHEMA, roster_lock_rows: 2 }, 'the_roster_control_row_is_exactly_one'],
       ['the account link still present', { ...READY_SCHEMA, account_link_present: true }, 'the_profiles_account_link_is_dropped'],
     ] as const) {
       const f = fakeClient(schema, EMPTY);
       const { events, error } = await run(create(), f);
       check(`schema not ready (${name}): refused before any lock or write`, error instanceof RunnerRefusal && error.id === 'first_manager_refused' && events.some((e) => e.check === id && e.ok === false) && !f.sent.some((s) => /roster_lock for update|lock table/.test(s)) && writesOf(f.sent).length === 0 && result(events) === 'rolled_back');
     }
+  }
+  {
+    // The unlocked read said one row, but the locked SELECT returns none or two: the run refuses before the profiles lock or any write.
+    for (const lockRows of [0, 2]) {
+      const f = fakeClient(READY_SCHEMA, EMPTY, { lockRows });
+      const { events, error } = await run(create(), f);
+      check(`the locked roster control read returns ${lockRows} rows: refused before the profiles lock or any write`, error instanceof RunnerRefusal && error.id === 'first_manager_refused' && result(events) === 'rolled_back' && !f.sent.some((s) => /lock table/.test(s)) && writesOf(f.sent).length === 0 && !f.sent.includes('commit'));
+    }
+    const f = fakeClient(READY_SCHEMA, EMPTY);
+    await run(create(), f);
+    check('the real sign-in lookup (internal.auth_mint_lock) is called after the write and before commit', (() => { const i = f.sent.findIndex((s) => /^select user_id::text as user_id from internal.auth_mint_lock/.test(s)); return i > f.sent.findIndex((s) => /^with n as/.test(s)) && i < f.sent.indexOf('commit'); })());
+    const g = fakeClient(READY_SCHEMA, EMPTY);
+    await run(planProd({ action: 'first-manager-check', confirm: FIRST_MANAGER_CHECK_CONFIRMATION }), g);
+    check('the read-only check never calls the sign-in lookup (it takes row locks)', !g.sent.some((s) => /^select user_id::text as user_id from internal.auth_mint_lock/.test(s)));
   }
   // ---- failures inside the transaction
   {
@@ -207,24 +232,67 @@ async function main(): Promise<void> {
   check('an assessment with a missing fact never passes', !assessFirstManagerPre(undefined, undefined).ok && assessFirstManagerPre(undefined, undefined).checks.every((c) => c.ok === false));
 
   // ---- the runner: plan only by default; --execute is what connects
+  const PROD_URL = url(RECORDED_PROJECT_REFS.production);
+  const PROMPTED = { PRODUCTION_DB_URL: PROD_URL, [PRODUCTION_PROMPT_PROOF_VARIABLE]: promptProof(PROD_URL) };
   {
     const lines: string[] = [];
     const log = console.log; console.log = (...a: unknown[]) => { lines.push(String(a[0])); };
     let connected = 0;
     try {
-      await runnerMain(['--target=production', '--action=first-manager-create', `--confirm=${FIRST_MANAGER_CREATE_CONFIRMATION.production}`], { PRODUCTION_DB_URL: url(RECORDED_PROJECT_REFS.production) }, () => { connected += 1; throw new Error('must not connect'); });
+      await runnerMain(['--target=production', '--action=first-manager-create', `--confirm=${FIRST_MANAGER_CREATE_CONFIRMATION.production}`], PROMPTED, () => { connected += 1; throw new Error('must not connect'); });
     } finally { console.log = log; }
     check('without --execute the runner prints the plan, connects to nothing and prints no connection detail', connected === 0 && lines.length === 2 && lines[1]!.includes('plan_only') && !lines.join('').match(/pooler|redacted|postgres|supabase/i));
     const f = fakeClient(READY_SCHEMA, EMPTY);
     const lines2: string[] = [];
     console.log = (...a: unknown[]) => { lines2.push(String(a[0])); };
     try {
-      await runnerMain(['--target=production', '--action=first-manager-create', `--confirm=${FIRST_MANAGER_CREATE_CONFIRMATION.production}`, '--execute'], { PRODUCTION_DB_URL: url(RECORDED_PROJECT_REFS.production) }, () => f.client);
+      await runnerMain(['--target=production', '--action=first-manager-create', `--confirm=${FIRST_MANAGER_CREATE_CONFIRMATION.production}`, '--execute'], PROMPTED, () => f.client);
     } finally { console.log = log; }
     check('with --execute the runner connects through the factory, writes once and says done', result(lines2.map((l) => JSON.parse(l))) === 'committed' && JSON.parse(lines2[lines2.length - 1]!).msg === 'first-manager.done');
     let refused: unknown;
-    try { await runnerMain(['--action=first-manager-create', `--confirm=${FIRST_MANAGER_CREATE_CONFIRMATION.production}`, '--execute'], { PRODUCTION_DB_URL: url(RECORDED_PROJECT_REFS.production) }, () => { throw new Error('must not connect'); }); } catch (e) { refused = e; }
+    try { await runnerMain(['--action=first-manager-create', `--confirm=${FIRST_MANAGER_CREATE_CONFIRMATION.production}`, '--execute'], PROMPTED, () => { throw new Error('must not connect'); }); } catch (e) { refused = e; }
     check('without --target nothing connects, even with --execute and a production URL in the environment', refused instanceof RunnerRefusal && refused.id === 'bootstrap_target_required');
+  }
+
+  // ---- production credential entry: an ambient PRODUCTION_DB_URL is refused at the runner, in process and as the real executable
+  {
+    const args = ['--target=production', '--action=first-manager-create', `--confirm=${FIRST_MANAGER_CREATE_CONFIRMATION.production}`, '--execute'];
+    for (const [name, env] of [['no proof', { PRODUCTION_DB_URL: PROD_URL }], ['a forged proof', { PRODUCTION_DB_URL: PROD_URL, [PRODUCTION_PROMPT_PROOF_VARIABLE]: 'forged' }], ['a proof for another value', { PRODUCTION_DB_URL: PROD_URL, [PRODUCTION_PROMPT_PROOF_VARIABLE]: promptProof('other') }]] as const) {
+      let reached = 0; let refused: unknown;
+      try { await runnerMain(args, env, () => { reached += 1; throw new Error('must not connect'); }); } catch (e) { refused = e; }
+      check(`ambient PRODUCTION_DB_URL (${name}) is refused before any client is created`, reached === 0 && refused instanceof RunnerRefusal && refused.id === 'plan_refused');
+    }
+    // Direct entry: the real executable file as a child process. The refusal comes before any client exists, so no socket is opened.
+    const tsx = resolve(REPOSITORY_ROOT, 'pipeline/node_modules/tsx/dist/cli.mjs');
+    const child = spawnSync(process.execPath, [tsx, resolve(REPOSITORY_ROOT, 'pipeline/src/first-manager-runner.ts'), ...args], { env: { PATH: process.env.PATH ?? '', SystemRoot: process.env.SystemRoot ?? '', PRODUCTION_DB_URL: PROD_URL }, encoding: 'utf8', timeout: 60000, cwd: REPOSITORY_ROOT });
+    const printed = (child.stdout ?? '') + (child.stderr ?? '');
+    check('direct entry with an ambient PRODUCTION_DB_URL: exit 1, refused as plan_refused, nothing verified, no connection detail printed',
+      child.status === 1 && /"refusal":"plan_refused"/.test(printed) && !printed.includes('first-manager.verified') && !printed.includes('first-manager.done') && !/pooler|redacted-pw|supabase\.com/.test(printed));
+  }
+
+  // ---- the A3 test's connection strings are validated offline: nothing connects
+  {
+    const ADMIN = 'postgresql://tr_test_admin:pw@127.0.0.1:55871/tr_first_manager_review';
+    const APPOK = 'postgresql://recruiter_app:pw@127.0.0.1:55871/tr_first_manager_review';
+    const refusesApp = (app: string) => { try { validateA3Urls(ADMIN, app); return false; } catch (e) { return e instanceof Error && e.message.startsWith('refusing:') && !e.message.includes('pw@'); } };
+    const refusesAdmin = (admin: string) => { try { validateA3Urls(admin, APPOK); return false; } catch (e) { return e instanceof Error && e.message.startsWith('refusing:'); } };
+    check('A3 URLs: a matching local pair is accepted, an absent app URL is accepted', validateA3Urls(ADMIN, APPOK).hasApp === true && validateA3Urls(ADMIN, undefined).hasApp === false);
+    check('A3 URLs: a hosted app URL is refused', refusesApp(url(RECORDED_PROJECT_REFS.production)) && refusesApp('postgresql://recruiter_app:pw@db.example.supabase.co:5432/postgres'));
+    check('A3 URLs: a different port, database, host or role is refused', refusesApp(APPOK.replace('55871', '55872')) && refusesApp(APPOK.replace('/tr_first_manager_review', '/tr_other')) && refusesApp(APPOK.replace('127.0.0.1', 'localhost')) && refusesApp(APPOK.replace('recruiter_app', 'tr_test_admin')) && refusesApp(APPOK.replace('recruiter_app', 'postgres')));
+    check('A3 URLs: override parameters and fragments are refused on either URL', refusesApp(`${APPOK}?host=evil.example`) && refusesApp(`${APPOK}#x`) && refusesApp(`${APPOK}?options=-c%20role%3Dpostgres`) && refusesAdmin(`${ADMIN}?host=evil.example`));
+    check('A3 URLs: a non-loopback admin, a 5432/6543/empty port and a non tr_ database are refused', refusesAdmin(ADMIN.replace('127.0.0.1', '10.0.0.5')) && refusesAdmin(ADMIN.replace('55871', '5432')) && refusesAdmin(ADMIN.replace(':55871', '')) && refusesAdmin(ADMIN.replace('tr_first_manager_review', 'postgres')) && refusesApp('not a url'));
+  }
+
+  // ---- the real A3 test file refuses a hosted or mismatched app URL before it creates any client (an attempt to connect would have failed with ECONNREFUSED instead)
+  {
+    const tsx = resolve(REPOSITORY_ROOT, 'pipeline/node_modules/tsx/dist/cli.mjs');
+    const a3 = resolve(REPOSITORY_ROOT, 'pipeline/src/first-manager-bootstrap-a3.test.ts');
+    const LOCAL = 'postgresql://tr_test_admin:pw@127.0.0.1:55871/tr_first_manager_review';
+    for (const [name, app] of [['a hosted app URL', url(RECORDED_PROJECT_REFS.production)], ['an app URL on another port', 'postgresql://recruiter_app:pw@127.0.0.1:55872/tr_first_manager_review'], ['an app URL carrying a host override', 'postgresql://recruiter_app:pw@127.0.0.1:55871/tr_first_manager_review?host=evil.example']] as const) {
+      const child = spawnSync(process.execPath, [tsx, a3], { env: { PATH: process.env.PATH ?? '', SystemRoot: process.env.SystemRoot ?? '', FIRST_MANAGER_A3_ADMIN_URL: LOCAL, FIRST_MANAGER_A3_APP_URL: app }, encoding: 'utf8', timeout: 60000, cwd: REPOSITORY_ROOT });
+      const printed = (child.stdout ?? '') + (child.stderr ?? '');
+      check(`the A3 test refuses ${name} before any client connects`, child.status === 1 && printed.includes('refusing: FIRST_MANAGER_A3_APP_URL') && !/ECONNREFUSED|connect/i.test(printed.replace(/refusing:[^\n]*/g, '')));
+    }
   }
 
   // ---- wrapper (scripts/run-with-secrets.mjs): enumerations equal the sources; real events pass with nothing withheld
@@ -232,6 +300,7 @@ async function main(): Promise<void> {
   const sorted = (a: readonly string[]) => [...a].sort();
   check('wrapper: check ids, states and actions equal the sources', JSON.stringify(sorted(w.FIRST_MANAGER_CHECK_IDS)) === JSON.stringify(sorted(FIRST_MANAGER_CHECK_IDS)) && JSON.stringify(sorted(w.FIRST_MANAGER_STATES)) === JSON.stringify(sorted(FIRST_MANAGER_STATES)) && JSON.stringify(sorted(w.FIRST_MANAGER_ACTIONS)) === JSON.stringify(sorted(FIRST_MANAGER_ACTIONS)));
   check('wrapper: refusal identifiers and driver codes equal the runner lists', JSON.stringify(sorted(w.REFUSAL_IDS)) === JSON.stringify(sorted(REFUSAL_IDS)) && JSON.stringify(sorted(w.DRIVER_CODES)) === JSON.stringify(sorted(DRIVER_CODES)));
+  check('wrapper: the prompt proof is computed the same way on both sides', w.promptProof(PROD_URL) === promptProof(PROD_URL) && w.PROMPT_PROOF_PREFIX + 'PRODUCTION_DB_URL' === PRODUCTION_PROMPT_PROOF_VARIABLE);
   check('wrapper: PRODUCTION_DB_URL is a prompt-only secret', w.ALLOWED.includes('PRODUCTION_DB_URL') && w.PROMPT_ONLY.includes('PRODUCTION_DB_URL') && !w.PROMPT_ONLY.includes('STAGING_DB_URL'));
   {
     const all: Array<Record<string, unknown>> = [];

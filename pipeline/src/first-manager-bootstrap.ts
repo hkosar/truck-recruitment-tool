@@ -1,3 +1,4 @@
+import { createHash } from 'node:crypto';
 import { RunnerRefusal } from './refusals.js';
 import { APPROVED_OWNER_EMAIL } from './owner-bootstrap.js';
 import { requireRecordedRebuiltRef, type RebuiltSqlClient } from './staging-rebuilt.js';
@@ -82,6 +83,15 @@ export function planFirstManager(input: {
   return { action: input.action, target, db };
 }
 
+/**
+ * Production credential entry. scripts/run-with-secrets.mjs (hidden prompt) puts PRODUCTION_DB_URL in the child's environment AND
+ * a proof variable holding this hash of the value it just read from the prompt. A PRODUCTION_DB_URL that was merely sitting in
+ * the environment (a profile, a shell, a CI variable) has no matching proof and is refused here, at the executable boundary.
+ * (The proof stops accidents; it is not a defence against someone who deliberately forges it.) A test keeps this equal to the wrapper's copy.
+ */
+export const PRODUCTION_PROMPT_PROOF_VARIABLE = 'TNBS_PROMPT_PROOF_PRODUCTION_DB_URL';
+export const promptProof = (value: string): string => createHash('sha256').update(`tnbs-prompt-proof:${value}`).digest('hex');
+
 /** One URL variable per target; the other target's variable must not be present at all (a mixed environment is refused). */
 export function selectFirstManagerDbUrl(target: string | undefined, env: Readonly<Record<string, string | undefined>>): string | undefined {
   if (!isTarget(target)) return undefined;
@@ -89,14 +99,18 @@ export function selectFirstManagerDbUrl(target: string | undefined, env: Readonl
   if (env[FIRST_MANAGER_DB_URL_VARIABLE[other]]) {
     throw new RunnerRefusal('plan_refused', `${FIRST_MANAGER_DB_URL_VARIABLE[other]} is set although the target is ${target}; refusing a mixed environment`);
   }
-  return env[FIRST_MANAGER_DB_URL_VARIABLE[target]];
+  const value = env[FIRST_MANAGER_DB_URL_VARIABLE[target]];
+  if (target === 'production' && value && env[PRODUCTION_PROMPT_PROOF_VARIABLE] !== promptProof(value)) {
+    throw new RunnerRefusal('plan_refused', 'PRODUCTION_DB_URL is only accepted from the hidden prompt of scripts/run-with-secrets.mjs; a value already present in the environment is refused');
+  }
+  return value;
 }
 
 // ---------------------------------------------------------------------------------------------------------------
 // Facts and assessments
 // ---------------------------------------------------------------------------------------------------------------
 
-export interface SchemaFacts { m1_tables: boolean; m1b_function: boolean; account_link_present: boolean }
+export interface SchemaFacts { m1_tables: boolean; m1_sign_in_functions: boolean; m1b_function: boolean; account_link_present: boolean; roster_lock_rows: number }
 export interface RosterFacts {
   profiles_total: number;
   managers: number;
@@ -104,13 +118,13 @@ export interface RosterFacts {
   email_exact_lower: number;
   email_pristine_guest: number;
   owner_manager_self_approved: number;
-  sign_in_matches: number;
   email_blocked: number;
   bootstrap_events: number;
 }
 
 const SCHEMA_SQL = `select
-  (to_regclass('internal.roster_lock') is not null and to_regclass('internal.auth_events') is not null and to_regclass('internal.blocked_email_addresses') is not null and to_regclass('public.profiles') is not null) as m1_tables,
+  (to_regclass('internal.roster_lock') is not null and to_regclass('internal.auth_events') is not null and to_regclass('internal.blocked_email_addresses') is not null and to_regclass('internal.app_sessions') is not null and to_regclass('internal.signin_links') is not null and to_regclass('public.profiles') is not null) as m1_tables,
+  (to_regprocedure('internal.auth_mint_lock(text,timestamptz,timestamptz)') is not null and to_regprocedure('internal.auth_mint_insert(uuid,text,text,uuid)') is not null and to_regprocedure('internal.auth_link_check(text)') is not null and to_regprocedure('internal.auth_link_redeem(text,text)') is not null and to_regprocedure('internal.auth_session_info()') is not null) as m1_sign_in_functions,
   (to_regprocedure('public.team_add_person(text,text,public.user_role,text)') is not null) as m1b_function,
   exists (select 1 from pg_constraint where conname = 'profiles_id_fkey' and conrelid = to_regclass('public.profiles')) as account_link_present`;
 
@@ -122,12 +136,23 @@ const ROSTER_SQL = `select
   (select count(*) from public.profiles where lower(email) = $1 and email = $1)::int as email_exact_lower,
   (select count(*) from public.profiles where lower(email) = $1 and role = 'guest' and status = 'pending' and approved_by is null and approved_at is null)::int as email_pristine_guest,
   (select count(*) from public.profiles where email = $1 and role = 'manager' and status = 'approved' and approved_by = id and approved_at is not null)::int as owner_manager_self_approved,
-  (select count(*) from public.profiles where lower(email) = $1 and status = 'approved' and role in ('manager', 'edit', 'view'))::int as sign_in_matches,
   (select count(*) from internal.blocked_email_addresses where normalized_email = $1 and cleared_at is null)::int as email_blocked,
   (select count(*) from internal.auth_events where kind = $2)::int as bootstrap_events`;
 
+/** Rows in the roster control table. Only asked when that table exists (the schema query says so first). */
+const ROSTER_LOCK_ROWS_SQL = 'select count(*)::int as n from internal.roster_lock';
+/** The REAL sign-in lookup, exactly as the Node server calls it (pg-auth-store.ts), with a wide day window. Takes row locks, so it runs only inside the write transaction. */
+const SIGN_IN_LOOKUP_SQL = "select user_id::text as user_id from internal.auth_mint_lock($1, now() - interval '1 day', now() + interval '1 day')";
+
 export async function readSchemaFacts(client: RebuiltSqlClient): Promise<SchemaFacts> {
-  return (await client.query(SCHEMA_SQL)).rows[0] as SchemaFacts;
+  const facts = (await client.query(SCHEMA_SQL)).rows[0] as SchemaFacts;
+  const rows = facts.m1_tables === true ? Number(((await client.query(ROSTER_LOCK_ROWS_SQL)).rows[0] as { n: unknown } | undefined)?.n) : 0;
+  return { ...facts, roster_lock_rows: Number.isSafeInteger(rows) ? rows : -1 };
+}
+/** 1 only when the real lookup returns exactly one row and it is the person just written; otherwise 0. */
+export async function readSignInLookup(client: RebuiltSqlClient, userId: string): Promise<number> {
+  const rows = (await client.query(SIGN_IN_LOOKUP_SQL, [FIRST_MANAGER_EMAIL])).rows as Array<{ user_id?: unknown }>;
+  return rows.length === 1 && rows[0]!.user_id === userId ? 1 : 0;
 }
 export async function readRosterFacts(client: RebuiltSqlClient): Promise<RosterFacts> {
   return (await client.query(ROSTER_SQL, [FIRST_MANAGER_EMAIL, FIRST_MANAGER_EVENT_KIND])).rows[0] as RosterFacts;
@@ -139,7 +164,7 @@ const finish = (checks: FirstManagerCheck[]): FirstManagerAssessment => ({ ok: c
 const is = (v: unknown, n: number): boolean => v === n;
 
 export function schemaReady(s: SchemaFacts | undefined): boolean {
-  return s?.m1_tables === true && s.m1b_function === true && s.account_link_present === false;
+  return s?.m1_tables === true && s.m1_sign_in_functions === true && s.m1b_function === true && s.account_link_present === false && s.roster_lock_rows === 1;
 }
 
 /** Everything that must hold BEFORE the write. A missing fact (undefined) is a failure, never a pass. */
@@ -147,6 +172,8 @@ export function assessFirstManagerPre(schema: SchemaFacts | undefined, roster: R
   const r = roster;
   return finish([
     { check: 'm1_sign_in_tables_are_installed', ok: schema?.m1_tables === true },
+    { check: 'm1_sign_in_functions_are_installed', ok: schema?.m1_sign_in_functions === true },
+    { check: 'the_roster_control_row_is_exactly_one', ok: is(schema?.roster_lock_rows, 1) },
     { check: 'm1b_add_person_is_installed', ok: schema?.m1b_function === true },
     { check: 'the_profiles_account_link_is_dropped', ok: schema !== undefined && schema.account_link_present === false },
     { check: 'no_manager_profile_exists_in_any_status', ok: is(r?.managers, 0) },
@@ -156,13 +183,13 @@ export function assessFirstManagerPre(schema: SchemaFacts | undefined, roster: R
   ]);
 }
 
-/** Joined postconditions; `before` is the roster read under the same locks. */
-export function assessFirstManagerPost(before: RosterFacts, after: RosterFacts | undefined, path: FirstManagerPath): FirstManagerAssessment {
+/** Joined postconditions; `before` is the roster read under the same locks; `lookup` is readSignInLookup (the real M1 sign-in lookup). */
+export function assessFirstManagerPost(before: RosterFacts, after: RosterFacts | undefined, path: FirstManagerPath, lookup: number | undefined): FirstManagerAssessment {
   const a = after;
   return finish([
     { check: 'exactly_one_manager_profile_exists', ok: is(a?.managers, 1) },
     { check: 'it_is_the_owner_address_approved_by_itself', ok: is(a?.owner_manager_self_approved, 1) && is(a?.email_profiles, 1) },
-    { check: 'the_sign_in_lookup_finds_exactly_that_person', ok: is(a?.sign_in_matches, 1) },
+    { check: 'the_sign_in_lookup_finds_exactly_that_person', ok: is(lookup, 1) },
     { check: 'the_roster_changed_by_exactly_the_expected_count', ok: a !== undefined && a.profiles_total === before.profiles_total + (path === 'insert' ? 1 : 0) },
     { check: 'exactly_one_bootstrap_event_is_recorded', ok: is(a?.bootstrap_events, 1) },
     { check: 'the_owner_address_is_not_blocked', ok: is(a?.email_blocked, 0) },
@@ -170,8 +197,8 @@ export function assessFirstManagerPost(before: RosterFacts, after: RosterFacts |
 }
 
 /** Every check id any assessment can print (derived, not hand-copied); the output wrapper enumerates exactly these. */
-const DUMMY: RosterFacts = { profiles_total: 0, managers: 0, email_profiles: 0, email_exact_lower: 0, email_pristine_guest: 0, owner_manager_self_approved: 0, sign_in_matches: 0, email_blocked: 0, bootstrap_events: 0 };
-export const FIRST_MANAGER_CHECK_IDS: readonly string[] = [...new Set([...assessFirstManagerPre(undefined, undefined).checks, ...assessFirstManagerPost(DUMMY, undefined, 'insert').checks].map((c) => c.check))];
+const DUMMY: RosterFacts = { profiles_total: 0, managers: 0, email_profiles: 0, email_exact_lower: 0, email_pristine_guest: 0, owner_manager_self_approved: 0, email_blocked: 0, bootstrap_events: 0 };
+export const FIRST_MANAGER_CHECK_IDS: readonly string[] = [...new Set([...assessFirstManagerPre(undefined, undefined).checks, ...assessFirstManagerPost(DUMMY, undefined, 'insert', undefined).checks].map((c) => c.check))];
 
 export type FirstManagerPath = 'insert' | 'promote';
 export const FIRST_MANAGER_STATES = ['schema_not_ready', 'manager_exists', 'already_bootstrapped', 'address_blocked', 'address_on_roster', 'ready_to_create', 'ready_to_promote'] as const;
@@ -247,7 +274,12 @@ export async function runFirstManagerCreate(client: RebuiltSqlClient, target: Fi
       throw new RunnerRefusal('first_manager_refused', 'first-manager refused: the M1/M1b schema is not in place; nothing changed');
     }
     // I1 exclusive (every team operation takes it first; sign-in paths take it shared), then I2 (profiles).
-    await client.query('select 1 from internal.roster_lock for update');
+    const locked = await client.query('select 1 from internal.roster_lock for update');
+    // The unlocked schema read already wanted one row; the locked read is the one that counts. Zero rows would lock nothing.
+    if (locked.rowCount !== 1) {
+      reportFirstManagerAssessment('before', assessFirstManagerPre({ ...schema, roster_lock_rows: locked.rowCount ?? -1 }, undefined));
+      throw new RunnerRefusal('first_manager_refused', 'first-manager refused: the roster control table must hold exactly one row; nothing changed');
+    }
     await client.query('lock table public.profiles in share row exclusive mode');
     const before = await readRosterFacts(client);
     const pre = assessFirstManagerPre(schema, before);
@@ -269,7 +301,7 @@ export async function runFirstManagerCreate(client: RebuiltSqlClient, target: Fi
     if (userId === undefined) throw new RunnerRefusal('first_manager_refused', 'first-manager refused: the write did not change exactly one profile; nothing changed');
     await client.query(EVENT_SQL, [userId, FIRST_MANAGER_EVENT_KIND, 'target', target]);
 
-    const post = assessFirstManagerPost(before, await readRosterFacts(client), path);
+    const post = assessFirstManagerPost(before, await readRosterFacts(client), path, await readSignInLookup(client, userId));
     reportFirstManagerAssessment('after', post);
     if (!post.ok) throw new RunnerRefusal('first_manager_refused', `first-manager refused: ${post.checks.filter((c) => !c.ok).length} postcondition(s) failed; rolled back`);
     committing = true;

@@ -16,6 +16,7 @@ import pg from 'pg';
 import {
   FIRST_MANAGER_CHECK_CONFIRMATION, FIRST_MANAGER_CREATE_CONFIRMATION, FIRST_MANAGER_EMAIL, executeFirstManagerPlan, planFirstManager,
 } from './first-manager-bootstrap.js';
+import { validateA3Urls } from './first-manager-a3-urls.js';
 import { RunnerRefusal, classifyRunnerFailure } from './refusals.js';
 import { REPOSITORY_ROOT } from './staging-rebuilt.js';
 import { RECORDED_PROJECT_REFS } from './target-guard.js';
@@ -33,8 +34,8 @@ async function main(): Promise<void> {
     console.log('skip first-manager A3 test (set FIRST_MANAGER_A3_ADMIN_URL, loopback only)');
     return;
   }
-  const u = new URL(ADMIN);
-  if (u.search || u.hash || (u.hostname !== '127.0.0.1' && u.hostname !== 'localhost')) throw new Error('refusing: test URLs must be loopback, without query or fragment');
+  // Both URLs are validated here, offline, before any client exists: loopback, no overrides, the same owned cluster and database, app role recruiter_app.
+  validateA3Urls(ADMIN, APP);
   const admin = new pg.Client({ connectionString: ADMIN });
   await admin.connect();
   const q = (sql: string, params?: unknown[]) => admin.query(sql, params);
@@ -119,6 +120,9 @@ async function main(): Promise<void> {
       const app = new pg.Client({ connectionString: APP });
       await app.connect();
       try {
+        const who = (await app.query('select current_database() as d, current_user as u, inet_server_port()::text as p')).rows[0];
+        const mine = (await q('select current_database() as d, inet_server_port()::text as p')).rows[0];
+        assert.ok(who.d === mine.d && who.p === mine.p && who.u === 'recruiter_app', 'refusing: the app connection is not the same owned database as the admin connection');
         await app.query('begin');
         await app.query("select set_config('app.session_hash', $1, true)", [hash]);
         const added = await app.query("select public.team_add_person('Second Person', 'second.person@example.invalid', 'edit'::user_role, null) as id");
@@ -197,6 +201,49 @@ async function main(): Promise<void> {
     check('failure injection: an error on the audit write rolls back the profile too; only a SQLSTATE class is printed', c.refusal === 'server_or_driver_error' && c.err_code === '54001' && resultOf(o) === 'rolled_back' && (await profileSnapshot()) === before);
     await q('drop trigger zz_fail_event on internal.auth_events; drop function public.zz_fail_event()');
   }
+  // ---- 6b. Readiness: the roster control row and the real sign-in lookup are required (review finding 3). Each case changes the throwaway schema and puts it back.
+  await emptyRoster();
+  {
+    const LOOKUP = 'internal.auth_mint_lock(text, timestamptz, timestamptz)';
+    const rosterIsEmpty = async () => (await q('select count(*)::int as n from public.profiles')).rows[0].n === 0 && (await q("select count(*)::int as n from internal.auth_events where kind = 'first_manager_bootstrap'")).rows[0].n === 0;
+    // (a) no roster control row: the lock would take nothing
+    await q('delete from internal.roster_lock');
+    let o = await run('first-manager-create');
+    const noRow = refused(o) && failedBefore(o).includes('the_roster_control_row_is_exactly_one') && resultOf(o) === 'rolled_back' && !o.sent.some((x) => /lock table/.test(x)) && await rosterIsEmpty();
+    const checkNoRow = stateOf(await run('first-manager-check')) === 'schema_not_ready';
+    await q('insert into internal.roster_lock default values');
+    check('readiness: an empty roster control table refuses the create, takes no lock and writes nothing; the check reports schema_not_ready', noRow && checkNoRow);
+    // (b) two roster control rows (only if the table allows them)
+    let two = true;
+    try { await q('insert into internal.roster_lock default values'); } catch { two = false; }
+    if (two) {
+      o = await run('first-manager-create');
+      const ok = refused(o) && failedBefore(o).includes('the_roster_control_row_is_exactly_one') && await rosterIsEmpty();
+      await q('delete from internal.roster_lock where ctid in (select ctid from internal.roster_lock limit 1)');
+      check('readiness: a second roster control row refuses the create and writes nothing', ok && (await q('select count(*)::int as n from internal.roster_lock')).rows[0].n === 1);
+    } else {
+      console.log('skip: the roster control table does not allow a second row');
+    }
+    // (c) the real sign-in lookup is missing
+    await q(`alter function ${LOOKUP} rename to auth_mint_lock_hidden`);
+    o = await run('first-manager-create');
+    const noLookup = refused(o) && failedBefore(o).includes('m1_sign_in_functions_are_installed') && resultOf(o) === 'rolled_back' && !o.sent.some((x) => /for update|lock table/.test(x)) && await rosterIsEmpty();
+    const checkNoLookup = stateOf(await run('first-manager-check')) === 'schema_not_ready';
+    await q('alter function internal.auth_mint_lock_hidden(text, timestamptz, timestamptz) rename to auth_mint_lock');
+    check('readiness: a missing internal.auth_mint_lock refuses the create before any lock or write; the check reports schema_not_ready', noLookup && checkNoLookup);
+    // (d) the postcondition calls the REAL lookup: a stand-in that finds nobody makes the whole write roll back
+    await q('alter function internal.auth_mint_lock(text, timestamptz, timestamptz) rename to auth_mint_lock_hidden');
+    await q('create function internal.auth_mint_lock(p_email text, p_day_start timestamptz, p_day_end timestamptz) returns table (user_id uuid) language sql as $$ select null::uuid where false $$');
+    o = await run('first-manager-create');
+    const failedAfter = o.events.filter((e) => e.msg === 'first-manager.check' && e.phase === 'after' && e.ok === false).map((e) => e.check as string);
+    const rolledBack = refused(o) && failedAfter.includes('the_sign_in_lookup_finds_exactly_that_person') && resultOf(o) === 'rolled_back' && await rosterIsEmpty();
+    await q('drop function internal.auth_mint_lock(text, timestamptz, timestamptz)');
+    await q('alter function internal.auth_mint_lock_hidden(text, timestamptz, timestamptz) rename to auth_mint_lock');
+    check('postcondition: the real sign-in lookup is called; when it does not find the new person the write is rolled back', rolledBack);
+    o = await run('first-manager-create');
+    check('readiness: with the control row and the lookup back in place the create succeeds', o.error === undefined && resultOf(o) === 'committed');
+  }
+  await emptyRoster();
   // ---- 7. Two runs at once: exactly one commits.
   await emptyRoster();
   {
