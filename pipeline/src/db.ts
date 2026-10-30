@@ -8,6 +8,7 @@ import pg from 'pg';
 // PoolClient needs this named-import treatment.
 import type { PoolClient } from 'pg';
 import type { Config } from './config.js';
+import { clientUsable, isDefiniteCommitRefusal, isRollbackTag } from './commit-outcome.js';
 import { parseSupabaseDbTarget } from './target-guard.js';
 
 const { Pool } = pg;
@@ -196,20 +197,45 @@ export async function withStagingConnection<T>(
   // becomes a failed query (the run fails and exits non-zero) instead of an uncaught exception. A
   // client that reported an error is destroyed, never reused.
   const guard = guardClient(client);
+  // Same COMMIT rules as load-location-tables.ts applyLoad and app/server/db/database.ts: once COMMIT
+  // is sent, only an allowlisted refusal on a healthy connection with a successful ROLLBACK is a
+  // definite failure; everything else is an unknown outcome and the client is destroyed.
+  let commitSent = false;
+  let lostByCode: Error | undefined; // no 'error' event (yet) but the client must not be reused
+  const unknownOutcome = () =>
+    new Error('The connection was lost after COMMIT was sent; whether the changes were saved is unknown. Check the target tables before running the job again.');
   try {
     const earlier = guard.failure();
     if (earlier) throw earlier; // it died while the pool was handing it over
     await client.query('begin');
     await client.query(ddl);
     const result = await fn(client);
-    await client.query('commit');
+    commitSent = true;
+    const answer = await client.query('commit');
+    if (isRollbackTag(answer)) {
+      // COMMIT answered with ROLLBACK: the transaction had already failed (a caught query error), so
+      // the server rolled everything back. A confirmed rollback: a definite failure, never success.
+      commitSent = false;
+      throw new Error('COMMIT was answered with ROLLBACK: the transaction had already failed, so nothing was saved.');
+    }
     return result;
   } catch (err) {
-    await client.query('rollback').catch(() => undefined);
+    if (commitSent && (guard.failure() || !isDefiniteCommitRefusal(err) || !clientUsable(client))) {
+      lostByCode = new Error('connection lost');
+      throw unknownOutcome();
+    }
+    let rollbackFailed = false;
+    await client.query('rollback').catch(() => { rollbackFailed = true; });
+    // A failed ROLLBACK never leaves the client in the pool, and after COMMIT was sent it also means unknown.
+    if (rollbackFailed) lostByCode = new Error('connection lost');
+    if (commitSent && (rollbackFailed || guard.failure() || !clientUsable(client))) {
+      lostByCode = new Error('connection lost');
+      throw unknownOutcome();
+    }
     throw err;
   } finally {
     guard.stop();
-    client.release(guard.failure());
+    client.release(guard.failure() ?? lostByCode);
   }
 }
 

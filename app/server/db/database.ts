@@ -9,6 +9,7 @@
 import pg from 'pg';
 import type { PoolClient, QueryResultRow } from 'pg';
 import { NotFoundError, NotPermittedError, OutcomeUnknownError, RefusedError, UnavailableError } from '../core/types';
+import { clientUsable, isDefiniteCommitRefusal, isRollbackTag } from './commit-outcome';
 
 export interface Tx {
   query<R extends QueryResultRow = Record<string, unknown>>(sql: string, params?: unknown[]): Promise<{ rows: R[]; rowCount: number }>;
@@ -135,33 +136,7 @@ function newClientErrorState(): ClientErrorState {
   return state;
 }
 
-/**
- * The ONLY errors that, after COMMIT was sent, count as a definite refusal. Each is an error the
- * server raises while COMMIT runs its pre-commit work (deferred constraints and constraint triggers
- * fire, then the serializable-isolation check), before the commit record exists, so PostgreSQL has
- * rolled the transaction back. Evidence per code (PostgreSQL 16 docs, local file, plus a local
- * PostgreSQL 16 repro that shows the row absent afterwards) is in the task report:
- *   23505 unique_violation        - a DEFERRABLE INITIALLY DEFERRED unique constraint, checked at COMMIT
- *   23503 foreign_key_violation   - a DEFERRABLE INITIALLY DEFERRED foreign key, checked at COMMIT
- *   40001 serialization_failure   - SERIALIZABLE read/write dependency cancelled at COMMIT
- * Everything else (an unlisted SQLSTATE, a server shutdown or any FATAL, a transport error, no code
- * at all) is an UNKNOWN outcome. The severity text is never consulted: pg-protocol (parser.js:307)
- * exposes only the localized severity field (S), so it proves nothing on a translated server.
- */
-const DEFINITE_COMMIT_REFUSALS: ReadonlySet<string> = new Set(['23505', '23503', '40001']);
-
-/** True only for an allowlisted SQLSTATE; the caller must still confirm the connection is healthy. */
-export function isDefiniteCommitRefusal(err: unknown): boolean {
-  if (!(err instanceof Error) || !('code' in err)) return false;
-  const code = (err as { code: unknown }).code;
-  return typeof code === 'string' && DEFINITE_COMMIT_REFUSALS.has(code);
-}
-
-/** The client has not reported a connection error and pg still considers it usable. */
-function clientUsable(client: PoolClient): boolean {
-  const c = client as unknown as { _queryable?: boolean; _ending?: boolean };
-  return c._queryable !== false && c._ending !== true;
-}
+export { isDefiniteCommitRefusal } from './commit-outcome';
 
 export class Database {
   private readonly pool: pg.Pool;
@@ -395,7 +370,17 @@ export class Database {
       };
       const value = await work(tx);
       commitSent = true;
-      await client.query('COMMIT');
+      const answer = await client.query('COMMIT');
+      if (isRollbackTag(answer)) {
+        // COMMIT was answered with ROLLBACK: the transaction had already failed (the work caught a
+        // query error and carried on), so the server rolled everything back. That is a CONFIRMED
+        // rollback, not an unknown outcome and never a success. UnavailableError is the fit: the
+        // write definitely did not happen (503 "unavailable"; a safe, honest "not saved"). A
+        // RefusedError would claim a business rule (409 with a fixed slug, none applies), and
+        // OutcomeUnknownError would wrongly tell the user to go and check.
+        commitSent = false;
+        throw new UnavailableError();
+      }
       committed = true;
       return value;
     };
@@ -434,7 +419,7 @@ export class Database {
         throw new OutcomeUnknownError();
       }
       if (!destroyed) checkedOut.release();
-      throw err instanceof NotPermittedError || err instanceof RefusedError || err instanceof NotFoundError ? err : mapPgError(err);
+      throw err instanceof NotPermittedError || err instanceof RefusedError || err instanceof NotFoundError || err instanceof UnavailableError ? err : mapPgError(err);
     } finally {
       if (timer !== undefined) clearTimeout(timer);
     }

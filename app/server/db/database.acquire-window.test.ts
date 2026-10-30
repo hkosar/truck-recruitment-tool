@@ -71,6 +71,8 @@ interface CommitScript {
    * drop-with-reject: the link closes right after the rejection (a FATAL); the 'error' event comes later.
    */
   then: 'healthy' | 'drop-in-rollback' | 'drop-with-reject';
+  /** COMMIT is answered (no error, connection stays healthy) with this command tag. */
+  tag?: string;
 }
 class FakeClient extends EventEmitter {
   static commit: CommitScript = { then: 'healthy' };
@@ -90,6 +92,7 @@ class FakeClient extends EventEmitter {
     const ok = { rows: [], rowCount: 0 };
     const script = FakeClient.commit;
     if (sql === 'COMMIT') {
+      if (!script.reject && script.tag) return Promise.resolve({ ...ok, command: script.tag });
       if (!script.reject) {
         // Acknowledged, and the connection error follows in the same turn: the result stands.
         return new Promise((resolve) =>
@@ -265,6 +268,19 @@ describe('COMMIT classification: an allowlist of proven rollbacks, whatever the 
     const { outcome, pool } = run({ then: 'healthy' });
     await expect(outcome).resolves.toBe('saved');
     expect(pool.totalCount).toBe(0);
+  });
+
+  it('COMMIT answered with the tag ROLLBACK (no error) is a definite failure: UnavailableError, not success, not unknown; the healthy client is returned', async () => {
+    const { outcome, pool } = run({ then: 'healthy', tag: 'ROLLBACK' });
+    const seen = await outcome.then(() => undefined, (e: unknown) => e);
+    expect(seen).toBeInstanceOf(UnavailableError);
+    expect(seen).not.toBeInstanceOf(OutcomeUnknownError);
+    expect(pool.idleCount).toBe(1);
+  });
+
+  it('COMMIT answered with the ordinary tag COMMIT is success', async () => {
+    const { outcome } = run({ then: 'healthy', tag: 'COMMIT' });
+    await expect(outcome).resolves.toBe('saved');
   });
 
   it('the same code BEFORE COMMIT keeps its ordinary mapping (not unknown)', async () => {

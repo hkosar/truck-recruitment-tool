@@ -1,6 +1,7 @@
 import { readFileSync } from 'node:fs';
 import pg from 'pg';
 import { parseSupabaseDbTarget, verifyPipelineTarget } from './target-guard.js';
+import { clientUsable, isDefiniteCommitRefusal, isRollbackTag } from './commit-outcome.js';
 import { guardClient, watchPoolClients } from './db.js';
 
 /**
@@ -198,17 +199,6 @@ export async function upsertCityCentroids(db: Queryable, rows: CityRow[]): Promi
   return counts;
 }
 
-/** SQLSTATEs COMMIT can raise before the commit record exists: deferred unique, deferred foreign key, serialization. */
-const DEFINITE_COMMIT_REFUSALS: ReadonlySet<string> = new Set(['23505', '23503', '40001']);
-function isDefiniteCommitRefusal(err: unknown): boolean {
-  const code = err instanceof Error && 'code' in err ? (err as { code: unknown }).code : undefined;
-  return typeof code === 'string' && DEFINITE_COMMIT_REFUSALS.has(code);
-}
-function clientUsable(client: object): boolean {
-  const c = client as { _queryable?: boolean; _ending?: boolean };
-  return c._queryable !== false && c._ending !== true;
-}
-
 export interface ApplyOptions {
   /** Names that must NOT be in city_centroids (the ambiguous list). */
   ambiguous?: string[];
@@ -258,7 +248,13 @@ export async function applyLoad(
     const zip = await upsertZipCentroids(client, zips);
     const city = await upsertCityCentroids(client, cities);
     commitSent = true;
-    await client.query('commit');
+    const answer = await client.query('commit');
+    if (isRollbackTag(answer)) {
+      // COMMIT answered with ROLLBACK: the transaction had already failed, so nothing was loaded.
+      // A confirmed rollback: a definite failure, never success (and not an unknown outcome).
+      commitSent = false;
+      throw new Error('COMMIT was answered with ROLLBACK: the transaction had already failed, so nothing was loaded.');
+    }
     return { zip, city, reconciledDeleted };
   } catch (e) {
     // After COMMIT was sent, only an allowlisted pre-commit refusal on a healthy connection is a
@@ -270,6 +266,7 @@ export async function applyLoad(
     }
     let rollbackFailed = false;
     await client.query('rollback').catch(() => { rollbackFailed = true; });
+    if (rollbackFailed) lostByCode = new Error('connection lost'); // never reuse a client whose ROLLBACK failed
     // The connection failed during cleanup after COMMIT was sent: it is no longer proven rolled back.
     if (commitSent && (rollbackFailed || guard.failure() || !clientUsable(client))) {
       lostByCode = new Error('connection lost');

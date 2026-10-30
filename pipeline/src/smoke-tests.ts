@@ -1257,8 +1257,8 @@ function fakePoolClient(onQuery: (sql: string, client: EventEmitter) => Promise<
     async query(sql: string) {
       if (client.queries.length === 0) client.listenersAtFirstQuery = client.listenerCount('error');
       client.queries.push(sql);
-      await onQuery(sql, client);
-      return { rows: [], rowCount: 0 };
+      const answer = await onQuery(sql, client);
+      return answer !== null && typeof answer === 'object' ? answer : { rows: [], rowCount: 0 };
     },
     release(err?: Error) { client.released.push(err); },
   });
@@ -1416,6 +1416,107 @@ test('load-location-tables applyLoad: after COMMIT was sent only an allowlisted 
   }
   assert.deepEqual(uncaughtFromEmit, []);
 });
+
+// ---- COMMIT answered with the command tag ROLLBACK, and the COMMIT uncertainty rules for withStagingConnection ----
+// PostgreSQL answers COMMIT with the tag ROLLBACK (no error) when the transaction had already failed:
+// everything was rolled back. That is a confirmed rollback: a definite failure, never success.
+const answerWith = (command: string) => ({ command, rows: [], rowCount: null });
+const UNKNOWN = /after COMMIT was sent.*unknown/;
+
+test('db.ts withStagingConnection: COMMIT answered with ROLLBACK is a definite failure, not success and not unknown', async () => {
+  const client = fakePoolClient((sql) => (sql === 'commit' ? Promise.resolve(answerWith('ROLLBACK')) : undefined));
+  let seen: unknown;
+  await withStagingConnection(fakePool(client), 'create temp table t(a int)', async () => 'saved').catch((e: unknown) => { seen = e; });
+  assert.ok(seen instanceof Error, 'it must reject');
+  assert.match((seen as Error).message, /answered with ROLLBACK/);
+  assert.doesNotMatch((seen as Error).message, /unknown/);
+  assert.deepEqual(client.released, [undefined], 'the connection itself is healthy: returned, not destroyed');
+  const ok = fakePoolClient((sql) => (sql === 'commit' ? Promise.resolve(answerWith('COMMIT')) : undefined));
+  assert.equal(await withStagingConnection(fakePool(ok), 'create temp table t(a int)', async () => 'saved'), 'saved');
+});
+
+test('load-location-tables applyLoad: COMMIT answered with ROLLBACK is a definite failure, not success and not unknown', async () => {
+  const client = fakePoolClient((sql) => (sql === 'commit' ? Promise.resolve(answerWith('ROLLBACK')) : undefined));
+  let seen: unknown;
+  await applyLoad(fakePool(client) as unknown as pg.Pool, [], [], {}).catch((e: unknown) => { seen = e; });
+  assert.ok(seen instanceof Error, 'it must reject');
+  assert.match((seen as Error).message, /answered with ROLLBACK/);
+  assert.doesNotMatch((seen as Error).message, /unknown/);
+  assert.deepEqual(client.released, [undefined]);
+  const ok = fakePoolClient((sql) => (sql === 'commit' ? Promise.resolve(answerWith('COMMIT')) : undefined));
+  await applyLoad(fakePool(ok) as unknown as pg.Pool, [], [], {});
+});
+
+test('db.ts withStagingConnection: after COMMIT was sent only an allowlisted code on a healthy connection is a definite refusal', async () => {
+  uncaughtFromEmit.length = 0;
+  for (const code of ['23505', '23503', '40001']) {
+    const refused = fakePoolClient((sql) => (sql === 'commit' ? Promise.reject(Object.assign(new Error('deferred'), { code })) : undefined));
+    await assert.rejects(withStagingConnection(fakePool(refused), 'create temp table t(a int)', async () => 1), /deferred/);
+    assert.ok(refused.queries.includes('rollback'), 'rolled back on the healthy connection: ' + code);
+    assert.deepEqual(refused.released, [undefined], 'returned: ' + code);
+  }
+  for (const code of ['XX000', '57P01', '23514', undefined]) {
+    const unknown = fakePoolClient((sql) => (sql === 'commit' ? Promise.reject(Object.assign(new Error('x'), code ? { code, severity: 'SCHWERWIEGEND' } : {})) : undefined));
+    await assert.rejects(withStagingConnection(fakePool(unknown), 'create temp table t(a int)', async () => 1), UNKNOWN);
+    assert.ok(unknown.released.length === 1 && unknown.released[0] instanceof Error, 'destroyed: ' + String(code));
+  }
+  assert.deepEqual(uncaughtFromEmit, []);
+});
+
+test('db.ts withStagingConnection: COMMIT rejected with a terminal code, the connection error only arrives during ROLLBACK: result is unknown', async () => {
+  uncaughtFromEmit.length = 0;
+  const client = fakePoolClient((sql, c) => {
+    if (sql === 'commit') return Promise.reject(Object.assign(new Error('terminating connection'), { code: '57P01' }));
+    if (sql === 'rollback') { socketError(c); return hang(c); }
+    return undefined;
+  });
+  await assert.rejects(withStagingConnection(fakePool(client), 'create temp table t(a int)', async () => 1), UNKNOWN);
+  await settle();
+  assert.ok(client.released.length === 1 && client.released[0] instanceof Error);
+  assert.deepEqual(uncaughtFromEmit, []);
+});
+
+test('db.ts withStagingConnection: an allowlisted code followed by a failed ROLLBACK is unknown and the client is destroyed', async () => {
+  const client = fakePoolClient((sql) => {
+    if (sql === 'commit') return Promise.reject(Object.assign(new Error('serialization'), { code: '40001' }));
+    if (sql === 'rollback') return Promise.reject(new Error('rollback failed'));
+    return undefined;
+  });
+  await assert.rejects(withStagingConnection(fakePool(client), 'create temp table t(a int)', async () => 1), UNKNOWN);
+  assert.ok(client.released.length === 1 && client.released[0] instanceof Error);
+});
+
+test('db.ts withStagingConnection: a failed ROLLBACK before COMMIT keeps the original error and still never reuses the client', async () => {
+  const client = fakePoolClient((sql) => (sql === 'rollback' ? Promise.reject(new Error('rollback failed')) : undefined));
+  await assert.rejects(withStagingConnection(fakePool(client), 'create temp table t(a int)', async () => { throw new Error('work failed'); }), /work failed/);
+  assert.ok(client.released.length === 1 && client.released[0] instanceof Error, 'destroyed');
+  assert.ok(!client.queries.includes('commit'));
+});
+
+// The same three scenarios, through a REAL pg-pool with a scripted client (no socket, no server): the
+// pool's own release/destroy behavior decides whether the client is reused.
+for (const scenario of ['late-terminal', 'translated-unlisted', 'rollback-failed'] as const) {
+  test(`db.ts withStagingConnection (real pg-pool, scripted client): ${scenario} after COMMIT was sent is unknown and the client is destroyed`, async () => {
+    class ScriptedClient extends EventEmitter {
+      _queryable = true; _ending = false;
+      connect(cb: () => void) { setImmediate(cb); }
+      async query(sql: string) {
+        if (sql === 'commit') throw Object.assign(new Error('scripted server rejection'), { code: scenario === 'late-terminal' ? '57P01' : scenario === 'rollback-failed' ? '40001' : 'XX000', severity: 'SCHWERWIEGEND' });
+        if (sql === 'rollback' && scenario === 'late-terminal') { this._queryable = false; this.emit('error', new Error('scripted connection lost')); throw new Error('scripted rollback lost'); }
+        if (sql === 'rollback' && scenario === 'rollback-failed') throw new Error('scripted rollback failed');
+        return { rows: [], rowCount: 0 };
+      }
+      end(cb?: () => void) { this._ending = true; cb?.(); }
+      ref() {} unref() {}
+    }
+    const pool = new pg.Pool({ Client: ScriptedClient as never, max: 1, idleTimeoutMillis: 0 });
+    pool.on('error', () => undefined);
+    try {
+      await assert.rejects(withStagingConnection(pool as unknown as PgPool, 'select 1', async () => 'saved'), UNKNOWN);
+      assert.equal(pool.totalCount, 0, 'destroyed, not returned to the pool');
+    } finally { await pool.end(); }
+  });
+}
 
 test('staging-sql-runner executeStagingSqlPlan: a dropped connection is reported by the existing failure path, not thrown uncaught', async () => {
   uncaughtFromEmit.length = 0;
