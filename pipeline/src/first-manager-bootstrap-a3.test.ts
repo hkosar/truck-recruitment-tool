@@ -242,6 +242,10 @@ async function main(): Promise<void> {
       ['auth_session_touch', ''],
       ['auth_session_revoke', ''],
       ['auth_apply_send_evidence', 'text, uuid, text, text, text, text, text, boolean, timestamptz'],
+      // (c3) the three the app needs after the first sign-in (review r3): session resolution, the write guard and actor attribution
+      ['current_session', ''],
+      ['current_staff_id', ''],
+      ['lock_and_validate', 'public.user_role[], text[], uuid[], boolean, text'],
     ] as const) {
       await q(`alter function internal.${fn}(${args}) rename to ${fn}_hidden`);
       const created = await run('first-manager-create');

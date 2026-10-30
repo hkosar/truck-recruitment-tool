@@ -123,8 +123,10 @@ export interface RosterFacts {
 }
 
 /**
- * Every internal.* function the app's sign-in store (app/server/db/pg-auth-store.ts) calls, as a regprocedure signature.
- * Readiness requires all of them; a test reads pg-auth-store.ts and fails when the app calls one that is not listed here.
+ * Every internal.* function the app needs after the first manager signs in, as a regprocedure signature: the ten the sign-in store
+ * (app/server/db/pg-auth-store.ts) calls, plus current_session (auth_session_info reads it), and lock_and_validate and current_staff_id
+ * (the data store's write guard and actor attribution). Readiness requires all of them; a test derives the calls from app/server/**
+ * and from the M1 function bodies and fails when one is not listed here.
  */
 export const SIGN_IN_FUNCTION_SIGNATURES: readonly string[] = [
   'internal.auth_bucket_hit(text,text,text)',
@@ -137,6 +139,9 @@ export const SIGN_IN_FUNCTION_SIGNATURES: readonly string[] = [
   'internal.auth_session_touch()',
   'internal.auth_session_revoke()',
   'internal.auth_apply_send_evidence(text,uuid,text,text,text,text,text,boolean,timestamptz)',
+  'internal.current_session()',
+  'internal.current_staff_id()',
+  'internal.lock_and_validate(public.user_role[],text[],uuid[],boolean,text)',
 ];
 const SIGN_IN_FUNCTIONS_SQL = SIGN_IN_FUNCTION_SIGNATURES.map((sig) => `to_regprocedure('${sig}') is not null`).join(' and ');
 

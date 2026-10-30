@@ -4,7 +4,7 @@
 
 import assert from 'node:assert/strict';
 import { spawnSync } from 'node:child_process';
-import { readFileSync } from 'node:fs';
+import { readFileSync, readdirSync } from 'node:fs';
 import { resolve } from 'node:path';
 import { pathToFileURL } from 'node:url';
 import {
@@ -60,15 +60,69 @@ check('each target reads its own variable; the other one present is a mixed envi
 check('a staging run never reads the production variable', (() => { try { selectFirstManagerDbUrl('staging', { PRODUCTION_DB_URL: 'p' }); return false; } catch (e) { return e instanceof RunnerRefusal && e.id === 'plan_refused'; } })());
 check('the address is a constant, not an input', FIRST_MANAGER_EMAIL === 'hunter@twistednail.com' && FIRST_MANAGER_NAME === 'Hunter Kosar' && FIRST_MANAGER_EMAIL === FIRST_MANAGER_EMAIL.toLowerCase());
 
-// Readiness must require every internal.* function the app's sign-in store calls (derived from the source, so a new call that readiness does not require fails here).
+// Readiness must require every internal.* function the app needs after sign-in. The calls are DERIVED from the sources, so a new call that readiness does not require fails here:
+//  (1) app/server/db/pg-auth-store.ts: exact argument count; (2) every other non-test .ts file under app/server (pg-data-store.ts, batch/batch-list.ts and the rest): the call may use fewer arguments than the
+//  signature (defaults); (3) the dbFunction names in app/server/recovery/matrix.ts; (4) the internal.* calls inside the bodies of the M1 functions listed, followed transitively (supabase/pending/M1_same_origin_signin.sql).
+function topLevelArgCount(args: string): number {
+  if (args.trim() === '') return 0;
+  let depth = 0, quote = '', n = 1;
+  for (const ch of args) {
+    if (quote) { if (ch === quote) quote = ''; continue; }
+    if (ch === "'" || ch === '"') quote = ch; else if ('([{'.includes(ch)) depth++; else if (')]}'.includes(ch)) depth--; else if (ch === ',' && depth === 0) n++;
+  }
+  return n;
+}
+function walkSources(dir: string): string[] {
+  return readdirSync(dir, { withFileTypes: true }).flatMap((e) => e.isDirectory() ? (e.name === 'node_modules' ? [] : walkSources(resolve(dir, e.name))) : /\.(ts|mts)$/.test(e.name) && !/\.test\./.test(e.name) ? [resolve(dir, e.name)] : []);
+}
+function internalCalls(source: string): Array<{ name: string; args: number }> {
+  return [...source.matchAll(/internal\.(\w+)\(([^()]*(?:\([^()]*\)[^()]*)*)\)/g)].map((m) => ({ name: m[1]!, args: topLevelArgCount(m[2]!) }));
+}
+function sqlBodies(sql: string): Map<string, string> {
+  const bodies = new Map<string, string>();
+  for (const m of sql.matchAll(/create (?:or replace )?function internal\.(\w+)\(/g)) {
+    const start = m.index!, open = sql.indexOf('$$', start), close = open < 0 ? -1 : sql.indexOf('$$', open + 2);
+    bodies.set(m[1]!, close < 0 ? '' : sql.slice(start, close));
+  }
+  return bodies;
+}
 {
-  const source = readFileSync(resolve(REPOSITORY_ROOT, 'app/server/db/pg-auth-store.ts'), 'utf8');
-  const calls = [...source.matchAll(/internal\.(\w+)\(([^)]*)\)/g)].map((m) => ({ name: m[1]!, args: m[2]!.trim() === '' ? 0 : m[2]!.split(',').length }));
+  const serverRoot = resolve(REPOSITORY_ROOT, 'app/server');
+  const authFile = resolve(serverRoot, 'db/pg-auth-store.ts');
   const listed = SIGN_IN_FUNCTION_SIGNATURES.map((sig) => { const m = /^internal\.(\w+)\((.*)\)$/.exec(sig)!; return { name: m[1]!, args: m[2] === '' ? 0 : m[2]!.split(',').length }; });
-  const missing = calls.filter((c) => !listed.some((l) => l.name === c.name && l.args === c.args)).map((c) => c.name);
-  check('the app sign-in store is parsed (it calls the ten sign-in functions)', new Set(calls.map((c) => c.name)).size === 10);
-  check(`readiness requires every internal.* function pg-auth-store.ts calls, with the same number of arguments${missing.length ? ` (missing: ${missing.join(', ')})` : ''}`, missing.length === 0);
-  check('readiness lists nothing the sign-in store does not call', listed.every((l) => calls.some((c) => c.name === l.name)));
+  const lacking = (calls: Array<{ name: string; args: number }>, exact: boolean) => calls.filter((c) => !listed.some((l) => l.name === c.name && (exact ? l.args === c.args : l.args >= c.args))).map((c) => c.name);
+
+  const authCalls = internalCalls(readFileSync(authFile, 'utf8'));
+  check('the app sign-in store is parsed (it calls the ten sign-in functions)', new Set(authCalls.map((c) => c.name)).size === 10);
+  const missingAuth = lacking(authCalls, true);
+  check(`readiness requires every internal.* function pg-auth-store.ts calls, with the same number of arguments${missingAuth.length ? ` (missing: ${missingAuth.join(', ')})` : ''}`, missingAuth.length === 0);
+
+  const sources = walkSources(serverRoot);
+  const otherCalls = sources.filter((f) => f !== authFile).flatMap((f) => internalCalls(readFileSync(f, 'utf8')));
+  const otherNames = new Set(otherCalls.map((c) => c.name));
+  check('the rest of app/server is parsed (the data store and batch code call lock_and_validate and current_staff_id)', sources.length >= 10 && otherNames.has('lock_and_validate') && otherNames.has('current_staff_id'));
+  const missingOther = lacking(otherCalls, false);
+  check(`readiness requires every internal.* function the rest of app/server calls${missingOther.length ? ` (missing: ${[...new Set(missingOther)].join(', ')})` : ''}`, missingOther.length === 0);
+
+  const matrix = readFileSync(resolve(serverRoot, 'recovery/matrix.ts'), 'utf8');
+  const matrixNames = [...matrix.matchAll(/dbFunction:\s*'internal\.(\w+)'/g)].map((m) => m[1]!);
+  check('the session matrix is parsed (current_session is named there)', matrixNames.includes('current_session'));
+  const missingMatrix = matrixNames.filter((n) => !listed.some((l) => l.name === n));
+  check(`readiness requires every internal.* function the session matrix names${missingMatrix.length ? ` (missing: ${missingMatrix.join(', ')})` : ''}`, missingMatrix.length === 0);
+
+  const bodies = sqlBodies(readFileSync(resolve(REPOSITORY_ROOT, 'supabase/pending/M1_same_origin_signin.sql'), 'utf8'));
+  const seen = new Set<string>(), queue = listed.map((l) => l.name), dependsOn: string[] = [];
+  while (queue.length) {
+    const name = queue.pop()!;
+    if (seen.has(name)) continue;
+    seen.add(name);
+    for (const c of internalCalls(bodies.get(name) ?? '')) {
+      if (c.name !== name && bodies.has(c.name)) { if (!listed.some((l) => l.name === c.name)) dependsOn.push(`${name} -> ${c.name}`); queue.push(c.name); }
+    }
+  }
+  check('the M1 function bodies are parsed (auth_session_info reads current_session; auth_session_touch calls lock_and_validate)', /internal\.current_session\(/.test(bodies.get('auth_session_info') ?? '') && /internal\.lock_and_validate\(/.test(bodies.get('auth_session_touch') ?? ''));
+  check(`no listed function depends on an internal function that readiness does not require${dependsOn.length ? ` (${[...new Set(dependsOn)].join('; ')})` : ''}`, dependsOn.length === 0);
+  check('readiness lists nothing that neither the app nor a listed function uses', listed.every((l) => authCalls.some((c) => c.name === l.name) || otherCalls.some((c) => c.name === l.name) || matrixNames.includes(l.name) || listed.some((o) => o.name !== l.name && (bodies.get(o.name) ?? '').includes(`internal.${l.name}(`))));
 }
 
 // ---------------------------------------------------------------------------------------------------------------
