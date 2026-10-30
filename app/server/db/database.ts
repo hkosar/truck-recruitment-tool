@@ -114,9 +114,60 @@ interface Checkout {
   release(err?: Error): void;
 }
 
+/** What the per-client error guard records (see Database.guard). */
+interface ClientErrorState {
+  failure: Error | undefined;
+  /** Set while a checkout is waiting on the client; told once, at the first error. */
+  onFailure: ((err: Error) => void) | undefined;
+  listener: (err: unknown) => void;
+}
+
+function newClientErrorState(): ClientErrorState {
+  const state: ClientErrorState = {
+    failure: undefined,
+    onFailure: undefined,
+    listener: (err) => {
+      if (state.failure) return;
+      state.failure = err instanceof Error ? err : new Error('connection error');
+      state.onFailure?.(state.failure);
+    },
+  };
+  return state;
+}
+
+/**
+ * The ONLY errors that, after COMMIT was sent, count as a definite refusal. Each is an error the
+ * server raises while COMMIT runs its pre-commit work (deferred constraints and constraint triggers
+ * fire, then the serializable-isolation check), before the commit record exists, so PostgreSQL has
+ * rolled the transaction back. Evidence per code (PostgreSQL 16 docs, local file, plus a local
+ * PostgreSQL 16 repro that shows the row absent afterwards) is in the task report:
+ *   23505 unique_violation        - a DEFERRABLE INITIALLY DEFERRED unique constraint, checked at COMMIT
+ *   23503 foreign_key_violation   - a DEFERRABLE INITIALLY DEFERRED foreign key, checked at COMMIT
+ *   40001 serialization_failure   - SERIALIZABLE read/write dependency cancelled at COMMIT
+ * Everything else (an unlisted SQLSTATE, a server shutdown or any FATAL, a transport error, no code
+ * at all) is an UNKNOWN outcome. The severity text is never consulted: pg-protocol (parser.js:307)
+ * exposes only the localized severity field (S), so it proves nothing on a translated server.
+ */
+const DEFINITE_COMMIT_REFUSALS: ReadonlySet<string> = new Set(['23505', '23503', '40001']);
+
+/** True only for an allowlisted SQLSTATE; the caller must still confirm the connection is healthy. */
+export function isDefiniteCommitRefusal(err: unknown): boolean {
+  if (!(err instanceof Error) || !('code' in err)) return false;
+  const code = (err as { code: unknown }).code;
+  return typeof code === 'string' && DEFINITE_COMMIT_REFUSALS.has(code);
+}
+
+/** The client has not reported a connection error and pg still considers it usable. */
+function clientUsable(client: PoolClient): boolean {
+  const c = client as unknown as { _queryable?: boolean; _ending?: boolean };
+  return c._queryable !== false && c._ending !== true;
+}
+
 export class Database {
   private readonly pool: pg.Pool;
   private closed = false;
+  private readonly guarded = new WeakSet<pg.Pool>();
+  private readonly clientStates = new WeakMap<object, ClientErrorState>();
 
   constructor(options: DatabaseOptions) {
     this.pool = new pg.Pool({
@@ -132,6 +183,7 @@ export class Database {
     this.pool.on('error', () => {
       // An idle client died; the pool replaces it. Nothing to log beyond the category.
     });
+    this.guard(this.pool);
     this.minWarm = options.minWarm ?? 0;
     this.label = options.label ?? 'db';
     this.onAcquireFailure = options.onAcquireFailure;
@@ -148,37 +200,67 @@ export class Database {
   private readonly onAcquireFailure: ((label: string) => void) | undefined;
 
   /**
-   * Checks out a client and attaches the per-checkout 'error' listener in the same turn, before
-   * any query. pg-pool removes its own idle listener while a client is checked out, so without
-   * this an 'error' from a dropped connection has no listener and Node throws it as an uncaught
-   * exception. The listener records the failure (callers destroy the client) and is removed at
-   * release so listeners never pile up on reused clients.
+   * Continuous error coverage from the pool's own synchronous lifecycle. pg-pool removes its idle
+   * 'error' listener inside `_acquireClient`, and then resolves the application's connect promise;
+   * the await continuation runs later. If pg parses ReadyForQuery and a fatal ErrorResponse from
+   * one input buffer, the error is emitted before that continuation, so a listener attached after
+   * `await pool.connect()` is too late and Node throws. The pool emits 'acquire' BEFORE it removes
+   * its idle listener, so this listener is attached with no gap, and it is removed on the pool's
+   * 'release' event (which every release path emits), so listeners never pile up on reused
+   * clients. The failure is recorded; checkout reads it and release destroys the client.
+   * Idempotent per pool (tests swap the pool in).
+   */
+  private guard(pool: pg.Pool): void {
+    if (this.guarded.has(pool)) return;
+    this.guarded.add(pool);
+    pool.on('acquire', (client) => {
+      const state = newClientErrorState();
+      this.clientStates.set(client, state);
+      client.on('error', state.listener);
+    });
+    pool.on('release', (_err, client) => {
+      const state = this.clientStates.get(client);
+      if (!state) return;
+      client.removeListener('error', state.listener);
+      this.clientStates.delete(client);
+    });
+  }
+
+  /**
+   * Checks out a client. Its 'error' guard was attached by the pool's 'acquire' hook (see guard);
+   * a client the hook never saw (a pool without it) gets one here, before any query. The guard
+   * records the failure (callers destroy the client) and is removed at release.
    */
   private async checkout(): Promise<Checkout> {
+    this.guard(this.pool);
     const client = await this.pool.connect();
-    let failure: Error | undefined;
+    let state = this.clientStates.get(client);
+    let ownListener = false;
+    if (!state) {
+      state = newClientErrorState();
+      client.on('error', state.listener);
+      ownListener = true;
+    }
+    const seen = state;
     let signal: (err: Error) => void = () => undefined;
     const dropped = new Promise<never>((_, reject) => {
       signal = reject;
     });
     dropped.catch(() => undefined); // a rejection nobody is racing is not an unhandled one
-    const onError = (err: unknown) => {
-      if (failure) return;
-      failure = err instanceof Error ? err : new Error('connection error');
-      signal(failure);
-    };
-    client.on('error', onError);
+    if (seen.failure) signal(seen.failure); // it died in the acquisition window
+    else seen.onFailure = signal;
     let released = false;
     return {
       client,
-      failure: () => failure,
+      failure: () => seen.failure,
       dropped,
       release: (err) => {
         if (released) return;
         released = true;
-        client.removeListener('error', onError);
+        seen.onFailure = undefined;
+        if (ownListener) client.removeListener('error', seen.listener);
         // A client that reported an error is destroyed (release with an error), never reused.
-        client.release(err ?? failure);
+        client.release(err ?? seen.failure);
       },
     };
   }
@@ -332,16 +414,24 @@ export class Database {
       }
       // The connection itself failed (its 'error' fired): the client is destroyed, never reused.
       const connectionFailed = checkedOut.failure() !== undefined;
-      if (commitSent && (connectionFailed || !('code' in (err as object)))) {
-        // COMMIT was sent and the connection failed without a server answer.
+      if (commitSent && (connectionFailed || !isDefiniteCommitRefusal(err) || !clientUsable(client))) {
+        // COMMIT was sent and the answer is not a proven rollback on a healthy connection:
+        // whatever the order of the query rejection and the client 'error' event, it is unknown.
         destroy();
         throw new OutcomeUnknownError();
       }
       if (connectionFailed) destroy();
+      let cleanupFailed = false;
       try {
         if (!destroyed) await client.query('ROLLBACK');
       } catch {
+        cleanupFailed = true;
         destroy();
+      }
+      // The connection failed during cleanup after COMMIT was sent: it is no longer proven rolled back.
+      if (commitSent && (cleanupFailed || checkedOut.failure() !== undefined || !clientUsable(client))) {
+        destroy();
+        throw new OutcomeUnknownError();
       }
       if (!destroyed) checkedOut.release();
       throw err instanceof NotPermittedError || err instanceof RefusedError || err instanceof NotFoundError ? err : mapPgError(err);

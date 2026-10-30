@@ -36,6 +36,7 @@ import { DRIVER_CODES, KNOWN_SERVER_REFUSALS, REFUSAL_IDS, RunnerRefusal, classi
 import { DENIED_STATEMENTS } from './retention-dry-run.js';
 import { retentionClientConfig, runRetentionForCron, runRetentionStep, type RetentionClient } from './retention-step.js';
 import { EventEmitter } from 'node:events';
+import { Duplex } from 'node:stream';
 import pg from 'pg';
 import { createPgPool, withStagingConnection, type PgPool } from './db.js';
 import { applyLoad } from './load-location-tables.js';
@@ -1326,6 +1327,93 @@ test('load-location-tables applyLoad: a connection error after COMMIT was sent s
   await settle();
   assert.ok(client.released.length === 1 && client.released[0] instanceof Error);
   assert.equal(client.queries.includes('rollback'), false, 'no ROLLBACK on a dead connection after COMMIT');
+  assert.deepEqual(uncaughtFromEmit, []);
+});
+
+// ---- The acquisition window: ReadyForQuery and a fatal error in one input buffer --------------
+// The REAL pg.Client, pg-pool and pg-protocol parser over an in-memory Duplex (no socket, no
+// network, no database). pg-pool resolves pool.connect() before the caller's await continues, so a
+// listener attached after the await is too late for an error parsed from the same buffer.
+const wirePacket = (type: string, payload: Buffer): Buffer => {
+  const header = Buffer.alloc(5);
+  header.write(type);
+  header.writeInt32BE(payload.length + 4, 1);
+  return Buffer.concat([header, payload]);
+};
+class AcquireWire extends Duplex {
+  first = true;
+  override _read(): void {}
+  override _write(_chunk: Buffer, _enc: string, callback: (err?: Error | null) => void): void {
+    if (this.first) {
+      this.first = false;
+      setTimeout(() => {
+        try {
+          this.push(Buffer.concat([
+            wirePacket('R', Buffer.alloc(4)),
+            wirePacket('Z', Buffer.from('I')),
+            wirePacket('E', Buffer.from('SFATAL C57P01 MConnection terminated unexpectedly  ')),
+          ]));
+        } catch (thrown) { uncaughtFromEmit.push(thrown); }
+      }, 0);
+    }
+    callback();
+  }
+  connect(): void { setImmediate(() => this.emit('connect')); }
+  setNoDelay(): void {} setKeepAlive(): void {} ref(): void {} unref(): void {}
+}
+class AcquireWireClient extends pg.Client {
+  constructor(config: pg.ClientConfig) { super({ ...config, stream: (() => new AcquireWire()) as never }); }
+}
+function acquireWirePool(): pg.Pool {
+  const pool = new pg.Pool({ Client: AcquireWireClient as never, max: 1, idleTimeoutMillis: 0 });
+  pool.on('error', () => undefined);
+  return pool;
+}
+
+test('db.ts withStagingConnection: an error parsed in the same buffer as ReadyForQuery is controlled, nothing uncaught, no client left', async () => {
+  uncaughtFromEmit.length = 0;
+  const pool = acquireWirePool();
+  await assert.rejects(withStagingConnection(pool as unknown as PgPool, 'create temp table t(a int)', async () => 1));
+  await settle(30);
+  assert.deepEqual(uncaughtFromEmit, []);
+  assert.equal(pool.totalCount, 0, 'the dead client was destroyed, not pooled');
+  await pool.end();
+});
+
+test('load-location-tables applyLoad: an error parsed in the same buffer as ReadyForQuery is controlled, nothing uncaught, no client left', async () => {
+  uncaughtFromEmit.length = 0;
+  const pool = acquireWirePool();
+  await assert.rejects(applyLoad(pool, [], [], {}));
+  await settle(30);
+  assert.deepEqual(uncaughtFromEmit, []);
+  assert.equal(pool.totalCount, 0);
+  await pool.end();
+});
+
+test('load-location-tables applyLoad: COMMIT rejected with a terminal code, the connection error only arrives during ROLLBACK: result is unknown', async () => {
+  uncaughtFromEmit.length = 0;
+  const client = fakePoolClient((sql, c) => {
+    if (sql === 'commit') return Promise.reject(Object.assign(new Error('terminating connection'), { code: '57P01' }));
+    if (sql === 'rollback') { socketError(c); return hang(c); }
+    return undefined;
+  });
+  await assert.rejects(applyLoad(fakePool(client) as unknown as pg.Pool, [], [], {}), /after COMMIT was sent.*unknown/);
+  await settle();
+  assert.ok(client.released.length === 1 && client.released[0] instanceof Error);
+  assert.deepEqual(uncaughtFromEmit, []);
+});
+
+test('load-location-tables applyLoad: after COMMIT was sent only an allowlisted code on a healthy connection is a definite refusal', async () => {
+  uncaughtFromEmit.length = 0;
+  const refused = fakePoolClient((sql) => (sql === 'commit' ? Promise.reject(Object.assign(new Error('deferred'), { code: '23505' })) : undefined));
+  await assert.rejects(applyLoad(fakePool(refused) as unknown as pg.Pool, [], [], {}), /deferred/);
+  assert.ok(refused.queries.includes('rollback'), 'rolled back on the healthy connection');
+  assert.deepEqual(refused.released, [undefined]);
+  for (const code of ['XX000', '57P01', '23514', undefined]) {
+    const unknown = fakePoolClient((sql) => (sql === 'commit' ? Promise.reject(Object.assign(new Error('x'), code ? { code, severity: 'SCHWERWIEGEND' } : {})) : undefined));
+    await assert.rejects(applyLoad(fakePool(unknown) as unknown as pg.Pool, [], [], {}), /after COMMIT was sent.*unknown/);
+    assert.ok(unknown.released.length === 1 && unknown.released[0] instanceof Error, 'destroyed: ' + String(code));
+  }
   assert.deepEqual(uncaughtFromEmit, []);
 });
 

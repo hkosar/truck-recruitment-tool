@@ -94,6 +94,7 @@ export function createPgPool(config: Config): PgPool {
   // it as an uncaught exception. The pool drops that client itself. Fixed text only: a driver
   // message can carry an address.
   pool.on('error', () => createLogger('pg').warn('pg.idle_client_connection_error'));
+  watchPoolClients(pool);
   return pool;
 }
 
@@ -117,6 +118,67 @@ export async function closePipelineContext(ctx: PipelineContext): Promise<void> 
 // every sources/*.ts job follows (Part B §2.2).
 // =====================================================================================
 
+// ---- Continuous client error coverage --------------------------------------------------------
+// pg-pool removes its idle 'error' listener inside _acquireClient and then resolves pool.connect();
+// the await continuation runs later. If pg parses ReadyForQuery and a fatal ErrorResponse from one
+// input buffer, the error is emitted before that continuation, so a listener attached after
+// `await pool.connect()` is too late and Node throws. The pool emits 'acquire' BEFORE it removes its
+// idle listener, so the listener below has no gap; it is removed on the pool's 'release' event (every
+// release path emits it), so listeners never pile up on reused clients.
+interface ClientErrorState {
+  failure: Error | undefined;
+  listener: (err: unknown) => void;
+}
+const clientStates = new WeakMap<object, ClientErrorState>();
+const watchedPools = new WeakSet<object>();
+
+function newClientErrorState(): ClientErrorState {
+  const state: ClientErrorState = {
+    failure: undefined,
+    listener: (err) => {
+      state.failure ??= err instanceof Error ? err : new Error('connection error');
+    },
+  };
+  return state;
+}
+
+/** Idempotent and synchronous: call before `pool.connect()`. A pool without events is skipped. */
+export function watchPoolClients(pool: Pick<PgPool, 'on'>): void {
+  if (typeof pool.on !== 'function' || watchedPools.has(pool)) return;
+  watchedPools.add(pool);
+  pool.on('acquire', (client) => {
+    const state = newClientErrorState();
+    clientStates.set(client, state);
+    client.on('error', state.listener);
+  });
+  pool.on('release', (_err, client) => {
+    const state = clientStates.get(client);
+    if (!state) return;
+    client.removeListener('error', state.listener);
+    clientStates.delete(client);
+  });
+}
+
+export interface ClientGuard {
+  /** The connection error seen while the client was checked out, if any. */
+  failure(): Error | undefined;
+  /** Detaches a listener this guard attached itself (the pool hook's is removed by the pool). */
+  stop(): void;
+}
+
+/** The guard for a checked-out client: the pool hook's record, or (no hook) a listener attached now. */
+export function guardClient(client: PgPoolClient): ClientGuard {
+  const hooked = clientStates.get(client);
+  const state = hooked ?? newClientErrorState();
+  if (!hooked) client.on('error', state.listener);
+  return {
+    failure: () => state.failure,
+    stop: () => {
+      if (!hooked) client.removeListener('error', state.listener);
+    },
+  };
+}
+
 /**
  * Runs `ddl` (one or more `create temp table ...` statements) then `fn`, on one checked-out
  * pooled client -- temp tables are session-scoped, so every query `fn` issues must reuse the
@@ -128,16 +190,15 @@ export async function withStagingConnection<T>(
   ddl: string,
   fn: (client: PgPoolClient) => Promise<T>
 ): Promise<T> {
+  watchPoolClients(pool);
   const client = await pool.connect();
-  // pg-pool removes its own error listener while a client is checked out, so one is attached here
-  // before any query: a dropped connection becomes a failed query (the run fails and exits non-zero)
-  // instead of an uncaught exception. A client that reported an error is destroyed, never reused.
-  let connectionError: Error | undefined;
-  const onError = (err: Error) => {
-    connectionError ??= err;
-  };
-  client.on('error', onError);
+  // The pool's 'acquire' hook (watchPoolClients) already covers the client; a dropped connection
+  // becomes a failed query (the run fails and exits non-zero) instead of an uncaught exception. A
+  // client that reported an error is destroyed, never reused.
+  const guard = guardClient(client);
   try {
+    const earlier = guard.failure();
+    if (earlier) throw earlier; // it died while the pool was handing it over
     await client.query('begin');
     await client.query(ddl);
     const result = await fn(client);
@@ -147,8 +208,8 @@ export async function withStagingConnection<T>(
     await client.query('rollback').catch(() => undefined);
     throw err;
   } finally {
-    client.removeListener('error', onError);
-    client.release(connectionError);
+    guard.stop();
+    client.release(guard.failure());
   }
 }
 

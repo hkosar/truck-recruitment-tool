@@ -1,6 +1,7 @@
 import { readFileSync } from 'node:fs';
 import pg from 'pg';
 import { parseSupabaseDbTarget, verifyPipelineTarget } from './target-guard.js';
+import { guardClient, watchPoolClients } from './db.js';
 
 /**
  * Standalone, one-off loader for the geocode fallback reference tables `zip_centroids` and
@@ -197,6 +198,17 @@ export async function upsertCityCentroids(db: Queryable, rows: CityRow[]): Promi
   return counts;
 }
 
+/** SQLSTATEs COMMIT can raise before the commit record exists: deferred unique, deferred foreign key, serialization. */
+const DEFINITE_COMMIT_REFUSALS: ReadonlySet<string> = new Set(['23505', '23503', '40001']);
+function isDefiniteCommitRefusal(err: unknown): boolean {
+  const code = err instanceof Error && 'code' in err ? (err as { code: unknown }).code : undefined;
+  return typeof code === 'string' && DEFINITE_COMMIT_REFUSALS.has(code);
+}
+function clientUsable(client: object): boolean {
+  const c = client as { _queryable?: boolean; _ending?: boolean };
+  return c._queryable !== false && c._ending !== true;
+}
+
 export interface ApplyOptions {
   /** Names that must NOT be in city_centroids (the ambiguous list). */
   ambiguous?: string[];
@@ -209,16 +221,18 @@ export interface ApplyOptions {
 export async function applyLoad(
   pool: pg.Pool, zips: ZipRow[], cities: CityRow[], opts: ApplyOptions = {}
 ): Promise<{ zip: UpsertCounts; city: UpsertCounts; reconciledDeleted: string[] }> {
+  watchPoolClients(pool);
   const client = await pool.connect();
-  // A checked-out client has no pool listener: attach one before any query so a dropped connection
-  // fails this load (exit 1) instead of crashing as an uncaught exception. Such a client is destroyed.
-  let connectionError: Error | undefined;
+  // The pool's 'acquire' hook already covers the client (see db.ts): a dropped connection fails this
+  // load (exit 1) instead of crashing as an uncaught exception. Such a client is destroyed.
+  const guard = guardClient(client);
   let commitSent = false;
-  const onError = (err: Error) => {
-    connectionError ??= err;
-  };
-  client.on('error', onError);
+  let lostByCode: Error | undefined; // a terminal code with no 'error' event yet: still destroy the client
+  const unknownOutcome = () =>
+    new Error('The connection was lost after COMMIT was sent; whether the load was saved is unknown. Check the zip and city tables before running it again.');
   try {
+    const earlier = guard.failure();
+    if (earlier) throw earlier; // it died while the pool was handing it over
     await client.query('begin');
     let reconciledDeleted: string[] = [];
     const names = (opts.ambiguous ?? []).map((n) => n.toLowerCase());
@@ -247,14 +261,24 @@ export async function applyLoad(
     await client.query('commit');
     return { zip, city, reconciledDeleted };
   } catch (e) {
-    if (commitSent && connectionError) {
-      throw new Error('The connection was lost after COMMIT was sent; whether the load was saved is unknown. Check the zip and city tables before running it again.');
+    // After COMMIT was sent, only an allowlisted pre-commit refusal on a healthy connection is a
+    // definite "rolled back" (same list and reasons as app/server/db/database.ts). Anything else, even
+    // before the client 'error' event has fired, leaves the result unknown and the client destroyed.
+    if (commitSent && (guard.failure() || !isDefiniteCommitRefusal(e) || !clientUsable(client))) {
+      lostByCode = new Error('connection lost');
+      throw unknownOutcome();
     }
-    await client.query('rollback').catch(() => undefined);
+    let rollbackFailed = false;
+    await client.query('rollback').catch(() => { rollbackFailed = true; });
+    // The connection failed during cleanup after COMMIT was sent: it is no longer proven rolled back.
+    if (commitSent && (rollbackFailed || guard.failure() || !clientUsable(client))) {
+      lostByCode = new Error('connection lost');
+      throw unknownOutcome();
+    }
     throw e;
   } finally {
-    client.removeListener('error', onError);
-    client.release(connectionError);
+    guard.stop();
+    client.release(guard.failure() ?? lostByCode);
   }
 }
 
