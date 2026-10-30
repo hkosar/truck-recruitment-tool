@@ -321,8 +321,17 @@ export async function main({ argv, env = process.env, stdin = process.stdin, std
         throw new Error(`refusing: ${name} is already set in this terminal. Close this window, open a new one and run the command again (a value typed into a shell can stay in its history).`);
       }
     }
+    // Windows looks environment names up case-insensitively, so every spelling of a secret name that is already set is refused,
+    // and every spelling of an inherited proof is removed (an exact-case delete would leave `tnbs_prompt_proof_...` for the child to read).
+    for (const name of secrets) {
+      const clash = Object.keys(env).find((k) => k !== name && k.toUpperCase() === name.toUpperCase() && env[k] !== undefined && env[k] !== '');
+      if (clash !== undefined) throw new Error(`refusing: ${name} is already set in this terminal under another capitalisation. Close this window, open a new one and run the command again.`);
+    }
     childEnv = { ...env };
-    for (const name of PROMPT_ONLY) delete childEnv[PROMPT_PROOF_PREFIX + name];
+    const proofNames = new Set(PROMPT_ONLY.map((name) => (PROMPT_PROOF_PREFIX + name).toUpperCase()));
+    for (const key of Object.keys(childEnv)) {
+      if (proofNames.has(key.toUpperCase()) || secrets.some((name) => key.toUpperCase() === name.toUpperCase())) delete childEnv[key];
+    }
     for (const name of secrets) {
       const value = (await readHidden(`Enter ${name} (typing is hidden; paste, then press Enter): `, stdin, stdout)).trim();
       if (!value) throw new Error(`no value entered for ${name}`);

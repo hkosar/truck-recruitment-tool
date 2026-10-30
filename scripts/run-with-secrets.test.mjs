@@ -261,3 +261,42 @@ test('prompt proof: a prompted production URL reaches the child with a matching 
   assert.equal(await run2, 0);
   assert.match(out2.text(), /"ok":true/);
 });
+
+test('prompt proof: every capitalisation of an inherited proof is removed (Windows reads environment names case-insensitively); no socket, synthetic values only', async () => {
+  const PROOF = PROMPT_PROOF_PREFIX + PROMPT_ONLY[0];
+  const synthetic = 'postgresql://postgres.syntheticref:synthetic-pw@synthetic.invalid:5432/postgres';
+  const spellings = [PROOF.toLowerCase(), PROOF.replace('PROOF', 'Proof'), PROOF];
+  // Another secret is prompted, so the wrapper does not write a proof of its own: the child must see no spelling of the proof at all.
+  const listProofs = `const names = Object.keys(process.env).filter((k) => k.toUpperCase() === '${PROOF}');
+console.log(JSON.stringify({ msg: 'staging-sql.selftest', ok: names.length === 0 }));`;
+  for (const spelling of spellings) {
+    const stdin = fakeTty(); const out = sink();
+    const run = main({ argv: ['--secret', 'TEST_USER_PASSWORD', '--', 'node', '-e', listProofs], env: { PATH: process.env.PATH, PRODUCTION_DB_URL: synthetic, [spelling]: promptProof(synthetic) }, stdin, stdout: out.stream, stderr: sink().stream });
+    await new Promise((r) => setImmediate(r));
+    stdin.write('synthetic-test-value\r');
+    assert.equal(await run, 0);
+    assert.match(out.text(), /"ok":true/, `inherited proof spelled ${spelling} must not reach the child`);
+  }
+  // A prompted production URL: only the canonical proof, equal to the proof of the typed value, remains whatever the inherited spelling was.
+  const exactlyOne = `const c = require('node:crypto');
+const names = Object.keys(process.env).filter((k) => k.toUpperCase() === '${PROOF}');
+const want = c.createHash('sha256').update('tnbs-prompt-proof:' + process.env.PRODUCTION_DB_URL).digest('hex');
+console.log(JSON.stringify({ msg: 'staging-sql.selftest', ok: names.length === 1 && names[0] === '${PROOF}' && process.env['${PROOF}'] === want }));`;
+  for (const spelling of spellings) {
+    const stdin = fakeTty(); const out = sink();
+    const run = main({ argv: ['--secret', 'PRODUCTION_DB_URL', '--', 'node', '-e', exactlyOne], env: { PATH: process.env.PATH, [spelling]: promptProof(synthetic) }, stdin, stdout: out.stream, stderr: sink().stream });
+    await new Promise((r) => setImmediate(r));
+    stdin.write(`${URL_SECRET}\r`);
+    assert.equal(await run, 0);
+    assert.match(out.text(), /"ok":true/, `inherited proof spelled ${spelling} must be replaced by the canonical proof of the typed value`);
+  }
+});
+
+test('a prompted secret already set under another capitalisation is refused before anything is read or run', async () => {
+  for (const name of ['production_db_url', 'Production_Db_Url']) {
+    await assert.rejects(
+      main({ argv: ['--secret', 'PRODUCTION_DB_URL', '--', 'node', '-e', '0'], env: { PATH: process.env.PATH, [name]: 'already-here' }, stdin: fakeTty(), stdout: sink().stream, stderr: sink().stream }),
+      /already set in this terminal under another capitalisation/,
+    );
+  }
+});
