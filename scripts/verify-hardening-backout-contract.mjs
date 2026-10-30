@@ -28,12 +28,17 @@ const backoutText = stripComments(read(...BACKOUT_PATH));
 
 // A. Mirror every revoke in the migration. The expected statements are DERIVED from the migration,
 //    not hard-coded, so a later edit to the migration breaks this check instead of drifting.
+//    Any statement that contains REVOKE and is not one of the two recognized shapes is a failure, not
+//    something to skip: a new kind of revoke (another form, FOR ROLE, another privilege) needs explicit
+//    support here and a reviewed mirror grant in the backout.
 const expected = [];
 for (const s of migration) {
+  if (!/\brevoke\b/i.test(s)) continue;
   let m = /^revoke execute on all functions in schema (\w+) from ([\w, ]+)$/i.exec(s);
-  if (m) expected.push(`grant execute on all functions in schema ${m[1]} to ${m[2]}`);
+  if (m) { expected.push(`grant execute on all functions in schema ${m[1]} to ${m[2]}`); continue; }
   m = /^alter default privileges in schema (\w+) revoke execute on functions from ([\w, ]+)$/i.exec(s);
-  if (m) expected.push(`alter default privileges in schema ${m[1]} grant execute on functions to ${m[2]}`);
+  if (m) { expected.push(`alter default privileges in schema ${m[1]} grant execute on functions to ${m[2]}`); continue; }
+  fail(`migration: unrecognized REVOKE statement (add explicit support and a mirror grant): ${s.slice(0, 100)}`);
 }
 // The migration is known to carry 4 such revokes (2 schemas x function revoke and default revoke).
 if (expected.length !== 4) fail(`migration: expected 4 EXECUTE revokes to mirror, found ${expected.length}`);
@@ -43,7 +48,11 @@ for (const want of expected) {
 }
 
 // B. One transaction, and nothing but begin / commit / the mirror grants.
+//    Exactly one BEGIN (first) and one COMMIT (last); no transaction control of any kind in between.
 if (backout[0]?.toLowerCase() !== 'begin' || backout[backout.length - 1]?.toLowerCase() !== 'commit') fail('backout: must be exactly one transaction (begin; ... commit;)');
+const TXN_CONTROL = /^(begin|start transaction|commit|end|rollback|abort|savepoint|release|prepare transaction|commit prepared|rollback prepared|set transaction|set session characteristics)\b/i;
+const controls = backout.filter((s) => TXN_CONTROL.test(s)).map((s) => s.toLowerCase());
+if (controls.length !== 2 || controls[0] !== 'begin' || controls[1] !== 'commit') fail(`backout: transaction control statements must be exactly one begin and one commit at the boundaries, found ${controls.length}`);
 const allowed = new Set([...expected.map((s) => s.toLowerCase()), 'begin', 'commit']);
 for (const s of backout) {
   if (!allowed.has(s.toLowerCase())) fail(`backout: unexpected statement: ${s.slice(0, 80)}`);
