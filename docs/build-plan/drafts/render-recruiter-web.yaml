@@ -53,7 +53,7 @@ services:
         value: production # 'test' = fake mail adapter (app/server/config.ts). Production sends through SendGrid.
       - key: MAINTENANCE_MODE
         value: "true" # starts ON for the cutover (doc 16 section 3.2 step 3); turned off only at the end of the runbook.
-      # ---- secrets and per-environment values: names only, values typed by the owner in the dashboard ----
+      # ---- secrets and per-environment values: names only; values are held in Doppler truck-recruitment-tool/prd ----
       - key: APP_ORIGIN
         sync: false # exact https origin of this service, no path, no trailing slash.
       - key: DATABASE_URL
@@ -86,7 +86,11 @@ services:
         value: google
       # REMOVED from this app and must NOT be set: VITE_SUPABASE_URL, VITE_SUPABASE_ANON_KEY (doc 15 section 6).
 
-# Secrets: Hunter's standing rule is that app secrets live in Doppler. Whether this service is connected to Doppler,
-# and the Doppler project/config it would use, is NOT decided here; connecting a Doppler->Render sync replaces every
-# Render setting (follow C:\Users\hunte\.bb\BB Rules\doppler-render-playbook.md first). Doc 16 section 1.9 places only
-# the STAGING runner secrets in Doppler project truck-recruitment-tool, config stg.
+# Secrets and settings (decided in runbook 17, revised 2026-10-30): EVERY value below, secret or not, lives in Doppler
+# project `truck-recruitment-tool`, config `prd` (proposed; Hunter confirms in runbook OPEN-5; not verified that the config
+# exists today). Nothing is typed into Render's own Environment page. The Render service is created with no variables; a
+# Doppler -> Render sync (Redeploy = No) is connected only after Doppler `prd` is complete, because a sync replaces every
+# Render setting with what Doppler holds (C:\Users\hunte\.bb\BB Rules\doppler-render-playbook.md). A changed value reaches
+# the server only after Render's "Deploy latest commit" (a restart does not load it). So the `value:` entries above are
+# ALSO Doppler entries. Doc 16 section 1.9 places the STAGING runner secrets in the same project, config `stg`; production
+# secrets are not read through that path.
