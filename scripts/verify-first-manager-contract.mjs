@@ -124,8 +124,14 @@ if (mod) {
   need('first-manager-bootstrap.ts', c, /if \(!schemaReady\(schema\)\) \{[^]*?throw new RunnerRefusal\('first_manager_refused'/, 'the schema-not-ready refusal before any lock');
   need('first-manager-bootstrap.ts', c, /const locked = await client\.query\('select 1 from internal\.roster_lock for update'\);[^]*?if \(locked\.rowCount !== 1\) \{[^]*?throw new RunnerRefusal\('first_manager_refused'/, 'the check that the locked roster control read returned exactly one row');
   need('first-manager-bootstrap.ts', c, /s\?\.m1_tables === true && s\.m1_sign_in_functions === true && s\.m1b_function === true && s\.account_link_present === false && s\.roster_lock_rows === 1/, 'schemaReady requiring the sign-in functions and exactly one roster control row');
-  need('first-manager-bootstrap.ts', c, /'internal\.auth_bucket_hit\(text,text,text\)'[^]*'internal\.auth_link_record_send\(uuid,text,text,text\)'/, 'the sign-in function list containing auth_bucket_hit and auth_link_record_send');
-  need('first-manager-bootstrap.ts', c, /'internal\.auth_mint_lock\(text,timestamptz,timestamptz\)'[^]*SIGN_IN_FUNCTION_SIGNATURES\.map\(\(sig\) => `to_regprocedure\('\$\{sig\}'\) is not null`\)/, 'the schema probe built from the sign-in function list, including internal.auth_mint_lock');
+  need('first-manager-bootstrap.ts', c, /import \{ REQUIRED_FUNCTION_SIGNATURES \} from '\.\/first-manager-required-functions\.js'/, 'the readiness list imported from the generated dependency-walk module');
+  need('first-manager-bootstrap.ts', c, /REQUIRED_FUNCTION_SIGNATURES\.map\(\(sig\) => `to_regprocedure\('\$\{sig\}'\) is not null`\)/, 'the schema probe built from the whole required-function list');
+  {
+    const list = read('pipeline/src/first-manager-required-functions.ts');
+    if (!list) failures.push('missing pipeline/src/first-manager-required-functions.ts');
+    else for (const sig of ['internal.auth_mint_lock(text,timestamptz,timestamptz)', 'internal.recheck_session()', 'internal.actor_can_write(public.user_role[])', 'internal.current_app_role()', 'internal.is_manager()', 'internal.is_app_login()', 'internal.matching_carriers(jsonb)', 'internal.zone_geom(jsonb)', 'internal.zone_radius_m(jsonb)', 'internal.is_contactable(bigint,public.contact_channel)']) if (!list.includes(`'${sig}'`)) failures.push('first-manager-required-functions.ts is missing ' + sig);
+    if (!read('pipeline/src/first-manager-dependency-walk.ts')) failures.push('missing pipeline/src/first-manager-dependency-walk.ts');
+  }
   need('first-manager-bootstrap.ts', c, /from internal\.auth_mint_lock\(\$1,/, 'the real sign-in lookup call (internal.auth_mint_lock)');
   need('first-manager-bootstrap.ts', c, /assessFirstManagerPost\(before, await readRosterFacts\(client\), path, await readSignInLookup\(client, userId\)\)/, 'the postcondition fed by the real sign-in lookup');
   need('first-manager-bootstrap.ts', c, /ok: is\(lookup, 1\) \}/, 'the sign-in lookup postcondition');

@@ -14,8 +14,9 @@ import { resolve } from 'node:path';
 import { pathToFileURL } from 'node:url';
 import pg from 'pg';
 import {
-  FIRST_MANAGER_CHECK_CONFIRMATION, FIRST_MANAGER_CREATE_CONFIRMATION, FIRST_MANAGER_EMAIL, executeFirstManagerPlan, planFirstManager,
+  FIRST_MANAGER_CHECK_CONFIRMATION, FIRST_MANAGER_CREATE_CONFIRMATION, FIRST_MANAGER_EMAIL, REQUIRED_FUNCTION_SIGNATURES, executeFirstManagerPlan, planFirstManager,
 } from './first-manager-bootstrap.js';
+import { walkReachableFunctions } from './first-manager-dependency-walk.js';
 import { validateA3Urls } from './first-manager-a3-urls.js';
 import { RunnerRefusal, classifyRunnerFailure } from './refusals.js';
 import { REPOSITORY_ROOT } from './staging-rebuilt.js';
@@ -231,28 +232,30 @@ async function main(): Promise<void> {
     const checkNoLookup = stateOf(await run('first-manager-check')) === 'schema_not_ready';
     await q('alter function internal.auth_mint_lock_hidden(text, timestamptz, timestamptz) rename to auth_mint_lock');
     check('readiness: a missing internal.auth_mint_lock refuses the create before any lock or write; the check reports schema_not_ready', noLookup && checkNoLookup);
-    // (c2) every other sign-in function the app calls is required too (review r2 finding 2): the two the first list omitted, and the rest
-    for (const [fn, args] of [
-      ['auth_bucket_hit', 'text, text, text'],
-      ['auth_link_record_send', 'uuid, text, text, text'],
-      ['auth_mint_insert', 'uuid, text, text, uuid'],
-      ['auth_link_check', 'text'],
-      ['auth_link_redeem', 'text, text'],
-      ['auth_session_info', ''],
-      ['auth_session_touch', ''],
-      ['auth_session_revoke', ''],
-      ['auth_apply_send_evidence', 'text, uuid, text, text, text, text, text, boolean, timestamptz'],
-      // (c3) the three the app needs after the first sign-in (review r3): session resolution, the write guard and actor attribution
-      ['current_session', ''],
-      ['current_staff_id', ''],
-      ['lock_and_validate', 'public.user_role[], text[], uuid[], boolean, text'],
-    ] as const) {
-      await q(`alter function internal.${fn}(${args}) rename to ${fn}_hidden`);
-      const created = await run('first-manager-create');
-      const refusedHere = refused(created) && failedBefore(created).includes('m1_sign_in_functions_are_installed') && resultOf(created) === 'rolled_back' && !created.sent.some((x) => /for update|lock table/.test(x)) && await rosterIsEmpty();
-      const checked = stateOf(await run('first-manager-check')) === 'schema_not_ready';
-      await q(`alter function internal.${fn}_hidden(${args}) rename to ${fn}`);
-      check(`readiness: a missing internal.${fn} refuses the create before any lock or write; the check reports schema_not_ready`, refusedHere && checked);
+    // (c2) EVERY function in the generated required list (first-manager-required-functions.ts: the server's own calls plus everything reached through the policies,
+    // triggers and function bodies of the tables it touches) is required: hide each one in turn; the create must refuse before any lock or write and the check must say
+    // schema_not_ready. This covers the sign-in functions, the write guard and session functions, and the reviewer's ten ordinary-work functions (recheck_session,
+    // actor_can_write, current_app_role, is_manager, is_app_login, matching_carriers, zone_geom, zone_radius_m, batch_members_ordered, is_contactable).
+    // The signatures to hide come from a fresh walk of the sources, NOT from the shipped list, so a function dropped from the shipped list is still hidden here and the create is seen to succeed.
+    const walked = walkReachableFunctions({ repositoryRoot: REPOSITORY_ROOT }).signatures;
+    const notRefused: string[] = [];
+    for (const sig of walked) {
+      const m = /^(\w+)\.(\w+)\((.*)\)$/.exec(sig)!;
+      const [, schema, fn, args] = m as unknown as [string, string, string, string];
+      await q(`alter function ${sig} rename to ${fn}_hidden`);
+      let refusedHere = false;
+      try {
+        const created = await run('first-manager-create');
+        refusedHere = refused(created) && failedBefore(created).includes('m1_sign_in_functions_are_installed') && resultOf(created) === 'rolled_back' && !created.sent.some((x) => /for update|lock table/.test(x)) && await rosterIsEmpty()
+          && stateOf(await run('first-manager-check')) === 'schema_not_ready';
+      } finally {
+        await q(`alter function ${schema}.${fn}_hidden(${args}) rename to ${fn}`);
+      }
+      if (!refusedHere) { notRefused.push(sig); break; } // a create that was not refused has committed a manager, so later iterations would be noise
+    }
+    check(`readiness: hiding any one of the ${walked.length} reachable functions (fresh walk) refuses the create before any lock or write and the check reports schema_not_ready${notRefused.length ? ` (NOT refused: ${notRefused.join('; ')})` : ''}`, notRefused.length === 0);
+    for (const named of ['recheck_session', 'actor_can_write', 'current_app_role', 'is_manager', 'is_app_login', 'matching_carriers', 'zone_geom', 'zone_radius_m', 'batch_members_ordered', 'is_contactable']) {
+      check(`readiness list covers internal.${named} (a reviewer-found ordinary-work dependency)`, REQUIRED_FUNCTION_SIGNATURES.some((s) => s.startsWith(`internal.${named}(`)));
     }
     // (d) the postcondition calls the REAL lookup: a stand-in that finds nobody makes the whole write roll back
     await q('alter function internal.auth_mint_lock(text, timestamptz, timestamptz) rename to auth_mint_lock_hidden');
