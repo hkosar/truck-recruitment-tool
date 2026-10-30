@@ -156,6 +156,24 @@ if (wrapper) {
   const proofOf = (src) => (src.match(/update\(\x60(tnbs-prompt-proof:\$\{value\})\x60\)/) ?? [])[1];
   if (!mod || proofOf(wrapper) === undefined || proofOf(wrapper) !== proofOf(mod)) failures.push('the prompt proof formula must be identical in run-with-secrets.mjs and first-manager-bootstrap.ts');
 }
+// A dropped connection must be a controlled failure, never an uncaught exception: the client gets an 'error' listener (fixed text) BEFORE connect(),
+// and closing a dead connection must not replace the real failure.
+if (mod) {
+  const c = code(mod);
+  const iFactory = c.indexOf('const client = clientFactory(plan.db);'); const iOn = c.indexOf(".on?.('error'", iFactory); const iConnect = c.indexOf('await client.connect();', iFactory);
+  if (iFactory < 0 || iOn < 0 || iConnect < 0 || !(iFactory < iOn && iOn < iConnect)) failures.push("first-manager-bootstrap.ts: executeFirstManagerPlan must attach client.on('error', ...) before client.connect()");
+  else if (!/\.on\?\.\('error', \(\) => console\.error\('first-manager: the database connection reported an error'\)\)/.test(c)) failures.push("first-manager-bootstrap.ts: the 'error' listener must log fixed text only (never its argument)");
+  if (!c.includes('await client.end().catch(() => undefined);') || /await client\.end\(\);/.test(c)) failures.push('first-manager-bootstrap.ts: every client.end() must be .catch(() => undefined) so a dead connection cannot replace the real failure');
+}
+if (runner && /new pg\.(Client|Pool)/.test(code(runner)) && !/\.on\(/.test(code(runner)) && !(mod && code(mod).includes(".on?.('error'"))) failures.push('first-manager-runner.ts creates a pg client with no error listener');
+const unitSrc = read('pipeline/src/first-manager-bootstrap.test.ts');
+if (unitSrc && !unitSrc.includes('dropped connection: no uncaught exception')) failures.push('first-manager-bootstrap.test.ts is missing the dropped-connection regression test');
+const a3src = read('pipeline/src/first-manager-bootstrap-a3.test.ts');
+if (a3src) {
+  const clients = (code(a3src).match(/new pg\.Client\(/g) ?? []).length;
+  if (clients > 0 && (code(a3src).match(/\.on\('error'/g) ?? []).length < 2) failures.push("first-manager-bootstrap-a3.test.ts: the admin and app clients need client.on('error', ...) listeners (the run clients get theirs from the executor)");
+  if (!a3src.includes('pg_terminate_backend')) failures.push('first-manager-bootstrap-a3.test.ts is missing the real-PostgreSQL dropped-connection case');
+}
 const a3 = read('pipeline/src/first-manager-bootstrap-a3.test.ts');
 const a3urls = read('pipeline/src/first-manager-a3-urls.ts');
 const unit = read('pipeline/src/first-manager-bootstrap.test.ts');

@@ -38,6 +38,7 @@ async function main(): Promise<void> {
   // Both URLs are validated here, offline, before any client exists: loopback, no overrides, the same owned cluster and database, app role recruiter_app.
   validateA3Urls(ADMIN, APP);
   const admin = new pg.Client({ connectionString: ADMIN });
+  admin.on('error', () => console.error('A3 test: the admin connection reported an error'));
   await admin.connect();
   const q = (sql: string, params?: unknown[]) => admin.query(sql, params);
   assert.match((await q('select current_database() as d')).rows[0].d as string, /^tr_/, 'refusing: the test database name must start with tr_');
@@ -68,7 +69,7 @@ async function main(): Promise<void> {
     const events: Array<Record<string, unknown>> = [];
     const sent: string[] = [];
     const client = new pg.Client({ connectionString: ADMIN });
-    const wrapped = wrap ? wrap(client, sent) : { connect: () => client.connect(), query: (sql: string, p?: unknown[]) => { sent.push(sql.replace(/\s+/g, ' ').trim()); return client.query(sql, p); }, end: () => client.end() };
+    const wrapped = wrap ? wrap(client, sent) : { connect: () => client.connect(), query: (sql: string, p?: unknown[]) => { sent.push(sql.replace(/\s+/g, ' ').trim()); return client.query(sql, p); }, end: () => client.end(), on: (ev: 'error', l: () => void) => client.on(ev, l) };
     const log = console.log; const err = console.error;
     console.log = (...a: unknown[]) => { try { events.push(JSON.parse(String(a[0]))); } catch { /* not an event */ } };
     console.error = () => undefined;
@@ -96,6 +97,41 @@ async function main(): Promise<void> {
     check('fixtures: a manager already exists -> refused, rolled back, nothing changed', refused(o) && failedBefore(o).includes('no_manager_profile_exists_in_any_status') && resultOf(o) === 'rolled_back' && (await profileSnapshot()) === before);
   }
 
+  // ---- 1b. The server drops the connection in the middle of the create transaction: the profile write is rolled back by the server, the run ends
+  // in the tool's own refusal path (a controlled failure, not a crash), and no uncaught exception is raised.
+  await emptyRoster();
+  {
+    const before = await profileSnapshot();
+    const uncaught: unknown[] = [];
+    const onUncaught = (e: unknown) => { uncaught.push(e); };
+    process.on('uncaughtException', onUncaught);
+    let killed = false;
+    const o = await run('first-manager-create', (client, sent) => ({
+      connect: () => client.connect(),
+      on: (ev: 'error', l: () => void) => client.on(ev, l),
+      end: () => client.end(),
+      query: async (sql: string, p?: unknown[]) => {
+        const text = sql.replace(/\s+/g, ' ').trim();
+        sent.push(text);
+        if (!killed && text.startsWith('with n as')) {
+          killed = true;
+          const pid = (await client.query('select pg_backend_pid() as pid')).rows[0].pid as number;
+          await q('select pg_terminate_backend($1)', [pid]);
+          await new Promise((r) => setTimeout(r, 200));
+        }
+        return client.query(sql, p);
+      },
+    }));
+    await new Promise((r) => setTimeout(r, 200));
+    process.off('uncaughtException', onUncaught);
+    check('dropped connection: the server really ended the connection mid-transaction', killed);
+    check('dropped connection: no uncaught exception', uncaught.length === 0);
+    check('dropped connection: the run failed (no commit was sent) and reported rollback_not_confirmed through the existing path', o.error !== undefined && !o.sent.includes('commit') && resultOf(o) === 'rollback_not_confirmed');
+    check('dropped connection: the profile write was rolled back by the server, nothing changed', (await profileSnapshot()) === before);
+    const failure = classifyRunnerFailure(o.error);
+    check('dropped connection: the failure classifies to a fixed identifier and a driver code, never the driver text', typeof failure.refusal === 'string' && !JSON.stringify(failure).toLowerCase().includes('terminat'));
+  }
+
   // ---- 2. Empty roster: the insert path, then the proof that sign-in and Team add work for that person.
   await emptyRoster();
   const authUsersBefore = (await q('select count(*)::int as n from auth.users')).rows[0].n as number;
@@ -119,6 +155,7 @@ async function main(): Promise<void> {
       await q(`insert into internal.app_sessions (user_id, token_hash, kind, email_at_issue, created_at, last_seen_at, idle_window, expires_at, absolute_expires_at)
                select id, $2, 'link', email, now(), now(), interval '30 days', now() + interval '30 days', now() + interval '90 days' from public.profiles where id = $1`, [rows[0].id, hash]);
       const app = new pg.Client({ connectionString: APP });
+      app.on('error', () => console.error('A3 test: the app connection reported an error'));
       await app.connect();
       try {
         const who = (await app.query('select current_database() as d, current_user as u, inet_server_port()::text as p')).rows[0];

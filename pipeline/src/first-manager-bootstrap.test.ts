@@ -4,6 +4,7 @@
 
 import assert from 'node:assert/strict';
 import { spawnSync } from 'node:child_process';
+import { EventEmitter } from 'node:events';
 import { readFileSync } from 'node:fs';
 import { resolve } from 'node:path';
 import { pathToFileURL } from 'node:url';
@@ -355,6 +356,46 @@ async function main(): Promise<void> {
     const bad2 = { fields: 0 };
     const out2 = JSON.parse(w.allowListLine(JSON.stringify({ msg: 'first-manager.check', phase: 'before', check: 'hunter@twistednail.com', ok: true }), bad2));
     check('wrapper: a check name outside the enumerated list is withheld', out2.check === '<withheld>' && bad2.fields === 1);
+  }
+
+  // ---- a dropped connection mid-run: the driver emits 'error' on the client from the socket (not from inside a call). With no listener that is an
+  // uncaught exception; with one, the query in flight rejects and the existing rollback path and refusal run. The address in the message must not be printed.
+  {
+    const uncaught: unknown[] = [];
+    const onUncaught = (e: unknown) => { uncaught.push(e); };
+    process.on('uncaughtException', onUncaught);
+    const base = fakeClient(READY_SCHEMA, EMPTY);
+    let dead = false;
+    const dropped = Object.assign(new EventEmitter(), {
+      async connect() { return undefined; },
+      async end() { base.sent.push('<end>'); if (dead) throw new Error('Connection terminated at 10.20.30.40'); },
+      async query(sql: string, params?: unknown[]) {
+        if (dead) throw new Error('Client has encountered a connection error and is not queryable');
+        if (/^with n as/.test(sql.replace(/\s+/g, ' ').trim())) {
+          // The server drops the connection while the profile write is in flight.
+          const lost = new Error('Connection terminated unexpectedly at 10.20.30.40');
+          dead = true;
+          setImmediate(() => dropped.emit('error', lost));
+          await new Promise((r) => setTimeout(r, 20));
+          throw lost;
+        }
+        return base.client.query(sql, params);
+      },
+    });
+    const events: Array<Record<string, unknown>> = [];
+    const errors: string[] = [];
+    const log = console.log; const err = console.error;
+    console.log = (...a: unknown[]) => { try { events.push(JSON.parse(String(a[0]))); } catch { /* not an event */ } };
+    console.error = (...a: unknown[]) => { errors.push(a.map(String).join(' ')); };
+    let thrown: unknown;
+    try { await executeFirstManagerPlan(create(), () => dropped as never); } catch (e) { thrown = e; } finally { console.log = log; console.error = err; }
+    await new Promise((r) => setTimeout(r, 30));
+    process.off('uncaughtException', onUncaught);
+    check('dropped connection: no uncaught exception', uncaught.length === 0);
+    check('dropped connection: the run fails through the existing path, the close error does not replace it, and the result is rollback_not_confirmed',
+      thrown instanceof Error && !thrown.message.includes('Connection terminated at') && result(events) === 'rollback_not_confirmed' && !base.sent.includes('commit') && base.sent[base.sent.length - 1] === '<end>');
+    check('dropped connection: the profile write is not kept, and what is printed never carries the address', base.roster().profiles_total === 0 && !JSON.stringify(events).concat(errors.join(' ')).includes('10.20.30.40'));
+    check('dropped connection: the failure classifies to a fixed identifier with no driver text', !JSON.stringify(classifyRunnerFailure(thrown)).includes('10.20.30.40'));
   }
 
   console.log(`first-manager bootstrap offline tests: ${passed} passed`);

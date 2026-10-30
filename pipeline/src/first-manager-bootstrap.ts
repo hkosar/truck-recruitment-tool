@@ -332,11 +332,15 @@ export async function runFirstManagerCreate(client: RebuiltSqlClient, target: Fi
 
 export async function executeFirstManagerPlan(plan: FirstManagerPlan, clientFactory: (db: SupabaseDbTarget) => RebuiltSqlClient): Promise<void> {
   const client = clientFactory(plan.db);
+  // A pg client with no 'error' listener turns a dropped connection into an uncaught exception. With one, the query in flight (or the next)
+  // rejects, and the catch in runFirstManagerCreate takes its existing rollback path. Fixed text only: a driver message can carry an address.
+  (client as { on?: (event: 'error', listener: () => void) => unknown }).on?.('error', () => console.error('first-manager: the database connection reported an error'));
   await client.connect();
   try {
     if (plan.action === 'first-manager-check') await runFirstManagerCheck(client, plan.target);
     else await runFirstManagerCreate(client, plan.target);
   } finally {
-    await client.end();
+    // Closing a dead connection can fail; that must never replace the real failure.
+    await client.end().catch(() => undefined);
   }
 }
