@@ -8,6 +8,7 @@ import pg from 'pg';
 // PoolClient needs this named-import treatment.
 import type { PoolClient } from 'pg';
 import type { Config } from './config.js';
+import { clientUsable, isDefiniteCommitRefusal, isRollbackTag } from './commit-outcome.js';
 import { parseSupabaseDbTarget } from './target-guard.js';
 
 const { Pool } = pg;
@@ -72,7 +73,7 @@ export function createPgPool(config: Config): PgPool {
   // Build from the guard's explicit fields, never from the raw string: pg would let query
   // parameters in a connection string override host/user/port (see target-guard.ts).
   const target = parseSupabaseDbTarget(config.SUPABASE_DB_URL);
-  return new Pool({
+  const pool = new Pool({
     host: target.host,
     port: target.port,
     user: target.user,
@@ -90,6 +91,12 @@ export function createPgPool(config: Config): PgPool {
     // this relaxed by default forever, just for the skeleton.
     ssl: { rejectUnauthorized: false },
   });
+  // An IDLE client whose connection drops emits 'error' on the pool; with no listener Node throws
+  // it as an uncaught exception. The pool drops that client itself. Fixed text only: a driver
+  // message can carry an address.
+  pool.on('error', () => createLogger('pg').warn('pg.idle_client_connection_error'));
+  watchPoolClients(pool);
+  return pool;
 }
 
 export function createPipelineContext(config: Config, scope = 'pipeline'): PipelineContext {
@@ -112,6 +119,67 @@ export async function closePipelineContext(ctx: PipelineContext): Promise<void> 
 // every sources/*.ts job follows (Part B §2.2).
 // =====================================================================================
 
+// ---- Continuous client error coverage --------------------------------------------------------
+// pg-pool removes its idle 'error' listener inside _acquireClient and then resolves pool.connect();
+// the await continuation runs later. If pg parses ReadyForQuery and a fatal ErrorResponse from one
+// input buffer, the error is emitted before that continuation, so a listener attached after
+// `await pool.connect()` is too late and Node throws. The pool emits 'acquire' BEFORE it removes its
+// idle listener, so the listener below has no gap; it is removed on the pool's 'release' event (every
+// release path emits it), so listeners never pile up on reused clients.
+interface ClientErrorState {
+  failure: Error | undefined;
+  listener: (err: unknown) => void;
+}
+const clientStates = new WeakMap<object, ClientErrorState>();
+const watchedPools = new WeakSet<object>();
+
+function newClientErrorState(): ClientErrorState {
+  const state: ClientErrorState = {
+    failure: undefined,
+    listener: (err) => {
+      state.failure ??= err instanceof Error ? err : new Error('connection error');
+    },
+  };
+  return state;
+}
+
+/** Idempotent and synchronous: call before `pool.connect()`. A pool without events is skipped. */
+export function watchPoolClients(pool: Pick<PgPool, 'on'>): void {
+  if (typeof pool.on !== 'function' || watchedPools.has(pool)) return;
+  watchedPools.add(pool);
+  pool.on('acquire', (client) => {
+    const state = newClientErrorState();
+    clientStates.set(client, state);
+    client.on('error', state.listener);
+  });
+  pool.on('release', (_err, client) => {
+    const state = clientStates.get(client);
+    if (!state) return;
+    client.removeListener('error', state.listener);
+    clientStates.delete(client);
+  });
+}
+
+export interface ClientGuard {
+  /** The connection error seen while the client was checked out, if any. */
+  failure(): Error | undefined;
+  /** Detaches a listener this guard attached itself (the pool hook's is removed by the pool). */
+  stop(): void;
+}
+
+/** The guard for a checked-out client: the pool hook's record, or (no hook) a listener attached now. */
+export function guardClient(client: PgPoolClient): ClientGuard {
+  const hooked = clientStates.get(client);
+  const state = hooked ?? newClientErrorState();
+  if (!hooked) client.on('error', state.listener);
+  return {
+    failure: () => state.failure,
+    stop: () => {
+      if (!hooked) client.removeListener('error', state.listener);
+    },
+  };
+}
+
 /**
  * Runs `ddl` (one or more `create temp table ...` statements) then `fn`, on one checked-out
  * pooled client -- temp tables are session-scoped, so every query `fn` issues must reuse the
@@ -123,18 +191,51 @@ export async function withStagingConnection<T>(
   ddl: string,
   fn: (client: PgPoolClient) => Promise<T>
 ): Promise<T> {
+  watchPoolClients(pool);
   const client = await pool.connect();
+  // The pool's 'acquire' hook (watchPoolClients) already covers the client; a dropped connection
+  // becomes a failed query (the run fails and exits non-zero) instead of an uncaught exception. A
+  // client that reported an error is destroyed, never reused.
+  const guard = guardClient(client);
+  // Same COMMIT rules as load-location-tables.ts applyLoad and app/server/db/database.ts: once COMMIT
+  // is sent, only an allowlisted refusal on a healthy connection with a successful ROLLBACK is a
+  // definite failure; everything else is an unknown outcome and the client is destroyed.
+  let commitSent = false;
+  let lostByCode: Error | undefined; // no 'error' event (yet) but the client must not be reused
+  const unknownOutcome = () =>
+    new Error('The connection was lost after COMMIT was sent; whether the changes were saved is unknown. Check the target tables before running the job again.');
   try {
+    const earlier = guard.failure();
+    if (earlier) throw earlier; // it died while the pool was handing it over
     await client.query('begin');
     await client.query(ddl);
     const result = await fn(client);
-    await client.query('commit');
+    commitSent = true;
+    const answer = await client.query('commit');
+    if (isRollbackTag(answer)) {
+      // COMMIT answered with ROLLBACK: the transaction had already failed (a caught query error), so
+      // the server rolled everything back. A confirmed rollback: a definite failure, never success.
+      commitSent = false;
+      throw new Error('COMMIT was answered with ROLLBACK: the transaction had already failed, so nothing was saved.');
+    }
     return result;
   } catch (err) {
-    await client.query('rollback').catch(() => undefined);
+    if (commitSent && (guard.failure() || !isDefiniteCommitRefusal(err) || !clientUsable(client))) {
+      lostByCode = new Error('connection lost');
+      throw unknownOutcome();
+    }
+    let rollbackFailed = false;
+    await client.query('rollback').catch(() => { rollbackFailed = true; });
+    // A failed ROLLBACK never leaves the client in the pool, and after COMMIT was sent it also means unknown.
+    if (rollbackFailed) lostByCode = new Error('connection lost');
+    if (commitSent && (rollbackFailed || guard.failure() || !clientUsable(client))) {
+      lostByCode = new Error('connection lost');
+      throw unknownOutcome();
+    }
     throw err;
   } finally {
-    client.release();
+    guard.stop();
+    client.release(guard.failure() ?? lostByCode);
   }
 }
 

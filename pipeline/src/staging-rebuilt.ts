@@ -237,6 +237,8 @@ export function planRebuiltSqlRun(input: {
 
 /** The part of pg.Client the executor uses; tests (and the local-database proof) inject their own. */
 export interface RebuiltSqlClient {
+  /** pg.Client has it; the executor attaches an error listener so a dropped connection is a failed query, not an uncaught exception. */
+  on?(event: 'error', listener: (err: Error) => void): unknown;
   connect(): Promise<unknown>;
   query(sql: string, params?: unknown[]): Promise<any>;
   end(): Promise<void>;
@@ -255,6 +257,7 @@ const defaultClientFactory = (target: SupabaseDbTarget): RebuiltSqlClient =>
 
 export async function executeRebuiltSqlPlan(plan: RebuiltSqlPlan, clientFactory: (target: SupabaseDbTarget) => RebuiltSqlClient = defaultClientFactory): Promise<void> {
   const client = clientFactory(plan.target);
+  client.on?.('error', () => undefined); // the query in flight (or the next one) rejects and is reported as server_or_driver_error
   await client.connect();
   try {
     if (plan.kind === 'retention') {
@@ -377,6 +380,6 @@ export async function executeRebuiltSqlPlan(plan: RebuiltSqlPlan, clientFactory:
       console.log(JSON.stringify({ msg: 'staging-sql.m1c_postcondition_ok' }));
     }
   } finally {
-    await client.end();
+    await client.end().catch(() => undefined); // a dead connection's close error must not replace the real failure
   }
 }

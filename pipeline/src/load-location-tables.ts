@@ -1,6 +1,8 @@
 import { readFileSync } from 'node:fs';
 import pg from 'pg';
 import { parseSupabaseDbTarget, verifyPipelineTarget } from './target-guard.js';
+import { clientUsable, isDefiniteCommitRefusal, isRollbackTag } from './commit-outcome.js';
+import { guardClient, watchPoolClients } from './db.js';
 
 /**
  * Standalone, one-off loader for the geocode fallback reference tables `zip_centroids` and
@@ -209,8 +211,18 @@ export interface ApplyOptions {
 export async function applyLoad(
   pool: pg.Pool, zips: ZipRow[], cities: CityRow[], opts: ApplyOptions = {}
 ): Promise<{ zip: UpsertCounts; city: UpsertCounts; reconciledDeleted: string[] }> {
+  watchPoolClients(pool);
   const client = await pool.connect();
+  // The pool's 'acquire' hook already covers the client (see db.ts): a dropped connection fails this
+  // load (exit 1) instead of crashing as an uncaught exception. Such a client is destroyed.
+  const guard = guardClient(client);
+  let commitSent = false;
+  let lostByCode: Error | undefined; // a terminal code with no 'error' event yet: still destroy the client
+  const unknownOutcome = () =>
+    new Error('The connection was lost after COMMIT was sent; whether the load was saved is unknown. Check the zip and city tables before running it again.');
   try {
+    const earlier = guard.failure();
+    if (earlier) throw earlier; // it died while the pool was handing it over
     await client.query('begin');
     let reconciledDeleted: string[] = [];
     const names = (opts.ambiguous ?? []).map((n) => n.toLowerCase());
@@ -235,13 +247,35 @@ export async function applyLoad(
     }
     const zip = await upsertZipCentroids(client, zips);
     const city = await upsertCityCentroids(client, cities);
-    await client.query('commit');
+    commitSent = true;
+    const answer = await client.query('commit');
+    if (isRollbackTag(answer)) {
+      // COMMIT answered with ROLLBACK: the transaction had already failed, so nothing was loaded.
+      // A confirmed rollback: a definite failure, never success (and not an unknown outcome).
+      commitSent = false;
+      throw new Error('COMMIT was answered with ROLLBACK: the transaction had already failed, so nothing was loaded.');
+    }
     return { zip, city, reconciledDeleted };
   } catch (e) {
-    await client.query('rollback').catch(() => undefined);
+    // After COMMIT was sent, only an allowlisted pre-commit refusal on a healthy connection is a
+    // definite "rolled back" (same list and reasons as app/server/db/database.ts). Anything else, even
+    // before the client 'error' event has fired, leaves the result unknown and the client destroyed.
+    if (commitSent && (guard.failure() || !isDefiniteCommitRefusal(e) || !clientUsable(client))) {
+      lostByCode = new Error('connection lost');
+      throw unknownOutcome();
+    }
+    let rollbackFailed = false;
+    await client.query('rollback').catch(() => { rollbackFailed = true; });
+    if (rollbackFailed) lostByCode = new Error('connection lost'); // never reuse a client whose ROLLBACK failed
+    // The connection failed during cleanup after COMMIT was sent: it is no longer proven rolled back.
+    if (commitSent && (rollbackFailed || guard.failure() || !clientUsable(client))) {
+      lostByCode = new Error('connection lost');
+      throw unknownOutcome();
+    }
     throw e;
   } finally {
-    client.release();
+    guard.stop();
+    client.release(guard.failure() ?? lostByCode);
   }
 }
 
@@ -298,6 +332,8 @@ async function main(): Promise<void> {
     host: target.host, port: target.port, user: target.user, password: target.password, database: target.database,
     max: 1, ssl: { rejectUnauthorized: false },
   });
+  // An idle client's dropped connection must not crash the tool (fixed text: a driver message can carry an address).
+  pool.on('error', () => console.error('The database connection dropped while idle.'));
   try {
     console.log(JSON.stringify(await applyLoad(pool, zips.rows, cities.rows, { ambiguous: cities.ambiguous, state: args.state, reconcile: args.reconcile })));
   } finally {

@@ -100,6 +100,9 @@ export async function executeStagingSqlPlan(plan: StagingSqlPlan): Promise<void>
     // Same relaxed pooler TLS setting as the pipeline (see db.ts TODO(live-db)).
     ssl: { rejectUnauthorized: false },
   });
+  // A dropped connection emits 'error' on the client; with no listener Node throws it as an uncaught
+  // exception. The query in flight (or the next one) rejects, which main() reports as server_or_driver_error.
+  client.on('error', () => undefined);
   await client.connect();
   try {
     for (const [name, value] of plan.settings) {
@@ -107,7 +110,7 @@ export async function executeStagingSqlPlan(plan: StagingSqlPlan): Promise<void>
     }
     await client.query(sql);
   } finally {
-    await client.end();
+    await client.end().catch(() => undefined); // never let a dead connection's close error replace the real failure
   }
 }
 
