@@ -1,0 +1,92 @@
+# DRAFT -- NOT DEPLOYED, NOT A BLUEPRINT IN USE. Do not copy into render.yaml without Hunter's "go".
+# Drafted 2026-10-30 (UTC) for release-path step 12. Nothing here has been created on Render.
+#
+# Why a separate file: render.yaml is the Blueprint for the live pipeline cron and the old static site.
+# Doc 16 section 2.2 says the production web service is created in the Render DASHBOARD, not through
+# that Blueprint. This file records the settings to type into the dashboard (or to review as a
+# Blueprint later); it is a checklist in YAML form.
+#
+# Sources for every value:
+#   - runtime/root/build/start, region, auto-deploy off, two services ... doc 16 section 2.2
+#   - env var NAMES ................................... doc 16 section 2.3, and the code that reads them:
+#                                                       app/server/config.ts (the code is the source of truth)
+#   - VITE_* build variables .......................... doc 16 section 2.4, app/.env.example
+#   - health check path /readyz ....................... doc 16 section 2.5; implemented in
+#                                                       app/server/app.ts:562 and app/server/http/health.ts
+#   - shutdown delay 60 s ............................. doc 16 section 2.2 (server drains up to 45 s)
+#   - the shape (dashboard web service, Node 22, build/start commands, separate env list per service)
+#     mirrors Quote-Queue docs/M0_HOMEWORK.md at 4059789845a52e355b747371752744ffd790e135. Quote-Queue has
+#     no render.yaml at that commit, so there is no Blueprint block to copy; the values were matched by hand.
+#
+# PRICING: NOT VERIFIED today. Doc 16 section 2.1 records "$7/month, 512 MB" read from render.com/pricing
+# on 2026-10-23T04:39Z. Re-check on the day Hunter approves the spend.
+#
+# Names that DIFFER from doc 15 section 6 (older): APP_BASE_URL -> APP_ORIGIN, KEY_TOKENS -> KEY_LINKS,
+# and HEALTH_SECRET, TEAM_ADD_ENABLED, TEAM_EMAIL_EDIT_ENABLED, RECOVERY_ENABLED do not exist in
+# app/server/config.ts. This draft follows the code and doc 16.
+#
+# Mail provider: SendGrid (settled by the manager, 2026-10-30). Planning only: no key or webhook is created by this file.
+
+services:
+  - type: web
+    name: tnbs-recruiter-prod # doc 16 section 2.2 name. Staging would be tnbs-recruiter-staging (separate service, separate secrets).
+    runtime: node
+    plan: starter # NOT VERIFIED: doc 16 says the $7/month tier; confirm the plan name and price in the dashboard.
+    region: ohio # NOT VERIFIED: doc 16 says "nearest Supabase us-east-2 (Ohio; confirm in the dashboard)".
+    rootDir: app
+    buildCommand: npm ci && npm run build && npm run build:server
+    startCommand: node dist-server/main.js
+    healthCheckPath: /readyz # 503 until one bounded database round trip as recruiter_app succeeds; a wrong DB password never goes live.
+    autoDeploy: false # doc 16 section 2.2: production auto-deploy off.
+    maxShutdownDelaySeconds: 60 # doc 16 section 2.2. NOT VERIFIED here whether a Blueprint accepts this key; doc 16 says to set it by the Update service API and read the value back.
+    envVars:
+      - key: NODE_VERSION
+        value: "22" # package.json engines: node >=22.12.0 (doc 16 does not name this; Quote-Queue pins 22). Confirm a >=22.12 patch is installed.
+      - key: HOST
+        value: 0.0.0.0 # Render requires it (doc 16 section 2.3). The code default is 127.0.0.1.
+      # PORT is set by Render itself (doc 16 section 2.3). Do not add it.
+      - key: STATIC_DIR
+        value: dist # code default is 'dist', relative to the service root (app/). Listed because doc 16 names it.
+      - key: TRUSTED_PROXY_HOPS
+        value: "0" # doc 16 section 2.3: "0 until T-IP passes". NOTE: the code default is 1. Set the value deliberately after the T-IP test.
+      - key: EMAIL_MODE
+        value: production # 'test' = fake mail adapter (app/server/config.ts). Production sends through SendGrid.
+      - key: MAINTENANCE_MODE
+        value: "true" # starts ON for the cutover (doc 16 section 3.2 step 3); turned off only at the end of the runbook.
+      # ---- secrets and per-environment values: names only, values typed by the owner in the dashboard ----
+      - key: APP_ORIGIN
+        sync: false # exact https origin of this service, no path, no trailing slash.
+      - key: DATABASE_URL
+        sync: false # session-pooler URL for the recruiter_app login, port 5432 (doc 16 section 2.6).
+      - key: KEY_LINKS
+        sync: false # 32-byte random key, base64url, at least 43 characters. All three keys must differ.
+      - key: KEY_SESSIONS
+        sync: false
+      - key: KEY_RATE
+        sync: false
+      - key: SENDGRID_API_KEY
+        sync: false # Mail-Send-only key (doc 16 section 7).
+      - key: SENDGRID_FROM_ADDRESS
+        sync: false
+      - key: SENDGRID_FROM_NAME
+        sync: false # optional; the code default is "Carrier Recruiter".
+      - key: SENDGRID_WEBHOOK_VERIFICATION_KEY
+        sync: false # public verification key of the Event Webhook (doc 16 section 7).
+      - key: DB_ACQUIRE_TIMEOUT_MS
+        sync: false # optional; integer 500-30000; code default 5000. Leave unset unless a test shows a need.
+      # STAGING_BANNER is for the staging service only. Do not set it on production.
+      # ---- build-time variables (Vite inlines them at `npm run build`; doc 16 section 2.4) ----
+      - key: VITE_APP_ENV
+        value: production
+      - key: VITE_GOOGLE_MAPS_API_KEY
+        sync: false # HTTP-referrer-restricted browser key; adding the production origin is its own approval.
+      - key: VITE_GOOGLE_MAPS_MAP_ID
+        sync: false
+      - key: VITE_MAPS_PROVIDER
+        value: google
+      # REMOVED from this app and must NOT be set: VITE_SUPABASE_URL, VITE_SUPABASE_ANON_KEY (doc 15 section 6).
+
+# Secrets: Hunter's standing rule is that app secrets live in Doppler. Whether this service is connected to Doppler,
+# and the Doppler project/config it would use, is NOT decided here; connecting a Doppler->Render sync replaces every
+# Render setting (follow C:\Users\hunte\.bb\BB Rules\doppler-render-playbook.md first). Doc 16 section 1.9 places only
+# the STAGING runner secrets in Doppler project truck-recruitment-tool, config stg.
