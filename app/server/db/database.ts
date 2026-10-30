@@ -103,6 +103,17 @@ export function mapPgError(err: unknown): Error {
   }
 }
 
+/** A checked-out client with its per-checkout error guard (see Database.checkout). */
+interface Checkout {
+  client: PoolClient;
+  /** The connection error seen while this client was checked out, if any. */
+  failure(): Error | undefined;
+  /** Rejects when the client reports a connection error (race it against work in flight). */
+  dropped: Promise<never>;
+  /** Detaches the listener and releases; passing an error (or having seen one) destroys the client. Idempotent. */
+  release(err?: Error): void;
+}
+
 export class Database {
   private readonly pool: pg.Pool;
   private closed = false;
@@ -137,13 +148,49 @@ export class Database {
   private readonly onAcquireFailure: ((label: string) => void) | undefined;
 
   /**
+   * Checks out a client and attaches the per-checkout 'error' listener in the same turn, before
+   * any query. pg-pool removes its own idle listener while a client is checked out, so without
+   * this an 'error' from a dropped connection has no listener and Node throws it as an uncaught
+   * exception. The listener records the failure (callers destroy the client) and is removed at
+   * release so listeners never pile up on reused clients.
+   */
+  private async checkout(): Promise<Checkout> {
+    const client = await this.pool.connect();
+    let failure: Error | undefined;
+    let signal: (err: Error) => void = () => undefined;
+    const dropped = new Promise<never>((_, reject) => {
+      signal = reject;
+    });
+    dropped.catch(() => undefined); // a rejection nobody is racing is not an unhandled one
+    const onError = (err: unknown) => {
+      if (failure) return;
+      failure = err instanceof Error ? err : new Error('connection error');
+      signal(failure);
+    };
+    client.on('error', onError);
+    let released = false;
+    return {
+      client,
+      failure: () => failure,
+      dropped,
+      release: (err) => {
+        if (released) return;
+        released = true;
+        client.removeListener('error', onError);
+        // A client that reported an error is destroyed (release with an error), never reused.
+        client.release(err ?? failure);
+      },
+    };
+  }
+
+  /**
    * A pool connection, optionally within a limit tighter than the pool's own. If that limit
    * expires first, the connection that arrives later is released at once (never leaked).
    */
-  private acquire(limitMs: number | undefined): Promise<PoolClient> {
-    const pending = this.pool.connect();
+  private acquire(limitMs: number | undefined): Promise<Checkout> {
+    const pending = this.checkout();
     if (!limitMs) return pending;
-    return new Promise<PoolClient>((resolve, reject) => {
+    return new Promise<Checkout>((resolve, reject) => {
       let settled = false;
       const timer = setTimeout(() => {
         if (settled) return;
@@ -152,11 +199,11 @@ export class Database {
         reject(new Error('acquire limit exceeded'));
       }, limitMs);
       pending.then(
-        (client) => {
+        (checkedOut) => {
           if (settled) return;
           settled = true;
           clearTimeout(timer);
-          resolve(client);
+          resolve(checkedOut);
         },
         (err: unknown) => {
           if (settled) return;
@@ -201,14 +248,17 @@ export class Database {
     if (missing === 0) return this.pool.totalCount;
     const attempts = await Promise.allSettled(
       Array.from({ length: missing }, async () => {
-        const client = await this.pool.connect();
+        const checkedOut = await this.checkout();
         try {
-          await client.query({ text: this.warmSql, query_timeout: this.warmQueryTimeoutMs } as pg.QueryConfig);
+          await Promise.race([
+            checkedOut.client.query({ text: this.warmSql, query_timeout: this.warmQueryTimeoutMs } as pg.QueryConfig),
+            checkedOut.dropped,
+          ]);
         } catch (err) {
-          client.release(err instanceof Error ? err : new Error('warm-up failed'));
+          checkedOut.release(err instanceof Error ? err : new Error('warm-up failed'));
           throw err;
         }
-        client.release();
+        checkedOut.release();
       }),
     );
     const failed = attempts.filter((a) => a.status === 'rejected');
@@ -219,21 +269,29 @@ export class Database {
   async transaction<T>(options: TxOptions, work: (tx: Tx) => Promise<T>): Promise<T> {
     if (this.closed) throw new UnavailableError();
     const deadlineMs = options.deadlineMs ?? 5_000;
-    let client: PoolClient;
+    let checkedOut: Checkout;
     try {
-      client = await this.acquire(options.acquireTimeoutMs);
+      checkedOut = await this.acquire(options.acquireTimeoutMs);
     } catch {
       // Fail closed (the caller answers 503), but never silently.
       this.onAcquireFailure?.(this.label);
       throw new UnavailableError();
     }
+    const client = checkedOut.client;
     const started = Date.now();
     let destroyed = false;
     let commitSent = false;
+    let committed = false;
+    // A connection error settles the transaction early, unless COMMIT was already acknowledged.
+    const dropped = new Promise<never>((_, reject) => {
+      checkedOut.dropped.catch((err: unknown) => {
+        if (!committed) reject(err);
+      });
+    });
     const destroy = () => {
       if (!destroyed) {
         destroyed = true;
-        client.release(new Error('deadline'));
+        checkedOut.release(new Error('deadline'));
       }
     };
     const remaining = () => deadlineMs - (Date.now() - started);
@@ -256,13 +314,15 @@ export class Database {
       const value = await work(tx);
       commitSent = true;
       await client.query('COMMIT');
+      committed = true;
       return value;
     };
     const running = run();
     running.catch(() => undefined); // a late failure after the deadline is already handled below
     try {
-      const value = await Promise.race([running, deadline]);
-      if (!destroyed) client.release();
+      const value = await Promise.race([running, deadline, dropped]);
+      // A connection error after the work finished still destroys the client (release passes it on).
+      if (!destroyed) checkedOut.release();
       return value;
     } catch (err) {
       const isDeadline = err instanceof Error && err.message === 'deadline' && !('code' in err);
@@ -270,17 +330,20 @@ export class Database {
         destroy();
         throw commitSent ? new OutcomeUnknownError() : new UnavailableError();
       }
-      if (commitSent && !('code' in (err as object))) {
+      // The connection itself failed (its 'error' fired): the client is destroyed, never reused.
+      const connectionFailed = checkedOut.failure() !== undefined;
+      if (commitSent && (connectionFailed || !('code' in (err as object)))) {
         // COMMIT was sent and the connection failed without a server answer.
         destroy();
         throw new OutcomeUnknownError();
       }
+      if (connectionFailed) destroy();
       try {
         if (!destroyed) await client.query('ROLLBACK');
       } catch {
         destroy();
       }
-      if (!destroyed) client.release();
+      if (!destroyed) checkedOut.release();
       throw err instanceof NotPermittedError || err instanceof RefusedError || err instanceof NotFoundError ? err : mapPgError(err);
     } finally {
       if (timer !== undefined) clearTimeout(timer);
