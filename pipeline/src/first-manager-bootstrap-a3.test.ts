@@ -231,6 +231,25 @@ async function main(): Promise<void> {
     const checkNoLookup = stateOf(await run('first-manager-check')) === 'schema_not_ready';
     await q('alter function internal.auth_mint_lock_hidden(text, timestamptz, timestamptz) rename to auth_mint_lock');
     check('readiness: a missing internal.auth_mint_lock refuses the create before any lock or write; the check reports schema_not_ready', noLookup && checkNoLookup);
+    // (c2) every other sign-in function the app calls is required too (review r2 finding 2): the two the first list omitted, and the rest
+    for (const [fn, args] of [
+      ['auth_bucket_hit', 'text, text, text'],
+      ['auth_link_record_send', 'uuid, text, text, text'],
+      ['auth_mint_insert', 'uuid, text, text, uuid'],
+      ['auth_link_check', 'text'],
+      ['auth_link_redeem', 'text, text'],
+      ['auth_session_info', ''],
+      ['auth_session_touch', ''],
+      ['auth_session_revoke', ''],
+      ['auth_apply_send_evidence', 'text, uuid, text, text, text, text, text, boolean, timestamptz'],
+    ] as const) {
+      await q(`alter function internal.${fn}(${args}) rename to ${fn}_hidden`);
+      const created = await run('first-manager-create');
+      const refusedHere = refused(created) && failedBefore(created).includes('m1_sign_in_functions_are_installed') && resultOf(created) === 'rolled_back' && !created.sent.some((x) => /for update|lock table/.test(x)) && await rosterIsEmpty();
+      const checked = stateOf(await run('first-manager-check')) === 'schema_not_ready';
+      await q(`alter function internal.${fn}_hidden(${args}) rename to ${fn}`);
+      check(`readiness: a missing internal.${fn} refuses the create before any lock or write; the check reports schema_not_ready`, refusedHere && checked);
+    }
     // (d) the postcondition calls the REAL lookup: a stand-in that finds nobody makes the whole write roll back
     await q('alter function internal.auth_mint_lock(text, timestamptz, timestamptz) rename to auth_mint_lock_hidden');
     await q('create function internal.auth_mint_lock(p_email text, p_day_start timestamptz, p_day_end timestamptz) returns table (user_id uuid) language sql as $$ select null::uuid where false $$');

@@ -124,7 +124,8 @@ if (mod) {
   need('first-manager-bootstrap.ts', c, /if \(!schemaReady\(schema\)\) \{[^]*?throw new RunnerRefusal\('first_manager_refused'/, 'the schema-not-ready refusal before any lock');
   need('first-manager-bootstrap.ts', c, /const locked = await client\.query\('select 1 from internal\.roster_lock for update'\);[^]*?if \(locked\.rowCount !== 1\) \{[^]*?throw new RunnerRefusal\('first_manager_refused'/, 'the check that the locked roster control read returned exactly one row');
   need('first-manager-bootstrap.ts', c, /s\?\.m1_tables === true && s\.m1_sign_in_functions === true && s\.m1b_function === true && s\.account_link_present === false && s\.roster_lock_rows === 1/, 'schemaReady requiring the sign-in functions and exactly one roster control row');
-  need('first-manager-bootstrap.ts', c, /to_regprocedure\('internal\.auth_mint_lock\(text,timestamptz,timestamptz\)'\)/, 'the schema probe for internal.auth_mint_lock');
+  need('first-manager-bootstrap.ts', c, /'internal\.auth_bucket_hit\(text,text,text\)'[^]*'internal\.auth_link_record_send\(uuid,text,text,text\)'/, 'the sign-in function list containing auth_bucket_hit and auth_link_record_send');
+  need('first-manager-bootstrap.ts', c, /'internal\.auth_mint_lock\(text,timestamptz,timestamptz\)'[^]*SIGN_IN_FUNCTION_SIGNATURES\.map\(\(sig\) => `to_regprocedure\('\$\{sig\}'\) is not null`\)/, 'the schema probe built from the sign-in function list, including internal.auth_mint_lock');
   need('first-manager-bootstrap.ts', c, /from internal\.auth_mint_lock\(\$1,/, 'the real sign-in lookup call (internal.auth_mint_lock)');
   need('first-manager-bootstrap.ts', c, /assessFirstManagerPost\(before, await readRosterFacts\(client\), path, await readSignInLookup\(client, userId\)\)/, 'the postcondition fed by the real sign-in lookup');
   need('first-manager-bootstrap.ts', c, /ok: is\(lookup, 1\) \}/, 'the sign-in lookup postcondition');
@@ -144,7 +145,7 @@ if (wrapper) {
   const c = code(wrapper);
   need('run-with-secrets.mjs', c, /if \(fromEnv\) for \(const s of secrets\) if \(PROMPT_ONLY\.includes\(s\)\) throw new Error\(/, 'the PROMPT_ONLY refusal under --from-env');
   need('run-with-secrets.mjs', c, /if \(env\[name\] !== undefined && env\[name\] !== ''\) \{\s*throw new Error\(\x60refusing: \$\{name\} is already set in this terminal/, 'the refusal of a secret already set in the environment');
-  need('run-with-secrets.mjs', c, /for \(const name of PROMPT_ONLY\) delete childEnv\[PROMPT_PROOF_PREFIX \+ name\];/, 'the removal of any ambient prompt proof');
+  need('run-with-secrets.mjs', c, /if \(proofNames\.has\(key\.toUpperCase\(\)\) \|\| secrets\.some\(\(name\) => key\.toUpperCase\(\) === name\.toUpperCase\(\)\)\) delete childEnv\[key\];/, 'the case-insensitive removal of any ambient prompt proof (and other spellings of a prompted secret name)');
   need('run-with-secrets.mjs', c, /if \(PROMPT_ONLY\.includes\(name\)\) childEnv\[PROMPT_PROOF_PREFIX \+ name\] = promptProof\(value\);/, 'the prompt proof handed to the child for a prompted PROMPT_ONLY secret');
   const proofOf = (src) => (src.match(/update\(\x60(tnbs-prompt-proof:\$\{value\})\x60\)/) ?? [])[1];
   if (!mod || proofOf(wrapper) === undefined || proofOf(wrapper) !== proofOf(mod)) failures.push('the prompt proof formula must be identical in run-with-secrets.mjs and first-manager-bootstrap.ts');

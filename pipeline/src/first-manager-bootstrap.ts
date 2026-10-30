@@ -122,9 +122,27 @@ export interface RosterFacts {
   bootstrap_events: number;
 }
 
+/**
+ * Every internal.* function the app's sign-in store (app/server/db/pg-auth-store.ts) calls, as a regprocedure signature.
+ * Readiness requires all of them; a test reads pg-auth-store.ts and fails when the app calls one that is not listed here.
+ */
+export const SIGN_IN_FUNCTION_SIGNATURES: readonly string[] = [
+  'internal.auth_bucket_hit(text,text,text)',
+  'internal.auth_mint_lock(text,timestamptz,timestamptz)',
+  'internal.auth_mint_insert(uuid,text,text,uuid)',
+  'internal.auth_link_record_send(uuid,text,text,text)',
+  'internal.auth_link_check(text)',
+  'internal.auth_link_redeem(text,text)',
+  'internal.auth_session_info()',
+  'internal.auth_session_touch()',
+  'internal.auth_session_revoke()',
+  'internal.auth_apply_send_evidence(text,uuid,text,text,text,text,text,boolean,timestamptz)',
+];
+const SIGN_IN_FUNCTIONS_SQL = SIGN_IN_FUNCTION_SIGNATURES.map((sig) => `to_regprocedure('${sig}') is not null`).join(' and ');
+
 const SCHEMA_SQL = `select
   (to_regclass('internal.roster_lock') is not null and to_regclass('internal.auth_events') is not null and to_regclass('internal.blocked_email_addresses') is not null and to_regclass('internal.app_sessions') is not null and to_regclass('internal.signin_links') is not null and to_regclass('public.profiles') is not null) as m1_tables,
-  (to_regprocedure('internal.auth_mint_lock(text,timestamptz,timestamptz)') is not null and to_regprocedure('internal.auth_mint_insert(uuid,text,text,uuid)') is not null and to_regprocedure('internal.auth_link_check(text)') is not null and to_regprocedure('internal.auth_link_redeem(text,text)') is not null and to_regprocedure('internal.auth_session_info()') is not null) as m1_sign_in_functions,
+  (${SIGN_IN_FUNCTIONS_SQL}) as m1_sign_in_functions,
   (to_regprocedure('public.team_add_person(text,text,public.user_role,text)') is not null) as m1b_function,
   exists (select 1 from pg_constraint where conname = 'profiles_id_fkey' and conrelid = to_regclass('public.profiles')) as account_link_present`;
 

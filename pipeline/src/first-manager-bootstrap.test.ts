@@ -4,11 +4,12 @@
 
 import assert from 'node:assert/strict';
 import { spawnSync } from 'node:child_process';
+import { readFileSync } from 'node:fs';
 import { resolve } from 'node:path';
 import { pathToFileURL } from 'node:url';
 import {
   FIRST_MANAGER_ACTIONS, FIRST_MANAGER_CHECK_CONFIRMATION, FIRST_MANAGER_CHECK_IDS, FIRST_MANAGER_CREATE_CONFIRMATION, FIRST_MANAGER_EMAIL, FIRST_MANAGER_NAME, FIRST_MANAGER_STATES,
-  PRODUCTION_PROMPT_PROOF_VARIABLE, assessFirstManagerPre, executeFirstManagerPlan, firstManagerState, planFirstManager, promptProof, selectFirstManagerDbUrl,
+  PRODUCTION_PROMPT_PROOF_VARIABLE, SIGN_IN_FUNCTION_SIGNATURES, assessFirstManagerPre, executeFirstManagerPlan, firstManagerState, planFirstManager, promptProof, selectFirstManagerDbUrl,
   type FirstManagerPlan, type RosterFacts, type SchemaFacts,
 } from './first-manager-bootstrap.js';
 import { validateA3Urls } from './first-manager-a3-urls.js';
@@ -58,6 +59,17 @@ check('each target reads its own variable; the other one present is a mixed envi
   && refusalOf(() => selectFirstManagerDbUrl('staging', { PRODUCTION_DB_URL: 'p', STAGING_DB_URL: 's' })) === 'plan_refused');
 check('a staging run never reads the production variable', (() => { try { selectFirstManagerDbUrl('staging', { PRODUCTION_DB_URL: 'p' }); return false; } catch (e) { return e instanceof RunnerRefusal && e.id === 'plan_refused'; } })());
 check('the address is a constant, not an input', FIRST_MANAGER_EMAIL === 'hunter@twistednail.com' && FIRST_MANAGER_NAME === 'Hunter Kosar' && FIRST_MANAGER_EMAIL === FIRST_MANAGER_EMAIL.toLowerCase());
+
+// Readiness must require every internal.* function the app's sign-in store calls (derived from the source, so a new call that readiness does not require fails here).
+{
+  const source = readFileSync(resolve(REPOSITORY_ROOT, 'app/server/db/pg-auth-store.ts'), 'utf8');
+  const calls = [...source.matchAll(/internal\.(\w+)\(([^)]*)\)/g)].map((m) => ({ name: m[1]!, args: m[2]!.trim() === '' ? 0 : m[2]!.split(',').length }));
+  const listed = SIGN_IN_FUNCTION_SIGNATURES.map((sig) => { const m = /^internal\.(\w+)\((.*)\)$/.exec(sig)!; return { name: m[1]!, args: m[2] === '' ? 0 : m[2]!.split(',').length }; });
+  const missing = calls.filter((c) => !listed.some((l) => l.name === c.name && l.args === c.args)).map((c) => c.name);
+  check('the app sign-in store is parsed (it calls the ten sign-in functions)', new Set(calls.map((c) => c.name)).size === 10);
+  check(`readiness requires every internal.* function pg-auth-store.ts calls, with the same number of arguments${missing.length ? ` (missing: ${missing.join(', ')})` : ''}`, missing.length === 0);
+  check('readiness lists nothing the sign-in store does not call', listed.every((l) => calls.some((c) => c.name === l.name)));
+}
 
 // ---------------------------------------------------------------------------------------------------------------
 // Fake client: models the rows the tool reads, keyed on the statements it sends
@@ -172,6 +184,10 @@ async function main(): Promise<void> {
       const { events, error } = await run(create(), f);
       check(`schema not ready (${name}): refused before any lock or write`, error instanceof RunnerRefusal && error.id === 'first_manager_refused' && events.some((e) => e.check === id && e.ok === false) && !f.sent.some((s) => /roster_lock for update|lock table/.test(s)) && writesOf(f.sent).length === 0 && result(events) === 'rolled_back');
     }
+    const ready = fakeClient(READY_SCHEMA, EMPTY);
+    await run(create(), ready);
+    const schemaSql = ready.sent.find((s) => s.includes("to_regclass('internal.roster_lock')")) ?? '';
+    check('the schema query asks for every listed sign-in function signature', SIGN_IN_FUNCTION_SIGNATURES.every((sig) => schemaSql.includes(`to_regprocedure('${sig}') is not null`)));
   }
   {
     // The unlocked read said one row, but the locked SELECT returns none or two: the run refuses before the profiles lock or any write.
