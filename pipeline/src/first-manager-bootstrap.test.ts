@@ -19,6 +19,7 @@ import { main as runnerMain, parseFirstManagerArgs } from './first-manager-runne
 import { DRIVER_CODES, REFUSAL_IDS, RunnerRefusal, classifyRunnerFailure } from './refusals.js';
 import { REPOSITORY_ROOT, type RebuiltSqlClient } from './staging-rebuilt.js';
 import { RECORDED_PROJECT_REFS } from './target-guard.js';
+import { testFirstManagerFailures } from './first-manager-failure.test.js';
 
 const STAGING_REF = 'abcdefghijklmnopqrst';
 const OTHER_REF = 'tsrqponmlkjihgfedcba';
@@ -398,7 +399,8 @@ async function main(): Promise<void> {
     check('dropped connection: the failure classifies to a fixed identifier with no driver text', !JSON.stringify(classifyRunnerFailure(thrown)).includes('10.20.30.40'));
   }
 
-  console.log(`first-manager bootstrap offline tests: ${passed} passed`);
+  await testFirstManagerFailures();
+  console.log(`first-manager bootstrap offline tests: ${passed} passed (plus 8 failure executable/wrapper regressions)`);
 }
 
 main().catch((e) => { console.error(e); process.exitCode = 1; });

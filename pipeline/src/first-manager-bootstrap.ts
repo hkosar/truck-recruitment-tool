@@ -258,6 +258,14 @@ export async function runFirstManagerCheck(client: RebuiltSqlClient, target: Fir
   }
 }
 
+/** The existing unknown result event is the final report; the executable must not relabel it as refused. */
+export class FirstManagerResultUnknown extends Error {
+  constructor(cause: unknown) {
+    super('First-manager COMMIT result is unknown; do not retry', { cause });
+    this.name = 'FirstManagerResultUnknown';
+  }
+}
+
 const INSERT_SQL = `with n as (select gen_random_uuid() as id)
   insert into public.profiles (id, email, full_name, role, status, approved_by, approved_at)
   select n.id, $1, $2, 'manager', 'approved', n.id, now() from n returning id::text`;
@@ -315,11 +323,15 @@ export async function runFirstManagerCreate(client: RebuiltSqlClient, target: Fi
     reportFirstManagerAssessment('after', post);
     if (!post.ok) throw new RunnerRefusal('first_manager_refused', `first-manager refused: ${post.checks.filter((c) => !c.ok).length} postcondition(s) failed; rolled back`);
     committing = true;
-    await client.query('commit');
+    const committed = await client.query('commit');
+    if (committed.command === 'ROLLBACK') {
+      committing = false;
+      throw new RunnerRefusal('first_manager_refused', 'First-manager COMMIT returned ROLLBACK; nothing committed');
+    }
   } catch (err) {
     if (committing) {
       line({ msg: 'first-manager.result', result: 'unknown', path });
-      throw err;
+      throw new FirstManagerResultUnknown(err);
     }
     // 'rolled_back' only when the server acknowledged the ROLLBACK; otherwise no COMMIT was sent and the caller still STOPS and reads the state.
     let acknowledged = true;
@@ -333,8 +345,8 @@ export async function runFirstManagerCreate(client: RebuiltSqlClient, target: Fi
 export async function executeFirstManagerPlan(plan: FirstManagerPlan, clientFactory: (db: SupabaseDbTarget) => RebuiltSqlClient): Promise<void> {
   const client = clientFactory(plan.db);
   // A pg client with no 'error' listener turns a dropped connection into an uncaught exception. With one, the query in flight (or the next)
-  // rejects, and the catch in runFirstManagerCreate takes its existing rollback path. Fixed text only: a driver message can carry an address.
-  (client as { on?: (event: 'error', listener: () => void) => unknown }).on?.('error', () => console.error('first-manager: the database connection reported an error'));
+  // rejects, and runFirstManagerCreate reports the outcome. Keep this listener silent: only the existing fixed events pass the wrapper.
+  (client as { on?: (event: 'error', listener: () => void) => unknown }).on?.('error', () => undefined);
   await client.connect();
   try {
     if (plan.action === 'first-manager-check') await runFirstManagerCheck(client, plan.target);

@@ -1,7 +1,7 @@
 import { pathToFileURL } from 'node:url';
 import pg from 'pg';
 import { RunnerRefusal, asPlanRefusal, classifyRunnerFailure } from './refusals.js';
-import { executeFirstManagerPlan, planFirstManager, selectFirstManagerDbUrl } from './first-manager-bootstrap.js';
+import { FirstManagerResultUnknown, executeFirstManagerPlan, planFirstManager, selectFirstManagerDbUrl } from './first-manager-bootstrap.js';
 import type { RebuiltSqlClient } from './staging-rebuilt.js';
 import type { SupabaseDbTarget } from './target-guard.js';
 
@@ -54,7 +54,7 @@ export async function main(argv: readonly string[], env: Readonly<Record<string,
 const isDirectInvocation = process.argv[1] !== undefined && import.meta.url === pathToFileURL(process.argv[1]).href;
 if (isDirectInvocation) {
   main(process.argv.slice(2), process.env).catch((err: unknown) => {
-    console.error(JSON.stringify({ msg: 'first-manager.refused', ...classifyRunnerFailure(err) }));
+    if (!(err instanceof FirstManagerResultUnknown)) console.error(JSON.stringify({ msg: 'first-manager.refused', ...classifyRunnerFailure(err) }));
     process.exitCode = 1;
   });
 }

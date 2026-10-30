@@ -156,17 +156,22 @@ if (wrapper) {
   const proofOf = (src) => (src.match(/update\(\x60(tnbs-prompt-proof:\$\{value\})\x60\)/) ?? [])[1];
   if (!mod || proofOf(wrapper) === undefined || proofOf(wrapper) !== proofOf(mod)) failures.push('the prompt proof formula must be identical in run-with-secrets.mjs and first-manager-bootstrap.ts');
 }
-// A dropped connection must be a controlled failure, never an uncaught exception: the client gets an 'error' listener (fixed text) BEFORE connect(),
+// A dropped connection must be a controlled failure, never an uncaught exception: the client gets a silent 'error' listener BEFORE connect(),
 // and closing a dead connection must not replace the real failure.
 if (mod) {
   const c = code(mod);
   const iFactory = c.indexOf('const client = clientFactory(plan.db);'); const iOn = c.indexOf(".on?.('error'", iFactory); const iConnect = c.indexOf('await client.connect();', iFactory);
   if (iFactory < 0 || iOn < 0 || iConnect < 0 || !(iFactory < iOn && iOn < iConnect)) failures.push("first-manager-bootstrap.ts: executeFirstManagerPlan must attach client.on('error', ...) before client.connect()");
-  else if (!/\.on\?\.\('error', \(\) => console\.error\('first-manager: the database connection reported an error'\)\)/.test(c)) failures.push("first-manager-bootstrap.ts: the 'error' listener must log fixed text only (never its argument)");
+  else if (!/\.on\?\.\('error', \(\) => undefined\)/.test(c)) failures.push("first-manager-bootstrap.ts: the 'error' listener must stay silent (existing events report the failure)");
+  need('first-manager-bootstrap.ts', c, /if \(committing\) \{\s*line\(\{ msg: 'first-manager.result', result: 'unknown', path \}\);\s*throw new FirstManagerResultUnknown\(err\)/, 'unknown COMMIT reported without reclassification or retry');
+  need('first-manager-bootstrap.ts', c, /if \(committed.command === 'ROLLBACK'\) \{\s*committing = false;\s*throw new RunnerRefusal\('first_manager_refused'/, 'COMMIT command tag ROLLBACK takes the existing rollback/refusal path');
+  need('first-manager-runner.ts', code(runner ?? ''), /if \(!\(err instanceof FirstManagerResultUnknown\)\) console.error/, 'an unknown COMMIT must not also be reported as refused');
   if (!c.includes('await client.end().catch(() => undefined);') || /await client\.end\(\);/.test(c)) failures.push('first-manager-bootstrap.ts: every client.end() must be .catch(() => undefined) so a dead connection cannot replace the real failure');
 }
 if (runner && /new pg\.(Client|Pool)/.test(code(runner)) && !/\.on\(/.test(code(runner)) && !(mod && code(mod).includes(".on?.('error'"))) failures.push('first-manager-runner.ts creates a pg client with no error listener');
 const unitSrc = read('pipeline/src/first-manager-bootstrap.test.ts');
+if (!unitSrc?.includes('testFirstManagerFailures')) failures.push('first-manager-bootstrap.test.ts must run the drop-wrapper and COMMIT regressions');
+if (!read('pipeline/src/first-manager-failure.test.ts')) failures.push('missing first-manager failure regressions');
 if (unitSrc && !unitSrc.includes('dropped connection: no uncaught exception')) failures.push('first-manager-bootstrap.test.ts is missing the dropped-connection regression test');
 const a3src = read('pipeline/src/first-manager-bootstrap-a3.test.ts');
 if (a3src) {
