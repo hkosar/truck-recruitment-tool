@@ -7,7 +7,7 @@ Covers release-path plan step 14 (production sign-in cutover) and step 15 (L1, c
 **Decisions already settled:**
 - The mail provider is **SendGrid** (settled by the manager, 2026-10-30; the older "Resend" mention in the release-path plan is stale).
 - **Every secret goes through Doppler** (the source of truth since 2026-10-28). This runbook names each secret by NAME, its source and its Doppler project/config only. **No step asks Hunter to type a value into Render, GitHub or any other dashboard.** The Doppler → Render rules are in `C:\Users\hunte\.bb\BB Rules\doppler-render-playbook.md` (a sync replaces every Render setting with what Doppler holds; a restart does NOT load new settings, "Deploy latest commit" does).
-- **Doppler home for the new service (proposed here, Hunter confirms in OPEN-5):** project `truck-recruitment-tool`, config `prd`. (Doc 16 §1.9 already uses this project's `stg` config for staging runner secrets. Not verified: that a `prd` config exists in that project today.)
+- **Doppler homes (proposed here, Hunter confirms in OPEN-5):** runtime settings only in `truck-recruitment-tool` / `prd`; owner-only `PRODUCTION_DB_URL` in separate project `truck-recruitment-tool-owner` / `prd`, which must never sync to Render or any other service. (Doc 16 §1.9 uses `truck-recruitment-tool` / `stg` for staging runner secrets. Not verified: either proposed production scope exists today.)
 - **The server's maintenance mode answers 503 to everything except `/readyz` and `/healthz/db`** (`app/server/app.ts:566`; test `app/server/app.test.ts:548`). That includes sign-in, confirmation and the SendGrid webhook. There is **no operator bypass and none is invented here**. So: anything that needs the real sign-in or the webhook runs **after** maintenance is turned off (Part C). Database work for the first manager runs **before** (Part B).
 
 ---
@@ -33,7 +33,7 @@ Covers release-path plan step 14 (production sign-in cutover) and step 15 (L1, c
   npm run first-manager -- --target=production --action=first-manager-create --confirm="CREATE TNBS PRODUCTION FIRST MANAGER" --execute
   ```
   Without `--execute` either command only prints a plan and connects to nothing (doc 18 §3); with it, the check reads only. The exact wrapped form (`run-with-secrets.mjs --cwd pipeline --secret PRODUCTION_DB_URL -- node ...`) is **not written out in doc 18** — the wrapper requires the child command to start with `node` — so the manager records the exact wrapped line after review (pending review).
-- **Secret handling (decision needed, see OPEN-5):** the tool deliberately treats `PRODUCTION_DB_URL` as **prompt-only** (its wrapper refuses `--from-env` for it; doc 16 §1.9 also says production never uses the Doppler runner path). The NAME `PRODUCTION_DB_URL` is therefore *not* read from Doppler by this tool. Hunter's rule says secrets live in Doppler, so the owner-run value is to be **stored in Doppler (project `truck-recruitment-tool`, config `prd`) as the record**, and read from there by Hunter to paste into the hidden prompt. Whether the tool should instead be changed to read it from Doppler is a decision for Hunter.
+- **Secret handling (scope confirmation needed, see OPEN-5):** `PRODUCTION_DB_URL` stays **owner-only and prompt-only** (the candidate wrapper refuses `--from-env`; doc 16 §1.9 excludes production from the Doppler runner path). Source: the owner database credential approved for the separately reviewed bootstrap, obtained by Hunter from the production Supabase connection page at https://supabase.com/dashboard (not verified: exact page). Record it only in Doppler project `truck-recruitment-tool-owner`, config `prd`, at https://dashboard.doppler.com (not verified: exact project page). Hunter reads it there and supplies the hidden local prompt; the tool does not fetch it from Doppler. This project/config must have no integrations or syncs and must never be synced to Render or another service. Never store `PRODUCTION_DB_URL` in `truck-recruitment-tool/prd`, any other Render-synced config, an environment group or secret file. `DATABASE_URL` is the separate runtime login. No change to the candidate's prompt-only design is proposed here.
 - **Why needed:** without a manager profile for Hunter's email, step C1 (first manager signs in) cannot succeed, and nobody can add anyone.
 - **If skipped:** the cutover finishes with a sign-in page nobody can use.
 - **Steps:** 1. a. The manager reports the outcome of the separate review of `e31dc29`. b. If it passes, the manager merges it (a separate action, not part of this runbook) and replaces "pending review" here. c. The staging rehearsal in doc 18 §4 passes first (its own approvals).
@@ -50,13 +50,14 @@ Covers release-path plan step 14 (production sign-in cutover) and step 15 (L1, c
 - **Steps:** 1. a. The manager reconciles the latest recorded evidence with doc 16 §1.5 and shows each row as PASS (with evidence) or missing. b. Nothing is asked of Hunter.
 - **Success check:** every row 1–15 is PASS with recorded evidence.
 
-🔴 **OPEN-5 — Confirm the Doppler home for the production service** — NOT APPROVED, needs its own go
-- **What:** this draft puts every production secret and setting for the new service in Doppler project `truck-recruitment-tool`, config `prd`. **Why:** Hunter's rule: app secrets live in Doppler. **If skipped:** step A5 cannot start.
+🔴 **OPEN-5 — Confirm separate runtime and owner-only Doppler homes** — NOT APPROVED, needs its own go
+- **What:** runtime settings belong in `truck-recruitment-tool` / `prd`; owner-only `PRODUCTION_DB_URL` belongs in `truck-recruitment-tool-owner` / `prd`, never synced. **Why:** a Render sync copies the entire selected config, including any privileged bootstrap credential mistakenly stored there. **If skipped:** A5 and B8/B9 cannot start.
 - **Steps:**
-  1. a. Hunter confirms in chat: "use `truck-recruitment-tool` / `prd`" or names another project/config.
-  2. a. The operator (read-only) confirms the config exists: Doppler dashboard https://dashboard.doppler.com (not verified: exact page names) → project `truck-recruitment-tool` → Configs. b. If `prd` does not exist, the operator creates it only after a separate go.
-  3. a. Hunter also decides the `PRODUCTION_DB_URL` question in OPEN-2.
-- **Success check:** this item names the project/config and the Doppler token or login that reaches it.
+  1. a. Hunter confirms both proposed project/config names in chat, including that the owner-only scope must never sync. b. A different choice requires updating every affected step before approval.
+  2. a. At https://dashboard.doppler.com (not verified: exact page names), the operator checks project `truck-recruitment-tool` → Configs → `prd`, then project `truck-recruitment-tool-owner` → Configs → `prd`. b. Missing scopes require a separate go before creation. c. Inspect Integrations for the owner-only project: any sync or integration is a STOP; do not remove or change it under this step.
+  3. a. Hunter records the approved bootstrap credential from the production Supabase connection page (https://supabase.com/dashboard, not verified: exact page) as `PRODUCTION_DB_URL` only in `truck-recruitment-tool-owner` / `prd`, after a separate go for that secret write. b. Report names and scope only.
+- **Success check:** both scopes and the owner login that reaches them are identified; the owner-only scope has no syncs or integrations; `PRODUCTION_DB_URL` is absent from the runtime sync inventory.
+- **Go-gate:** Hunter confirms the two scopes; each missing-scope creation or owner-secret write needs its own explicit go before it happens.
 
 ---
 
@@ -123,7 +124,7 @@ Order at a glance: **Part A** (prepare, nothing user-facing) → **Part B** (mai
   VITE_MAPS_PROVIDER=google
   ```
   b. `TRUSTED_PROXY_HOPS` is `0` only until the T-IP test on staging produces the real number; replace it with that number before B15 (doc 16 §2.3). c. `NODE_VERSION`: confirm an installed 22.x at least 22.12 (the app needs `>=22.12.0`; not verified).
-  3. a. Create these **secret** names now, with the value left empty for the moment (each is filled by the step named, not here): `APP_ORIGIN` (A6), `DATABASE_URL` (B5), `KEY_LINKS`, `KEY_SESSIONS`, `KEY_RATE` (step 4 below), `SENDGRID_API_KEY`, `SENDGRID_FROM_ADDRESS`, `SENDGRID_FROM_NAME`, `SENDGRID_WEBHOOK_VERIFICATION_KEY` (A9), `VITE_GOOGLE_MAPS_API_KEY`, `VITE_GOOGLE_MAPS_MAP_ID` (A8). Do **not** create `DB_ACQUIRE_TIMEOUT_MS` (leave it unset; an empty string is not the same as unset). Do **not** create `PORT` (Render supplies it) or `STAGING_BANNER` (staging only).
+  3. a. Create these **secret** names now, with the value left empty for the moment (each is filled by the step named, not here): `APP_ORIGIN` (A6), `DATABASE_URL` (B5), `KEY_LINKS`, `KEY_SESSIONS`, `KEY_RATE` (step 4 below), `SENDGRID_API_KEY`, `SENDGRID_FROM_ADDRESS`, `SENDGRID_FROM_NAME`, `SENDGRID_WEBHOOK_VERIFICATION_KEY` (A9), `VITE_GOOGLE_MAPS_API_KEY`, `VITE_GOOGLE_MAPS_MAP_ID` (A8). Do **not** create `DB_ACQUIRE_TIMEOUT_MS` (leave it unset; an empty string is not the same as unset). Do **not** create `PORT` (Render supplies it) or `STAGING_BANNER` (staging only). `PRODUCTION_DB_URL` and `TEMP_RENDER_API_KEY` are forbidden in this runtime config; neither is an app runtime setting.
   4. a. Make the three app keys (`KEY_LINKS`, `KEY_SESSIONS`, `KEY_RATE`): three different 32-byte random values, base64url, at least 43 characters (`app/server/config.ts`; doc 16 §2.3). b. In a **Windows PowerShell** window, paste this block (not run by the author), which puts one key on the clipboard and prints nothing:
   ```
   $b = New-Object byte[] 32; [System.Security.Cryptography.RandomNumberGenerator]::Create().GetBytes($b); Set-Clipboard -Value ([Convert]::ToBase64String($b).TrimEnd('=').Replace('+','-').Replace('/','_'))
@@ -167,6 +168,17 @@ Order at a glance: **Part A** (prepare, nothing user-facing) → **Part B** (mai
 - **Success check:** the read-back value is 60. If it is not returned, **stop** (doc 16 §2.2). Both the key and its Doppler copy are deleted.
 - **Go-gate:** A6 done; Hunter says "go for A7".
 - **Source:** doc 16 §2.2; playbook (TEMP_RENDER_API_KEY).
+
+🔴 **A7R — Separate reader-key copy for sync checks and deployment monitoring** — NOT APPROVED, needs its own go
+- **What:** after A7 deletes its write-capable key and Doppler copy, place a separately approved reader-key copy named `TEMP_RENDER_API_KEY` in Doppler `truck-recruitment-tool` / `dev`. Source: existing `TEMP_RENDER_API_KEY` in `carrieronboardingbot` / `dev`, per the playbook. **Why:** the local inspect, verify and deploy-watch helpers require this exact target project's `dev` name; A7's revoked key cannot serve them. **If skipped:** B6, B7, B15 and BO1 cannot use those helpers.
+- **Who:** Hunter approves the lifecycle; the operator performs only the reviewed secret-safe copy after approval.
+- **Steps:**
+  1. a. At https://dashboard.doppler.com (not verified: exact pages), identify source project `carrieronboardingbot` → config `dev` → `TEMP_RENDER_API_KEY` and destination project `truck-recruitment-tool` → config `dev`. b. At https://dashboard.render.com → Account Settings → API Keys (not verified: exact names), confirm with Hunter the source reader key is valid and suitable for the connection and read-only helpers, without showing its value. If not confirmed, **stop**; do not recreate or silently reuse A7's key.
+  2. a. The manager supplies a reviewed copy procedure that moves the secret between those Doppler scopes without printing, logging or writing its value to a file. **GAP: the exact copy command is not recorded here; stop until it is supplied and reviewed.** Paste box: *(manager must add the reviewed secret-safe procedure before requesting go)*. b. Copy only after the separate go; never put it in `prd`, Render's Environment page or chat.
+  3. a. Keep the target `dev` copy available through B6 connection/verification, B7, B15 and any BO1 monitoring, until the backout window is closed or the approved backout is complete. b. Final removal is K1, with its own go. The shared source reader key and the Render integration's connection credential remain in use; this runbook does not revoke them.
+- **Success check:** source and target secret names/scopes and reader-key validity are confirmed without values; A7's write key is gone; the target reader copy remains available for all later helpers.
+- **Go-gate:** A7 cleanup verified; exact secret-safe copy procedure reviewed; reader-key scope/validity and retention through backout approved; Hunter says "go for A7R".
+- **Source:** playbook prerequisite and step 4; local `deploy-watch.js` line 5 reads the target project's `dev` config.
 
 🔴 **A8 — Google Maps referrer for the production origin** — NOT APPROVED, needs its own go
 - **What:** add the production origin to the browser key's allowed referrers, and record the two Maps values in Doppler. **If skipped:** maps fail closed; nothing else depends on it (doc 16 §2.4).
@@ -249,12 +261,12 @@ Length of the period = the work below + **W** (A4). Pick the date with Hunter; g
 - **What:** link Doppler `truck-recruitment-tool` / `prd` to the Render service `tnbs-recruiter-prod`. **Why:** Render gets its settings from Doppler. A sync **replaces every Render setting with what Doppler holds** (playbook), which is safe here only because A6 left the service with no variables and Doppler `prd` is now complete. **If skipped:** the deploy has no settings. **Hunter's rule:** never edit these settings in Render directly.
 - **Who:** the operator for the read-only checks; Hunter for the connect.
 - **Steps:**
-  1. **Check Doppler is complete (read-only).** a. Operator: confirm every secret name listed in A5 now has a value (names only, never values). b. Confirm `MAINTENANCE_MODE` is `true`. c. If anything is empty: **stop**.
+  1. **Check Doppler is complete (read-only).** a. Operator: confirm every secret name listed in A5 now has a value (names only, never values). b. Confirm `MAINTENANCE_MODE` is `true`. c. Compare the complete `truck-recruitment-tool/prd` name inventory with A5's runtime-only list: `PRODUCTION_DB_URL`, `TEMP_RENDER_API_KEY` or any unapproved extra name is a **STOP**, even if nonempty. d. Confirm owner-only `truck-recruitment-tool-owner/prd` has no syncs or integrations and is not the selected source. e. If anything is empty or either isolation check fails: **stop**; correct the draft/inventory under separate approval before connecting.
   2. **Inspect Render (read-only).** a. Operator: `node "C:\Users\hunte\.bb\BB Rules\doppler-tools\render-to-doppler.js" inspect truck-recruitment-tool tnbs-recruiter-prod` (playbook step 1). b. Expect **no** variables, no env groups, no secret files. If any exist: **stop** and plan them separately.
-  3. **Connect (Hunter).** a. Open https://dashboard.doppler.com (not verified) → Integrations → Render → (+). b. Project `truck-recruitment-tool`, Config `prd`, choose the non-"By project & environment" service selection, service `tnbs-recruiter-prod`, **Redeploy = No**. c. Take a screenshot and give it to the manager. d. Create Sync. (First time in this project, Doppler asks for a Render connection: Name `Render`, key = the reader key; the playbook says it is the project's dev `TEMP_RENDER_API_KEY` copy — not verified for this project.)
+  3. **Connect (Hunter).** a. Open https://dashboard.doppler.com (not verified) → Integrations → Render → (+). b. Project `truck-recruitment-tool`, Config `prd`, choose the non-"By project & environment" service selection, service `tnbs-recruiter-prod`, **Redeploy = No**. c. Take a screenshot of the selection only, with no credential fields visible, and give it to the manager. d. Create Sync. If Doppler asks for a first-time Render connection, Name `Render`; its reader credential source is `TEMP_RENDER_API_KEY` in Doppler `truck-recruitment-tool/dev`, copied separately from `carrieronboardingbot/dev` under A7R. Use only the reviewed secret-safe connection procedure in Doppler Integrations; **GAP: manager must record that procedure before requesting go**, without values in chat, files or other dashboards. Never use A7's revoked write key or the owner-only bootstrap config.
   4. **Verify (read-only).** a. Operator: `node "C:\Users\hunte\.bb\BB Rules\doppler-tools\render-to-doppler.js" verify truck-recruitment-tool tnbs-recruiter-prod`. b. Expect 0 missing, 0 different; Render gains only `DOPPLER_CONFIG`, `DOPPLER_ENVIRONMENT`, `DOPPLER_PROJECT`.
 - **Success check:** step 4 reports 0 missing and 0 different.
-- **Go-gate:** B5 done and Doppler `prd` complete; Hunter says "go for B6".
+- **Go-gate:** B5 and A7R done; the reader copy in `truck-recruitment-tool/dev` is valid; runtime-only inventory and owner isolation checks passed; exact first-time connection procedure reviewed if needed; Doppler `prd` complete; Hunter says "go for B6".
 - **Source:** playbook steps 1, 4, 5; Hunter's rule on Doppler → Render.
 
 🔴 **B7 — Deploy the reviewed commit (Render waits for `/readyz`)** — NOT APPROVED, needs its own go
@@ -263,35 +275,48 @@ Length of the period = the work below + **W** (A4). Pick the date with Hunter; g
 - **Steps:**
   1. a. Open https://dashboard.render.com (not verified) → `tnbs-recruiter-prod` → resume (not verified: exact button name). b. Manual Deploy → **Deploy latest commit** (Restart does NOT load new settings, so do not use Restart; the commit is the one the manager names; auto-deploy is off). c. Operator: `node "C:\Users\hunte\.bb\BB Rules\doppler-tools\deploy-watch.js" truck-recruitment-tool tnbs-recruiter-prod`. d. The deploy becomes live only when `/readyz` answers 200.
 - **Success check:** the deploy shows live; a visit to the service address shows the plain text "Back shortly." (maintenance). If `/readyz` never answers 200 within the time Render allows (doc 16 says 15 minutes, inherited and not re-verified), Render cancels the deploy. **This is the first deploy of a new service, so there is no older running instance to keep serving**; the live site stays the recorded pre-cutover static frontend (B1). Stop and tell the manager.
-- **Go-gate:** B6 done; Hunter says "go for B7".
+- **Go-gate:** B6 done; A7R reader copy `TEMP_RENDER_API_KEY` remains valid in Doppler `truck-recruitment-tool/dev` for the watcher; Hunter says "go for B7".
 - **Source:** doc 16 §3.2 step 3, §2.5; `app/server/app.ts:562`; playbook step 6.
 
 🔴 **B8 — First manager: read-only check (maintenance still on)** — NOT APPROVED, needs its own go. **Tool PENDING REVIEW (OPEN-2).**
 - **What:** report whether production is ready for the first manager row. Reads only. **Why:** the first manager must exist **before** maintenance is lifted, because sign-in cannot be tested while maintenance is on. **If skipped:** the create step runs blind.
 - **Who:** the operator, with Hunter present for the hidden prompt.
 - **Steps:**
-  1. a. Preconditions: B2 and B3 committed; maintenance on. b. Operator runs the tool from branch `signin/first-manager-bootstrap` @ `e31dc29` (pending review), through `scripts/run-with-secrets.mjs` with the secret `PRODUCTION_DB_URL`:
+  1. a. Confirm B2 and B3 committed and maintenance remains on. b. Open https://dashboard.doppler.com (not verified: exact project page) → project `truck-recruitment-tool-owner` → config `prd` → `PRODUCTION_DB_URL`. Source: Hunter's owner bootstrap database credential from the approved production Supabase connection page (https://supabase.com/dashboard, not verified: exact page). Confirm this owner-only scope has no syncs or integrations. c. Operator uses the reviewed and merged first-manager tool (candidate branch `signin/first-manager-bootstrap` @ `e31dc29`, pending review), through `scripts/run-with-secrets.mjs` with a hidden prompt for `PRODUCTION_DB_URL`. Candidate child command, **not a complete wrapped invocation**:
   ```
   npm run first-manager -- --target=production --action=first-manager-check --confirm="RUN TNBS FIRST MANAGER CHECK" --execute
   ```
-  c. Hunter pastes `PRODUCTION_DB_URL` into the hidden prompt (value read from Doppler `truck-recruitment-tool` / `prd`, per OPEN-2; never into chat). d. Optional first: the same command **without** `--execute` prints the plan only and connects to nothing.
+  d. **GAP: the manager must add the exact reviewed wrapper line with a `node` child before requesting go; do not run the bare npm line above as though it were wrapped.** e. Hunter supplies `PRODUCTION_DB_URL` from `truck-recruitment-tool-owner/prd` only to the hidden local prompt; never to an environment variable, Render, chat or a file.
 - **Success check:** the printed state is `ready_to_create` or `ready_to_promote`. Any other state (`manager_exists`, `already_bootstrapped`, `address_blocked`, `address_on_roster`, `schema_not_ready`) → **stop** and tell Hunter.
-- **Go-gate:** OPEN-2 resolved; Hunter says "go for B8".
+- **Go-gate:** OPEN-2 review, merge and staging rehearsal passed; exact hidden-prompt wrapper line supplied and reviewed; OPEN-5 owner-only isolation verified; B2/B3 committed and maintenance on; Hunter says "go for B8". Pending review means STOP, no go requested.
 - **Source:** doc 18 §3, §4 (branch `signin/first-manager-bootstrap` @ `e31dc29`, pending review).
 
 🔴 **B9 — First manager: create (maintenance still on)** — NOT APPROVED, needs its own go. **Tool PENDING REVIEW (OPEN-2).**
-- **What:** insert (or promote) the one `public.profiles` row for Hunter's email as an approved Manager, with one audit row. No Auth user, no password, no email. **If skipped:** nobody can sign in or add anyone after opening.
+- **What:** insert (or promote) the one `public.profiles` row for Hunter's email as an approved Manager, with one audit row. No Auth user, no password, no email. **Why:** the first manager must exist in the database before real sign-in can be tested after maintenance ends. **If skipped:** nobody can sign in or add anyone after opening.
 - **Who:** the operator, with Hunter present for the hidden prompt.
 - **Steps:**
-  1. a. Operator runs, through `scripts/run-with-secrets.mjs` with the secret `PRODUCTION_DB_URL` (pending review):
+  1. a. Confirm B8 reported `ready_to_create` or `ready_to_promote` and maintenance is still on. b. Open https://dashboard.doppler.com (not verified: exact project page) → project `truck-recruitment-tool-owner` → config `prd` → `PRODUCTION_DB_URL`; confirm no syncs or integrations. Source: Hunter's approved owner bootstrap database credential from the production Supabase connection page (https://supabase.com/dashboard, not verified: exact page). c. Operator uses the reviewed and merged first-manager tool through `scripts/run-with-secrets.mjs` with a hidden local prompt. Candidate child command (pending review), **not a complete wrapped invocation**:
   ```
   npm run first-manager -- --target=production --action=first-manager-create --confirm="CREATE TNBS PRODUCTION FIRST MANAGER" --execute
   ```
-  b. Hunter pastes `PRODUCTION_DB_URL` into the hidden prompt. c. The tool is single-use; if it fails, **do not retry**. After a failure or an unknown result, run B8 again and stop.
-  2. a. Same day, run the B8 command again (the check is read-only).
-- **Success check:** result `committed` with all "after" checks ok; the follow-up check prints `manager_exists`.
-- **Go-gate:** B8 showed `ready_to_create` or `ready_to_promote`; Hunter says "go for B9".
+  d. **GAP: the exact reviewed wrapper line with a `node` child must be recorded before requesting go.** e. Hunter supplies `PRODUCTION_DB_URL` from `truck-recruitment-tool-owner/prd` only to the hidden prompt; never to Render, an environment variable, chat or a file. f. The tool is single-use. After any failure or unknown result, **stop**, tell the manager, and do not retry or run another check under this approval.
+- **Success check:** result `committed` with all "after" checks ok. Existence is independently checked in B9V under its own go; B9 alone does not authorize opening sign-in.
+- **Go-gate:** OPEN-2 review, merge and staging rehearsal passed; exact hidden-prompt wrapper line supplied and reviewed; owner-only isolation verified; B8 showed `ready_to_create` or `ready_to_promote`; maintenance on; Hunter says "go for B9". Pending review means STOP, no go requested.
 - **Source:** doc 18 §3, §4 (pending review).
+
+🔴 **B9V — First manager: independent follow-up check** — NOT APPROVED, needs its own go. **Tool PENDING REVIEW.**
+- **What:** read the roster after the create attempt, without creating, promoting or sending anything. **Why:** a create result alone does not prove the manager exists; an unknown result must not cause a blind retry. **If skipped:** B15 and C1 remain blocked.
+- **Who:** the operator, with Hunter supplying the hidden prompt.
+- **Steps:**
+  1. a. Keep maintenance on. b. Open https://dashboard.doppler.com (not verified: exact project page) → project `truck-recruitment-tool-owner` → config `prd` → `PRODUCTION_DB_URL`. Source: Hunter's approved owner bootstrap database credential from the production Supabase connection page (https://supabase.com/dashboard, not verified: exact page). Confirm this scope has no syncs or integrations.
+  2. a. Use the reviewed and merged first-manager tool through `scripts/run-with-secrets.mjs` with its hidden local prompt. Candidate child command (pending review), **not a complete wrapped invocation**:
+  ```
+  npm run first-manager -- --target=production --action=first-manager-check --confirm="RUN TNBS FIRST MANAGER CHECK" --execute
+  ```
+  b. **GAP: manager must supply the exact reviewed wrapper line with a `node` child before requesting go.** c. Hunter supplies `PRODUCTION_DB_URL` from `truck-recruitment-tool-owner/prd` only to that hidden prompt; never to an environment variable, Render, chat or a file. d. Record the state only, no personal data.
+- **Success check:** `manager_exists` after a confirmed successful create. Any other state or any unknown/failed B9 result is a STOP for the manager's investigation; a negative check never authorizes another create.
+- **Go-gate:** OPEN-2 review, merge and staging rehearsal passed; exact hidden-prompt wrapper line supplied and reviewed; owner isolation verified; B9 result recorded (including any unknown result); maintenance on; Hunter says "go for B9V". Pending review means STOP, no go requested.
+- **Source:** doc 18 §3, §4 (branch `signin/first-manager-bootstrap` @ `e31dc29`, pending review).
 
 🔴 **B10 — Backout window on (`window-on`) and verify** — NOT APPROVED, needs its own go (approval 18)
 - **What:** pause email edits during the window. Done **before** maintenance is turned off. **If skipped:** the backout's identity check (`profiles.email = auth.users.email`) can fail.
@@ -362,7 +387,7 @@ Length of the period = the work below + **W** (A4). Pick the date with Hunter; g
   1. a. Open https://dashboard.doppler.com (not verified) → project `truck-recruitment-tool` → config `prd` → `MAINTENANCE_MODE` → set `false` → save. b. Confirm `TRUSTED_PROXY_HOPS` is the number the T-IP test gave (A5 step 2b). Do not edit anything in Render.
   2. a. Open https://dashboard.render.com (not verified) → `tnbs-recruiter-prod` → Manual Deploy → **Deploy latest commit**. (A Restart does NOT load new settings.) b. Operator: `node "C:\Users\hunte\.bb\BB Rules\doppler-tools\deploy-watch.js" truck-recruitment-tool tnbs-recruiter-prod`.
 - **Success check:** the deploy shows live; `https://<APP_ORIGIN>/signin` loads the sign-in page for an outside visitor (it returned 503 "Back shortly." before).
-- **Go-gate:** B10, B13, B14 passed and the first manager exists (B9); Hunter says "go for B15".
+- **Go-gate:** B10, B13, B14 passed; B9 committed and B9V confirmed `manager_exists`; A7R reader copy `TEMP_RENDER_API_KEY` remains valid in Doppler `truck-recruitment-tool/dev` for the watcher; Hunter says "go for B15".
 - **Source:** doc 16 §3.2 step 3; playbook step 6.
 
 ##### Part C — after opening (each its own go)
@@ -388,13 +413,16 @@ Length of the period = the work below + **W** (A4). Pick the date with Hunter; g
 - **Source:** doc 16 §7 (C); `app/server/app.ts:566`.
 
 🔴 **C3 — Retention wired on the pipeline (approval 23)** — NOT APPROVED, needs its own go. Never in the same sitting as the cutover.
-- **What:** add the retention database login to the production pipeline service. **If skipped:** retention does not run.
+- **What:** add `MAINTENANCE_DATABASE_URL` for the `recruiter_maintenance` database login to Doppler project `pipeline`, config `prd`, which supplies the production pipeline cron. **Why:** retention needs its own database login. **If skipped:** retention is not enabled or proven; do not claim it runs.
 - **Who:** Hunter, with the operator.
 - **Steps:**
-  1. a. Add the secret `MAINTENANCE_DATABASE_URL` (user `recruiter_maintenance`) in Doppler for the **production pipeline service's** project/config (not verified: which one; the Render pipeline service is in the Doppler-connected list). b. Click Render's **Deploy latest commit** for that service only if it is a web service; for the pipeline cron there is no "Deploy latest commit" and the playbook says not to click Trigger Run just to apply settings (not verified: how the cron picks the change up). c. Read back that `PIPELINE_COMMAND` and the existing secrets are unchanged (names only).
-- **Success check:** `PIPELINE_COMMAND` and all existing names unchanged; `MAINTENANCE_DATABASE_URL` present.
-- **Go-gate:** Hunter says "go for C3" in a later sitting (approval 23).
-- **Source:** doc 16 §4 step 4; playbook.
+  1. a. **STOP before requesting go:** the manager must document and review how the cron loads the synced setting, the exact activation action or next scheduled-run rule, its UTC date/time, and the read-only evidence that will prove retention ran using the new setting. **GAP: cron activation is unresolved.** Paste box: *(manager must add the reviewed activation and evidence procedure here; no action is authorized while absent)*. b. At https://dashboard.render.com (not verified: exact service page), confirm `pipeline` is the cron and identify its schedule without changing it. A cron has no **Deploy latest commit**; do not use **Trigger Run** just to load settings. No web-service branch applies.
+  2. a. Source for `MAINTENANCE_DATABASE_URL`: Hunter's approved `recruiter_maintenance` production connection credential, prepared via the still-undecided OPEN-1 production SQL route; no credential-creation command is supplied here. If unavailable, **stop**. b. Open https://dashboard.doppler.com (not verified: exact project page) → project `pipeline` → config `prd`. c. Record existing names and `PIPELINE_COMMAND` without printing secret values; confirm the existing Render sync targets the pipeline cron. Do not create or reconnect a sync under this step.
+  3. a. Only after the separate go, add `MAINTENANCE_DATABASE_URL` in Doppler `pipeline/prd` from that approved source. Never type its value into Render or another dashboard. b. Read back names and confirm `PIPELINE_COMMAND` and existing entries are unchanged, without displaying secret values.
+  4. a. Follow the activation/evidence procedure recorded in step 1 only if it is covered by Hunter's explicit C3 go; any additional run or change requires its own go. b. Record the UTC run time and reviewed retention result, with counts only.
+- **Success check:** `MAINTENANCE_DATABASE_URL` present in `pipeline/prd`; existing names, entries and `PIPELINE_COMMAND` unchanged; recorded cron evidence proves the approved activation loaded the setting and retention succeeded. Merely saving the secret is not activation proof.
+- **Go-gate:** C1/C2 passed; later sitting; OPEN-1 credential preparation resolved and approved; `pipeline/prd` source/sync confirmed; exact cron activation, schedule and evidence procedure written and reviewed with all gaps resolved; Hunter says "go for C3" (approval 23). Until then STOP; do not request this go or edit `pipeline/prd`.
+- **Source:** doc 16 §4 step 4; Hunter's AGENTS.md identifies `pipeline/prd`; playbook says cron jobs have no Deploy latest commit and not to Trigger Run just to apply settings.
 
 🔴 **C4 — Close the backout window (approval 24)** — NOT APPROVED, needs its own go
 - **What:** `window-off`, then verify `false`, only on Hunter's word (recommended day 14). Then M2 (FK drop) is a separate decision (doc 14 §11.2 step 5). **If skipped:** email edits stay paused.
@@ -422,7 +450,7 @@ Order from doc 16 §3.3 and doc 14 §11.5. After any failure: **stop, tell the m
 - **Steps:**
   1. a. Open https://dashboard.doppler.com (not verified) → project `truck-recruitment-tool` → config `prd` → `MAINTENANCE_MODE` → `true` → save. b. Open https://dashboard.render.com (not verified) → `tnbs-recruiter-prod` → Manual Deploy → **Deploy latest commit** (Restart does not load the change). c. Operator: `node "C:\Users\hunte\.bb\BB Rules\doppler-tools\deploy-watch.js" truck-recruitment-tool tnbs-recruiter-prod`.
 - **Success check:** the service address answers "Back shortly."; `/readyz` still answers.
-- **Go-gate:** Hunter says "go for BO1".
+- **Go-gate:** reader copy `TEMP_RENDER_API_KEY` is still valid in Doppler `truck-recruitment-tool/dev` for deploy-watch; K1 has not removed it; Hunter says "go for BO1". If missing or revoked, STOP until a separate reader-key provisioning plan and go are recorded; do not use A7's revoked key.
 - **Source:** doc 16 §3.3; playbook step 6.
 
 🔴 **BO2 — `retire-app-credentials.sql` (five stages)** — NOT APPROVED, needs its own go
@@ -446,21 +474,21 @@ Order from doc 16 §3.3 and doc 14 §11.5. After any failure: **stop, tell the m
 - **Source:** doc 16 §3.3; `docs/build-plan/18-first-manager-bootstrap.md` §5 (pending review).
 
 🔴 **BO4 — `M1c-backout.sql`** — NOT APPROVED, needs its own go
-- **What:** `supabase/backout/M1c-backout.sql`. **If skipped:** M1c stays.
+- **What:** `supabase/backout/M1c-backout.sql` removes the new batch-delete function and restores the prior direct-delete grant while retaining the audit table. **Why:** restore the earlier delete interface before dismantling M1's permissions. **If skipped:** that new function and its dependency on the sign-in roles remain during the rest of backout.
 - **Steps:** 1. a. Run the file unchanged. b. Confirm it commits.
 - **Success check:** the file commits with no error.
 - **Go-gate:** BO3 done; Hunter says "go for BO4".
 - **Source:** doc 16 §3.3.
 
 🔴 **BO5 — `M1b-backout.sql`** — NOT APPROVED, needs its own go
-- **What:** `supabase/backout/M1b-backout.sql`. After it, the `profiles_id_fkey` returns **NOT VALID** (people added stay; they cannot sign in to the old app).
+- **What:** `supabase/backout/M1b-backout.sql` removes the new manager add-person function and returns `profiles_id_fkey` as **NOT VALID** (people added stay; they cannot sign in to the old app). **Why:** restore the earlier profile-to-Auth relationship without deleting added people before backing out M1. **If skipped:** the add-person function and its M1 role dependency remain, and the earlier foreign-key relationship is not restored.
 - **Steps:** 1. a. Run the file unchanged. b. Confirm it commits.
 - **Success check:** the file commits with no error.
 - **Go-gate:** BO4 done; Hunter says "go for BO5".
 - **Source:** doc 16 §3.3; doc 18 §5 (pending review).
 
 🔴 **BO6 — `M1-backout.sql`** — NOT APPROVED, needs its own go
-- **What:** `supabase/backout/M1-backout.sql`. Data is preserved (people added stay; batch-delete records stay).
+- **What:** `supabase/backout/M1-backout.sql` restores the earlier permission model, removes the new sign-in interfaces and revokes the app role's membership and grants. Data is preserved (people added stay; batch-delete records stay). **Why:** the old frontend needs its earlier database permissions when traffic returns. **If skipped:** the new session-based permission model remains, so reopening the old frontend does not complete backout and old sign-in may fail.
 - **Steps:** 1. a. Run the file unchanged. b. Confirm it commits.
 - **Success check:** the file commits with no error; compare with the A3 snapshot in BO8.
 - **Go-gate:** BO5 done; Hunter says "go for BO6".
@@ -476,7 +504,7 @@ Order from doc 16 §3.3 and doc 14 §11.5. After any failure: **stop, tell the m
 - **Source:** doc 16 §3.3; doc 14 §11.5.
 
 🔴 **BO8 — Return traffic to the recorded pre-cutover frontend, then smoke test** — NOT APPROVED, needs its own go
-- **What:** the pre-cutover static site (recorded in B1) is the live site again; compare permissions with the A3 snapshot. **Note:** the old frontend was never switched off in this runbook, so this step is "confirm it is still the live deploy"; any change of address or redirect is a separate decision not recorded in the repo (**GAP**).
+- **What:** the pre-cutover static site (recorded in B1) is the live site again; compare permissions with the A3 snapshot. **Why:** a successful SQL backout alone does not prove the old site works. **If skipped:** users may be directed to an unusable site and permission differences remain undetected. **Note:** the old frontend was never switched off in this runbook, so this step is "confirm it is still the live deploy"; any change of address or redirect is a separate decision not recorded in the repo (**GAP**).
 - **Steps:**
   1. a. Open https://dashboard.render.com (not verified) and confirm the static site's live deploy is the one written down in B1. b. Load the site and do the read-only smoke test the manager provides (**GAP: not recorded**). c. Re-run the A3 snapshot file and compare numbers with the stored output (counts only).
 - **Success check:** the live deploy matches B1; the smoke test passes; the snapshot comparison shows no difference.
@@ -491,7 +519,7 @@ Order from doc 16 §3.3 and doc 14 §11.5. After any failure: **stop, tell the m
 - **Source:** doc 16 §3.3.
 
 🔴 **BO10 — `security-hardening-backout.sql` (only if hardening itself must also go back)** — NOT APPROVED, needs its own go
-- **What:** `supabase/backout/security-hardening-backout.sql` (this branch): re-grants EXECUTE on functions in `public` and `internal` to PUBLIC and `anon` and re-adds the matching default privileges, in one transaction. Run **after** BO6. Text-checked by `scripts/verify-hardening-backout-contract.mjs`; **never executed**. It does not undo the search_path pins or the `authenticated`/`service_role` grants.
+- **What:** `supabase/backout/security-hardening-backout.sql` (this branch): re-grants EXECUTE on functions in `public` and `internal` to PUBLIC and `anon` and re-adds the matching default privileges, in one transaction. Run **after** BO6. Text-checked by `scripts/verify-hardening-backout-contract.mjs`; **never executed**. It does not undo the search_path pins or the `authenticated`/`service_role` grants. **Why:** only a separately approved rollback of July hardening needs these earlier EXECUTE grants. **If skipped when that rollback is required:** the July EXECUTE restrictions remain; ordinary M1 backout does not itself require BO10.
 - **Steps:** 1. a. Run the file unchanged, first line to last. b. Confirm it commits.
 - **Success check:** the file commits with no error.
 - **Go-gate:** BO6 done; Hunter says "go for BO10".
@@ -499,18 +527,31 @@ Order from doc 16 §3.3 and doc 14 §11.5. After any failure: **stop, tell the m
 
 Re-applying later uses `reapply-m1`, `reapply-m1b`, `reapply-m1c` (doc 16 §3.3) on staging only; **no production route is recorded (OPEN-1)**.
 
+##### Final reader-copy cleanup (after the monitoring/backout period)
+
+🔴 **K1 — Remove only the temporary reader-key copy** — NOT APPROVED, needs its own go
+- **What:** remove `TEMP_RENDER_API_KEY` only from Doppler `truck-recruitment-tool` / `dev`. Source of this copy: `TEMP_RENDER_API_KEY` in `carrieronboardingbot` / `dev`. **Why:** the temporary monitoring copy should not remain after its approved use. **If skipped:** an unnecessary reader-key copy remains in the target dev config.
+- **Who:** Hunter, with the operator checking names only.
+- **Steps:**
+  1. a. The manager records that B6/B7/B15 and any BO1 monitoring are finished. b. On the successful cutover path, record C1/C2 proof and C4's closed backout window, or Hunter's OPEN-3 decision that no window was declared plus explicit closure of the monitoring period. On the backout path, record completed BO8 smoke/snapshot proof and the disposition of BO9 and conditional BO10. c. If more deploy-watch, inspect or verify calls may be needed, **stop**; cleanup is premature.
+  2. a. Open https://dashboard.doppler.com (not verified: exact page) → project `truck-recruitment-tool` → config `dev` → `TEMP_RENDER_API_KEY`. b. After the separate go, delete only this temporary target copy. Do not delete the source in `carrieronboardingbot/dev` and do not revoke the shared reader key in Render: the Doppler Render connection may still rely on it. A7's write key was revoked and removed during A7.
+  3. a. Read the target config's names only. Confirm `TEMP_RENDER_API_KEY` is absent and record cleanup time in UTC. b. No helper requiring it runs after cleanup under these approvals; future monitoring requires a new, separately approved reader-copy lifecycle.
+- **Success check:** target dev copy absent; cleanup time recorded; source reader key and integration credential unchanged; no outstanding approved helper needs the removed copy.
+- **Go-gate:** A7R created the target copy; successful cutover monitoring/window closed or approved backout complete as recorded in step 1; no later helper needs the key; Hunter says "go for K1".
+- **Source:** playbook prerequisite (delete the copy when done); helper source requires the target project's dev copy on every invocation.
+
 ---
 
 ### Summary of Next Step
 
-Nothing runs next. Hunter and the manager read this draft and answer five questions: how production SQL will be run (OPEN-1), whether the first-manager tool passes its review (OPEN-2), whether to declare a 14-day backout window (OPEN-3), when staging proof will be finished (OPEN-4), and whether the Doppler home is `truck-recruitment-tool` / `prd` (OPEN-5). After that, the manager asks for one "go" at a time, starting with the read-only counts (A1).
+Nothing runs next. Hunter and the manager read this draft and answer five questions: how production SQL will be run (OPEN-1), whether the first-manager tool passes its review (OPEN-2), whether to declare a 14-day backout window (OPEN-3), when staging proof will be finished (OPEN-4), and whether the separate runtime and owner-only Doppler homes are confirmed (OPEN-5). After that, the manager resolves each step's gaps before asking for its individual go, starting with the read-only counts (A1). Cron retention stays blocked until C3's activation procedure is written and reviewed.
 
 ### Summary of Previous Step
 
 Verified by reading the repo (nothing was run against any live system):
 - The step order was corrected against the real router: while maintenance is on, everything except `/readyz` and `/healthz/db` returns 503 (`app/server/app.ts:566`). So the first manager is created in the database before maintenance comes off (B8, B9), the real sign-in test (C1) and the SendGrid webhook proof (C2) run after it (Part C), and the five issuance probes run before L1 (B12).
 - L1 now repeats the recount after the second sweep (B13 stage 7).
-- Secrets now go through Doppler `truck-recruitment-tool` / `prd`; Render settings come from the Doppler sync and "Deploy latest commit".
+- Runtime settings go through Doppler `truck-recruitment-tool` / `prd`; Render settings come from that config's sync and "Deploy latest commit". Owner-only `PRODUCTION_DB_URL` is isolated in proposed `truck-recruitment-tool-owner` / `prd`, never synced. A7's write key is removed immediately; the separate A7R reader copy stays in `truck-recruitment-tool/dev` through monitoring/backout and is removed only at K1.
 
 Attempts / not verified: exact Supabase, Render, SendGrid, Doppler and Google Cloud page and button names; that Doppler config `prd` exists in that project; Render price today; the production probe subset and the commands for the GAP items; the first-manager tool (read only, under separate review, not merged).
 

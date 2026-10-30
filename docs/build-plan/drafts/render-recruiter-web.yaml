@@ -86,11 +86,19 @@ services:
         value: google
       # REMOVED from this app and must NOT be set: VITE_SUPABASE_URL, VITE_SUPABASE_ANON_KEY (doc 15 section 6).
 
-# Secrets and settings (decided in runbook 17, revised 2026-10-30): EVERY value below, secret or not, lives in Doppler
+# Runtime secrets and settings only (runbook 17, revised 2026-10-30 UTC): every runtime value above lives in Doppler
 # project `truck-recruitment-tool`, config `prd` (proposed; Hunter confirms in runbook OPEN-5; not verified that the config
 # exists today). Nothing is typed into Render's own Environment page. The Render service is created with no variables; a
 # Doppler -> Render sync (Redeploy = No) is connected only after Doppler `prd` is complete, because a sync replaces every
 # Render setting with what Doppler holds (C:\Users\hunte\.bb\BB Rules\doppler-render-playbook.md). A changed value reaches
 # the server only after Render's "Deploy latest commit" (a restart does not load it). So the `value:` entries above are
 # ALSO Doppler entries. Doc 16 section 1.9 places the STAGING runner secrets in the same project, config `stg`; production
-# secrets are not read through that path.
+# bootstrap credentials are not read through that path. PRODUCTION_DB_URL is owner-only and prompt-only: its source is
+# Hunter's approved production owner database connection credential; its record belongs only in separate proposed Doppler
+# project `truck-recruitment-tool-owner`, config `prd` (OPEN-5 confirmation required). That owner-only scope must have NO
+# integrations or syncs and must NEVER sync to Render or another service. PRODUCTION_DB_URL must be absent from this
+# runtime config, Render environment groups and secret files. DATABASE_URL is the separate recruiter_app runtime login.
+# TEMP_RENDER_API_KEY is also excluded from the runtime config: A7 removes its write-key copy; A7R separately approves a
+# reader-key copy from `carrieronboardingbot/dev` into `truck-recruitment-tool/dev` for connection and monitoring through
+# backout. Only K1 removes that target reader copy after all monitoring is finished; it does not revoke the shared source
+# reader or the integration credential. B6 must compare the complete runtime name inventory before connecting the sync.
