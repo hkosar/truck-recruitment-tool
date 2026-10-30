@@ -38,6 +38,9 @@ export const REFUSAL_IDS = [
   'owner_auth_unknown_result',
   'owner_promotion_refused',
   'owner_bootstrap_target_refused',
+  'bootstrap_target_required',
+  'target_not_recorded_production',
+  'first_manager_refused',
   'server_or_driver_error',
 ] as const;
 export type RefusalId = (typeof REFUSAL_IDS)[number];

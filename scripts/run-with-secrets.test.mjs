@@ -53,7 +53,14 @@ test('arguments: only allowed secret names, only a `node` child, no duplicates, 
     ['--', 'node', 'x'],
     ['--secret', 'STAGING_DB_URL'],
   ]) assert.throws(() => parseArgs(bad), `${bad.join(' ')} must be refused`);
-  assert.deepEqual(ALLOWED, ['STAGING_DB_URL', 'SUPABASE_SERVICE_ROLE_KEY', 'TEST_USER_PASSWORD', 'OWNER_STAGING_PASSWORD']);
+  assert.deepEqual(ALLOWED, ['STAGING_DB_URL', 'SUPABASE_SERVICE_ROLE_KEY', 'TEST_USER_PASSWORD', 'OWNER_STAGING_PASSWORD', 'PRODUCTION_DB_URL']);
+});
+
+test('PRODUCTION_DB_URL is prompt-only: --from-env refuses it before anything runs, while the hidden-prompt path accepts the name', () => {
+  assert.throws(() => parseArgs(['--from-env', '--secret', 'PRODUCTION_DB_URL', '--', 'node', 'x']), /can only be entered at the hidden prompt/);
+  assert.throws(() => parseArgs(['--from-env', '--secret', 'STAGING_DB_URL', '--secret', 'PRODUCTION_DB_URL', '--', 'node', 'x']), /can only be entered at the hidden prompt/);
+  assert.deepEqual(parseArgs(['--secret', 'PRODUCTION_DB_URL', '--', 'node', 'x']).secrets, ['PRODUCTION_DB_URL']);
+  assert.equal(parseArgs(['--from-env', '--secret', 'STAGING_DB_URL', '--', 'node', 'x']).fromEnv, true);
 });
 
 test('scrub: the value, its URL-encoded form and a URL secret host, user and password are all masked', () => {
