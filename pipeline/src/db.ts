@@ -72,7 +72,7 @@ export function createPgPool(config: Config): PgPool {
   // Build from the guard's explicit fields, never from the raw string: pg would let query
   // parameters in a connection string override host/user/port (see target-guard.ts).
   const target = parseSupabaseDbTarget(config.SUPABASE_DB_URL);
-  return new Pool({
+  const pool = new Pool({
     host: target.host,
     port: target.port,
     user: target.user,
@@ -90,6 +90,11 @@ export function createPgPool(config: Config): PgPool {
     // this relaxed by default forever, just for the skeleton.
     ssl: { rejectUnauthorized: false },
   });
+  // An IDLE client whose connection drops emits 'error' on the pool; with no listener Node throws
+  // it as an uncaught exception. The pool drops that client itself. Fixed text only: a driver
+  // message can carry an address.
+  pool.on('error', () => createLogger('pg').warn('pg.idle_client_connection_error'));
+  return pool;
 }
 
 export function createPipelineContext(config: Config, scope = 'pipeline'): PipelineContext {
@@ -124,6 +129,14 @@ export async function withStagingConnection<T>(
   fn: (client: PgPoolClient) => Promise<T>
 ): Promise<T> {
   const client = await pool.connect();
+  // pg-pool removes its own error listener while a client is checked out, so one is attached here
+  // before any query: a dropped connection becomes a failed query (the run fails and exits non-zero)
+  // instead of an uncaught exception. A client that reported an error is destroyed, never reused.
+  let connectionError: Error | undefined;
+  const onError = (err: Error) => {
+    connectionError ??= err;
+  };
+  client.on('error', onError);
   try {
     await client.query('begin');
     await client.query(ddl);
@@ -134,7 +147,8 @@ export async function withStagingConnection<T>(
     await client.query('rollback').catch(() => undefined);
     throw err;
   } finally {
-    client.release();
+    client.removeListener('error', onError);
+    client.release(connectionError);
   }
 }
 

@@ -27,6 +27,8 @@ export type RetentionOutcome =
   | { status: 'failed'; reason: 'connect_or_query_error' };
 
 export interface RetentionClient extends Queryable {
+  /** pg.Client has it; the step attaches an error listener so a dropped connection is a failed query, not an uncaught exception. */
+  on?(event: 'error', listener: (err: Error) => void): unknown;
   connect(): Promise<void>;
   query(sql: string, params?: unknown[]): Promise<{ rowCount: number | null; rows?: Array<Record<string, unknown>> }>;
   end(): Promise<void>;
@@ -88,6 +90,8 @@ export async function runRetentionStep(
     host: target.host, port: target.port, user: target.user, password: target.password, database: target.database,
   });
   let connected = false;
+  // The query in flight (or the next one) rejects; the catch below reports it as the existing 'failed' outcome.
+  client.on?.('error', () => undefined);
   try {
     await client.connect();
     connected = true;

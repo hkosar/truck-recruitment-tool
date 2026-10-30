@@ -210,6 +210,14 @@ export async function applyLoad(
   pool: pg.Pool, zips: ZipRow[], cities: CityRow[], opts: ApplyOptions = {}
 ): Promise<{ zip: UpsertCounts; city: UpsertCounts; reconciledDeleted: string[] }> {
   const client = await pool.connect();
+  // A checked-out client has no pool listener: attach one before any query so a dropped connection
+  // fails this load (exit 1) instead of crashing as an uncaught exception. Such a client is destroyed.
+  let connectionError: Error | undefined;
+  let commitSent = false;
+  const onError = (err: Error) => {
+    connectionError ??= err;
+  };
+  client.on('error', onError);
   try {
     await client.query('begin');
     let reconciledDeleted: string[] = [];
@@ -235,13 +243,18 @@ export async function applyLoad(
     }
     const zip = await upsertZipCentroids(client, zips);
     const city = await upsertCityCentroids(client, cities);
+    commitSent = true;
     await client.query('commit');
     return { zip, city, reconciledDeleted };
   } catch (e) {
+    if (commitSent && connectionError) {
+      throw new Error('The connection was lost after COMMIT was sent; whether the load was saved is unknown. Check the zip and city tables before running it again.');
+    }
     await client.query('rollback').catch(() => undefined);
     throw e;
   } finally {
-    client.release();
+    client.removeListener('error', onError);
+    client.release(connectionError);
   }
 }
 
@@ -298,6 +311,8 @@ async function main(): Promise<void> {
     host: target.host, port: target.port, user: target.user, password: target.password, database: target.database,
     max: 1, ssl: { rejectUnauthorized: false },
   });
+  // An idle client's dropped connection must not crash the tool (fixed text: a driver message can carry an address).
+  pool.on('error', () => console.error('The database connection dropped while idle.'));
   try {
     console.log(JSON.stringify(await applyLoad(pool, zips.rows, cities.rows, { ambiguous: cities.ambiguous, state: args.state, reconcile: args.reconcile })));
   } finally {

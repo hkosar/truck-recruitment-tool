@@ -2,9 +2,11 @@
 
 import { readdirSync, readFileSync, statSync } from 'node:fs';
 import { join, relative, resolve } from 'node:path';
-import { describe, expect, it } from 'vitest';
-import { DB_SUITES, suiteDatabase } from './test-db';
-// claimSuiteDatabase is exercised against a real database by the A3 suites themselves.
+import { EventEmitter } from 'node:events';
+import pg from 'pg';
+import { afterEach, describe, expect, it, vi } from 'vitest';
+import { DB_SUITES, claimSuiteDatabase, suiteDatabase } from './test-db';
+// claimSuiteDatabase is exercised against a real database by the A3 suites themselves; the dropped-connection case is offline below.
 
 const serverRoot = resolve(import.meta.dirname, '..');
 const repoRoot = resolve(serverRoot, '..', '..');
@@ -67,5 +69,33 @@ describe('test-database isolation', () => {
     const builder = readFileSync(join(repoRoot, 'scripts', 'a3-build-test-db.mjs'), 'utf8');
     const literal = /const SUITES = \[([^\]]*)\];/.exec(builder)?.[1] ?? '';
     expect(literal.split(',').map((s) => s.trim().replace(/'/g, ''))).toEqual([...DB_SUITES]);
+  });
+});
+
+// A dropped connection on the claim's session must not be an uncaught exception, and it must not
+// pass silently either: the advisory lock went with the connection, so the suite fails at release.
+describe('claimSuiteDatabase: the claim connection drops', () => {
+  afterEach(() => vi.restoreAllMocks());
+  const admin = 'postgres://tr_test_admin:y@127.0.0.1:55473/tr_signin_test_m1_store';
+
+  it('is handled, not thrown, and the release then fails loudly', async () => {
+    const clients: EventEmitter[] = [];
+    vi.spyOn(pg.Client.prototype, 'connect').mockImplementation(function (this: EventEmitter) {
+      clients.push(this);
+      return Promise.resolve() as never;
+    });
+    vi.spyOn(pg.Client.prototype, 'query').mockImplementation((() => Promise.resolve({ rows: [{ ok: true }] })) as never);
+    vi.spyOn(pg.Client.prototype, 'end').mockImplementation((() => Promise.reject(new Error('dead connection'))) as never);
+    const release = await claimSuiteDatabase(admin);
+    expect(clients[0]!.listenerCount('error')).toBeGreaterThan(0);
+    expect(() => clients[0]!.emit('error', new Error('Connection terminated unexpectedly'))).not.toThrow();
+    await expect(release()).rejects.toThrow(/claim on test database tr_signin_test_m1_store was lost/);
+  });
+
+  it('a healthy claim releases quietly', async () => {
+    vi.spyOn(pg.Client.prototype, 'connect').mockImplementation((() => Promise.resolve()) as never);
+    vi.spyOn(pg.Client.prototype, 'query').mockImplementation((() => Promise.resolve({ rows: [{ ok: true }] })) as never);
+    vi.spyOn(pg.Client.prototype, 'end').mockImplementation((() => Promise.resolve()) as never);
+    await expect((await claimSuiteDatabase(admin))()).resolves.toBeUndefined();
   });
 });

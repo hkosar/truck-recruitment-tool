@@ -50,6 +50,12 @@ export function suiteDatabase(suite: DbSuite, env: Record<string, string | undef
  */
 export async function claimSuiteDatabase(adminUrl: string): Promise<() => Promise<void>> {
   const client = new pg.Client({ connectionString: adminUrl });
+  // The advisory lock lives as long as this connection. If it drops, the claim is gone: remember
+  // that (instead of an uncaught exception) and fail the suite at release.
+  let lost = false;
+  client.on('error', () => {
+    lost = true;
+  });
   await client.connect();
   const { rows } = await client.query<{ ok: boolean }>('select pg_try_advisory_lock($1) as ok', [CLAIM_KEY]);
   if (!rows[0]?.ok) {
@@ -57,6 +63,7 @@ export async function claimSuiteDatabase(adminUrl: string): Promise<() => Promis
     throw new Error(`test database ${new URL(adminUrl).pathname.slice(1)} is in use by another run; refusing to share it`);
   }
   return async () => {
-    await client.end(); // ending the session releases the advisory lock
+    await client.end().catch(() => undefined); // ending the session releases the advisory lock
+    if (lost) throw new Error(`the claim on test database ${new URL(adminUrl).pathname.slice(1)} was lost: its connection dropped during the run`);
   };
 }
