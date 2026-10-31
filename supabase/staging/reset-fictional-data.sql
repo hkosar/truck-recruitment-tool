@@ -145,6 +145,8 @@ where table_name in ('carriers', 'batches', 'cargo_other_values');
 -- reset rolls it back with the deleted rows. Never use the setval function here: its
 -- effect survives ROLLBACK, so a failed reset would leave sequences below surviving row IDs.
 -- A table that still holds rows the reset does not own keeps its sequence untouched.
+-- Only tables with an identity id column belong in the list below (carrier_qc_snapshots is keyed by
+-- dot_number: pg_get_serial_sequence on its missing id raises 42703); scripts/verify-staging-reset.mjs checks this.
 do $$
 declare
   v_table text;
@@ -152,8 +154,7 @@ declare
   v_empty boolean;
 begin
   foreach v_table in array array[
-    'public.batch_activity', 'public.contact_suppressions', 'public.carrier_inspections',
-    'public.carrier_qc_snapshots'
+    'public.batch_activity', 'public.contact_suppressions', 'public.carrier_inspections'
   ] loop
     v_sequence := pg_get_serial_sequence(v_table, 'id');
     execute format('select not exists (select 1 from %s)', v_table) into v_empty;
