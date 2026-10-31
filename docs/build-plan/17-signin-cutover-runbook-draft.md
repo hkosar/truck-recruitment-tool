@@ -1,11 +1,12 @@
 # 17 · Production sign-in cutover — owner runbook (DRAFT, revised after Codex review)
 
-**Status: DRAFT. NOTHING IN THIS FILE IS APPROVED OR HAS BEEN RUN.** First written 2026-10-30 (UTC) on branch `signin/cutover-prep`; revised 2026-10-30 (UTC) to fix the eight Codex review findings. Local only. Every step that touches a live system is marked **NOT APPROVED, needs its own go**. A "go" for one step is not a "go" for the next. Hunter's clock is US Central; times written down here are UTC.
+**Status: DRAFT. NOTHING IN THIS FILE IS APPROVED OR HAS BEEN RUN.** First written 2026-10-30 (UTC) on branch `signin/cutover-prep`; revised 2026-10-30 (UTC) to fix the eight Codex review findings; revised again 2026-10-30 (UTC) to record Hunter's OPEN-1 decision (Route A for the SQL files, Route B for the one password statement). Local only. Every step that touches a live system is marked **NOT APPROVED, needs its own go**. A "go" for one step is not a "go" for the next. Hunter's clock is US Central; times written down here are UTC.
 
 Covers release-path plan step 14 (production sign-in cutover) and step 15 (L1, closing the old Supabase sign-in credentials). Order comes from doc 14 §11.2 step 4 and doc 16 §3.2. Where the repo has **no recorded command**, the step says so and stops (marked **GAP**).
 
 **Decisions already settled:**
 - The mail provider is **SendGrid** (settled by the manager, 2026-10-30; the older "Resend" mention in the release-path plan is stale).
+- **Production SQL is run by Route A, with one exception (OPEN-1, decided by Hunter on 2026-10-30 UTC).** The SQL files go through the guarded runner `pipeline/src/prod-sql-runner.ts`. The one password statement (B5) goes through Route B, the Supabase SQL editor. See OPEN-1 below. The runner is on a different branch and is **not merged here** (GATE-1).
 - **Every secret goes through Doppler** (the source of truth since 2026-10-28). This runbook names each secret by NAME, its source and its Doppler project/config only. **No step asks Hunter to type a value into Render, GitHub or any other dashboard.** The Doppler → Render rules are in `C:\Users\hunte\.bb\BB Rules\doppler-render-playbook.md` (a sync replaces every Render setting with what Doppler holds; a restart does NOT load new settings, "Deploy latest commit" does).
 - **Doppler homes (proposed here, Hunter confirms in OPEN-5):** runtime settings only in `truck-recruitment-tool` / `prd`; owner-only `PRODUCTION_DB_URL` in separate project `truck-recruitment-tool-owner` / `prd`, which must never sync to Render or any other service. (Doc 16 §1.9 uses `truck-recruitment-tool` / `stg` for staging runner secrets. Not verified: either proposed production scope exists today.)
 - **The server's maintenance mode answers 503 to everything except `/readyz` and `/healthz/db`** (`app/server/app.ts:566`; test `app/server/app.test.ts:548`). That includes sign-in, confirmation and the SendGrid webhook. There is **no operator bypass and none is invented here**. So: anything that needs the real sign-in or the webhook runs **after** maintenance is turned off (Part C). Database work for the first manager runs **before** (Part B).
@@ -14,16 +15,20 @@ Covers release-path plan step 14 (production sign-in cutover) and step 15 (L1, c
 
 ### Pending Action
 
-**Nothing is asked of Hunter today.** This is a draft for review. Before anyone can ask for the first "go", Hunter must settle the open items below (OPEN-1 to OPEN-5). After that, the steps run in order, one "go" at a time.
+**Nothing is asked of Hunter today.** This is a draft for review. Before anyone can ask for the first "go", Hunter must settle the open items below (OPEN-2 to OPEN-5; OPEN-1 is closed) and the three runner gates (GATE-1 to GATE-3, each NOT APPROVED with its own go). After that, the steps run in order, one "go" at a time.
 
-🔴 **OPEN-1 — How production SQL gets run (no route is recorded)** — NOT APPROVED, needs its own go
-- **What:** the staging SQL runners refuse production on purpose: the original planner at `pipeline/src/staging-sql-runner.ts:67–68` (error `production_refused`) and the rebuilt-project actions at `pipeline/src/staging-rebuilt.ts:183–184`. Their actions (`snapshot`, `apply-m1`, `apply-m1b`, `apply-m1c`, `window-on`, `window-off`, `reapply-*`) are staging only. Doc 14 says "the operator runs it as `postgres`" and doc 16 §1.9 says "production steps stay owner-run", but **no document records the exact tool** for running the production SQL files.
-- **Why needed:** steps A2, A3, B2, B3, B4, B5, B10, B13 and the backout SQL steps cannot be scheduled without it.
-- **If skipped:** the cutover cannot start.
-- **Steps:**
-  1. a. Hunter tells the manager, in chat, which route to use for production SQL (for example: Hunter pastes each reviewed file into the Supabase SQL editor at https://supabase.com/dashboard (not verified: exact page) while the operator watches; or a new, separately reviewed production runner is built).
-  2. a. The manager records the answer in this file, replacing this item.
-- **Success check:** this item names one route and who runs it.
+✅ **OPEN-1 — CLOSED: how production SQL gets run.** Decided by **Hunter** on **2026-10-30 (UTC)**: "Route A for the SQL files, Route B (Supabase SQL editor) for the one password statement." **This decision approves no live step.** Every step below stays NOT APPROVED and needs its own go.
+- **Cited:** `docs/build-plan/18-production-sql-route-options.md` (doc 18, on branch `bb/route-a-round-3-termination-warning-auth-invento-thr_dj4kffsjqf`) and the Route A runner at tip `4552557` on that branch (reviewed "route-a r3: ready except staging-2 inventory capture"). The runner is **not merged into this branch**; this runbook only cites it (GATE-1).
+- **Route A (the SQL files):** the guarded runner `pipeline/src/prod-sql-runner.ts` (`npm run prod-sql` in `pipeline/`). It has one named action per approved file or stage; every action has its own exact typed phrase (`--confirm`); it connects to nothing unless `--execute` is added (plan-only is the default); it accepts the connection string only from the hidden prompt of `scripts/run-with-secrets.mjs` (`--secret PRODUCTION_DB_URL`).
+- **Route B (the one password statement, B5):** Hunter runs it in the Supabase SQL editor. **Reviewed paste box still owed.** The runner is not used for it.
+- **Secret handling:** `PRODUCTION_DB_URL` is owner-only and prompt-only, from Doppler project `truck-recruitment-tool-owner`, config `prd` (scope proposed, confirmed in OPEN-5). It is never in an environment variable, Render, chat or a file.
+- **Command form (every Route A step below uses it).** Run from the repository root after GATE-1. Wrapped form assembled from the wrapper's usage line and doc 18's staging example (not verified: the runner header gives only the `npm run prod-sql -- ...` form; this wrapped line has never been run):
+  ```
+  node scripts/run-with-secrets.mjs --cwd pipeline --secret PRODUCTION_DB_URL -- node node_modules/tsx/dist/cli.mjs src/prod-sql-runner.ts --target=production --action=<action> --confirm="<phrase>"
+  ```
+  Each step gives the action and phrase, then a **plan-only** paste box first, then the same line with `--execute` in a second box. The `--execute` box is run only after the plan output (`prod-sql.verified`, then `prod-sql.plan_only`) was read and Hunter has given that step's go.
+- **Not covered by Route A (runner refuses these as `prod_sql_action_not_built`):** `window-on` and `window-off` (B10, C4), `read-only-inventory` (A1, BO3), `security-hardening-backout` (A2 backout, BO10), `profile-bootstrap-backout` and `dnc-enum-cast-backout` (A2 backouts). The affected steps say so. Hunter's decision named only the SQL files and the password statement, so the route for the two window statements is **not decided** (not verified: see B10).
+- **Still required before any use:** GATE-1, GATE-2, GATE-3 below.
 
 🔴 **OPEN-2 — First manager on an empty roster** — NOT APPROVED, needs its own go. **Candidate tool exists; PENDING REVIEW.**
 - **What:** production had 0 Auth users and 0 profiles on 2026-10-22 (doc 15 §32; release-path plan §2 step 14; historical counts, not a live measurement). `team_add_person` (M1b) needs an existing manager (doc 15 §32), so the first manager cannot be created through the app. The candidate tool is on branch `signin/first-manager-bootstrap` @ `e31dc29` (design and runbook: its `docs/build-plan/18-first-manager-bootstrap.md`). **It is under separate review and is not merged into this branch. Until that review passes, treat everything below as "pending review".** The tool makes one `public.profiles` row (Hunter's email, role manager, status approved); it makes no Auth user and no password.
@@ -59,6 +64,35 @@ Covers release-path plan step 14 (production sign-in cutover) and step 15 (L1, c
 - **Success check:** both scopes and the owner login that reaches them are identified; the owner-only scope has no syncs or integrations; `PRODUCTION_DB_URL` is absent from the runtime sync inventory.
 - **Go-gate:** Hunter confirms the two scopes; each missing-scope creation or owner-secret write needs its own explicit go before it happens.
 
+🔴 **GATE-1 — Merge the Route A runner's own branch before any use** — NOT APPROVED, needs its own go
+- **What:** the runner (`pipeline/src/prod-sql*.ts`, `scripts/run-with-secrets.mjs` changes, `supabase/rollout/auth-table-classification.json`, doc 18) exists only on branch `bb/route-a-round-3-termination-warning-auth-invento-thr_dj4kffsjqf`, tip `4552557`. It is not on the branch this runbook is on. This draft does not merge or cherry-pick it. **Why needed:** every action, phrase and command cited here exists only there. **If skipped:** the commands cannot run, and the actions cited here cannot be checked against the code the cutover will actually use.
+- **Steps:**
+  1. a. Hunter says "go for GATE-1". b. The manager merges that branch (a separate action, not part of this runbook; Hunter's rule: no push to main). c. The manager re-reads `pipeline/src/prod-sql.ts` on the merged result and confirms every action and phrase cited in this runbook is unchanged; if the merged tip differs from `4552557`, the contract script's pinned tip is updated under its own review. d. The runner's own offline test (`test:prod-sql` in `pipeline/package.json`) passes (not verified: not run here).
+- **Success check:** `pipeline/src/prod-sql-runner.ts` is present on the branch the cutover runs from, and the cited actions and phrases match it.
+- **Go-gate:** Hunter says "go for GATE-1". Needed before A2, A3, B2, B3, B4, B13, BO2, BO4, BO5 and BO6.
+
+🔴 **GATE-2 — staging-2 auth-table inventory capture and human classification (before B13 L1)** — NOT APPROVED, needs its own go
+- **What:** the runner's L1 shape gate (action `l1-shape`, which `l1-sweep` runs first inside its own transaction) refuses any `auth.*` table that is not listed in `supabase/rollout/auth-table-classification.json`, or is listed `credential-bearing: STOP`. The file today lists the five tables L1 clears plus `schema_migrations`. Doc 18 records the staging-2 capture as **PENDING**: the read-only catalogue query `supabase/rollout/auth-schema-inventory.sql` has not been run. A staging capture is not proof of production parity (note in the classification file). **Why needed:** without it the shape gate may stop B13 on an unclassified table, or pass on a wrong list. **If skipped:** B13 L1 must not start.
+- **Steps:**
+  1. a. **Capture (Doppler `stg` read, staging-2 only, read-only SQL).** Secret by name: `STAGING_DB_URL`, Doppler project `truck-recruitment-tool`, config `stg`. `<DIR>` is an absolute folder outside the repository. Command from doc 18, plan-only first (not run here):
+  ```
+  doppler run --project truck-recruitment-tool --config stg -- node scripts/run-with-secrets.mjs --from-env --cwd pipeline --secret STAGING_DB_URL -- node node_modules/tsx/dist/cli.mjs src/staging-sql-runner.ts --project=rebuilt --action=auth-schema-inventory --confirm="TAKE TNBS AUTH SCHEMA INVENTORY" --out=<DIR>\auth-schema-inventory-staging2.json
+  ```
+  b. After the plan output was read and Hunter's go for the capture, the same line with `--execute` added at the end:
+  ```
+  doppler run --project truck-recruitment-tool --config stg -- node scripts/run-with-secrets.mjs --from-env --cwd pipeline --secret STAGING_DB_URL -- node node_modules/tsx/dist/cli.mjs src/staging-sql-runner.ts --project=rebuilt --action=auth-schema-inventory --confirm="TAKE TNBS AUTH SCHEMA INVENTORY" --out=<DIR>\auth-schema-inventory-staging2.json --execute
+  ```
+  2. a. **Human classification (separate go).** A person reviews the file (names and types only), records the Auth release the project runs, and classifies each table in `auth-table-classification.json` with a cited source; the pin and the regression fixtures are updated together; the gate is re-run on staging (doc 18). Who classifies is not named in doc 18 (not verified: the manager proposes each entry with its source and Hunter approves is assumed here, not recorded). Any table not proven non-credential-bearing stays `STOP`, and B13 stays blocked.
+- **Success check:** the capture file exists outside the repository; every table in it is classified with a cited source; no table remains unclassified or `STOP`; the staging gate re-run passes.
+- **Go-gate:** GATE-1 done; Hunter says "go for GATE-2" for the capture, and says it again for the classification and pin update. Required before B13.
+
+🔴 **GATE-3 — The irreversible termination warning, before `retire-terminate`** — NOT APPROVED, needs its own go
+- **What:** Route A action `retire-terminate` (BO2 step 3) ends every database connection of the application role. Ended connections **cannot be brought back, and a rollback does not restore them**. The runner prints a fixed warning event `prod-sql.warning` with id `connections_end_cannot_be_undone` together with the plan, before anything connects, for plan-only and `--execute` alike. After a run that ends `rolled_back`, `rollback_not_confirmed` or `unknown` it prints `rollback_does_not_restore_connections`. The fixed sentences (runner source) are: "WARNING: this step ENDS every database connection of the application role. Ended connections cannot be brought back and a rollback does not restore them. Take the owner go for this step only." and "WARNING: a rolled_back or unknown result covers SQL changes only; any connections this step already ended stay ended. STOP, do not retry, and read the real connection count with the retire-backends action." **Why needed:** this is the one step whose effect cannot be undone by the runner's rollback. **If skipped:** the connections could be ended without Hunter having read and accepted that.
+- **Steps:**
+  1. a. The operator runs the plan-only `retire-terminate` command from BO2 step 3 (connects to nothing) and shows Hunter the `prod-sql.warning` line. b. Hunter reads it and says "go for GATE-3". c. Only then may the `--execute` box in BO2 step 3 be run. d. After any error: **STOP**, do not retry, run the `retire-backends` count (BO2 step 3).
+- **Success check:** the plan-only output showed the `connections_end_cannot_be_undone` warning and Hunter's GATE-3 go is recorded before the `--execute` line runs.
+- **Go-gate:** GATE-1 done; BO1 done; the BO2 go given; Hunter says "go for GATE-3" (separate from "go for BO2"). Doc 18 adds no extra typed phrase for this step beyond its own per-action phrase (a second phrase is a separate decision).
+
 ---
 
 #### The production steps (all NOT APPROVED, each needs its own go)
@@ -81,21 +115,61 @@ Order at a glance: **Part A** (prepare, nothing user-facing) → **Part B** (mai
 
 🔴 **A2 — The four July migrations on production (only if still unapplied)** — NOT APPROVED, needs its own go per migration (approval 19)
 - **What:** `20260722223300_security_hardening`, `20260723004500_profile_service_bootstrap`, `20260723010400_dnc_activity_enum_cast`, `20260723020000_contact_logs_dnc_guard`, one at a time, each after its staging replay (release-path plan §2 steps 9a–9d; M1, M1b and M1c depend on all four, doc 16 §1.1). **If skipped:** M1 fails or leaves the wrong permissions.
-- **Who:** the production SQL route from **OPEN-1**. **GAP: no command recorded (OPEN-1).**
+- **Who:** the operator, through Route A (OPEN-1, closed), with Hunter supplying `PRODUCTION_DB_URL` only to the hidden prompt. The runner runs the file from `supabase/migrations/` as pinned by SHA-256 (it refuses on any mismatch).
 - **Steps:**
-  1. a. For each migration in the order above, the operator runs the file from `supabase/migrations/` unchanged, first line to last. b. After each, run the success check below before the next. c. Hunter's separate go for each.
-- **Backouts (kept here so each is known before the go):** hardening → `supabase/backout/security-hardening-backout.sql` (this branch; run after `M1-backout.sql` if M1 is also being backed out); profile bootstrap → restore the earlier function body (`20260720000300` / `20260720000800`; **no file prepared**); DNC enum cast → previous body (**no file prepared**); DNC guard → drop trigger and function (file header).
-- **Success check (per file):** the function or trigger is present when re-read; the next nightly pipeline run succeeds (plan step 9a evidence).
-- **Go-gate:** the migration's staging replay passed; Hunter says "go for A2, migration <name>".
+  1. a. For each migration in the order above, one at a time: run the plan-only box, read it, then (after Hunter's go for that migration) the `--execute` box. b. After each, run the success check below before the next. c. Hunter's separate go for each.
+  2. Migration 1, action `migration-security-hardening`, phrase `RUN TNBS PRODUCTION SQL MIGRATION-SECURITY-HARDENING`. Plan-only:
+  ```
+  node scripts/run-with-secrets.mjs --cwd pipeline --secret PRODUCTION_DB_URL -- node node_modules/tsx/dist/cli.mjs src/prod-sql-runner.ts --target=production --action=migration-security-hardening --confirm="RUN TNBS PRODUCTION SQL MIGRATION-SECURITY-HARDENING"
+  ```
+  Execute:
+  ```
+  node scripts/run-with-secrets.mjs --cwd pipeline --secret PRODUCTION_DB_URL -- node node_modules/tsx/dist/cli.mjs src/prod-sql-runner.ts --target=production --action=migration-security-hardening --confirm="RUN TNBS PRODUCTION SQL MIGRATION-SECURITY-HARDENING" --execute
+  ```
+  3. Migration 2, action `migration-profile-service-bootstrap`, phrase `RUN TNBS PRODUCTION SQL MIGRATION-PROFILE-SERVICE-BOOTSTRAP`. Plan-only:
+  ```
+  node scripts/run-with-secrets.mjs --cwd pipeline --secret PRODUCTION_DB_URL -- node node_modules/tsx/dist/cli.mjs src/prod-sql-runner.ts --target=production --action=migration-profile-service-bootstrap --confirm="RUN TNBS PRODUCTION SQL MIGRATION-PROFILE-SERVICE-BOOTSTRAP"
+  ```
+  Execute:
+  ```
+  node scripts/run-with-secrets.mjs --cwd pipeline --secret PRODUCTION_DB_URL -- node node_modules/tsx/dist/cli.mjs src/prod-sql-runner.ts --target=production --action=migration-profile-service-bootstrap --confirm="RUN TNBS PRODUCTION SQL MIGRATION-PROFILE-SERVICE-BOOTSTRAP" --execute
+  ```
+  4. Migration 3, action `migration-dnc-activity-enum-cast`, phrase `RUN TNBS PRODUCTION SQL MIGRATION-DNC-ACTIVITY-ENUM-CAST`. Plan-only:
+  ```
+  node scripts/run-with-secrets.mjs --cwd pipeline --secret PRODUCTION_DB_URL -- node node_modules/tsx/dist/cli.mjs src/prod-sql-runner.ts --target=production --action=migration-dnc-activity-enum-cast --confirm="RUN TNBS PRODUCTION SQL MIGRATION-DNC-ACTIVITY-ENUM-CAST"
+  ```
+  Execute:
+  ```
+  node scripts/run-with-secrets.mjs --cwd pipeline --secret PRODUCTION_DB_URL -- node node_modules/tsx/dist/cli.mjs src/prod-sql-runner.ts --target=production --action=migration-dnc-activity-enum-cast --confirm="RUN TNBS PRODUCTION SQL MIGRATION-DNC-ACTIVITY-ENUM-CAST" --execute
+  ```
+  5. Migration 4, action `migration-contact-logs-dnc-guard`, phrase `RUN TNBS PRODUCTION SQL MIGRATION-CONTACT-LOGS-DNC-GUARD`. Plan-only:
+  ```
+  node scripts/run-with-secrets.mjs --cwd pipeline --secret PRODUCTION_DB_URL -- node node_modules/tsx/dist/cli.mjs src/prod-sql-runner.ts --target=production --action=migration-contact-logs-dnc-guard --confirm="RUN TNBS PRODUCTION SQL MIGRATION-CONTACT-LOGS-DNC-GUARD"
+  ```
+  Execute:
+  ```
+  node scripts/run-with-secrets.mjs --cwd pipeline --secret PRODUCTION_DB_URL -- node node_modules/tsx/dist/cli.mjs src/prod-sql-runner.ts --target=production --action=migration-contact-logs-dnc-guard --confirm="RUN TNBS PRODUCTION SQL MIGRATION-CONTACT-LOGS-DNC-GUARD" --execute
+  ```
+- **Backouts (kept here so each is known before the go):** hardening → `supabase/backout/security-hardening-backout.sql` (this branch; run after `M1-backout.sql` if M1 is also being backed out). **Route A has no action for it** (the runner lists `security-hardening-backout` as not built: the file is not pinned there; it needs its own reviewed commit). Route for it: not decided (not verified). Profile bootstrap → restore the earlier function body (`20260720000300` / `20260720000800`; **no file prepared**, runner action `profile-bootstrap-backout` not built); DNC enum cast → previous body (**no file prepared**, runner action `dnc-enum-cast-backout` not built); DNC guard → drop trigger and function (file header; not verified: no runner action for it appears in the runner source).
+- **Success check (per file):** the runner prints result `committed`; the function or trigger is present when re-read; the next nightly pipeline run succeeds (plan step 9a evidence).
+- **Go-gate:** GATE-1 done; the migration's staging replay passed; Hunter says "go for A2, migration <name>".
 - **Source:** release-path plan §2 steps 9a–9d; doc 16 §3.2 step 1; `scripts/verify-baseline-reconciliation.mjs`.
 
 🔴 **A3 — Pre-cutover permission snapshot (read-only)** — NOT APPROVED, needs its own go
 - **What:** `supabase/backout/pre-cutover-snapshot.sql` lists every grant, policy and function M1 touches. **Why:** the backout is checked against it. **If skipped:** the backout cannot be proven identical. Must run **before** M1.
-- **Who:** the production SQL route from **OPEN-1**. (On staging the runner action is `snapshot`; production is refused by the runner.)
+- **Who:** the operator, through Route A (OPEN-1, closed): action `snapshot`, phrase `RUN TNBS PRODUCTION SQL SNAPSHOT`. It is read-only; the runner reports a digest per statement instead of printing rows. Hunter supplies `PRODUCTION_DB_URL` only to the hidden prompt.
 - **Steps:**
-  1. a. Run the file unchanged. b. Store the output **outside the repo** with the release record. c. Do not paste it into chat.
-- **Success check:** the output file exists and is non-empty.
-- **Go-gate:** Hunter says "go for A3".
+  1. a. Plan-only first:
+  ```
+  node scripts/run-with-secrets.mjs --cwd pipeline --secret PRODUCTION_DB_URL -- node node_modules/tsx/dist/cli.mjs src/prod-sql-runner.ts --target=production --action=snapshot --confirm="RUN TNBS PRODUCTION SQL SNAPSHOT"
+  ```
+  b. After Hunter's go, execute:
+  ```
+  node scripts/run-with-secrets.mjs --cwd pipeline --secret PRODUCTION_DB_URL -- node node_modules/tsx/dist/cli.mjs src/prod-sql-runner.ts --target=production --action=snapshot --confirm="RUN TNBS PRODUCTION SQL SNAPSHOT" --execute
+  ```
+  c. Store the printed output (digests, no rows) **outside the repo** with the release record. d. Do not paste it into chat.
+- **Success check:** the stored output exists, is non-empty, and ends with result `read_only_done`.
+- **Go-gate:** GATE-1 done; Hunter says "go for A3".
 - **Source:** doc 14 §11.5; doc 16 §1.3 step 6, §3.2 step 1.
 
 🔴 **A4 — Read the hosted sign-in expiry settings (fixes wait W)** — NOT APPROVED, needs its own go
@@ -216,42 +290,63 @@ Length of the period = the work below + **W** (A4). Pick the date with Hunter; g
 
 🔴 **B2 — M1** — NOT APPROVED, needs its own go
 - **What:** `supabase/pending/M1_same_origin_signin.sql` (1,816 lines): creates the sign-in tables and the roles `recruiter_api`, `recruiter_app`, `recruiter_maintenance` (no passwords), re-keys permissions from `auth.uid()` to the session ledger, and ends with a PostGIS self-check that aborts everything on failure. **If skipped:** no new sign-in.
-- **Who:** the production SQL route (**OPEN-1**).
+- **Who:** the operator, through Route A (OPEN-1, closed): action `m1`, phrase `RUN TNBS PRODUCTION SQL M1`. The runner sends the pinned file unchanged, first line to last, and wraps it in one transaction when the file has none of its own. Hunter supplies `PRODUCTION_DB_URL` only to the hidden prompt.
 - **Steps:**
-  1. a. Run the file **unchanged, first line to last**; no edits. b. Do not split it.
-- **Paste box:** the file's own text, unchanged.
-- **Success check:** the file commits; the PostGIS self-check passes; Postgres logs show no `permission denied` / `does not exist` (doc 16 §1.5 row 2).
-- **Go-gate:** B1 done, A2 done, A3 snapshot stored, OPEN-1 answered; Hunter says "go for B2".
+  1. a. Plan-only first (no edits to the file; do not split it):
+  ```
+  node scripts/run-with-secrets.mjs --cwd pipeline --secret PRODUCTION_DB_URL -- node node_modules/tsx/dist/cli.mjs src/prod-sql-runner.ts --target=production --action=m1 --confirm="RUN TNBS PRODUCTION SQL M1"
+  ```
+  b. After Hunter's go, execute:
+  ```
+  node scripts/run-with-secrets.mjs --cwd pipeline --secret PRODUCTION_DB_URL -- node node_modules/tsx/dist/cli.mjs src/prod-sql-runner.ts --target=production --action=m1 --confirm="RUN TNBS PRODUCTION SQL M1" --execute
+  ```
+- **Paste box:** none; the runner reads the file itself.
+- **Success check:** the runner prints result `committed`; the PostGIS self-check passes; Postgres logs show no `permission denied` / `does not exist` (doc 16 §1.5 row 2).
+- **Go-gate:** B1 done, A2 done, A3 snapshot stored, GATE-1 done; Hunter says "go for B2".
 - **Rollback:** the Backout section below.
 - **Source:** doc 16 §1.4 step 1, §3.2 step 3; the file header.
 
 🔴 **B3 — M1b (managers add people)** — NOT APPROVED, needs its own go
 - **What:** `supabase/pending/M1b_add_person.sql` (D8, approved 2026-10-22): adds `team_add_person` and drops the `profiles_id_fkey` so a profile no longer needs an Auth user. **If skipped:** the first manager cannot be created (B8/B9) and nobody can be added.
-- **Who:** the production SQL route (**OPEN-1**).
+- **Who:** the operator, through Route A (OPEN-1, closed): action `m1b`, phrase `RUN TNBS PRODUCTION SQL M1B`. Hunter supplies `PRODUCTION_DB_URL` only to the hidden prompt.
 - **Steps:**
-  1. a. Run the file **unchanged, first line to last**; no edits.
-- **Paste box:** the file's own text, unchanged.
-- **Success check:** the file commits, with no error.
-- **Go-gate:** B2 committed; Hunter says "go for B3".
+  1. a. Plan-only first (the file runs unchanged, first line to last; no edits):
+  ```
+  node scripts/run-with-secrets.mjs --cwd pipeline --secret PRODUCTION_DB_URL -- node node_modules/tsx/dist/cli.mjs src/prod-sql-runner.ts --target=production --action=m1b --confirm="RUN TNBS PRODUCTION SQL M1B"
+  ```
+  b. After Hunter's go, execute:
+  ```
+  node scripts/run-with-secrets.mjs --cwd pipeline --secret PRODUCTION_DB_URL -- node node_modules/tsx/dist/cli.mjs src/prod-sql-runner.ts --target=production --action=m1b --confirm="RUN TNBS PRODUCTION SQL M1B" --execute
+  ```
+- **Paste box:** none; the runner reads the file itself.
+- **Success check:** the runner prints result `committed`, with no error.
+- **Go-gate:** B2 committed; GATE-1 done; Hunter says "go for B3".
 - **Rollback:** the Backout section below.
 - **Source:** doc 16 §1.4 step 2; doc 15 §32.
 
 🔴 **B4 — M1c (batch delete audit)** — NOT APPROVED, needs its own go
 - **What:** `supabase/pending/M1c_batch_delete_audit.sql` (Hunter "yes", 2026-10-23, per doc 16): the batch-delete audit record. **Its self-check must pass** (doc 16 §3.2 step 3). **If skipped:** batch deletes are not audited.
-- **Who:** the production SQL route (**OPEN-1**).
+- **Who:** the operator, through Route A (OPEN-1, closed): action `m1c`, phrase `RUN TNBS PRODUCTION SQL M1C`. Hunter supplies `PRODUCTION_DB_URL` only to the hidden prompt.
 - **Steps:**
-  1. a. Run the file **unchanged, first line to last**; no edits.
-- **Paste box:** the file's own text, unchanged.
-- **Success check:** the file commits and its self-check passes.
-- **Go-gate:** B3 committed; Hunter says "go for B4".
+  1. a. Plan-only first (the file runs unchanged, first line to last; no edits):
+  ```
+  node scripts/run-with-secrets.mjs --cwd pipeline --secret PRODUCTION_DB_URL -- node node_modules/tsx/dist/cli.mjs src/prod-sql-runner.ts --target=production --action=m1c --confirm="RUN TNBS PRODUCTION SQL M1C"
+  ```
+  b. After Hunter's go, execute:
+  ```
+  node scripts/run-with-secrets.mjs --cwd pipeline --secret PRODUCTION_DB_URL -- node node_modules/tsx/dist/cli.mjs src/prod-sql-runner.ts --target=production --action=m1c --confirm="RUN TNBS PRODUCTION SQL M1C" --execute
+  ```
+- **Paste box:** none; the runner reads the file itself.
+- **Success check:** the runner prints result `committed` and the file's self-check passes.
+- **Go-gate:** B3 committed; GATE-1 done; Hunter says "go for B4".
 - **Rollback:** the Backout section below.
 - **Source:** doc 16 §1.4 step 3.
 
 🔴 **B5 — Set the `recruiter_app` password and store `DATABASE_URL` in Doppler** — NOT APPROVED, needs its own go
 - **What:** M1 makes the login roles without passwords. The owner sets the password out of band. **Why:** the server cannot connect without it. **If skipped:** the deploy never becomes ready (`/readyz` stays 503).
-- **Who:** Hunter.
+- **Who:** Hunter, on **Route B** (the Supabase SQL editor), as decided in OPEN-1. This is the one statement that stays off the Route A runner, so the password never passes through runner output.
 - **Steps:**
-  1. a. Generate a long random password in your password manager. b. Open https://supabase.com/dashboard (not verified: exact page) → the production project → SQL editor. c. Run one statement that gives `recruiter_app` LOGIN and that password. **GAP: no exact statement is recorded in this repo.** Quote-Queue's recorded form is `ALTER ROLE qq_maintenance LOGIN PASSWORD '<generated>'` (QQ `docs/M0_HOMEWORK.md` / `scripts/retention.ts` at 4059789); the manager adapts it to `recruiter_app` and has it reviewed. Paste box: *(the reviewed statement; the manager adds it here)*. d. Close the editor tab afterwards so the password is not left on screen.
+  1. a. Generate a long random password in your password manager. b. Open https://supabase.com/dashboard (not verified: exact page) → the production project → SQL editor. c. Run one statement that gives `recruiter_app` LOGIN and that password. **GAP: no exact statement is recorded in this repo.** Quote-Queue's recorded form is `ALTER ROLE qq_maintenance LOGIN PASSWORD '<generated>'` (QQ `docs/M0_HOMEWORK.md` / `scripts/retention.ts` at 4059789); the manager adapts it to `recruiter_app` and has it reviewed. Paste box: *(reviewed paste box still owed: the reviewed statement; the manager adds it here)*. d. Close the editor tab afterwards so the password is not left on screen.
   2. a. Build the `DATABASE_URL` as the **session pooler** address, user `recruiter_app.<project-ref>`, port **5432** (doc 16 §2.6). The pooler address is shown on the Supabase project's connection page (not verified: exact page name). b. Open https://dashboard.doppler.com (not verified) → project `truck-recruitment-tool` → config `prd` → `DATABASE_URL` → paste → save. **Only** into Doppler.
 - **Success check:** `DATABASE_URL` is filled in Doppler `prd` (names only reported). Later, B7's deploy passes the `/readyz` health check.
 - **Go-gate:** B4 committed; Hunter says "go for B5".
@@ -320,9 +415,9 @@ Length of the period = the work below + **W** (A4). Pick the date with Hunter; g
 
 🔴 **B10 — Backout window on (`window-on`) and verify** — NOT APPROVED, needs its own go (approval 18)
 - **What:** pause email edits during the window. Done **before** maintenance is turned off. **If skipped:** the backout's identity check (`profiles.email = auth.users.email`) can fail.
-- **Who:** the production SQL route (**OPEN-1**). (Staging runner action name: `window-on`; it refuses production.)
+- **Who:** **route not decided.** Route A has **no action** for these statements: the runner lists `window-on` and `window-off` as not built ("an inline statement in doc 16 section 3.1, not a file in this repository") and refuses them as `prod_sql_action_not_built`. Hunter's OPEN-1 decision named only the SQL files and the password statement. (not verified: whether these two inline statements go through Route B, through a new reviewed Route A action, or another way. The manager asks Hunter; **STOP, B10 cannot be run until that is answered**.)
 - **Steps:**
-  1. a. Run the update below. b. Run the check below.
+  1. a. After the route is decided: run the update below. b. Run the check below.
 - **Paste boxes (from doc 16 §3.1):**
   ```
   update internal.backout_window set email_edits_paused = true
@@ -332,7 +427,7 @@ Length of the period = the work below + **W** (A4). Pick the date with Hunter; g
   select email_edits_paused from internal.backout_window
   ```
 - **Success check:** the second statement returns `true`. (A Team email edit being refused is proved on staging first, doc 16 §3.1 step 2.)
-- **Go-gate:** D10 answered (OPEN-3); B4 committed; Hunter says "go for B10".
+- **Go-gate:** D10 answered (OPEN-3); B4 committed; the route for these two statements decided and recorded here; Hunter says "go for B10".
 - **Source:** doc 16 §3.1.
 
 🔴 **B11 — O2: turn off Supabase sign-ups and every Auth provider** — NOT APPROVED, needs its own go
@@ -355,20 +450,45 @@ Length of the period = the work below + **W** (A4). Pick the date with Hunter; g
 
 🔴 **B13 — L1: close the old Supabase sign-in credentials** — NOT APPROVED, needs its own go (approval 21, given before 22)
 - **What:** clears old sessions, refresh tokens, one-time tokens and flow state, and empties six token columns on `auth.users`. Changes **no** password, ban, email or profile. Expected rows changed: about 0 (production had 0 Auth users; verify at run time). **If skipped:** old credentials could still reach Supabase's `/user` endpoint. **No backout**; the backout only restores the email provider (doc 14 §11.6).
-- **Who:** the production SQL route (**OPEN-1**), as `postgres`. File: `supabase/rollout/L1-close-legacy-auth.sql`, run **in its own stages**, not as one paste. **Never print token values or ids.** Numbers only.
+- **Who:** the operator, through Route A (OPEN-1, closed), as the runner's own connection. File: `supabase/rollout/L1-close-legacy-auth.sql`, run **in its own stages** through three actions, not as one paste. Hunter supplies `PRODUCTION_DB_URL` only to the hidden prompt. **Never print token values or ids.** Numbers only (the runner prints counts, not rows).
+- **Actions (each its own plan-only box, then its own `--execute` box, in the steps below):** `l1-shape` (phrase `RUN TNBS PRODUCTION SQL L1-SHAPE`, read-only; stage 1); `l1-counts` (phrase `RUN TNBS PRODUCTION SQL L1-COUNTS`, read-only; stages 2, 4 and 7); `l1-sweep` (phrase `RUN TNBS PRODUCTION SQL L1-SWEEP`; stages 3 and 6; it runs the `l1-shape` gate first, inside its own transaction, and must pass).
 - **Steps:**
-  1. **Stage 1, shape check.** a. Run the two `information_schema` selects at the top of the file, unchanged. b. Any `auth.*` table that holds credentials and is not listed there → **STOP** for review. Success: nothing unlisted.
-  2. **Stage 2, counts before.** a. Run the `select … as sessions …` counts query, unchanged. b. Record the numbers. Success: numbers recorded.
-  3. **Stage 3, first sweep (one transaction).** a. Run `begin; … commit;` from the file, unchanged. b. Record rows changed (numbers only). Success: it commits.
-  4. **Stage 4, first recount.** a. Re-run the counts query. b. Record the numbers. Success: every number is **0**: all four tables, and no `auth.users` row with a non-empty token column. Otherwise **STOP**.
+  1. **Stage 1, shape check (action `l1-shape`).** a. Plan-only:
+  ```
+  node scripts/run-with-secrets.mjs --cwd pipeline --secret PRODUCTION_DB_URL -- node node_modules/tsx/dist/cli.mjs src/prod-sql-runner.ts --target=production --action=l1-shape --confirm="RUN TNBS PRODUCTION SQL L1-SHAPE"
+  ```
+  b. After Hunter's go, execute:
+  ```
+  node scripts/run-with-secrets.mjs --cwd pipeline --secret PRODUCTION_DB_URL -- node node_modules/tsx/dist/cli.mjs src/prod-sql-runner.ts --target=production --action=l1-shape --confirm="RUN TNBS PRODUCTION SQL L1-SHAPE" --execute
+  ```
+  c. Any `auth.*` table that is unclassified or classified `credential-bearing: STOP` (the runner's `no_unreviewed_auth_tables` check, from `supabase/rollout/auth-table-classification.json`, GATE-2) → **STOP** for review. Success: nothing unlisted.
+  2. **Stage 2, counts before (action `l1-counts`).** a. Plan-only:
+  ```
+  node scripts/run-with-secrets.mjs --cwd pipeline --secret PRODUCTION_DB_URL -- node node_modules/tsx/dist/cli.mjs src/prod-sql-runner.ts --target=production --action=l1-counts --confirm="RUN TNBS PRODUCTION SQL L1-COUNTS"
+  ```
+  b. After Hunter's go, execute:
+  ```
+  node scripts/run-with-secrets.mjs --cwd pipeline --secret PRODUCTION_DB_URL -- node node_modules/tsx/dist/cli.mjs src/prod-sql-runner.ts --target=production --action=l1-counts --confirm="RUN TNBS PRODUCTION SQL L1-COUNTS" --execute
+  ```
+  c. Record the numbers (`sessions`, `refresh_tokens`, `one_time_tokens`, `flow_state`, `users_with_tokens`). Success: numbers recorded.
+  3. **Stage 3, first sweep (action `l1-sweep`, one transaction).** a. Plan-only:
+  ```
+  node scripts/run-with-secrets.mjs --cwd pipeline --secret PRODUCTION_DB_URL -- node node_modules/tsx/dist/cli.mjs src/prod-sql-runner.ts --target=production --action=l1-sweep --confirm="RUN TNBS PRODUCTION SQL L1-SWEEP"
+  ```
+  b. After Hunter's go, execute:
+  ```
+  node scripts/run-with-secrets.mjs --cwd pipeline --secret PRODUCTION_DB_URL -- node node_modules/tsx/dist/cli.mjs src/prod-sql-runner.ts --target=production --action=l1-sweep --confirm="RUN TNBS PRODUCTION SQL L1-SWEEP" --execute
+  ```
+  c. Record rows changed (numbers only). Success: it commits.
+  4. **Stage 4, first recount.** a. Run the `l1-counts` plan-only box from stage 2, then its `--execute` box. b. Record the numbers. Success: every number is **0**: all four tables, and no `auth.users` row with a non-empty token column. Otherwise **STOP**.
   5. **Stage 5, wait W.** a. Wait W minutes (A4). b. Write the start and end time (UTC).
-  6. **Stage 6, second sweep.** a. Run stage 3 again. b. Record rows changed. Success: **zero** rows changed. Any non-zero → incident: stop and investigate (doc 14 §11.6 step 6).
-  7. **Stage 7, second recount (doc 14 §11.6 step 6 repeats both the sweep and the verification).** a. Immediately after stage 6, re-run the counts query. b. Record the numbers as their own result. Success: all four tables **0** and no non-empty token column. Otherwise incident: **STOP**. The daily counts in step 9 are a later check and do not replace this one.
+  6. **Stage 6, second sweep.** a. Run the `l1-sweep` boxes from stage 3 again. b. Record rows changed. Success: **zero** rows changed. Any non-zero → incident: stop and investigate (doc 14 §11.6 step 6).
+  7. **Stage 7, second recount (doc 14 §11.6 step 6 repeats both the sweep and the verification).** a. Immediately after stage 6, run the `l1-counts` boxes from stage 2 again. b. Record the numbers as their own result. Success: all four tables **0** and no non-empty token column. Otherwise incident: **STOP**. The daily counts in step 9 are a later check and do not replace this one.
   8. a. Record the final result (numbers only) with the release record.
-  9. a. During the backout window, run the counts daily (doc 14 §11.6 step 8). Any non-zero is an incident.
-- **Paste box:** the file's own text, unchanged, stage by stage.
+  9. a. During the backout window, run the counts daily (doc 14 §11.6 step 8), with the `l1-counts` boxes. Any non-zero is an incident.
+- **Paste box:** none beyond the action boxes above; the runner reads the file and pins each stage by SHA-256.
 - **Success check:** stages 4 and 7 both show all zeros; stage 6 changed 0 rows.
-- **Go-gate:** B12 all refused; Hunter says "go for B13".
+- **Go-gate:** B12 all refused; GATE-1 and GATE-2 done (inventory capture and human classification); Hunter says "go for B13".
 - **Source:** doc 14 §11.6 steps 0–8; `supabase/rollout/L1-close-legacy-auth.sql`.
 
 🔴 **B14 — Acceptance probes after L1 (rejection probes, log check, T-IP)** — NOT APPROVED, needs its own go
@@ -417,18 +537,18 @@ Length of the period = the work below + **W** (A4). Pick the date with Hunter; g
 - **Who:** Hunter, with the operator.
 - **Steps:**
   1. a. **STOP before requesting go:** the manager must document and review how the cron loads the synced setting, the exact activation action or next scheduled-run rule, its UTC date/time, and the read-only evidence that will prove retention ran using the new setting. **GAP: cron activation is unresolved.** Paste box: *(manager must add the reviewed activation and evidence procedure here; no action is authorized while absent)*. b. At https://dashboard.render.com (not verified: exact service page), confirm `pipeline` is the cron and identify its schedule without changing it. A cron has no **Deploy latest commit**; do not use **Trigger Run** just to load settings. No web-service branch applies.
-  2. a. Source for `MAINTENANCE_DATABASE_URL`: Hunter's approved `recruiter_maintenance` production connection credential, prepared via the still-undecided OPEN-1 production SQL route; no credential-creation command is supplied here. If unavailable, **stop**. b. Open https://dashboard.doppler.com (not verified: exact project page) → project `pipeline` → config `prd`. c. Record existing names and `PIPELINE_COMMAND` without printing secret values; confirm the existing Render sync targets the pipeline cron. Do not create or reconnect a sync under this step.
+  2. a. Source for `MAINTENANCE_DATABASE_URL`: Hunter's approved `recruiter_maintenance` production connection credential, prepared by Route A or Route B (OPEN-1, closed 2026-10-30); the runner has **no action** that gives `recruiter_maintenance` a login or password (not verified: the route and the exact reviewed statement are still owed); no credential-creation command is supplied here. If unavailable, **stop**. b. Open https://dashboard.doppler.com (not verified: exact project page) → project `pipeline` → config `prd`. c. Record existing names and `PIPELINE_COMMAND` without printing secret values; confirm the existing Render sync targets the pipeline cron. Do not create or reconnect a sync under this step.
   3. a. Only after the separate go, add `MAINTENANCE_DATABASE_URL` in Doppler `pipeline/prd` from that approved source. Never type its value into Render or another dashboard. b. Read back names and confirm `PIPELINE_COMMAND` and existing entries are unchanged, without displaying secret values.
   4. a. Follow the activation/evidence procedure recorded in step 1 only if it is covered by Hunter's explicit C3 go; any additional run or change requires its own go. b. Record the UTC run time and reviewed retention result, with counts only.
 - **Success check:** `MAINTENANCE_DATABASE_URL` present in `pipeline/prd`; existing names, entries and `PIPELINE_COMMAND` unchanged; recorded cron evidence proves the approved activation loaded the setting and retention succeeded. Merely saving the secret is not activation proof.
-- **Go-gate:** C1/C2 passed; later sitting; OPEN-1 credential preparation resolved and approved; `pipeline/prd` source/sync confirmed; exact cron activation, schedule and evidence procedure written and reviewed with all gaps resolved; Hunter says "go for C3" (approval 23). Until then STOP; do not request this go or edit `pipeline/prd`.
+- **Go-gate:** C1/C2 passed; later sitting; `recruiter_maintenance` credential preparation (route and reviewed statement) resolved and approved; `pipeline/prd` source/sync confirmed; exact cron activation, schedule and evidence procedure written and reviewed with all gaps resolved; Hunter says "go for C3" (approval 23). Until then STOP; do not request this go or edit `pipeline/prd`.
 - **Source:** doc 16 §4 step 4; Hunter's AGENTS.md identifies `pipeline/prd`; playbook says cron jobs have no Deploy latest commit and not to Trigger Run just to apply settings.
 
 🔴 **C4 — Close the backout window (approval 24)** — NOT APPROVED, needs its own go
 - **What:** `window-off`, then verify `false`, only on Hunter's word (recommended day 14). Then M2 (FK drop) is a separate decision (doc 14 §11.2 step 5). **If skipped:** email edits stay paused.
-- **Who:** the production SQL route (**OPEN-1**).
+- **Who:** **route not decided** (same as B10): Route A has no `window-off` action (runner: not built, `prod_sql_action_not_built`). (not verified: route; STOP until the manager records Hunter's answer.)
 - **Steps:**
-  1. a. Run the update below. b. Run the check below.
+  1. a. After the route is decided: run the update below. b. Run the check below.
 - **Paste boxes (inverse of B10, from doc 16 §3.1):**
   ```
   update internal.backout_window set email_edits_paused = false
@@ -438,12 +558,12 @@ Length of the period = the work below + **W** (A4). Pick the date with Hunter; g
   select email_edits_paused from internal.backout_window
   ```
 - **Success check:** the check returns `false`.
-- **Go-gate:** Hunter says "go for C4" (day 14 recommended).
+- **Go-gate:** the route for these two statements decided and recorded; Hunter says "go for C4" (day 14 recommended).
 - **Source:** doc 16 §3.1 step 3.
 
 ##### Backout (if anything goes wrong; every step its own go, in this order)
 
-Order from doc 16 §3.3 and doc 14 §11.5. After any failure: **stop, tell the manager**. Backout SQL runs through the production SQL route from **OPEN-1**.
+Order from doc 16 §3.3 and doc 14 §11.5. After any failure: **stop, tell the manager**. Backout SQL runs through Route A (OPEN-1, closed 2026-10-30) where the runner has an action: BO2 (six actions), BO4, BO5 and BO6. BO10 and the A2 backouts have **no** Route A action. Every command below needs GATE-1 first.
 
 🔴 **BO1 — Maintenance on** — NOT APPROVED, needs its own go
 - **What:** put the new server back in maintenance. **If skipped:** users keep reaching a system being rolled back.
@@ -455,14 +575,64 @@ Order from doc 16 §3.3 and doc 14 §11.5. After any failure: **stop, tell the m
 
 🔴 **BO2 — `retire-app-credentials.sql` (five stages)** — NOT APPROVED, needs its own go
 - **What:** stop the app database login (`NOLOGIN`, password cleared) and close its ledgers: `supabase/backout/retire-app-credentials.sql`. **If skipped:** the app can still reach the database during the rollback.
-- **Steps (file's own steps 1–5; file step 1 is outside SQL):**
+- **Who:** the operator, through Route A (OPEN-1, closed), one action per file stage; Hunter supplies `PRODUCTION_DB_URL` only to the hidden prompt. Each step: plan-only box first, `--execute` box only after Hunter's go.
+- **Steps (file's own steps 1–5, plus the runner's step 6; file step 1 is outside SQL):**
   1. a. After BO1, suspend the Render service `tnbs-recruiter-prod` (https://dashboard.render.com, not verified: exact button). Success: it shows suspended.
-  2. a. File STEP 2: run `alter role recruiter_app nologin password null;` on its own (autocommit). Success: it commits; new logins now fail.
-  3. a. File STEP 3: run the terminate query, then poll the `recruiter_app_backends` count once a second. Success: **0 three times in a row**. More than 60 seconds without that: **STOP** and tell the manager.
-  4. a. File STEP 4: run the one transaction that revokes every live app credential. Success: it commits.
-  5. a. File STEP 5: run the final checks. Success: all numbers 0.
-- **Paste box:** the file's own text, unchanged, stage by stage.
-- **Go-gate:** BO1 done; Hunter says "go for BO2".
+  2. a. File STEP 2 (action `retire-nologin`, phrase `RUN TNBS PRODUCTION SQL RETIRE-NOLOGIN`): `alter role recruiter_app nologin password null;` on its own. Plan-only:
+  ```
+  node scripts/run-with-secrets.mjs --cwd pipeline --secret PRODUCTION_DB_URL -- node node_modules/tsx/dist/cli.mjs src/prod-sql-runner.ts --target=production --action=retire-nologin --confirm="RUN TNBS PRODUCTION SQL RETIRE-NOLOGIN"
+  ```
+  b. Execute:
+  ```
+  node scripts/run-with-secrets.mjs --cwd pipeline --secret PRODUCTION_DB_URL -- node node_modules/tsx/dist/cli.mjs src/prod-sql-runner.ts --target=production --action=retire-nologin --confirm="RUN TNBS PRODUCTION SQL RETIRE-NOLOGIN" --execute
+  ```
+  Success: it commits; new logins now fail.
+  3. a. **IRREVERSIBLE (GATE-3 first).** File STEP 3, terminate query (action `retire-terminate`, phrase `RUN TNBS PRODUCTION SQL RETIRE-TERMINATE`). Plan-only (shows the `connections_end_cannot_be_undone` warning; Hunter's "go for GATE-3" comes after reading it):
+  ```
+  node scripts/run-with-secrets.mjs --cwd pipeline --secret PRODUCTION_DB_URL -- node node_modules/tsx/dist/cli.mjs src/prod-sql-runner.ts --target=production --action=retire-terminate --confirm="RUN TNBS PRODUCTION SQL RETIRE-TERMINATE"
+  ```
+  b. Execute only after GATE-3:
+  ```
+  node scripts/run-with-secrets.mjs --cwd pipeline --secret PRODUCTION_DB_URL -- node node_modules/tsx/dist/cli.mjs src/prod-sql-runner.ts --target=production --action=retire-terminate --confirm="RUN TNBS PRODUCTION SQL RETIRE-TERMINATE" --execute
+  ```
+  c. Then poll the `recruiter_app_backends` count once a second (action `retire-backends`, read-only, phrase `RUN TNBS PRODUCTION SQL RETIRE-BACKENDS`). Plan-only:
+  ```
+  node scripts/run-with-secrets.mjs --cwd pipeline --secret PRODUCTION_DB_URL -- node node_modules/tsx/dist/cli.mjs src/prod-sql-runner.ts --target=production --action=retire-backends --confirm="RUN TNBS PRODUCTION SQL RETIRE-BACKENDS"
+  ```
+  Execute (repeat as the poll):
+  ```
+  node scripts/run-with-secrets.mjs --cwd pipeline --secret PRODUCTION_DB_URL -- node node_modules/tsx/dist/cli.mjs src/prod-sql-runner.ts --target=production --action=retire-backends --confirm="RUN TNBS PRODUCTION SQL RETIRE-BACKENDS" --execute
+  ```
+  Success: **0 three times in a row**. More than 60 seconds without that: **STOP** and tell the manager. The runner does not poll for the operator.
+  4. a. File STEP 4, the one transaction that revokes every live app credential (action `retire-revoke`, phrase `RUN TNBS PRODUCTION SQL RETIRE-REVOKE`). Plan-only:
+  ```
+  node scripts/run-with-secrets.mjs --cwd pipeline --secret PRODUCTION_DB_URL -- node node_modules/tsx/dist/cli.mjs src/prod-sql-runner.ts --target=production --action=retire-revoke --confirm="RUN TNBS PRODUCTION SQL RETIRE-REVOKE"
+  ```
+  b. Execute:
+  ```
+  node scripts/run-with-secrets.mjs --cwd pipeline --secret PRODUCTION_DB_URL -- node node_modules/tsx/dist/cli.mjs src/prod-sql-runner.ts --target=production --action=retire-revoke --confirm="RUN TNBS PRODUCTION SQL RETIRE-REVOKE" --execute
+  ```
+  Success: it commits.
+  5. a. File STEP 5, the final checks (action `retire-checks`, read-only, phrase `RUN TNBS PRODUCTION SQL RETIRE-CHECKS`). Plan-only:
+  ```
+  node scripts/run-with-secrets.mjs --cwd pipeline --secret PRODUCTION_DB_URL -- node node_modules/tsx/dist/cli.mjs src/prod-sql-runner.ts --target=production --action=retire-checks --confirm="RUN TNBS PRODUCTION SQL RETIRE-CHECKS"
+  ```
+  b. Execute:
+  ```
+  node scripts/run-with-secrets.mjs --cwd pipeline --secret PRODUCTION_DB_URL -- node node_modules/tsx/dist/cli.mjs src/prod-sql-runner.ts --target=production --action=retire-checks --confirm="RUN TNBS PRODUCTION SQL RETIRE-CHECKS" --execute
+  ```
+  Success: all numbers 0 (`backends`, `live_sessions`, `live_links`, `live_codes`).
+  6. a. File step 6 (action `retire-email`, read-only, phrase `RUN TNBS PRODUCTION SQL RETIRE-EMAIL`; count `email_mismatches`). Plan-only:
+  ```
+  node scripts/run-with-secrets.mjs --cwd pipeline --secret PRODUCTION_DB_URL -- node node_modules/tsx/dist/cli.mjs src/prod-sql-runner.ts --target=production --action=retire-email --confirm="RUN TNBS PRODUCTION SQL RETIRE-EMAIL"
+  ```
+  b. Execute:
+  ```
+  node scripts/run-with-secrets.mjs --cwd pipeline --secret PRODUCTION_DB_URL -- node node_modules/tsx/dist/cli.mjs src/prod-sql-runner.ts --target=production --action=retire-email --confirm="RUN TNBS PRODUCTION SQL RETIRE-EMAIL" --execute
+  ```
+  Success: the count is reported (numbers only). (not verified: whether this replaces BO3's separately supplied check; BO3 stays a GAP until the manager says so.)
+- **Paste box:** none beyond the action boxes above; the runner reads the file and pins each stage by SHA-256.
+- **Go-gate:** GATE-1 done; BO1 done; Hunter says "go for BO2". The `retire-terminate` step also needs "go for GATE-3".
 - **Source:** doc 16 §3.3; doc 14 §11.5.
 
 🔴 **BO3 — Identity alignment check (read-only)** — NOT APPROVED, needs its own go
@@ -475,23 +645,50 @@ Order from doc 16 §3.3 and doc 14 §11.5. After any failure: **stop, tell the m
 
 🔴 **BO4 — `M1c-backout.sql`** — NOT APPROVED, needs its own go
 - **What:** `supabase/backout/M1c-backout.sql` removes the new batch-delete function and restores the prior direct-delete grant while retaining the audit table. **Why:** restore the earlier delete interface before dismantling M1's permissions. **If skipped:** that new function and its dependency on the sign-in roles remain during the rest of backout.
-- **Steps:** 1. a. Run the file unchanged. b. Confirm it commits.
-- **Success check:** the file commits with no error.
-- **Go-gate:** BO3 done; Hunter says "go for BO4".
+- **Steps:**
+  1. a. Route A action `backout-m1c`, phrase `RUN TNBS PRODUCTION SQL BACKOUT-M1C` (the file runs unchanged, as written). Plan-only:
+  ```
+  node scripts/run-with-secrets.mjs --cwd pipeline --secret PRODUCTION_DB_URL -- node node_modules/tsx/dist/cli.mjs src/prod-sql-runner.ts --target=production --action=backout-m1c --confirm="RUN TNBS PRODUCTION SQL BACKOUT-M1C"
+  ```
+  b. After Hunter's go, execute:
+  ```
+  node scripts/run-with-secrets.mjs --cwd pipeline --secret PRODUCTION_DB_URL -- node node_modules/tsx/dist/cli.mjs src/prod-sql-runner.ts --target=production --action=backout-m1c --confirm="RUN TNBS PRODUCTION SQL BACKOUT-M1C" --execute
+  ```
+  c. Confirm it commits.
+- **Success check:** the runner prints result `committed`, with no error.
+- **Go-gate:** GATE-1 done; BO3 done; Hunter says "go for BO4".
 - **Source:** doc 16 §3.3.
 
 🔴 **BO5 — `M1b-backout.sql`** — NOT APPROVED, needs its own go
 - **What:** `supabase/backout/M1b-backout.sql` removes the new manager add-person function and returns `profiles_id_fkey` as **NOT VALID** (people added stay; they cannot sign in to the old app). **Why:** restore the earlier profile-to-Auth relationship without deleting added people before backing out M1. **If skipped:** the add-person function and its M1 role dependency remain, and the earlier foreign-key relationship is not restored.
-- **Steps:** 1. a. Run the file unchanged. b. Confirm it commits.
-- **Success check:** the file commits with no error.
-- **Go-gate:** BO4 done; Hunter says "go for BO5".
+- **Steps:**
+  1. a. Route A action `backout-m1b`, phrase `RUN TNBS PRODUCTION SQL BACKOUT-M1B` (the file runs unchanged, as written). Plan-only:
+  ```
+  node scripts/run-with-secrets.mjs --cwd pipeline --secret PRODUCTION_DB_URL -- node node_modules/tsx/dist/cli.mjs src/prod-sql-runner.ts --target=production --action=backout-m1b --confirm="RUN TNBS PRODUCTION SQL BACKOUT-M1B"
+  ```
+  b. After Hunter's go, execute:
+  ```
+  node scripts/run-with-secrets.mjs --cwd pipeline --secret PRODUCTION_DB_URL -- node node_modules/tsx/dist/cli.mjs src/prod-sql-runner.ts --target=production --action=backout-m1b --confirm="RUN TNBS PRODUCTION SQL BACKOUT-M1B" --execute
+  ```
+  c. Confirm it commits.
+- **Success check:** the runner prints result `committed`, with no error.
+- **Go-gate:** GATE-1 done; BO4 done; Hunter says "go for BO5".
 - **Source:** doc 16 §3.3; doc 18 §5 (pending review).
 
 🔴 **BO6 — `M1-backout.sql`** — NOT APPROVED, needs its own go
 - **What:** `supabase/backout/M1-backout.sql` restores the earlier permission model, removes the new sign-in interfaces and revokes the app role's membership and grants. Data is preserved (people added stay; batch-delete records stay). **Why:** the old frontend needs its earlier database permissions when traffic returns. **If skipped:** the new session-based permission model remains, so reopening the old frontend does not complete backout and old sign-in may fail.
-- **Steps:** 1. a. Run the file unchanged. b. Confirm it commits.
-- **Success check:** the file commits with no error; compare with the A3 snapshot in BO8.
-- **Go-gate:** BO5 done; Hunter says "go for BO6".
+- **Steps:**
+  1. a. Route A action `backout-m1`, phrase `RUN TNBS PRODUCTION SQL BACKOUT-M1` (the file has its own begin/commit and runs as written). Plan-only:
+  ```
+  node scripts/run-with-secrets.mjs --cwd pipeline --secret PRODUCTION_DB_URL -- node node_modules/tsx/dist/cli.mjs src/prod-sql-runner.ts --target=production --action=backout-m1 --confirm="RUN TNBS PRODUCTION SQL BACKOUT-M1"
+  ```
+  b. After Hunter's go, execute:
+  ```
+  node scripts/run-with-secrets.mjs --cwd pipeline --secret PRODUCTION_DB_URL -- node node_modules/tsx/dist/cli.mjs src/prod-sql-runner.ts --target=production --action=backout-m1 --confirm="RUN TNBS PRODUCTION SQL BACKOUT-M1" --execute
+  ```
+  c. Confirm it commits.
+- **Success check:** the runner prints result `committed`, with no error; compare with the A3 snapshot in BO8.
+- **Go-gate:** GATE-1 done; BO5 done; Hunter says "go for BO6".
 - **Source:** doc 16 §3.3.
 
 🔴 **BO7 — Re-enable the Supabase email provider (undo B11)** — NOT APPROVED, needs its own go
@@ -506,7 +703,7 @@ Order from doc 16 §3.3 and doc 14 §11.5. After any failure: **stop, tell the m
 🔴 **BO8 — Return traffic to the recorded pre-cutover frontend, then smoke test** — NOT APPROVED, needs its own go
 - **What:** the pre-cutover static site (recorded in B1) is the live site again; compare permissions with the A3 snapshot. **Why:** a successful SQL backout alone does not prove the old site works. **If skipped:** users may be directed to an unusable site and permission differences remain undetected. **Note:** the old frontend was never switched off in this runbook, so this step is "confirm it is still the live deploy"; any change of address or redirect is a separate decision not recorded in the repo (**GAP**).
 - **Steps:**
-  1. a. Open https://dashboard.render.com (not verified) and confirm the static site's live deploy is the one written down in B1. b. Load the site and do the read-only smoke test the manager provides (**GAP: not recorded**). c. Re-run the A3 snapshot file and compare numbers with the stored output (counts only).
+  1. a. Open https://dashboard.render.com (not verified) and confirm the static site's live deploy is the one written down in B1. b. Load the site and do the read-only smoke test the manager provides (**GAP: not recorded**). c. Re-run the A3 snapshot (Route A action `snapshot`, the same plan-only and `--execute` boxes as A3) and compare its digests with the stored A3 output (counts only).
 - **Success check:** the live deploy matches B1; the smoke test passes; the snapshot comparison shows no difference.
 - **Go-gate:** BO7 done; Hunter says "go for BO8".
 - **Source:** doc 16 §3.3, §1.7.
@@ -520,12 +717,13 @@ Order from doc 16 §3.3 and doc 14 §11.5. After any failure: **stop, tell the m
 
 🔴 **BO10 — `security-hardening-backout.sql` (only if hardening itself must also go back)** — NOT APPROVED, needs its own go
 - **What:** `supabase/backout/security-hardening-backout.sql` (this branch): re-grants EXECUTE on functions in `public` and `internal` to PUBLIC and `anon` and re-adds the matching default privileges, in one transaction. Run **after** BO6. Text-checked by `scripts/verify-hardening-backout-contract.mjs`; **never executed**. It does not undo the search_path pins or the `authenticated`/`service_role` grants. **Why:** only a separately approved rollback of July hardening needs these earlier EXECUTE grants. **If skipped when that rollback is required:** the July EXECUTE restrictions remain; ordinary M1 backout does not itself require BO10.
-- **Steps:** 1. a. Run the file unchanged, first line to last. b. Confirm it commits.
+- **Route:** **Route A has no action for this file.** The runner lists `security-hardening-backout` as not built (the file is not pinned there; it needs its own reviewed commit, and the runner refuses it as `prod_sql_action_not_built`). (not verified: how BO10 will be run; Hunter's OPEN-1 decision does not name it. STOP until a route is recorded.)
+- **Steps:** 1. a. After a route is recorded: run the file unchanged, first line to last. b. Confirm it commits.
 - **Success check:** the file commits with no error.
-- **Go-gate:** BO6 done; Hunter says "go for BO10".
+- **Go-gate:** BO6 done; a route for this file recorded; Hunter says "go for BO10".
 - **Source:** the file header; Codex review "Backout SQL assessment".
 
-Re-applying later uses `reapply-m1`, `reapply-m1b`, `reapply-m1c` (doc 16 §3.3) on staging only; **no production route is recorded (OPEN-1)**.
+Re-applying later uses `reapply-m1`, `reapply-m1b`, `reapply-m1c` (doc 16 §3.3) on staging only. The runner has **no `reapply-*` action** (not verified: how a production re-apply would be run; a separate decision).
 
 ##### Final reader-copy cleanup (after the monitoring/backout period)
 
@@ -544,7 +742,7 @@ Re-applying later uses `reapply-m1`, `reapply-m1b`, `reapply-m1c` (doc 16 §3.3)
 
 ### Summary of Next Step
 
-Nothing runs next. Hunter and the manager read this draft and answer five questions: how production SQL will be run (OPEN-1), whether the first-manager tool passes its review (OPEN-2), whether to declare a 14-day backout window (OPEN-3), when staging proof will be finished (OPEN-4), and whether the separate runtime and owner-only Doppler homes are confirmed (OPEN-5). After that, the manager resolves each step's gaps before asking for its individual go, starting with the read-only counts (A1). Cron retention stays blocked until C3's activation procedure is written and reviewed.
+Nothing runs next. Hunter decided OPEN-1 on 2026-10-30: Route A (the guarded runner) for the SQL files, Route B (Supabase SQL editor) for the one password statement. That approves nothing live. Hunter and the manager now answer four questions: whether the first-manager tool passes its review (OPEN-2), whether to declare a 14-day backout window (OPEN-3), when staging proof will be finished (OPEN-4), and whether the separate runtime and owner-only Doppler homes are confirmed (OPEN-5). Three gates must also pass before the runner is used, each with its own go: merge the runner's branch (GATE-1), capture and classify the staging-2 auth tables before L1 (GATE-2), and read the irreversible termination warning before `retire-terminate` (GATE-3). Which route runs the two window statements (B10, C4), BO10 and the `recruiter_maintenance` login is not decided. After that, the manager resolves each step's gaps before asking for its individual go, starting with the read-only counts (A1). Cron retention stays blocked until C3's activation procedure is written and reviewed.
 
 ### Summary of Previous Step
 
@@ -553,10 +751,13 @@ Verified by reading the repo (nothing was run against any live system):
 - L1 now repeats the recount after the second sweep (B13 stage 7).
 - Runtime settings go through Doppler `truck-recruitment-tool` / `prd`; Render settings come from that config's sync and "Deploy latest commit". Owner-only `PRODUCTION_DB_URL` is isolated in proposed `truck-recruitment-tool-owner` / `prd`, never synced. A7's write key is removed immediately; the separate A7R reader copy stays in `truck-recruitment-tool/dev` through monitoring/backout and is removed only at K1.
 
-Attempts / not verified: exact Supabase, Render, SendGrid, Doppler and Google Cloud page and button names; that Doppler config `prd` exists in that project; Render price today; the production probe subset and the commands for the GAP items; the first-manager tool (read only, under separate review, not merged).
+- OPEN-1 is closed with Hunter's decision (2026-10-30 UTC). Every unnamed-route placeholder was replaced by the Route A action name, typed phrase and command taken from the runner source at `4552557`, read with `git show` (nothing run). Where the runner has no action, the step says so.
+
+Attempts / not verified: the wrapped command line (assembled, never run); exact Supabase, Render, SendGrid, Doppler and Google Cloud page and button names; that Doppler config `prd` exists in that project; Render price today; the production probe subset and the commands for the GAP items; the first-manager tool (read only, under separate review, not merged).
 
 ### Miscellaneous
 
+- Route A source (read only, not merged): doc 18 and the runner (`pipeline/src/prod-sql.ts`, `prod-sql-runner.ts`, `prod-sql-split.ts`, `scripts/run-with-secrets.mjs`, `supabase/rollout/auth-table-classification.json`, `pipeline/package.json`) at tip `4552557` on branch `bb/route-a-round-3-termination-warning-auth-invento-thr_dj4kffsjqf`.
 - Sources: docs 13, 14 (§3, §8.1, §11), 15 (§8, §32), 16 (§1–§4, §6, §7), 18 on branch `signin/first-manager-bootstrap` @ `e31dc29` (read only, pending review); release-path plan 2026-10-22 (thr_grum38j2d2); Quote-Queue `docs/M0_HOMEWORK.md` at 4059789845a52e355b747371752744ffd790e135 (read only); `C:\Users\hunte\.bb\BB Rules\doppler-render-playbook.md`.
 - Doc 15 §6's env var names (for example `APP_BASE_URL`, `KEY_TOKENS`, `HEALTH_SECRET`) are older than the code; this runbook and the Render draft follow `app/server/config.ts` and doc 16 §2.3.
 - Not decided here: SMS (future direction only), TOTP/passkeys (deferred), D8 approved, D10 open (OPEN-3).
