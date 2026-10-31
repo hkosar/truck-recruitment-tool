@@ -11,7 +11,7 @@ import { existsSync, readFileSync } from 'node:fs';
 import { resolve } from 'node:path';
 import { pathToFileURL } from 'node:url';
 import {
-  L1_AUTH_TABLES, L1_USERS_TOKEN_COLUMNS, PROD_SQL_ACTIONS, PROD_SQL_ACTION_IDS, PROD_SQL_COMMANDS, PROD_SQL_COUNT_NAMES, PROD_SQL_MISSING, PROD_SQL_RESULTS, PROD_SQL_SHAPE_CHECKS, PROD_SQL_WRAPS, PRODUCTION_PROMPT_PROOF_VARIABLE,
+  L1_AUTH_TABLES, L1_USERS_TOKEN_COLUMNS, PROD_SQL_ACTIONS, PROD_SQL_ACTION_IDS, PROD_SQL_COMMANDS, PROD_SQL_COUNT_NAMES, PROD_SQL_IRREVERSIBLE_ACTIONS, PROD_SQL_MISSING, PROD_SQL_RESULTS, PROD_SQL_SHAPE_CHECKS, PROD_SQL_WARNINGS, PROD_SQL_WRAPS, PRODUCTION_PROMPT_PROOF_VARIABLE,
   evaluateL1Shape, executeProdSqlPlan, planProdSql, promptProof, selectProdSqlDbUrl, stageDigest, stagesTile, type ProdSqlAction, type ProdSqlFiles,
 } from './prod-sql.js';
 import { main as runnerMain, parseProdSqlArgs } from './prod-sql-runner.js';
@@ -353,7 +353,7 @@ const wrapper = await import(pathToFileURL(resolve(REPOSITORY_ROOT, 'scripts/run
   const counter = { fields: 0 };
   const shown = all.map((e) => wrapper.allowListLine(JSON.stringify(e), counter));
   check('every event the runner prints for every action passes the wrapper allow-list: 0 withheld lines, 0 withheld fields', shown.every((s: string | null) => s !== null) && counter.fields === 0 && all.length > PROD_SQL_ACTIONS.length * 3);
-  check('the event names are exactly the new prod-sql family', [...new Set(all.map((e) => e.msg))].sort().join() === 'prod-sql.counts,prod-sql.plan_only,prod-sql.result,prod-sql.shape,prod-sql.statement,prod-sql.verified');
+  check('the event names are exactly the new prod-sql family', [...new Set(all.map((e) => e.msg))].sort().join() === 'prod-sql.counts,prod-sql.plan_only,prod-sql.result,prod-sql.shape,prod-sql.statement,prod-sql.verified,prod-sql.warning');
   {
     const good = await runPlan('l1-shape', shapeClient(goodColumns(), goodTables()));
     const bad = await runPlan('l1-sweep', shapeClient(goodColumns(), [...goodTables(), { table_name: 'x' }]));
@@ -377,6 +377,55 @@ const wrapper = await import(pathToFileURL(resolve(REPOSITORY_ROOT, 'scripts/run
 }
 
 // ---------------------------------------------------------------------------------------------------------------
+// B2 (re-review of eafc55b): ending connections cannot be undone by a rollback, so it is warned about with the plan, before any connection,
+// and again after a failed run. The warning is a fixed, allow-listed event; it is printed for no other action.
+// ---------------------------------------------------------------------------------------------------------------
+{
+  check('only retire-terminate carries the irreversible flag, and the wrapper names exactly that action', PROD_SQL_IRREVERSIBLE_ACTIONS.join() === 'retire-terminate' && JSON.stringify([...wrapper.PROD_SQL_IRREVERSIBLE_ACTIONS]) === JSON.stringify(PROD_SQL_IRREVERSIBLE_ACTIONS));
+  check('every action whose pinned statements call pg_terminate_backend carries the flag, and no other action does (so L1 has none: it has no termination statement)', PROD_SQL_ACTIONS.every((a) => plan(a.id).statements.some((s) => /pg_terminate_backend/i.test(s.clean)) === (a.irreversible !== undefined)));
+  check('the warning ids and sentences in the wrapper equal the runner', JSON.stringify(wrapper.PROD_SQL_WARNINGS) === JSON.stringify(PROD_SQL_WARNINGS));
+  check('the sentences say: ends connections, cannot be undone, a rollback does not restore them, stop and read the real count; and they hold no placeholder or address',
+    /ENDS every database connection/.test(PROD_SQL_WARNINGS.connections_end_cannot_be_undone) && /cannot be brought back/.test(PROD_SQL_WARNINGS.connections_end_cannot_be_undone) && /rollback does not restore/.test(PROD_SQL_WARNINGS.connections_end_cannot_be_undone)
+    && /rolled_back or unknown/.test(PROD_SQL_WARNINGS.rollback_does_not_restore_connections) && /stay ended/.test(PROD_SQL_WARNINGS.rollback_does_not_restore_connections) && /STOP/.test(PROD_SQL_WARNINGS.rollback_does_not_restore_connections) && /retire-backends/.test(PROD_SQL_WARNINGS.rollback_does_not_restore_connections)
+    && Object.values(PROD_SQL_WARNINGS).every((t) => !/[{}<>]|https?:|postgres/i.test(t)));
+  let made = 0;
+  const factory = (): RebuiltSqlClient => { made += 1; console.log(JSON.stringify({ msg: 'test.client_created' })); return new Recorder(); };
+  const planOnly = await captureLog(() => runnerMain(argvFor('retire-terminate'), ENV, factory));
+  const warned = planOnly.events.find((e) => e.msg === 'prod-sql.warning');
+  check('plan-only for retire-terminate: verified, then the fixed warning, then plan_only; nothing connects', made === 0 && planOnly.error === undefined && planOnly.events.map((e) => e.msg).join() === 'prod-sql.verified,prod-sql.warning,prod-sql.plan_only'
+    && warned?.action === 'retire-terminate' && warned.warning === 'connections_end_cannot_be_undone' && warned.notice === PROD_SQL_WARNINGS.connections_end_cannot_be_undone && Object.keys(warned).sort().join() === 'action,msg,notice,warning');
+  const exec = await captureLog(() => runnerMain(argvFor('retire-terminate', ['--execute']), ENV, factory));
+  check('--execute for retire-terminate: the warning is printed before the client is even created, and the run then reports its result', made === 1 && exec.error === undefined
+    && exec.events.map((e) => e.msg).join() === 'prod-sql.verified,prod-sql.warning,test.client_created,prod-sql.statement,prod-sql.result,prod-sql.done');
+  const others: Array<Record<string, unknown>> = [];
+  for (const a of PROD_SQL_ACTIONS.filter((x) => x.id !== 'retire-terminate')) others.push(...(await captureLog(() => runnerMain(argvFor(a.id), ENV, factory))).events);
+  check('no other action prints a warning in its plan', others.length > 0 && !others.some((e) => e.msg === 'prod-sql.warning'));
+  // After a failed run: the warning follows the result, for each way a run can end without a confirmed commit.
+  const terminate = (sql: string) => /pg_terminate_backend/.test(sql);
+  const failed = async (onQuery: (sql: string) => unknown) => runPlan('retire-terminate', new Recorder(onQuery));
+  const afterFailure = (o: { events: Array<Record<string, unknown>>; error?: unknown }, result: string) => {
+    const i = o.events.findIndex((e) => e.msg === 'prod-sql.result');
+    const w = o.events[i + 1];
+    return o.error !== undefined && o.events[i]?.result === result && w?.msg === 'prod-sql.warning' && w.warning === 'rollback_does_not_restore_connections' && w.notice === PROD_SQL_WARNINGS.rollback_does_not_restore_connections && o.events.filter((e) => e.msg === 'prod-sql.warning').length === 1;
+  };
+  check('a failure after the termination statement: rolled_back is followed by the warning that connections stay ended', afterFailure(await failed((sql) => { if (terminate(sql)) throw new Error('result handling failed'); return { rows: [], rowCount: 0 }; }), 'rolled_back'));
+  check('a failed rollback: rollback_not_confirmed is followed by the same warning', afterFailure(await failed((sql) => { if (terminate(sql)) throw new Error('boom'); if (sql === 'rollback') throw new Error('connection lost'); return { rows: [], rowCount: 0 }; }), 'rollback_not_confirmed'));
+  check('a failed COMMIT: unknown is followed by the same warning', afterFailure(await failed((sql) => { if (sql === 'commit') throw new Error('connection lost'); return { rows: [], rowCount: 0 }; }), 'unknown'));
+  const ok = await failed(() => ({ rows: [], rowCount: 2 }));
+  check('a successful retire-terminate run prints no after-failure warning', ok.error === undefined && !ok.events.some((e) => e.msg === 'prod-sql.warning'));
+  const m1failed = await runPlan('m1', new Recorder((sql) => { if (sql.includes('create table')) throw new Error('boom'); return { rows: [], rowCount: 0 }; }));
+  check('a failed run of an action without the flag prints no warning', m1failed.error !== undefined && !m1failed.events.some((e) => e.msg === 'prod-sql.warning'));
+  // The wrapper passes the fixed events and withholds anything altered.
+  const counter = { fields: 0 };
+  const passed = [...planOnly.events, ...exec.events, ...(await failed((sql) => { if (terminate(sql)) throw new Error('x'); return { rows: [], rowCount: 0 }; })).events].filter((e) => e.msg === 'prod-sql.warning');
+  check('both warning events pass the wrapper allow-list with nothing withheld', passed.length === 3 && passed.every((e) => wrapper.allowListLine(JSON.stringify(e), counter) !== null) && counter.fields === 0);
+  const tampered = { msg: 'prod-sql.warning', action: 'm1', warning: 'be careful', notice: 'free text from the database', extra: 'x' };
+  const counter2 = { fields: 0 };
+  const shown = JSON.parse(wrapper.allowListLine(JSON.stringify(tampered), counter2));
+  check('the allow-list withholds a warning for another action, an unknown warning id, a free-text notice, and drops an unknown key', shown.action === '<withheld>' && shown.warning === '<withheld>' && shown.notice === '<withheld>' && !('extra' in shown) && counter2.fields === 4);
+}
+
+// ---------------------------------------------------------------------------------------------------------------
 // The real executable, offline: plan-only and refusals as a subprocess (no socket can be opened: nothing connects)
 // ---------------------------------------------------------------------------------------------------------------
 {
@@ -387,6 +436,9 @@ const wrapper = await import(pathToFileURL(resolve(REPOSITORY_ROOT, 'scripts/run
   const evs = (s: string) => s.split(/\r?\n/).filter((l) => l.startsWith('{')).map((l) => JSON.parse(l) as Record<string, unknown>);
   const plain = exec(argvFor('m1b'), ENV);
   check('executable, plan-only: exit 0, verified then plan_only, and the output has no secret', plain.status === 0 && evs(plain.stdout).map((e) => e.msg).join() === 'prod-sql.verified,prod-sql.plan_only' && !plain.stdout.includes('redacted-pw') && plain.stderr === '');
+  const terminating = exec(argvFor('retire-terminate'), ENV);
+  check('executable, plan-only for retire-terminate: the fixed warning is printed between verified and plan_only, and passes the wrapper allow-list', terminating.status === 0 && evs(terminating.stdout).map((e) => e.msg).join() === 'prod-sql.verified,prod-sql.warning,prod-sql.plan_only'
+    && evs(terminating.stdout)[1]!.notice === PROD_SQL_WARNINGS.connections_end_cannot_be_undone && terminating.stdout.split(/\r?\n/).filter(Boolean).every((l) => wrapper.allowListLine(l, { fields: 0 }) !== null) && terminating.stderr === '');
   const ambient = exec(argvFor('m1b', ['--execute']), { PRODUCTION_DB_URL: PROD });
   check('executable, ambient URL with --execute: refused (plan_refused), exit 1, nothing connected', ambient.status === 1 && evs(ambient.stderr).some((e) => e.msg === 'prod-sql.refused' && e.refusal === 'plan_refused') && !ambient.stderr.includes('redacted-pw'));
   const staging = exec(['--target=staging', '--action=m1b', `--confirm=${action('m1b').phrase}`, '--execute'], { ...ENV });

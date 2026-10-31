@@ -11,6 +11,8 @@ import { resolve } from 'node:path';
 const root = resolve(import.meta.dirname, '..');
 const PRODUCTION_REF = 'ejrfobddnojbijzrjbii';
 const failures = [];
+let warningSentences = {};
+let irreversibleIds = [];
 const read = (rel) => (existsSync(resolve(root, rel)) ? readFileSync(resolve(root, rel), 'utf8').replace(/\r\n/g, '\n') : undefined);
 /** Source without comments (// and block), so a forbidden word in prose does not count and a real statement does. */
 const code = (src) => src.replace(/\/\*[\s\S]*?\*\//g, '').split('\n').map((l) => l.replace(/(^|\s)\/\/.*$/, '')).join('\n');
@@ -153,6 +155,30 @@ if (mod) {
   }
   if (!c.includes("id: 'security-hardening-backout'")) failures.push('prod-sql.ts: the missing list must name security-hardening-backout');
 
+  // ---- B2: an action whose pinned statements end database connections (pg_terminate_backend) cannot be undone by a rollback, so it must carry the
+  // irreversible flag (derived here from the statements themselves, not from the table), and nothing else may carry it.
+  {
+    const terminating = [];
+    for (const a of actions) {
+      const text = existsSync(resolve(root, a.file)) ? readFileSync(resolve(root, a.file), 'utf8') : '';
+      let stage;
+      try { const all = splitStatements(text); stage = a.from === undefined ? all : all.slice(a.from - 1, a.to); } catch { stage = [text]; }
+      if (stage.some((st) => /pg_terminate_backend/i.test(st.replace(/--[^\n]*/g, '').replace(/\/\*[\s\S]*?\*\//g, '')))) terminating.push(a.id);
+    }
+    const flagged = actions.filter((a) => new RegExp(`id: '${a.id}'[^}]*?irreversible: 'terminates_connections'`).test(c)).map((a) => a.id);
+    if (terminating.join() !== flagged.join()) failures.push(`prod-sql.ts: the actions whose pinned statements call pg_terminate_backend (${terminating.join() || 'none'}) must be exactly the actions flagged irreversible: 'terminates_connections' (${flagged.join() || 'none'})`);
+    if (terminating.length === 0) failures.push('prod-sql.ts: no action calls pg_terminate_backend any more; if retire-terminate changed, review the irreversible-step warning before relaxing this check');
+    need('prod-sql.ts', c, /export function emitIrreversibleWarning\(action: ProdSqlAction, warning: ProdSqlWarning\): void \{\s*if \(action\.irreversible === undefined\) return;\s*line\(\{ msg: 'prod-sql\.warning', action: action\.id, warning, notice: PROD_SQL_WARNINGS\[warning\] \}\);/, 'the fixed warning event (action id, warning id, fixed sentence; nothing else)');
+    need('prod-sql.ts', c, /await runProdSqlPlan\(client, plan\);\s*\} catch \(err\) \{\s*emitIrreversibleWarning\(plan\.action, 'rollback_does_not_restore_connections'\);\s*throw err;\s*\} finally \{/, 'the after-failure warning for every run that ends in an error (rolled_back, rollback_not_confirmed or unknown): a rollback does not restore ended connections');
+    const byId = Object.fromEntries([...(/export const PROD_SQL_WARNINGS = \{([\s\S]*?)\} as const;/.exec(c)?.[1] ?? '').matchAll(/([a-z_]+): '([^']*)'/g)].map((m) => [m[1], m[2]]));
+    if (Object.keys(byId).join() !== 'connections_end_cannot_be_undone,rollback_does_not_restore_connections') failures.push('prod-sql.ts: PROD_SQL_WARNINGS must hold exactly connections_end_cannot_be_undone and rollback_does_not_restore_connections');
+    for (const [id, words] of [['connections_end_cannot_be_undone', ['ENDS every database connection', 'cannot be brought back', 'a rollback does not restore them']], ['rollback_does_not_restore_connections', ['rolled_back or unknown', 'stay ended', 'STOP', 'do not retry', 'retire-backends']]]) {
+      for (const w of words) if (!(byId[id] ?? '').includes(w)) failures.push(`prod-sql.ts: the ${id} warning must say "${w}"`);
+    }
+    warningSentences = byId;
+    irreversibleIds = flagged;
+  }
+
   // ---- Guard statements (the statements themselves, comments stripped).
   for (const required of ["'bootstrap_target_required'", "'prod_sql_target_refused'", "'target_not_recorded_production'", "'port_must_be_5432'", "'confirmation_required'", "'prod_sql_hash_mismatch'", "'prod_sql_shape_refused'",
     "'prod_sql_action_not_built'", "'prod_sql_commit_rolled_back'", 'RECORDED_PROJECT_REFS.production', 'parseSupabaseDbTarget', "selectFirstManagerDbUrl('production', env)", "'begin read only'", "result: 'unknown'", "'rollback_not_confirmed'",
@@ -213,6 +239,8 @@ if (runner) {
   }
   if (/target\s*=\s*'(staging|production)'/.test(c) || /let target[^;]*=/.test(c)) failures.push('prod-sql-runner.ts: --target must have no default');
   if ((c.match(/process\.env/g) ?? []).length !== 1) failures.push('prod-sql-runner.ts: process.env may be read exactly once, at the direct-invocation entry point');
+  const warnAt = c.indexOf("emitIrreversibleWarning(plan.action, 'connections_end_cannot_be_undone')");
+  if (warnAt < 0 || warnAt > c.indexOf('if (!args.execute)') || warnAt < c.indexOf("'prod-sql.verified'")) failures.push('prod-sql-runner.ts: the irreversible-step warning must be printed with the plan (after prod-sql.verified), before the plan-only return and before anything connects');
   const planAt = c.indexOf('if (!args.execute)');
   const execAt = c.indexOf('await executeProdSqlPlan');
   if (planAt < 0 || execAt < 0 || planAt > execAt) failures.push('prod-sql-runner.ts: the plan-only return must come before anything connects');
@@ -238,11 +266,18 @@ if (refusals && wrapper) {
   }
 }
 if (wrapper) {
-  for (const required of ["'prod-sql.verified'", "'prod-sql.plan_only'", "'prod-sql.statement'", "'prod-sql.counts'", "'prod-sql.shape'", "'prod-sql.result'", "'prod-sql.done'", "'prod-sql.refused'", 'export const PROD_SQL_ACTIONS', 'export const PROD_SQL_COUNT_NAMES', 'export const PROD_SQL_SHAPE_CHECKS',
+  for (const required of ["'prod-sql.verified'", "'prod-sql.plan_only'", "'prod-sql.statement'", "'prod-sql.counts'", "'prod-sql.shape'", "'prod-sql.warning'", "'prod-sql.result'", "'prod-sql.done'", "'prod-sql.refused'", 'export const PROD_SQL_ACTIONS', 'export const PROD_SQL_COUNT_NAMES', 'export const PROD_SQL_SHAPE_CHECKS',
     "export const PROMPT_ONLY = ['PRODUCTION_DB_URL']", 'can only be entered at the hidden prompt, never taken from the environment', "sha256: pat(/^[0-9a-f]{64}$/)", "target: oneOf(['production'])"]) {
     if (!wrapper.includes(required)) failures.push(`run-with-secrets.mjs is missing: ${required}`);
   }
   for (const required of ["FROM_ENV_PROJECT = 'truck-recruitment-tool'", "FROM_ENV_CONFIG = 'stg'"]) if (!wrapper.includes(required)) failures.push(`run-with-secrets.mjs: --from-env scope changed (${required})`);
+  if (!/'prod-sql\.warning': \{ action: oneOf\(PROD_SQL_IRREVERSIBLE_ACTIONS\), warning: oneOf\(Object\.keys\(PROD_SQL_WARNINGS\)\), notice: oneOf\(Object\.values\(PROD_SQL_WARNINGS\)\) \}/.test(wrapper)) failures.push('run-with-secrets.mjs: the prod-sql.warning event must allow only the irreversible actions, the fixed warning ids and the fixed sentences');
+  {
+    const wrapperSentences = Object.fromEntries([...(/export const PROD_SQL_WARNINGS = \{([\s\S]*?)\};/.exec(wrapper)?.[1] ?? '').matchAll(/([a-z_]+): '([^']*)'/g)].map((m) => [m[1], m[2]]));
+    if (JSON.stringify(wrapperSentences) !== JSON.stringify(warningSentences)) failures.push('run-with-secrets.mjs PROD_SQL_WARNINGS must equal PROD_SQL_WARNINGS in prod-sql.ts (ids and sentences)');
+    const wrapperIrreversible = (/export const PROD_SQL_IRREVERSIBLE_ACTIONS = \[([\s\S]*?)\];/.exec(wrapper)?.[1].match(/'([a-z0-9-]+)'/g) ?? []).map((q) => q.slice(1, -1));
+    if (wrapperIrreversible.join() !== irreversibleIds.join()) failures.push('run-with-secrets.mjs PROD_SQL_IRREVERSIBLE_ACTIONS must equal the actions flagged irreversible in the table');
+  }
   // The wrapper's action list equals the table (derived here from the table text).
   const listed = /export const PROD_SQL_ACTIONS = \[([\s\S]*?)\];/.exec(wrapper)?.[1].match(/'([a-z0-9-]+)'/g)?.map((s) => s.slice(1, -1)) ?? [];
   if (JSON.stringify(listed) !== JSON.stringify(actions.map((a) => a.id))) failures.push('run-with-secrets.mjs PROD_SQL_ACTIONS must equal the action table ids, in order');
@@ -258,6 +293,11 @@ if (!ci || !ci.includes('node scripts/verify-prod-sql-runner-contract.mjs')) fai
 if (!safety || !safety.includes('verify-prod-sql-runner-contract.mjs')) failures.push('.github/ci/repository-safety.sh must run verify-prod-sql-runner-contract.mjs');
 if (!doc) failures.push('missing docs/build-plan/18-production-sql-route-options.md');
 else if (!doc.includes("BUILT, PENDING REVIEW AND HUNTER'S OPEN-1 CHOICE")) failures.push('doc 18 must carry the section marked "BUILT, PENDING REVIEW AND HUNTER\'S OPEN-1 CHOICE"');
+if (doc) {
+  for (const w of ['Irreversible step: ending connections', 'retire-terminate', 'cannot be undone', 'rollback does not restore', 'prod-sql.warning', 'rolled_back', 'retire-backends', 'three times in a row', '60 seconds']) {
+    if (!doc.includes(w)) failures.push(`doc 18 must keep the irreversible-step warning (missing: "${w}")`);
+  }
+}
 
 if (failures.length > 0) {
   console.error('verify-prod-sql-runner-contract: FAILED');

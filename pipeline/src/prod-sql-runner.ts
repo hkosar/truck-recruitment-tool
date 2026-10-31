@@ -1,7 +1,7 @@
 import { pathToFileURL } from 'node:url';
 import pg from 'pg';
 import { RunnerRefusal, asPlanRefusal, classifyRunnerFailure } from './refusals.js';
-import { ProdSqlResultUnknown, executeProdSqlPlan, planProdSql, selectProdSqlDbUrl, type ProdSqlFiles } from './prod-sql.js';
+import { ProdSqlResultUnknown, emitIrreversibleWarning, executeProdSqlPlan, planProdSql, selectProdSqlDbUrl, type ProdSqlFiles } from './prod-sql.js';
 import type { RebuiltSqlClient } from './staging-rebuilt.js';
 import type { SupabaseDbTarget } from './target-guard.js';
 
@@ -44,6 +44,8 @@ export async function main(argv: readonly string[], env: Readonly<Record<string,
   const plan = asPlanRefusal(() => planProdSql({ target: args.target, action: args.action, dbUrl: selectProdSqlDbUrl(env), confirm: args.confirm, files }));
   // Never print the connection string, password, host or address. The hash is repository content.
   console.log(JSON.stringify({ msg: 'prod-sql.verified', action: plan.action.id, target: plan.target, statements: plan.statements.length, wrap: plan.shape, sha256: plan.sha256 }));
+  // An irreversible action (ending connections) says so here, with the plan and before anything connects, for plan-only and --execute alike.
+  emitIrreversibleWarning(plan.action, 'connections_end_cannot_be_undone');
   if (!args.execute) {
     console.log(JSON.stringify({ msg: 'prod-sql.plan_only', hint: 'add --execute to run' }));
     return;

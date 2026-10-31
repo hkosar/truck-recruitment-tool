@@ -56,6 +56,12 @@ export interface ProdSqlAction {
    * evaluateL1Shape before any statement of this action runs. The gate is part of the plan, so it is the same run.
    */
   gate?: string;
+  /**
+   * Set on an action whose statements have an effect that SQL ROLLBACK cannot undo (ending database connections). The runner prints a fixed
+   * warning for it with the plan, before anything connects, and again after a failed run (see PROD_SQL_WARNINGS). The contract check derives
+   * the set from the pinned statements themselves (every stage that calls pg_terminate_backend must carry it).
+   */
+  irreversible?: 'terminates_connections';
   /** The exact words the operator must type with --confirm for this action. */
   phrase: string;
 }
@@ -83,7 +89,7 @@ export const PROD_SQL_ACTIONS: readonly ProdSqlAction[] = [
   { id: 'l1-sweep', step: 'B13 stages 3, 6', file: 'supabase/rollout/L1-close-legacy-auth.sql', sha256: '3f6e2c70f52c0f3b462769af6aa43c04b24a3984fe6d099c4184a7a4283223d5', statements: [4, 10], stageSha256: 'b0c4997d598809dd05f22e88fd81132b58e3d0439ee69353216feded075a1e09', mode: 'write', report: 'rows', gate: 'l1-shape', phrase: 'RUN TNBS PRODUCTION SQL L1-SWEEP' },
   // BO2: retire-app-credentials.sql, stage by stage (its own steps 2-6).
   { id: 'retire-nologin', step: 'BO2 step 2', file: 'supabase/backout/retire-app-credentials.sql', sha256: '3e716371979ffb876bb54f7ab91753eced9b89df15276c9d6d4ba7cc0ef7fa15', statements: [1, 1], stageSha256: '6df1df01d959cec06fa2f00c92114f91ff38a4ab422534b70051089cbc257f6f', mode: 'write', report: 'rows', phrase: 'RUN TNBS PRODUCTION SQL RETIRE-NOLOGIN' },
-  { id: 'retire-terminate', step: 'BO2 step 3', file: 'supabase/backout/retire-app-credentials.sql', sha256: '3e716371979ffb876bb54f7ab91753eced9b89df15276c9d6d4ba7cc0ef7fa15', statements: [2, 2], stageSha256: 'c9442fb30289dbf20fc87d8dfc35b37bbd68effaca248b85353b555e61cc343d', mode: 'write', report: 'rows', phrase: 'RUN TNBS PRODUCTION SQL RETIRE-TERMINATE' },
+  { id: 'retire-terminate', step: 'BO2 step 3', file: 'supabase/backout/retire-app-credentials.sql', sha256: '3e716371979ffb876bb54f7ab91753eced9b89df15276c9d6d4ba7cc0ef7fa15', statements: [2, 2], stageSha256: 'c9442fb30289dbf20fc87d8dfc35b37bbd68effaca248b85353b555e61cc343d', mode: 'write', report: 'rows', irreversible: 'terminates_connections', phrase: 'RUN TNBS PRODUCTION SQL RETIRE-TERMINATE' },
   { id: 'retire-backends', step: 'BO2 step 3 (poll)', file: 'supabase/backout/retire-app-credentials.sql', sha256: '3e716371979ffb876bb54f7ab91753eced9b89df15276c9d6d4ba7cc0ef7fa15', statements: [3, 3], stageSha256: '44029a911f4c244209dae3539bac1bf7748ccea2caca5ca1aa6d1050db5f96d9', mode: 'read_only', report: 'counts', countNames: ['recruiter_app_backends'], phrase: 'RUN TNBS PRODUCTION SQL RETIRE-BACKENDS' },
   { id: 'retire-revoke', step: 'BO2 step 4', file: 'supabase/backout/retire-app-credentials.sql', sha256: '3e716371979ffb876bb54f7ab91753eced9b89df15276c9d6d4ba7cc0ef7fa15', statements: [4, 10], stageSha256: 'e3e17e9e9a22c367c76b8682bd72ef993c6099cfa2f20e86fc5a3e9d1a5a2e24', mode: 'write', report: 'rows', phrase: 'RUN TNBS PRODUCTION SQL RETIRE-REVOKE' },
   { id: 'retire-checks', step: 'BO2 step 5', file: 'supabase/backout/retire-app-credentials.sql', sha256: '3e716371979ffb876bb54f7ab91753eced9b89df15276c9d6d4ba7cc0ef7fa15', statements: [11, 11], stageSha256: 'd46b5cd6f8b6991178dedfb8d545b533835d4e834b7406db05e65d87af319a96', mode: 'read_only', report: 'counts', countNames: ['backends', 'live_sessions', 'live_links', 'live_codes'], phrase: 'RUN TNBS PRODUCTION SQL RETIRE-CHECKS' },
@@ -284,7 +290,25 @@ export const PROD_SQL_WRAPS = ['wrapped', 'own', 'read_only'] as const;
 /** Every count column name that can ever be printed (derived from the table; the wrapper enumerates exactly these). */
 export const PROD_SQL_COUNT_NAMES: readonly string[] = [...new Set(PROD_SQL_ACTIONS.flatMap((a) => a.countNames ?? []))];
 
+/**
+ * The fixed warnings for an irreversible action (the wrapper enumerates exactly these ids and sentences; a test compares them).
+ * 'before' is printed with the plan, ahead of any connection, for plan-only and --execute alike. 'after_failure' is printed after a run that
+ * ended in rolled_back, rollback_not_confirmed or unknown: SQL ROLLBACK only undoes SQL changes, so connections ended by the statement stay ended.
+ */
+export const PROD_SQL_WARNINGS = {
+  connections_end_cannot_be_undone: 'WARNING: this step ENDS every database connection of the application role. Ended connections cannot be brought back and a rollback does not restore them. Take the owner go for this step only.',
+  rollback_does_not_restore_connections: 'WARNING: a rolled_back or unknown result covers SQL changes only; any connections this step already ended stay ended. STOP, do not retry, and read the real connection count with the retire-backends action.',
+} as const;
+export type ProdSqlWarning = keyof typeof PROD_SQL_WARNINGS;
+/** Every action id that carries the irreversible flag (derived from the table; the wrapper enumerates exactly these). */
+export const PROD_SQL_IRREVERSIBLE_ACTIONS: readonly string[] = PROD_SQL_ACTIONS.filter((a) => a.irreversible !== undefined).map((a) => a.id);
+
 const line = (o: Record<string, unknown>) => console.log(JSON.stringify(o));
+/** Prints one fixed warning event for an action that has the irreversible flag; nothing for any other action. */
+export function emitIrreversibleWarning(action: ProdSqlAction, warning: ProdSqlWarning): void {
+  if (action.irreversible === undefined) return;
+  line({ msg: 'prod-sql.warning', action: action.id, warning, notice: PROD_SQL_WARNINGS[warning] });
+}
 const commandOf = (s: SqlStatement): (typeof PROD_SQL_COMMANDS)[number] => {
   const first = s.clean.toLowerCase().split(/[^a-z]+/)[0] ?? '';
   return (PROD_SQL_COMMANDS as readonly string[]).includes(first) && first !== 'other' ? (first as (typeof PROD_SQL_COMMANDS)[number]) : 'other';
@@ -392,6 +416,10 @@ export async function executeProdSqlPlan(plan: ProdSqlPlan, clientFactory: (db: 
   await client.connect();
   try {
     await runProdSqlPlan(client, plan);
+  } catch (err) {
+    // runProdSqlPlan has already printed its result (rolled_back, rollback_not_confirmed or unknown); say what that result does not cover.
+    emitIrreversibleWarning(plan.action, 'rollback_does_not_restore_connections');
+    throw err;
   } finally {
     // Closing a dead connection can fail; that must never replace the real failure.
     await client.end().catch(() => undefined);

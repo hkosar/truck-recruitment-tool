@@ -170,6 +170,12 @@ export const PROD_SQL_COUNT_NAMES = ['sessions', 'refresh_tokens', 'one_time_tok
 export const PROD_SQL_COMMANDS = ['select', 'insert', 'update', 'delete', 'create', 'alter', 'drop', 'grant', 'revoke', 'do', 'set', 'comment', 'other'];
 export const PROD_SQL_RESULTS = ['committed', 'rolled_back', 'rollback_not_confirmed', 'unknown', 'read_only_done'];
 export const PROD_SQL_WRAPS = ['wrapped', 'own', 'read_only'];
+/** Keep equal to PROD_SQL_WARNINGS and PROD_SQL_IRREVERSIBLE_ACTIONS in pipeline/src/prod-sql.ts (a test compares them): the fixed warning ids and sentences for an action that cannot be undone by a rollback, and the actions that carry one. */
+export const PROD_SQL_WARNINGS = {
+  connections_end_cannot_be_undone: 'WARNING: this step ENDS every database connection of the application role. Ended connections cannot be brought back and a rollback does not restore them. Take the owner go for this step only.',
+  rollback_does_not_restore_connections: 'WARNING: a rolled_back or unknown result covers SQL changes only; any connections this step already ended stay ended. STOP, do not retry, and read the real connection count with the retire-backends action.',
+};
+export const PROD_SQL_IRREVERSIBLE_ACTIONS = ['retire-terminate'];
 /** Keep equal to PROD_SQL_SHAPE_CHECKS in pipeline/src/prod-sql.ts (a test compares them): the fixed names of the L1 shape gate's yes/no checks. */
 export const PROD_SQL_SHAPE_CHECKS = ['results_read', 'table_users', 'table_sessions', 'table_refresh_tokens', 'table_one_time_tokens', 'table_flow_state', 'users_confirmation_token', 'users_recovery_token', 'users_email_change_token_new', 'users_email_change_token_current', 'users_phone_change_token', 'users_reauthentication_token', 'no_unreviewed_auth_tables'];
 
@@ -246,6 +252,7 @@ const EVENTS = {
   'prod-sql.statement': { action: oneOf(PROD_SQL_ACTIONS), index: int, command: oneOf(PROD_SQL_COMMANDS), rows: int, digest: pat(/^[0-9a-f]{64}$/) },
   'prod-sql.counts': { action: oneOf(PROD_SQL_ACTIONS), index: int, counts: (v) => typeof v === 'object' && v !== null && !Array.isArray(v) && Object.keys(v).every((k) => PROD_SQL_COUNT_NAMES.includes(k) && int(v[k])) },
   'prod-sql.shape': { action: oneOf(['l1-shape', 'l1-sweep']), checks: (v) => typeof v === 'object' && v !== null && !Array.isArray(v) && Object.keys(v).every((k) => PROD_SQL_SHAPE_CHECKS.includes(k) && bool(v[k])), auth_tables: int, auth_tables_unreviewed: int, passed: bool },
+  'prod-sql.warning': { action: oneOf(PROD_SQL_IRREVERSIBLE_ACTIONS), warning: oneOf(Object.keys(PROD_SQL_WARNINGS)), notice: oneOf(Object.values(PROD_SQL_WARNINGS)) },
   'prod-sql.result': { action: oneOf(PROD_SQL_ACTIONS), result: oneOf(PROD_SQL_RESULTS), statements: int },
   'prod-sql.done': { action: oneOf(PROD_SQL_ACTIONS), target: oneOf(['production']) },
   'prod-sql.refused': { refusal: oneOf(REFUSAL_IDS), err_code: code },
