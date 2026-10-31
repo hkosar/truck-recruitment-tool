@@ -1,6 +1,6 @@
 #!/usr/bin/env node
 
-import { existsSync, readFileSync } from 'node:fs';
+import { existsSync, readFileSync, readdirSync } from 'node:fs';
 import { resolve } from 'node:path';
 
 const repositoryRoot = resolve(import.meta.dirname, '..');
@@ -66,6 +66,27 @@ if (/drop\s+(?:table|schema|database)|alter\s+table|truncate/gi.test(reset)) {
 if (/(?:insert\s+into|update|delete\s+from)\s+staging_identity\.marker|drop\s+schema|alter\s+table\s+staging_identity/i.test(reset)) {
   failures.push('reset may only read the staging identity marker, never change it');
 }
+// Sequence restarts: pg_get_serial_sequence(table, 'id') raises 42703 (undefined_column) when the table has
+// no id column (the first run on the rebuilt staging project failed this way on carrier_qc_snapshots, whose
+// key is dot_number). Every table the restart loop visits must have an identity or serial id column in the migrations.
+{
+  const restartList = /foreach\s+v_table\s+in\s+array\s+array\[([\s\S]*?)\]\s+loop/i.exec(reset)?.[1];
+  if (!restartList) failures.push('reset sequence-restart table list not found');
+  else {
+    const migrationsDir = resolve(repositoryRoot, 'supabase/migrations');
+    const migrationSql = readdirSync(migrationsDir).filter((name) => name.endsWith('.sql')).sort()
+      .map((name) => readFileSync(resolve(migrationsDir, name), 'utf8')).join('\n');
+    for (const [, qualified] of restartList.matchAll(/'([a-z_]+\.[a-z_]+)'/g)) {
+      const table = qualified.split('.')[1];
+      const body = new RegExp(`create table (?:public\\.)?${table}\\s*\\(([\\s\\S]*?)\\n\\);`, 'i').exec(migrationSql)?.[1];
+      if (body === undefined) failures.push(`reset restarts the sequence of ${qualified}, which no migration creates`);
+      else if (!/^\s*id\s+(?:(?:big|small)?serial\b|\w+\s+generated\s+(?:always|by default)\s+as\s+identity)/im.test(body)) {
+        failures.push(`reset restarts the sequence of ${qualified}, which has no identity or serial id column (pg_get_serial_sequence would raise 42703)`);
+      }
+    }
+  }
+}
+
 const FIRST_LINE = /\r?\n/;
 // Every delete is scoped by explicit fixture ownership (round 2), never by DOT range or owner.
 for (const statement of [...reset.matchAll(/delete\s+from\s+[\s\S]*?;/gi)].map((match) => match[0])) {
