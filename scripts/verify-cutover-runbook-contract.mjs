@@ -84,6 +84,11 @@ export function parseRunnerParser(src, fnName) {
   return { valueFlags, boolFlags, error };
 }
 
+/** The value a POSIX shell passes for one argument value: double quotes removed, everything else kept, so "A"B is AB (never a prefix match). */
+function unquoteArg(value) {
+  return value.replace(/"/g, '');
+}
+
 /** Validates ONE pasted command line, token by token, as the wrapper and the runner would parse it. Returns the action, phrase and mode, plus every problem. */
 export function parseCommandLine(line, wrapper, runner, runnerRelPath) {
   const problems = [];
@@ -116,8 +121,8 @@ export function parseCommandLine(line, wrapper, runner, runnerRelPath) {
     if (!flag) { problems.push('unknown_argument ' + arg.replace(/=.*/, '')); continue; }
     if (seen.has(flag)) problems.push('duplicate ' + flag);
     seen.add(flag);
-    if (flag === '--action') out.action = arg.slice('--action='.length);
-    else if (flag === '--confirm') out.confirm = arg.slice('--confirm='.length).replace(/^"(.*)"$/, '$1');
+    if (flag === '--action') out.action = unquoteArg(arg.slice('--action='.length));
+    else if (flag === '--confirm') out.confirm = unquoteArg(arg.slice('--confirm='.length));
     else if (flag === '--target') { if (arg !== '--target=production') problems.push('--target must be production'); }
     else if (flag === '--execute') out.execute = true;
   }
@@ -309,19 +314,20 @@ export function checkCutoverRunbook(runbook, yaml, runnerSources, fmSources) {
     const sequence = [];
     for (const { id, lineText } of located) {
       if (!/prod-sql-runner\.ts/.test(lineText)) continue;
-      const action = lineText.match(/--action=([a-z0-9-]+)/)?.[1];
-      if (!action) continue; // the one template line with <action>
+      const parsed = cli.error || wrapper.error ? undefined : parseCommandLine(lineText, wrapper, cli, RUNNER_FILES.cli.replace(/^pipeline\//, ''));
+      const action = parsed ? parsed.action : lineText.match(/--action=(\S+)/)?.[1];
+      if (!action || /^<[a-z-]+>$/.test(action)) continue; // the one template line with <action>
       if (runner.doNotUse.includes(action) || EXPECTED_DO_NOT_USE.includes(action)) { failures.push('DO NOT USE action ' + action + ' is cited as a runnable command'); continue; }
       if (!/^\s*node scripts\/run-with-secrets/.test(lineText)) { failures.push(id + ': a runner command is not a plain pasted line: ' + lineText.slice(0, 60)); continue; }
-      const confirm = lineText.match(/--confirm="([^"]*)"/)?.[1];
+      const confirm = parsed?.confirm;
       const execute = /\s--execute\s*$/.test(lineText);
       if (!runner.built.has(action)) {
         failures.push('cited action ' + action + ' is not a built action in the runner source at ' + RUNNER_TIP + (runner.missing.has(action) ? ' (listed as not built)' : ''));
         continue;
       }
       if (confirm !== runner.built.get(action)) failures.push('action ' + action + ': cited phrase "' + (confirm ?? '') + '" does not match the runner phrase');
-      if (!wrapper.error && !cli.error) {
-        for (const problem of parseCommandLine(lineText, wrapper, cli, RUNNER_FILES.cli.replace(/^pipeline\//, '')).problems) failures.push(id + ': action ' + action + ': command argument list does not match the parsers at ' + RUNNER_TIP + ': ' + problem);
+      if (parsed) {
+        for (const problem of parsed.problems) failures.push(id + ': action ' + action + ': command argument list does not match the parsers at ' + RUNNER_TIP + ': ' + problem);
       }
       sequence.push(id + '|' + action + '|' + (execute ? 'execute' : 'plan'));
       const kinds = seen.get(action) ?? new Set();
@@ -433,12 +439,13 @@ export function checkCutoverRunbook(runbook, yaml, runnerSources, fmSources) {
     for (const { id, lineText } of located) {
       if (!/first-manager-runner\.ts/.test(lineText) || !/--action=/.test(lineText)) continue;
       if (!/^\s*node scripts\/run-with-secrets/.test(lineText)) { failures.push(id + ': a first-manager command is not a plain pasted line: ' + lineText.slice(0, 60)); continue; }
-      const action = lineText.match(/--action=([a-z-]+)/)?.[1];
-      const confirm = lineText.match(/--confirm="([^"]*)"/)?.[1];
+      const parsed = fmWrapper.error || fmCli.error ? undefined : parseCommandLine(lineText, fmWrapper, fmCli, FM_FILES.runner.replace(/^pipeline\//, ''));
+      const action = parsed ? parsed.action : lineText.match(/--action=(\S+)/)?.[1];
+      const confirm = parsed?.confirm;
       if (!action || !fm.actions.includes(action)) { failures.push('first-manager command cites unknown action ' + (action ?? '(none)')); continue; }
       if (confirm !== fm.phrases.get(action)) failures.push('first-manager action ' + action + ': cited phrase "' + (confirm ?? '') + '" does not match the tool source');
-      if (!fmWrapper.error && !fmCli.error) {
-        for (const problem of parseCommandLine(lineText, fmWrapper, fmCli, FM_FILES.runner.replace(/^pipeline\//, '')).problems) failures.push(id + ': first-manager action ' + action + ': command argument list does not match the parsers at ' + FM_TIP + ': ' + problem);
+      if (parsed) {
+        for (const problem of parsed.problems) failures.push(id + ': first-manager action ' + action + ': command argument list does not match the parsers at ' + FM_TIP + ': ' + problem);
       }
       const execute = /\s--execute\s*$/.test(lineText);
       fmSequence.push(id + '|' + action + '|' + (execute ? 'execute' : 'plan'));
