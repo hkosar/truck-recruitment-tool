@@ -151,9 +151,41 @@ async function main(): Promise<void> {
     const hasAuth = await exists("to_regclass('auth.refresh_tokens')") && await exists("to_regclass('auth.one_time_tokens')") && await exists("to_regclass('auth.flow_state')") && await exists("to_regclass('auth.sessions')");
     if (hasAuth) {
       const shape = track(await run('l1-shape'));
+      const shapeEvent = shape.events.find((e) => e.msg === 'prod-sql.shape') as { passed?: boolean; checks?: Record<string, boolean>; auth_tables_unreviewed?: number } | undefined;
+      check('l1-shape against the local auth stand-ins: every fixed check true, nothing unreviewed, read_only_done', shape.error === undefined && resultOf(shape) === 'read_only_done' && shapeEvent?.passed === true && Object.values(shapeEvent.checks ?? {}).every((v) => v === true) && shapeEvent.auth_tables_unreviewed === 0);
+
+      // R1 regressions (review of 47b43e2): the gate must STOP, and a sweep must not delete anything, when the shape is wrong. Seeded synthetic rows only.
+      const seed = "insert into auth.sessions(id) values ('f0000000-0000-4000-8000-000000000001'); insert into auth.refresh_tokens(session_id) values ('f0000000-0000-4000-8000-000000000001'); insert into auth.one_time_tokens(id) values ('f0000000-0000-4000-8000-000000000002'); insert into auth.flow_state(id) values ('f0000000-0000-4000-8000-000000000003')";
+      const authCounts = async (): Promise<string> => JSON.stringify((await q('select (select count(*) from auth.sessions) as s, (select count(*) from auth.refresh_tokens) as r, (select count(*) from auth.one_time_tokens) as o, (select count(*) from auth.flow_state) as f')).rows);
+      await q(seed);
+      const seeded = await authCounts();
+      try {
+        await q('create table auth.review_unlisted_credentials (token text)');
+        await q("insert into auth.review_unlisted_credentials values ('review-synthetic')");
+        const stopShape = track(await run('l1-shape'));
+        const stopSweep = track(await run('l1-sweep'));
+        const unlistedEvent = stopShape.events.find((e) => e.msg === 'prod-sql.shape') as { auth_tables_unreviewed?: number; checks?: Record<string, boolean> } | undefined;
+        check('an extra unlisted auth table with a credential row: l1-shape refuses (prod_sql_l1_shape_not_ok) and counts it without naming it', stopShape.error instanceof RunnerRefusal && stopShape.error.id === 'prod_sql_l1_shape_not_ok' && unlistedEvent?.auth_tables_unreviewed === 1 && unlistedEvent.checks?.no_unreviewed_auth_tables === false && !JSON.stringify(stopShape.events).includes('review_unlisted'));
+        check('an extra unlisted auth table: l1-sweep refuses in the same run before any delete, nothing is committed, every seeded row and the unlisted row survive', stopSweep.error instanceof RunnerRefusal && stopSweep.error.id === 'prod_sql_l1_shape_not_ok' && resultOf(stopSweep) === 'rolled_back' && !stopSweep.sent.some((s) => ctlOf(s) === 'commit') && !stopSweep.sent.some((s) => /^(delete|update)\b/i.test(s))
+          && (await authCounts()) === seeded && Number((await q('select count(*) as n from auth.review_unlisted_credentials')).rows[0].n) === 1);
+      } finally {
+        await q('drop table if exists auth.review_unlisted_credentials');
+      }
+      await q('alter table auth.users rename column confirmation_token to review_hidden_confirmation_token');
+      try {
+        const hiddenShape = track(await run('l1-shape'));
+        const hiddenSweep = track(await run('l1-sweep'));
+        const hiddenEvent = hiddenShape.events.find((e) => e.msg === 'prod-sql.shape') as { checks?: Record<string, boolean> } | undefined;
+        check('a hidden confirmation_token column: l1-shape refuses and names only the fixed failing check', hiddenShape.error instanceof RunnerRefusal && hiddenShape.error.id === 'prod_sql_l1_shape_not_ok' && hiddenEvent?.checks?.users_confirmation_token === false && Object.entries(hiddenEvent.checks ?? {}).filter(([, v]) => !v).length === 1);
+        check('a hidden confirmation_token column: l1-sweep refuses before any delete or update; nothing committed; seeded rows survive', hiddenSweep.error instanceof RunnerRefusal && hiddenSweep.error.id === 'prod_sql_l1_shape_not_ok' && resultOf(hiddenSweep) === 'rolled_back' && !hiddenSweep.sent.some((s) => ctlOf(s) === 'commit') && !hiddenSweep.sent.some((s) => /^(delete|update)\b/i.test(s)) && (await authCounts()) === seeded);
+      } finally {
+        await q('alter table auth.users rename column review_hidden_confirmation_token to confirmation_token');
+      }
+
       const counts = track(await run('l1-counts'));
       const sweep = track(await run('l1-sweep'));
-      check('L1 stages run against the local auth stand-ins: shape (digests), counts (numbers), sweep (own begin/commit, rows)', shape.error === undefined && counts.error === undefined && sweep.error === undefined && resultOf(sweep) === 'committed' && Object.keys(counts.events.find((e) => e.msg === 'prod-sql.counts')!.counts as object).length === 5);
+      check('L1 stages run against the local auth stand-ins: counts (numbers), then the gated sweep passes its shape gate, runs as own begin/commit with rows, and clears the seeded rows', counts.error === undefined && sweep.error === undefined && resultOf(sweep) === 'committed' && sweep.events.some((e) => e.msg === 'prod-sql.shape' && e.passed === true) && Object.keys(counts.events.find((e) => e.msg === 'prod-sql.counts')!.counts as object).length === 5
+        && JSON.stringify((counts.events.find((e) => e.msg === 'prod-sql.counts')!.counts as Record<string, number>).sessions) === '1' && (await authCounts()) === JSON.stringify([{ s: '0', r: '0', o: '0', f: '0' }]));
     } else {
       info('L1 stages', 'skipped: the local auth stand-in lacks the Supabase auth tables the L1 file reads (refresh_tokens, one_time_tokens, flow_state); not covered here');
     }

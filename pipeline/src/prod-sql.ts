@@ -27,8 +27,11 @@ import { SqlSplitError, splitSqlStatements, transactionShape, unsupportedReason,
 
 export const PROD_SQL_TARGET = 'production' as const;
 export type ProdSqlMode = 'read_only' | 'write';
-/** What a finished statement may report: nothing, the row count, the row count plus a digest of the rows (for before/after comparison), or pinned count columns. */
-export type ProdSqlReport = 'none' | 'rows' | 'digest' | 'counts';
+/**
+ * What a finished statement may report: nothing, the row count, the row count plus a digest of the rows (for before/after comparison), pinned count columns,
+ * or 'shape': the row count, and the rows are checked in the runner against the reviewed L1 inventory (see evaluateL1Shape) and stop the run when it fails.
+ */
+export type ProdSqlReport = 'none' | 'rows' | 'digest' | 'counts' | 'shape';
 
 export interface ProdSqlAction {
   id: string;
@@ -48,6 +51,11 @@ export interface ProdSqlAction {
   report: ProdSqlReport;
   /** For report 'counts': the only column names that are ever printed (the values are numbers). */
   countNames?: readonly string[];
+  /**
+   * The id of an action whose statements (a 'shape' stage of the same file) run FIRST, inside this action's own transaction, and must pass
+   * evaluateL1Shape before any statement of this action runs. The gate is part of the plan, so it is the same run.
+   */
+  gate?: string;
   /** The exact words the operator must type with --confirm for this action. */
   phrase: string;
 }
@@ -70,9 +78,9 @@ export const PROD_SQL_ACTIONS: readonly ProdSqlAction[] = [
   { id: 'm1b', step: 'B3', file: 'supabase/pending/M1b_add_person.sql', sha256: '82724e06f0393adf82bbe7222f2a9ae55dbe2443c2fffdf98a8bebabcbc44768', mode: 'write', report: 'none', phrase: 'RUN TNBS PRODUCTION SQL M1B' },
   { id: 'm1c', step: 'B4', file: 'supabase/pending/M1c_batch_delete_audit.sql', sha256: '86cd3de2ab4f1b2283c344088e31d05fbc8e719ebaa17318987a7082c42dfb26', mode: 'write', report: 'none', phrase: 'RUN TNBS PRODUCTION SQL M1C' },
   // B13: L1, in its own stages (doc 17 B13 steps 1-4). Stage 2 is also the recount of steps 4 and 7; stage 3 is also the second sweep of step 6.
-  { id: 'l1-shape', step: 'B13 stage 1', file: 'supabase/rollout/L1-close-legacy-auth.sql', sha256: '3f6e2c70f52c0f3b462769af6aa43c04b24a3984fe6d099c4184a7a4283223d5', statements: [1, 2], stageSha256: '9fb09b8013f719119d024c17a8246b6f96a18b3b8f5ef3a1ac1049c7fc03bd40', mode: 'read_only', report: 'digest', phrase: 'RUN TNBS PRODUCTION SQL L1-SHAPE' },
+  { id: 'l1-shape', step: 'B13 stage 1', file: 'supabase/rollout/L1-close-legacy-auth.sql', sha256: '3f6e2c70f52c0f3b462769af6aa43c04b24a3984fe6d099c4184a7a4283223d5', statements: [1, 2], stageSha256: '9fb09b8013f719119d024c17a8246b6f96a18b3b8f5ef3a1ac1049c7fc03bd40', mode: 'read_only', report: 'shape', phrase: 'RUN TNBS PRODUCTION SQL L1-SHAPE' },
   { id: 'l1-counts', step: 'B13 stages 2, 4, 7', file: 'supabase/rollout/L1-close-legacy-auth.sql', sha256: '3f6e2c70f52c0f3b462769af6aa43c04b24a3984fe6d099c4184a7a4283223d5', statements: [3, 3], stageSha256: '991ccc9c661fd08ff076130d4bea321798bee54398631a609fa7c97eaf13a3e2', mode: 'read_only', report: 'counts', countNames: ['sessions', 'refresh_tokens', 'one_time_tokens', 'flow_state', 'users_with_tokens'], phrase: 'RUN TNBS PRODUCTION SQL L1-COUNTS' },
-  { id: 'l1-sweep', step: 'B13 stages 3, 6', file: 'supabase/rollout/L1-close-legacy-auth.sql', sha256: '3f6e2c70f52c0f3b462769af6aa43c04b24a3984fe6d099c4184a7a4283223d5', statements: [4, 10], stageSha256: 'b0c4997d598809dd05f22e88fd81132b58e3d0439ee69353216feded075a1e09', mode: 'write', report: 'rows', phrase: 'RUN TNBS PRODUCTION SQL L1-SWEEP' },
+  { id: 'l1-sweep', step: 'B13 stages 3, 6', file: 'supabase/rollout/L1-close-legacy-auth.sql', sha256: '3f6e2c70f52c0f3b462769af6aa43c04b24a3984fe6d099c4184a7a4283223d5', statements: [4, 10], stageSha256: 'b0c4997d598809dd05f22e88fd81132b58e3d0439ee69353216feded075a1e09', mode: 'write', report: 'rows', gate: 'l1-shape', phrase: 'RUN TNBS PRODUCTION SQL L1-SWEEP' },
   // BO2: retire-app-credentials.sql, stage by stage (its own steps 2-6).
   { id: 'retire-nologin', step: 'BO2 step 2', file: 'supabase/backout/retire-app-credentials.sql', sha256: '3e716371979ffb876bb54f7ab91753eced9b89df15276c9d6d4ba7cc0ef7fa15', statements: [1, 1], stageSha256: '6df1df01d959cec06fa2f00c92114f91ff38a4ab422534b70051089cbc257f6f', mode: 'write', report: 'rows', phrase: 'RUN TNBS PRODUCTION SQL RETIRE-NOLOGIN' },
   { id: 'retire-terminate', step: 'BO2 step 3', file: 'supabase/backout/retire-app-credentials.sql', sha256: '3e716371979ffb876bb54f7ab91753eced9b89df15276c9d6d4ba7cc0ef7fa15', statements: [2, 2], stageSha256: 'c9442fb30289dbf20fc87d8dfc35b37bbd68effaca248b85353b555e61cc343d', mode: 'write', report: 'rows', phrase: 'RUN TNBS PRODUCTION SQL RETIRE-TERMINATE' },
@@ -119,12 +127,25 @@ export interface ProdSqlPlan {
   target: typeof PROD_SQL_TARGET;
   db: SupabaseDbTarget;
   statements: readonly SqlStatement[];
+  /** The verified shape-gate statements (the 'gate' action's stage of the same file); they run first, inside the transaction, and must pass. */
+  gate?: readonly SqlStatement[];
   shape: ProdSqlShape;
   /** The pinned file hash (public, repository content). */
   sha256: string;
 }
 
 const find = (id: string): ProdSqlAction | undefined => PROD_SQL_ACTIONS.find((a) => a.id === id);
+
+/** True when the staged actions of `file` cover statements 1..total with no gap and no overlap, in order. */
+export function stagesTile(file: string, total: number, actions: readonly ProdSqlAction[] = PROD_SQL_ACTIONS): boolean {
+  const stages = actions.filter((a) => a.file === file && a.statements !== undefined).map((a) => a.statements!).sort((x, y) => x[0] - y[0]);
+  let next = 1;
+  for (const [from, to] of stages) {
+    if (from !== next || to < from) return false;
+    next = to + 1;
+  }
+  return stages.length > 0 && next === total + 1;
+}
 
 /** Pure, offline verification (it reads only the pinned repository file). Throws before anything could connect. */
 export function planProdSql(input: { target: string | undefined; action: string; dbUrl: string | undefined; confirm: string | undefined; files?: ProdSqlFiles }): ProdSqlPlan {
@@ -179,6 +200,16 @@ export function planProdSql(input: { target: string | undefined; action: string;
     if (from < 1 || to < from || to > all.length) throw new RunnerRefusal('prod_sql_shape_refused', 'The stage range does not fit the file; refusing');
     statements = all.slice(from - 1, to);
     if (stageDigest(statements) !== action.stageSha256) throw new RunnerRefusal('prod_sql_hash_mismatch', 'The stage does not match its pinned SHA-256; refusing');
+    // The stages of one file must tile it exactly, from statement 1 through the parsed final statement: an appended statement that no stage runs is refused.
+    if (!stagesTile(action.file, all.length)) throw new RunnerRefusal('prod_sql_shape_refused', 'The stages do not cover the file exactly (gap, overlap or an unexecuted tail); refusing');
+  }
+  let gate: readonly SqlStatement[] | undefined;
+  if (action.gate !== undefined) {
+    const gateAction = find(action.gate);
+    if (gateAction?.statements === undefined || gateAction.report !== 'shape' || gateAction.file !== action.file) throw new RunnerRefusal('prod_sql_shape_refused', 'The shape gate is not a shape stage of the same file; refusing');
+    gate = all.slice(gateAction.statements[0] - 1, gateAction.statements[1]);
+    if (stageDigest(gate) !== gateAction.stageSha256) throw new RunnerRefusal('prod_sql_hash_mismatch', 'The shape gate does not match its pinned SHA-256; refusing');
+    if (gate.length !== 2 || gate.some((g) => unsupportedReason(g) !== null || commandOf(g) !== 'select')) throw new RunnerRefusal('prod_sql_shape_refused', 'The shape gate must be the two select statements; refusing');
   }
   if (statements.length === 0) throw new RunnerRefusal('prod_sql_shape_refused', 'The action has no statements; refusing');
   if (statements.some((s) => unsupportedReason(s) !== null)) throw new RunnerRefusal('prod_sql_shape_refused', 'The action holds a statement that cannot run in one transaction; refusing');
@@ -191,7 +222,7 @@ export function planProdSql(input: { target: string | undefined; action: string;
   if (input.confirm !== action.phrase) {
     throw new RunnerRefusal('confirmation_required', `Action ${action.id} requires --confirm="${action.phrase}"`);
   }
-  return { action, target: PROD_SQL_TARGET, db, statements, shape, sha256: action.sha256 };
+  return { action, target: PROD_SQL_TARGET, db, statements, ...(gate === undefined ? {} : { gate }), shape, sha256: action.sha256 };
 }
 
 /** Production credential entry: the first-manager rule, unchanged. A PRODUCTION_DB_URL without the hidden prompt's proof is refused; STAGING_DB_URL must be absent. */
@@ -199,6 +230,48 @@ export function selectProdSqlDbUrl(env: Readonly<Record<string, string | undefin
   return selectFirstManagerDbUrl('production', env);
 }
 export { PRODUCTION_PROMPT_PROOF_VARIABLE, promptProof };
+
+// ---------------------------------------------------------------------------------------------------------------
+// The L1 shape gate (doc 17 B13 stage 1; the shape-check instructions at the top of supabase/rollout/L1-close-legacy-auth.sql)
+// ---------------------------------------------------------------------------------------------------------------
+
+/** The auth tables L1 clears or reads, named by the file's shape check and doc 17 B13: all must exist. users holds the six token columns. */
+export const L1_AUTH_TABLES = ['users', 'sessions', 'refresh_tokens', 'one_time_tokens', 'flow_state'] as const;
+/** The six auth.users token columns the L1 file clears; each must exist. */
+export const L1_USERS_TOKEN_COLUMNS = ['confirmation_token', 'recovery_token', 'email_change_token_new', 'email_change_token_current', 'phone_change_token', 'reauthentication_token'] as const;
+/**
+ * Other auth tables whose review is on record as holding no credential (a plain list of schema versions). Any auth table that is neither in
+ * L1_AUTH_TABLES nor here is unreviewed: the gate stops, a person reviews it, and only a reviewed change to this list (and the contract) lets it pass.
+ * The runner never deletes or reads an unlisted table; it only counts it.
+ */
+export const L1_REVIEWED_OTHER_AUTH_TABLES = ['schema_migrations'] as const;
+/** Every check name the shape gate can print (fixed words; the wrapper enumerates exactly these). */
+export const PROD_SQL_SHAPE_CHECKS: readonly string[] = ['results_read', ...L1_AUTH_TABLES.map((t) => `table_${t}`), ...L1_USERS_TOKEN_COLUMNS.map((c) => `users_${c}`), 'no_unreviewed_auth_tables'];
+
+export interface L1ShapeResult { checks: Record<string, boolean>; authTables: number; unreviewedAuthTables: number; passed: boolean }
+
+const rowsOfResult = (v: unknown): Array<Record<string, unknown>> | undefined =>
+  Array.isArray(v) ? v.filter((r): r is Record<string, unknown> => typeof r === 'object' && r !== null && !Array.isArray(r)) : undefined;
+
+/**
+ * Judges the two L1 shape results (the column listing and the table listing). Only booleans and counts come out; a table or column name
+ * from the database is compared with the fixed lists and never kept. A result that is not a list of rows fails every check.
+ */
+export function evaluateL1Shape(columnResult: unknown, tableResult: unknown): L1ShapeResult {
+  const columns = rowsOfResult(columnResult);
+  const tables = rowsOfResult(tableResult);
+  const tableNames = new Set((tables ?? []).map((r) => r.table_name).filter((n): n is string => typeof n === 'string'));
+  const columnTables = new Set((columns ?? []).map((r) => r.table_name).filter((n): n is string => typeof n === 'string'));
+  const userColumns = new Set((columns ?? []).filter((r) => r.table_name === 'users').map((r) => r.column_name).filter((n): n is string => typeof n === 'string'));
+  const known = new Set<string>([...L1_AUTH_TABLES, ...L1_REVIEWED_OTHER_AUTH_TABLES]);
+  const authTables = tables === undefined ? 0 : tables.length;
+  const unreviewedAuthTables = tables === undefined ? 0 : tables.filter((r) => typeof r.table_name !== 'string' || !known.has(r.table_name)).length;
+  const checks: Record<string, boolean> = { results_read: columns !== undefined && tables !== undefined };
+  for (const t of L1_AUTH_TABLES) checks[`table_${t}`] = tableNames.has(t) && (t === 'users' || columnTables.has(t));
+  for (const c of L1_USERS_TOKEN_COLUMNS) checks[`users_${c}`] = userColumns.has(c);
+  checks.no_unreviewed_auth_tables = tables !== undefined && unreviewedAuthTables === 0;
+  return { checks, authTables, unreviewedAuthTables, passed: Object.values(checks).every((v) => v) };
+}
 
 // ---------------------------------------------------------------------------------------------------------------
 // Reporting (fixed keys only; counts, enumerated words and the pinned hash; never an address, a value or driver text)
@@ -231,11 +304,19 @@ function reportStatement(plan: ProdSqlPlan, index: number, statement: SqlStateme
     line({ msg: 'prod-sql.counts', action: action.id, index, counts });
     return;
   }
+  // 'shape' prints only the row count here; the rows themselves are judged by evaluateL1Shape and never printed.
   const event: Record<string, unknown> = { msg: 'prod-sql.statement', action: action.id, index, command: commandOf(statement), rows: intOrMinusOne(result?.rowCount) };
   if (action.report === 'digest') {
     try { event.digest = sha256Hex(JSON.stringify(result?.rows ?? [])); } catch { /* no digest rather than a wrong one */ }
   }
   line(event);
+}
+
+/** Prints the fixed shape event and stops (refuses) unless every check passed. */
+function enforceL1Shape(action: ProdSqlAction, columnResult: unknown, tableResult: unknown): void {
+  const shape = evaluateL1Shape(columnResult, tableResult);
+  line({ msg: 'prod-sql.shape', action: action.id, checks: shape.checks, auth_tables: shape.authTables, auth_tables_unreviewed: shape.unreviewedAuthTables, passed: shape.passed });
+  if (!shape.passed) throw new RunnerRefusal('prod_sql_l1_shape_not_ok', 'The L1 shape check did not pass (a required table or column is missing, or an auth table is unreviewed); stopping');
 }
 
 // ---------------------------------------------------------------------------------------------------------------
@@ -265,11 +346,20 @@ export async function runProdSqlPlan(client: RebuiltSqlClient, plan: ProdSqlPlan
   await client.query(shape === 'read_only' ? 'begin read only' : shape === 'own' ? statements[0]!.raw : 'begin');
   try {
     if (shape !== 'read_only') await client.query(LOCK_TIMEOUT_SQL);
+    if (plan.gate !== undefined) {
+      // The gate: the two shape selects run inside this transaction before any change; a failed check refuses and the rollback below undoes nothing but the begin.
+      const gateResults: unknown[] = [];
+      for (const statement of plan.gate) gateResults.push((await client.query(statement.raw))?.rows);
+      enforceL1Shape(action, gateResults[0], gateResults[1]);
+    }
+    const shapeRows: unknown[] = [];
     for (const [i, statement] of body.entries()) {
       const result = await client.query(statement.raw);
       ran += 1;
+      if (action.report === 'shape') shapeRows.push(result?.rows);
       reportStatement(plan, (shape === 'own' ? 1 : 0) + i + 1, statement, result);
     }
+    if (action.report === 'shape') enforceL1Shape(action, shapeRows[0], shapeRows[1]);
     if (shape === 'read_only') {
       await client.query('rollback');
       line({ msg: 'prod-sql.result', action: action.id, result: 'read_only_done', statements: ran });

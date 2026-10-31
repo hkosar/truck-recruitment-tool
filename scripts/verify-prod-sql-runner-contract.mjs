@@ -14,6 +14,55 @@ const failures = [];
 const read = (rel) => (existsSync(resolve(root, rel)) ? readFileSync(resolve(root, rel), 'utf8').replace(/\r\n/g, '\n') : undefined);
 /** Source without comments (// and block), so a forbidden word in prose does not count and a real statement does. */
 const code = (src) => src.replace(/\/\*[\s\S]*?\*\//g, '').split('\n').map((l) => l.replace(/(^|\s)\/\/.*$/, '')).join('\n');
+/**
+ * An independent port of splitSqlStatements (pipeline/src/prod-sql-split.ts) returning each top-level statement's raw text, so the stage digests can be
+ * recomputed here without TypeScript or dependencies. Same rules: comments, quoted strings and identifiers and dollar-quoted bodies never end a statement.
+ */
+function splitStatements(text) {
+  const out = [];
+  let raw = '';
+  let clean = '';
+  const push = () => { if (clean.trim() !== '') out.push(raw.trim()); raw = ''; clean = ''; };
+  const identChar = /[A-Za-z0-9_\u0080-￿$]/;
+  const dollarTag = /^\$(?:[A-Za-z_\u0080-￿][A-Za-z0-9_\u0080-￿]*)?\$/;
+  const n = text.length;
+  let i = 0;
+  while (i < n) {
+    const ch = text[i];
+    const next = text[i + 1];
+    if (ch === '\\' && (i === 0 || text[i - 1] === '\n') && clean.trim() === '') throw new Error('meta_command');
+    if (ch === '-' && next === '-') { let j = i; while (j < n && text[j] !== '\n') j += 1; raw += text.slice(i, j); clean += ' '; i = j; continue; }
+    if (ch === '/' && next === '*') {
+      let depth = 1; let j = i + 2;
+      while (j < n && depth > 0) { if (text[j] === '/' && text[j + 1] === '*') { depth += 1; j += 2; } else if (text[j] === '*' && text[j + 1] === '/') { depth -= 1; j += 2; } else j += 1; }
+      if (depth > 0) throw new Error('unterminated');
+      raw += text.slice(i, j); clean += ' '; i = j; continue;
+    }
+    if (ch === "'" || ch === '"') {
+      const escapes = ch === "'" && /[eE]/.test(text[i - 1] ?? '') && !identChar.test(text[i - 2] ?? ' ');
+      let j = i + 1;
+      for (;;) {
+        if (j >= n) throw new Error('unterminated');
+        if (escapes && text[j] === '\\') { j += 2; continue; }
+        if (text[j] === ch) { if (text[j + 1] === ch) { j += 2; continue; } j += 1; break; }
+        j += 1;
+      }
+      raw += text.slice(i, j); clean += `${ch}${ch}`; i = j; continue;
+    }
+    if (ch === '$' && !identChar.test(text[i - 1] ?? ' ')) {
+      const tag = dollarTag.exec(text.slice(i, i + 130))?.[0];
+      if (tag !== undefined) {
+        const end = text.indexOf(tag, i + tag.length);
+        if (end < 0) throw new Error('unterminated');
+        raw += text.slice(i, end + tag.length); clean += '$$'; i = end + tag.length; continue;
+      }
+    }
+    if (ch === ';') { push(); i += 1; continue; }
+    raw += ch; clean += ch; i += 1;
+  }
+  push();
+  return out;
+}
 const need = (name, c, re, what) => { if (!c || !re.test(c)) failures.push(`${name} must keep: ${what}`); };
 
 const mod = read('pipeline/src/prod-sql.ts');
@@ -35,8 +84,8 @@ const actions = [];
 if (mod) {
   const c = code(mod);
   for (const m of c.matchAll(/MIGRATION\('([a-z0-9-]+)', '[^']*', '([^']+)', '([0-9a-f]{64})'\)/g)) actions.push({ id: m[1], file: `supabase/migrations/${m[2]}`, sha: m[3], manifestName: m[2], phrase: `RUN TNBS PRODUCTION SQL ${m[1].toUpperCase()}` });
-  for (const m of c.matchAll(/\{ id: '([a-z0-9-]+)', step: '[^']*', file: '([^']+)', sha256: '([0-9a-f]{64})'(?:, statements: \[(\d+), (\d+)\], stageSha256: '([0-9a-f]{64})')?, mode: '(read_only|write)', report: '(none|rows|digest|counts)'[^}]*?phrase: '([^']+)' \}/g)) {
-    actions.push({ id: m[1], file: m[2], sha: m[3], from: m[4] === undefined ? undefined : Number(m[4]), to: m[5] === undefined ? undefined : Number(m[5]), stageSha: m[6], mode: m[7], report: m[8], phrase: m[9] });
+  for (const m of c.matchAll(/\{ id: '([a-z0-9-]+)', step: '[^']*', file: '([^']+)', sha256: '([0-9a-f]{64})'(?:, statements: \[(\d+), (\d+)\], stageSha256: '([0-9a-f]{64})')?, mode: '(read_only|write)', report: '(none|rows|digest|counts|shape)'(?:, gate: '([a-z0-9-]+)')?[^}]*?phrase: '([^']+)' \}/g)) {
+    actions.push({ id: m[1], file: m[2], sha: m[3], from: m[4] === undefined ? undefined : Number(m[4]), to: m[5] === undefined ? undefined : Number(m[5]), stageSha: m[6], mode: m[7], report: m[8], gate: m[9], phrase: m[10] });
   }
   const declared = [...c.slice(0, c.indexOf('export const PROD_SQL_MISSING')).matchAll(/(?:MIGRATION\(|\{ id: )'([a-z0-9-]+)'/g)].map((m) => m[1]);
   if (actions.length !== declared.length || actions.length < 20) failures.push(`prod-sql.ts: the action table could not be read completely (read ${actions.length} of ${declared.length}; expected at least 20)`);
@@ -54,11 +103,41 @@ if (mod) {
       if (line?.[1] !== a.sha) failures.push(`prod-sql.ts: ${a.id} does not agree with docs/build-plan/migration-checksums.sha256`);
     }
   }
-  // Stage ranges of one file tile it without gap or overlap, and every stage carries its own pin.
+  // Stage ranges of one file tile it exactly: from statement 1 through the parsed FINAL statement, no gap, no overlap, every stage with a pin, and every
+  // stage digest recomputed here from the file's own statements (an independent port of the splitter; a disagreement fails, so a bug in either shows up).
   for (const file of [...new Set(actions.filter((a) => a.from !== undefined).map((a) => a.file))]) {
-    const stages = actions.filter((a) => a.file === file).sort((a, b) => a.from - b.from);
+    const stages = actions.filter((a) => a.file === file && a.from !== undefined).sort((a, b) => a.from - b.from);
     stages.forEach((s, i) => { if (s.from !== (i === 0 ? 1 : stages[i - 1].to + 1) || s.to < s.from || !s.stageSha) failures.push(`prod-sql.ts: the stages of ${file} must tile it without gap or overlap, each with a stage pin`); });
     if (new Set(stages.map((s) => s.sha)).size !== 1) failures.push(`prod-sql.ts: every stage of ${file} must pin the same whole-file hash`);
+    let statements;
+    try { statements = splitStatements(readFileSync(resolve(root, file), 'utf8')); } catch { failures.push(`prod-sql.ts: ${file} could not be split by the contract's own splitter`); continue; }
+    if (stages[stages.length - 1].to !== statements.length) failures.push(`prod-sql.ts: the stages of ${file} end at statement ${stages[stages.length - 1].to} but the file has ${statements.length} statements (an unexecuted tail)`);
+    for (const s of stages) {
+      if (s.to > statements.length) { failures.push(`prod-sql.ts: ${s.id} ends past the last statement of ${file}`); continue; }
+      const digest = createHash('sha256').update(statements.slice(s.from - 1, s.to).join('\u0000')).digest('hex');
+      if (digest !== s.stageSha) failures.push(`prod-sql.ts: ${s.id} pins stage digest ${String(s.stageSha).slice(0, 12)}... but statements ${s.from}-${s.to} of ${file} hash to ${digest.slice(0, 12)}... (the stage changed or the pin is stale: review, then update the pin)`);
+    }
+  }
+  // The shape gate: l1-shape is the only 'shape' stage, l1-sweep is gated by it, nothing else is; the reviewed inventory is the file's own shape check.
+  const shapeStages = actions.filter((a) => a.report === 'shape');
+  if (shapeStages.map((a) => a.id).join() !== 'l1-shape' || shapeStages[0]?.mode !== 'read_only') failures.push("prod-sql.ts: l1-shape must be the one read-only 'shape' stage");
+  if (actions.filter((a) => a.gate !== undefined).map((a) => `${a.id}>${a.gate}`).join() !== 'l1-sweep>l1-shape') failures.push("prod-sql.ts: l1-sweep must be gated by l1-shape and no other action may have a gate");
+  {
+    const l1 = actions.find((a) => a.id === 'l1-shape');
+    const l1Text = l1 && existsSync(resolve(root, l1.file)) ? splitStatements(readFileSync(resolve(root, l1.file), 'utf8')) : [];
+    const listOf = (name) => (new RegExp(`export const ${name} = \\[([^\\]]*)\\] as const`).exec(c)?.[1].match(/'([a-z_]+)'/g) ?? []).map((q) => q.slice(1, -1));
+    const tables = listOf('L1_AUTH_TABLES');
+    const cols = listOf('L1_USERS_TOKEN_COLUMNS');
+    if (tables.join() !== 'users,sessions,refresh_tokens,one_time_tokens,flow_state') failures.push('prod-sql.ts: L1_AUTH_TABLES must be the L1 file\'s own listed tables (users, sessions, refresh_tokens, one_time_tokens, flow_state)');
+    if (cols.length !== 6) failures.push('prod-sql.ts: L1_USERS_TOKEN_COLUMNS must list the six auth.users token columns');
+    if (l1Text.length >= 2) {
+      for (const t of tables.filter((x) => x !== 'users')) if (!l1Text[0].includes(`'${t}'`)) failures.push(`prod-sql.ts: ${t} is not named by the L1 file's first shape select (the reviewed inventory differs from the file)`);
+      for (const col of cols) if (!l1Text[0].includes(`'${col}'`)) failures.push(`prod-sql.ts: ${col} is not named by the L1 file's first shape select (the reviewed inventory differs from the file)`);
+      if (!/information_schema\.columns/.test(l1Text[0]) || !/information_schema\.tables/.test(l1Text[1]) || !/table_schema = 'auth'/.test(l1Text[0]) || !/table_schema = 'auth'/.test(l1Text[1])) failures.push('prod-sql.ts: the L1 file\'s first two statements are no longer the two auth information_schema shape selects');
+    } else failures.push('prod-sql.ts: the L1 file has fewer than two statements');
+    const expectedChecks = ['results_read', ...tables.map((t) => `table_${t}`), ...cols.map((col) => `users_${col}`), 'no_unreviewed_auth_tables'];
+    const wrapperChecks = (wrapper ? /export const PROD_SQL_SHAPE_CHECKS = \[([\s\S]*?)\];/.exec(wrapper)?.[1].match(/'([a-z_]+)'/g) ?? [] : []).map((q) => q.slice(1, -1));
+    if (JSON.stringify(wrapperChecks) !== JSON.stringify(expectedChecks)) failures.push('run-with-secrets.mjs PROD_SQL_SHAPE_CHECKS must equal the shape check names derived from L1_AUTH_TABLES and L1_USERS_TOKEN_COLUMNS');
   }
   // Read-only actions never write; every action that has report 'counts' names its columns.
   for (const a of actions) if (a.report === 'counts' && !new RegExp(`id: '${a.id}'[^}]*countNames: \\[`).test(c)) failures.push(`prod-sql.ts: ${a.id} reports counts but pins no countNames`);
@@ -86,6 +165,13 @@ if (mod) {
   need('prod-sql.ts', c, /if \(db\.port !== 5432\) throw new RunnerRefusal\('port_must_be_5432'/, 'the session-port refusal');
   need('prod-sql.ts', c, /if \(sha256Hex\(bytes\) !== action\.sha256\) throw new RunnerRefusal\('prod_sql_hash_mismatch'/, 'the whole-file hash refusal');
   need('prod-sql.ts', c, /if \(stageDigest\(statements\) !== action\.stageSha256\) throw new RunnerRefusal\('prod_sql_hash_mismatch'/, 'the stage hash refusal');
+  need('prod-sql.ts', c, /if \(!stagesTile\(action\.file, all\.length\)\) throw new RunnerRefusal\('prod_sql_shape_refused'/, 'the stage coverage refusal (stages tile the file through its final statement)');
+  need('prod-sql.ts', c, /export function stagesTile\(file: string, total: number[^)]*\): boolean \{[\s\S]*?return stages\.length > 0 && next === total \+ 1;/, 'stagesTile: first stage at 1, no gap, no overlap, last stage ends at the final statement');
+  need('prod-sql.ts', c, /if \(stageDigest\(gate\) !== gateAction\.stageSha256\) throw new RunnerRefusal\('prod_sql_hash_mismatch'/, 'the shape gate is verified against its own stage pin');
+  need('prod-sql.ts', c, /if \(!shape\.passed\) throw new RunnerRefusal\('prod_sql_l1_shape_not_ok'/, 'a failed L1 shape check stops the run');
+  need('prod-sql.ts', c, /if \(plan\.gate !== undefined\) \{[\s\S]*?enforceL1Shape\(action, gateResults\[0\], gateResults\[1\]\);\s*\}\s*const shapeRows: unknown\[\] = \[\];\s*for \(const \[i, statement\] of body\.entries\(\)\)/, 'the gate runs, and must pass, before the first statement of the gated action');
+  need('prod-sql.ts', c, /if \(action\.report === 'shape'\) enforceL1Shape\(action, shapeRows\[0\], shapeRows\[1\]\);\s*if \(shape === 'read_only'\)/, 'the shape stage is judged before its read-only transaction is rolled back and reported done');
+  if (!/export function evaluateL1Shape\(/.test(c) || !/no_unreviewed_auth_tables/.test(c)) failures.push('prod-sql.ts must keep evaluateL1Shape with the reviewed-inventory check');
   need('prod-sql.ts', c, /line\?\.\[1\] !== action\.sha256\) throw new RunnerRefusal\('prod_sql_hash_mismatch'/, 'the migration-manifest agreement refusal');
   need('prod-sql.ts', c, /if \(input\.confirm !== action\.phrase\) \{\s*throw new RunnerRefusal\('confirmation_required'/, 'the exact per-action phrase refusal');
   need('prod-sql.ts', c, /if \(found === 'invalid'\) throw new RunnerRefusal\('prod_sql_shape_refused'/, 'the refusal of any transaction shape other than wrapped or own');
@@ -144,7 +230,7 @@ for (const f of ['pipeline/src/staging-sql-runner.ts', 'pipeline/src/staging-reb
 // ---------------------------------------------------------------------------------------------------------------
 // Wiring: refusal ids, wrapper allow-list (events, enumerated lists), prompt-only URL, package scripts, verification chain, doc.
 // ---------------------------------------------------------------------------------------------------------------
-const NEW_IDS = ['prod_sql_target_refused', 'prod_sql_action_not_built', 'prod_sql_file_unreadable', 'prod_sql_hash_mismatch', 'prod_sql_shape_refused', 'prod_sql_commit_rolled_back'];
+const NEW_IDS = ['prod_sql_target_refused', 'prod_sql_action_not_built', 'prod_sql_file_unreadable', 'prod_sql_hash_mismatch', 'prod_sql_shape_refused', 'prod_sql_commit_rolled_back', 'prod_sql_l1_shape_not_ok'];
 if (refusals && wrapper) {
   for (const id of NEW_IDS) {
     if (!refusals.includes(`'${id}'`)) failures.push(`refusals.ts is missing ${id}`);
@@ -152,7 +238,7 @@ if (refusals && wrapper) {
   }
 }
 if (wrapper) {
-  for (const required of ["'prod-sql.verified'", "'prod-sql.plan_only'", "'prod-sql.statement'", "'prod-sql.counts'", "'prod-sql.result'", "'prod-sql.done'", "'prod-sql.refused'", 'export const PROD_SQL_ACTIONS', 'export const PROD_SQL_COUNT_NAMES',
+  for (const required of ["'prod-sql.verified'", "'prod-sql.plan_only'", "'prod-sql.statement'", "'prod-sql.counts'", "'prod-sql.shape'", "'prod-sql.result'", "'prod-sql.done'", "'prod-sql.refused'", 'export const PROD_SQL_ACTIONS', 'export const PROD_SQL_COUNT_NAMES', 'export const PROD_SQL_SHAPE_CHECKS',
     "export const PROMPT_ONLY = ['PRODUCTION_DB_URL']", 'can only be entered at the hidden prompt, never taken from the environment', "sha256: pat(/^[0-9a-f]{64}$/)", "target: oneOf(['production'])"]) {
     if (!wrapper.includes(required)) failures.push(`run-with-secrets.mjs is missing: ${required}`);
   }

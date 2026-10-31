@@ -134,7 +134,7 @@ export const REFUSAL_IDS = [
   'reapply_m1b_still_applied', 'reapply_m1c_not_backed_out', 'reapply_m1c_still_applied', 'owner_email_invalid',
   'owner_password_too_short', 'owner_auth_not_created', 'owner_auth_unknown_result', 'owner_promotion_refused',
   'owner_bootstrap_target_refused', 'bootstrap_target_required', 'target_not_recorded_production', 'first_manager_refused',
-  'prod_sql_target_refused', 'prod_sql_action_not_built', 'prod_sql_file_unreadable', 'prod_sql_hash_mismatch', 'prod_sql_shape_refused', 'prod_sql_commit_rolled_back', 'server_or_driver_error',
+  'prod_sql_target_refused', 'prod_sql_action_not_built', 'prod_sql_file_unreadable', 'prod_sql_hash_mismatch', 'prod_sql_shape_refused', 'prod_sql_commit_rolled_back', 'prod_sql_l1_shape_not_ok', 'server_or_driver_error',
 ];
 
 /** Keep equal to pipeline/src/refusals.ts DRIVER_CODES (a test compares them). */
@@ -170,6 +170,8 @@ export const PROD_SQL_COUNT_NAMES = ['sessions', 'refresh_tokens', 'one_time_tok
 export const PROD_SQL_COMMANDS = ['select', 'insert', 'update', 'delete', 'create', 'alter', 'drop', 'grant', 'revoke', 'do', 'set', 'comment', 'other'];
 export const PROD_SQL_RESULTS = ['committed', 'rolled_back', 'rollback_not_confirmed', 'unknown', 'read_only_done'];
 export const PROD_SQL_WRAPS = ['wrapped', 'own', 'read_only'];
+/** Keep equal to PROD_SQL_SHAPE_CHECKS in pipeline/src/prod-sql.ts (a test compares them): the fixed names of the L1 shape gate's yes/no checks. */
+export const PROD_SQL_SHAPE_CHECKS = ['results_read', 'table_users', 'table_sessions', 'table_refresh_tokens', 'table_one_time_tokens', 'table_flow_state', 'users_confirmation_token', 'users_recovery_token', 'users_email_change_token_new', 'users_email_change_token_current', 'users_phone_change_token', 'users_reauthentication_token', 'no_unreviewed_auth_tables'];
 
 const PRIVILEGES = ['SELECT', 'INSERT', 'UPDATE', 'DELETE', 'TRUNCATE', 'REFERENCES', 'TRIGGER', 'MAINTAIN', 'USAGE', 'EXECUTE', 'CREATE', 'OTHER'];
 const bool = (v) => typeof v === 'boolean';
@@ -243,6 +245,7 @@ const EVENTS = {
   'prod-sql.plan_only': { hint: oneOf(['add --execute to run']) },
   'prod-sql.statement': { action: oneOf(PROD_SQL_ACTIONS), index: int, command: oneOf(PROD_SQL_COMMANDS), rows: int, digest: pat(/^[0-9a-f]{64}$/) },
   'prod-sql.counts': { action: oneOf(PROD_SQL_ACTIONS), index: int, counts: (v) => typeof v === 'object' && v !== null && !Array.isArray(v) && Object.keys(v).every((k) => PROD_SQL_COUNT_NAMES.includes(k) && int(v[k])) },
+  'prod-sql.shape': { action: oneOf(['l1-shape', 'l1-sweep']), checks: (v) => typeof v === 'object' && v !== null && !Array.isArray(v) && Object.keys(v).every((k) => PROD_SQL_SHAPE_CHECKS.includes(k) && bool(v[k])), auth_tables: int, auth_tables_unreviewed: int, passed: bool },
   'prod-sql.result': { action: oneOf(PROD_SQL_ACTIONS), result: oneOf(PROD_SQL_RESULTS), statements: int },
   'prod-sql.done': { action: oneOf(PROD_SQL_ACTIONS), target: oneOf(['production']) },
   'prod-sql.refused': { refusal: oneOf(REFUSAL_IDS), err_code: code },
