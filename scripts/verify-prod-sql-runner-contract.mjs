@@ -187,6 +187,7 @@ if (mod) {
       }
     }
     need('prod-sql.ts', c, /const known = new Set<string>\(classification\.filter\(\(e\) => e\.classification !== 'credential-bearing: STOP'\)\.map\(\(e\) => e\.table\)\);/, 'the gate passes only a table the classification file lists as handled by L1 or reviewed as not credential-bearing (a STOP table and an unlisted table both stop it)');
+    need('prod-sql.ts', c, /const unreviewedAuthTables = tables === undefined \? 0 : tables\.filter\(\(r\) => typeof r\.table_name !== 'string' \|\| !known\.has\(r\.table_name\)\)\.length;/, 'every auth table that is not in the known set (or has no name) is counted unreviewed, and unreviewed stops the gate');
     need('prod-sql.ts', c, /const shape = evaluateL1Shape\(columnResult, tableResult, classification \?\? \[\]\);/, 'a plan without a verified classification fails closed');
     need('prod-sql.ts', c, /const classification = action\.report === 'shape' \|\| action\.gate !== undefined \? loadAuthClassification\(files\) : undefined;/, 'the classification is read, pin-checked and parsed at plan time for the shape stage and the gated sweep');
     need('prod-sql.ts', c, /if \(sha256Hex\(bytes\) !== AUTH_CLASSIFICATION_SHA256\) throw new RunnerRefusal\('prod_sql_hash_mismatch'/, 'the classification file hash refusal');
