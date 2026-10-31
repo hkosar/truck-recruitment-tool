@@ -9,10 +9,10 @@ import { fileURLToPath } from 'node:url';
 
 /** The Route A runner's reviewed tip ("missing-sql r2: ready"; branch bb/fix-draft-sql-findings-backouts-do-not-use-bo3-i-thr_8uxydx6hqr); never merged here. */
 export const RUNNER_TIP = '7111139';
-export const RUNNER_FILES = { prodSql: 'pipeline/src/prod-sql.ts', stagingRebuilt: 'pipeline/src/staging-rebuilt.ts' };
+export const RUNNER_FILES = { prodSql: 'pipeline/src/prod-sql.ts', stagingRebuilt: 'pipeline/src/staging-rebuilt.ts', cli: 'pipeline/src/prod-sql-runner.ts', wrapper: 'scripts/run-with-secrets.mjs' };
 /** The first-manager tool's reviewed commit ("fm-listener r2: ready"; branch bb/fix-first-manager-listener-output-commit-outcome-thr_q9ajbvqpa6, contained in signin/combined-reviewed-abc); never merged here. */
 export const FM_TIP = '7285a7e';
-export const FM_FILES = { bootstrap: 'pipeline/src/first-manager-bootstrap.ts', runner: 'pipeline/src/first-manager-runner.ts' };
+export const FM_FILES = { bootstrap: 'pipeline/src/first-manager-bootstrap.ts', runner: 'pipeline/src/first-manager-runner.ts', wrapper: 'scripts/run-with-secrets.mjs' };
 /** The only two actions the runner may refuse as DO NOT USE; the runbook may mention them but never as runnable. */
 export const EXPECTED_DO_NOT_USE = ['profile-bootstrap-backout', 'dnc-enum-cast-backout'];
 
@@ -54,6 +54,110 @@ export function parseRunner(prodSql, stagingRebuilt) {
   return { built, missing, doNotUse, warnings, stagingInventoryPhrase: inv?.[1] };
 }
 
+
+/** The wrapper's real parser (scripts/run-with-secrets.mjs parseArgs): its options, which take a value, the prompt-only names and the allowed secret names. */
+export function parseWrapperParser(src) {
+  const start = src.indexOf('export function parseArgs');
+  const end = src.indexOf('\n}\n', start);
+  if (start < 0 || end < 0) return { error: 'wrapper parseArgs not found' };
+  const body = src.slice(start, end);
+  const options = new Map();
+  for (const m of body.matchAll(/a === '(--[a-z-]+)'\) \{([^}]*)\}/g)) options.set(m[1], /\+\+i/.test(m[2]));
+  const promptOnly = [...(src.match(/PROMPT_ONLY = \[([^\]]*)\]/)?.[1] ?? '').matchAll(/'([A-Z_]+)'/g)].map((m) => m[1]);
+  const allowed = [...(src.match(/export const ALLOWED = \[([^\]]*)\]/)?.[1] ?? '').matchAll(/'([A-Z_]+)'/g)].map((m) => m[1]);
+  const needsNode = /rest\[0\] !== 'node'/.test(body);
+  const error = options.size === 4 && options.has('--secret') && options.has('--from-env') && options.has('--cwd') && options.has('--node-path') && promptOnly.includes('PRODUCTION_DB_URL') && allowed.includes('PRODUCTION_DB_URL') && needsNode && /unknown option/.test(body)
+    ? undefined : 'wrapper parser not recognised';
+  return { options, promptOnly, allowed, error };
+}
+
+/** A runner CLI's real argument parser: the --name= options, the bare flags and the unknown-argument refusal. */
+export function parseRunnerParser(src, fnName) {
+  const start = src.indexOf('export function ' + fnName);
+  const end = src.indexOf('\n}\n', start);
+  if (start < 0 || end < 0) return { error: fnName + ' not found' };
+  const body = src.slice(start, end);
+  const valueFlags = [...body.matchAll(/arg\.startsWith\('(--[a-z-]+)='\)/g)].map((m) => m[1]);
+  const boolFlags = [...body.matchAll(/arg === '(--[a-z-]+)'/g)].map((m) => m[1]);
+  const error = valueFlags.length === 3 && ['--target', '--action', '--confirm'].every((f) => valueFlags.includes(f)) && boolFlags.length === 1 && boolFlags[0] === '--execute' && /RunnerRefusal\('unknown_argument'/.test(body)
+    ? undefined : fnName + ' not recognised';
+  return { valueFlags, boolFlags, error };
+}
+
+/** Validates ONE pasted command line, token by token, as the wrapper and the runner would parse it. Returns the action, phrase and mode, plus every problem. */
+export function parseCommandLine(line, wrapper, runner, runnerRelPath) {
+  const problems = [];
+  const tokens = [...line.trim().matchAll(/(?:[^\s"]|"[^"]*")+/g)].map((m) => m[0]);
+  const out = { problems, action: undefined, confirm: undefined, execute: false };
+  if (tokens[0] !== 'node' || tokens[1] !== 'scripts/run-with-secrets.mjs') { problems.push('not a node scripts/run-with-secrets.mjs command'); return out; }
+  const secrets = [];
+  let cwd; let nodePath; let fromEnv = false;
+  let i = 2;
+  for (; i < tokens.length; i += 1) {
+    const a = tokens[i];
+    if (a === '--') { i += 1; break; }
+    if (!wrapper.options.has(a)) { problems.push('unknown wrapper option ' + a); continue; }
+    const value = wrapper.options.get(a) ? tokens[++i] : undefined;
+    if (a === '--secret') secrets.push(value);
+    else if (a === '--from-env') fromEnv = true;
+    else if (a === '--cwd') cwd = value;
+    else if (a === '--node-path') nodePath = value;
+  }
+  if (fromEnv) problems.push('--from-env is refused by the wrapper for ' + wrapper.promptOnly.join(', ') + ' (staging only)');
+  if (secrets.length !== 1 || secrets[0] !== 'PRODUCTION_DB_URL') problems.push('the secret list must be exactly --secret PRODUCTION_DB_URL, found: ' + secrets.join(', '));
+  if (cwd !== 'pipeline') problems.push('--cwd must be pipeline');
+  if (nodePath !== undefined) problems.push('--node-path is not part of the documented command');
+  const rest = tokens.slice(i);
+  if (rest[0] !== 'node' || rest[1] !== 'node_modules/tsx/dist/cli.mjs' || rest[2] !== runnerRelPath) problems.push('child must be exactly: node node_modules/tsx/dist/cli.mjs ' + runnerRelPath);
+  const seen = new Set();
+  for (const arg of rest.slice(3)) {
+    const name = arg.match(/^(--[a-z-]+)=/)?.[1];
+    const flag = name && runner.valueFlags.includes(name) ? name : runner.boolFlags.includes(arg) ? arg : undefined;
+    if (!flag) { problems.push('unknown_argument ' + arg.replace(/=.*/, '')); continue; }
+    if (seen.has(flag)) problems.push('duplicate ' + flag);
+    seen.add(flag);
+    if (flag === '--action') out.action = arg.slice('--action='.length);
+    else if (flag === '--confirm') out.confirm = arg.slice('--confirm='.length).replace(/^"(.*)"$/, '$1');
+    else if (flag === '--target') { if (arg !== '--target=production') problems.push('--target must be production'); }
+    else if (flag === '--execute') out.execute = true;
+  }
+  for (const need of ['--target', '--action', '--confirm']) if (!seen.has(need)) problems.push('missing ' + need);
+  if (out.execute && !/\s--execute\s*$/.test(line)) problems.push('--execute must be the last argument');
+  return out;
+}
+
+/** Keys of each 'first-manager.<event>' entry in the wrapper's output allow-list (the real field set). */
+export function parseFmOutputFields(wrapperSrc) {
+  const events = new Map();
+  for (const m of wrapperSrc.matchAll(/'first-manager\.([a-z_]+)': \{/g)) {
+    let depth = 1; let i = m.index + m[0].length; const start = i;
+    for (; i < wrapperSrc.length && depth > 0; i += 1) { if (wrapperSrc[i] === '{') depth += 1; else if (wrapperSrc[i] === '}') depth -= 1; }
+    const body = wrapperSrc.slice(start, i - 1);
+    const keys = []; let d = 0; let piece = '';
+    const flush = () => { const k = piece.trim().match(/^([a-z_]+)\b/)?.[1]; if (k) keys.push(k); piece = ''; };
+    for (const ch of body) {
+      if ('([{'.includes(ch)) d += 1; else if (')]}'.includes(ch)) d -= 1;
+      if (ch === ',' && d === 0) flush(); else piece += ch;
+    }
+    flush();
+    events.set(m[1], keys.sort());
+  }
+  return events;
+}
+
+/** The exact action order the runbook must show, in document order: each action as a plan-only line then its --execute line. */
+export const EXPECTED_STEPS = [
+  ['OPEN-2', 'fm', ['first-manager-check', 'first-manager-create']],
+  ['A1', 'prod', ['read-only-inventory']],
+  ['A2', 'prod', ['migration-security-hardening', 'migration-profile-service-bootstrap', 'migration-dnc-activity-enum-cast', 'migration-contact-logs-dnc-guard']],
+  ['A3', 'prod', ['snapshot']], ['B2', 'prod', ['m1']], ['B3', 'prod', ['m1b']], ['B4', 'prod', ['m1c']],
+  ['B8', 'fm', ['first-manager-check']], ['B9', 'fm', ['first-manager-create']], ['B9V', 'fm', ['first-manager-check']],
+  ['B10', 'prod', ['window-on']], ['B13', 'prod', ['l1-shape', 'l1-counts', 'l1-sweep']], ['C4', 'prod', ['window-off']],
+  ['BO2', 'prod', ['retire-nologin', 'retire-terminate', 'retire-backends', 'retire-revoke', 'retire-checks', 'retire-email']],
+  ['BO3', 'prod', ['bootstrap-identity-check', 'read-only-inventory']],
+  ['BO4', 'prod', ['backout-m1c']], ['BO5', 'prod', ['backout-m1b']], ['BO6', 'prod', ['backout-m1']], ['BO10', 'prod', ['security-hardening-backout']],
+];
+
 export function checkCutoverRunbook(runbook, yaml, runnerSources, fmSources) {
   const failures = [];
   const need = (text, pattern, label) => {
@@ -65,6 +169,23 @@ export function checkCutoverRunbook(runbook, yaml, runnerSources, fmSources) {
     if (!blocks.has(id)) failures.push(`missing ${id} block`);
     return blocks.get(id) ?? '';
   };
+  /** Every line of the runbook with the id of the step block it sits in ('' outside a step block), mirroring the block pattern above. */
+  const located = [];
+  let currentId = '';
+  for (const lineText of runbook.split('\n')) {
+    const header = lineText.match(/^🔴 \*\*([A-Z]+-?\d+[A-Z]?) — /);
+    if (header) currentId = header[1];
+    else if (/^##### |^---/.test(lineText)) currentId = '';
+    located.push({ id: currentId, lineText });
+  }
+  /** Compares the ordered actions found with the required order; names the first position that differs. */
+  const sameSequence = (label, actual, expected) => {
+    if (actual.join('\n') === expected.join('\n')) return;
+    let i = 0;
+    while (i < actual.length && i < expected.length && actual[i] === expected[i]) i += 1;
+    failures.push(label + ': command order differs from the required order at position ' + (i + 1) + ': found ' + (actual[i] ?? '(nothing)') + ', required ' + (expected[i] ?? '(nothing)') + ' (' + actual.length + ' commands found, ' + expected.length + ' required)');
+  };
+  const expectedSequence = (kind) => EXPECTED_STEPS.filter((s) => s[1] === kind).flatMap(([id, , actions]) => actions.flatMap((a) => [id + '|' + a + '|plan', id + '|' + a + '|execute']));
   const ownerScope = /`truck-recruitment-tool-owner`\s*(?:\/|, config)\s*`prd`|truck-recruitment-tool-owner\/prd/;
   const readerScope = /truck-recruitment-tool(?:`\s*\/\s*`|\/)dev/;
 
@@ -167,6 +288,7 @@ export function checkCutoverRunbook(runbook, yaml, runnerSources, fmSources) {
     need(body, /https:\/\/supabase\.com\/dashboard/, `${id}: Supabase page link missing`);
     need(body, /https:\/\/dashboard\.doppler\.com/, `${id}: Doppler page link missing`);
     need(body, /Success check/i, `${id}: owner steps need a success check`);
+    need(body, /Still owed before this is a reviewed paste box[^\n]*1\. exact production project[^\n]*2\. password generation[^\n]*3\. the correct session-pooler[^\n]*4\. /, `${id}: the four still-owed review items must be listed`);
     if (/prod-sql-runner/.test(body)) failures.push(`${id}: password statement must not go through the Route A runner`);
   }
   // No value anywhere: only the placeholder may sit inside a PASSWORD literal; no connection URL; no long token-like run.
@@ -181,50 +303,46 @@ export function checkCutoverRunbook(runbook, yaml, runnerSources, fmSources) {
   } else {
     const phrases = new Set(runner.built.values());
     const seen = new Map();
-    for (const lineText of runbook.split('\n')) {
+    const wrapper = parseWrapperParser(runnerSources.wrapper ?? '');
+    const cli = parseRunnerParser(runnerSources.cli ?? '', 'parseProdSqlArgs');
+    if (wrapper.error || cli.error) failures.push('argument parsers at ' + RUNNER_TIP + ' unavailable or unrecognised: ' + (wrapper.error ?? cli.error));
+    const sequence = [];
+    for (const { id, lineText } of located) {
       if (!/prod-sql-runner\.ts/.test(lineText)) continue;
       const action = lineText.match(/--action=([a-z0-9-]+)/)?.[1];
       if (!action) continue; // the one template line with <action>
-      if (runner.doNotUse.includes(action) || EXPECTED_DO_NOT_USE.includes(action)) { failures.push(`DO NOT USE action ${action} is cited as a runnable command`); continue; }
+      if (runner.doNotUse.includes(action) || EXPECTED_DO_NOT_USE.includes(action)) { failures.push('DO NOT USE action ' + action + ' is cited as a runnable command'); continue; }
+      if (!/^\s*node scripts\/run-with-secrets/.test(lineText)) { failures.push(id + ': a runner command is not a plain pasted line: ' + lineText.slice(0, 60)); continue; }
       const confirm = lineText.match(/--confirm="([^"]*)"/)?.[1];
       const execute = /\s--execute\s*$/.test(lineText);
       if (!runner.built.has(action)) {
-        failures.push(`cited action ${action} is not a built action in the runner source at ${RUNNER_TIP}${runner.missing.has(action) ? ' (listed as not built)' : ''}`);
+        failures.push('cited action ' + action + ' is not a built action in the runner source at ' + RUNNER_TIP + (runner.missing.has(action) ? ' (listed as not built)' : ''));
         continue;
       }
-      if (confirm !== runner.built.get(action)) failures.push(`action ${action}: cited phrase "${confirm ?? ''}" does not match the runner phrase`);
-      if (!/--target=production/.test(lineText)) failures.push(`action ${action}: command lacks --target=production`);
-      if (!/--secret PRODUCTION_DB_URL/.test(lineText) || !/run-with-secrets\.mjs/.test(lineText)) failures.push(`action ${action}: command not wrapped by run-with-secrets with the hidden PRODUCTION_DB_URL prompt`);
+      if (confirm !== runner.built.get(action)) failures.push('action ' + action + ': cited phrase "' + (confirm ?? '') + '" does not match the runner phrase');
+      if (!wrapper.error && !cli.error) {
+        for (const problem of parseCommandLine(lineText, wrapper, cli, RUNNER_FILES.cli.replace(/^pipeline\//, '')).problems) failures.push(id + ': action ' + action + ': command argument list does not match the parsers at ' + RUNNER_TIP + ': ' + problem);
+      }
+      sequence.push(id + '|' + action + '|' + (execute ? 'execute' : 'plan'));
       const kinds = seen.get(action) ?? new Set();
       kinds.add(execute ? 'execute' : 'plan');
       seen.set(action, kinds);
     }
+    sameSequence('Route A', sequence, expectedSequence('prod'));
     for (const m of runbook.matchAll(/\bactions? `([a-z0-9-]+)`/g)) {
       if (!runner.built.has(m[1]) && !runner.missing.has(m[1]) && !runner.doNotUse.includes(m[1]) && !/^auth-schema-inventory$/.test(m[1])) failures.push(`prose cites action \`${m[1]}\` that is not in the runner source at ${RUNNER_TIP}`);
     }
     for (const m of runbook.matchAll(/`(RUN TNBS PRODUCTION SQL [A-Z0-9-]+)`/g)) {
       if (!phrases.has(m[1])) failures.push(`prose cites phrase "${m[1]}" that is not in the runner source at ${RUNNER_TIP}`);
     }
-    const perBlock = {
-      A1: ['read-only-inventory'],
-      A2: ['migration-security-hardening', 'migration-profile-service-bootstrap', 'migration-dnc-activity-enum-cast', 'migration-contact-logs-dnc-guard'],
-      A3: ['snapshot'], B2: ['m1'], B3: ['m1b'], B4: ['m1c'],
-      B10: ['window-on'], C4: ['window-off'],
-      B13: ['l1-shape', 'l1-counts', 'l1-sweep'],
-      BO3: ['bootstrap-identity-check', 'read-only-inventory'], BO10: ['security-hardening-backout'],
-      BO2: ['retire-nologin', 'retire-terminate', 'retire-backends', 'retire-revoke', 'retire-checks', 'retire-email'],
-      BO4: ['backout-m1c'], BO5: ['backout-m1b'], BO6: ['backout-m1'],
-    };
-    for (const [id, actions] of Object.entries(perBlock)) {
-      const body = block(id);
-      for (const action of actions) {
-        const plan = new RegExp(`--action=${action} --confirm="[^"]+"\\n`).test(`${body}\n`);
-        const exec = new RegExp(`--action=${action} --confirm="[^"]+" --execute`).test(body);
-        if (!plan || !exec) failures.push(`${id}: action ${action} needs a plan-only command and a --execute command`);
-        if (!runner.built.has(action)) failures.push(`${id}: action ${action} not in the runner source`);
-      }
-      if (/production SQL route|the production SQL/i.test(body)) failures.push(`${id}: unnamed-route placeholder`);
+    for (const [id, kind, actions] of EXPECTED_STEPS) {
+      if (kind !== 'prod') continue;
+      for (const action of actions) if (!runner.built.has(action)) failures.push(id + ': action ' + action + ' not in the runner source');
+      if (/production SQL route|the production SQL/i.test(block(id))) failures.push(id + ': unnamed-route placeholder');
     }
+    // A2: the prose labels must name the migrations in the required order (the command lines are checked above).
+    const a2Labels = [...block('A2').matchAll(/Migration (\d), action `([a-z0-9-]+)`/g)].map((m) => m[1] + ':' + m[2]);
+    sameSequence('A2 labels', a2Labels, EXPECTED_STEPS.find((s) => s[0] === 'A2')[2].map((a, i) => (i + 1) + ':' + a));
     // DO NOT USE: the runner's list must be exactly the two known ids; the runbook may mention them only on a line that says DO NOT USE,
     // and A2 must explain why (doc 18) and say the forward fixes are retained.
     if (runner.doNotUse.length !== EXPECTED_DO_NOT_USE.length || EXPECTED_DO_NOT_USE.some((id) => !runner.doNotUse.includes(id))) failures.push(`runner DO NOT USE list is [${runner.doNotUse.join(', ')}], expected [${EXPECTED_DO_NOT_USE.join(', ')}]`);
@@ -256,6 +374,24 @@ export function checkCutoverRunbook(runbook, yaml, runnerSources, fmSources) {
     need(block('BO3'), /BEFORE the M1 backouts/, 'BO3: must say it runs before the M1 backouts');
     need(block('BO3'), /retire-email/, 'BO3: relation to retire-email missing');
     need(block('BO3'), /BO6[^\n]*drops|drops `internal\.auth_events`|drops[^\n]*auth_events/, 'BO3: why order matters (internal.auth_events dropped by M1-backout) missing');
+    // BO3 must consume approved_auth_email_null: report it, require 0, and STOP above 0 (the email_mismatches comparison cannot see a NULL Auth email).
+    const bo3 = block('BO3');
+    const bo3Report = bo3.split('\n').find((l) => /^\s+c\. Report `email_mismatches`/.test(l)) ?? '';
+    need(bo3Report, /`approved_auth_email_null` \(expected 0[^)]*STOP/, 'BO3: reporting step must require approved_auth_email_null = 0 with a STOP above 0');
+    const bo3Success = bo3.split('\n').find((l) => l.startsWith('- **Success check:**')) ?? '';
+    need(bo3Success, /`approved_auth_email_null` is 0/, 'BO3: success rule must require approved_auth_email_null to be 0');
+    need(bo3Success, /if[^.]*`approved_auth_email_null` is above 0[^.]*\*\*stop\*\*/, 'BO3: STOP rule must name approved_auth_email_null above 0');
+    // Documented counts and refusal ids must exist in the wrapper's allow-lists at the runner tip (no invented name).
+    const countNames = [...(runnerSources.wrapper ?? '').matchAll(/PROD_SQL_COUNT_NAMES = \[([^\]]*)\]/g)].flatMap((m) => [...m[1].matchAll(/'([a-z_]+)'/g)].map((x) => x[1]));
+    const refusalIds = [...((runnerSources.wrapper ?? '').match(/REFUSAL_IDS = \[([^\]]*)\]/)?.[1] ?? '').matchAll(/'([a-z_]+)'/g)].map((x) => x[1]);
+    if (countNames.length === 0 || refusalIds.length === 0) failures.push('count names or refusal ids not found in the wrapper at ' + RUNNER_TIP);
+    for (const { id, lineText } of located) {
+      if (/prod-sql\.counts/.test(lineText)) {
+        for (const m of lineText.matchAll(/`([a-z]+(?:_[a-z<>]+)+)`/g)) if (!countNames.includes(m[1]) && !/^profiles_<role>_<status>$/.test(m[1])) failures.push(id + ': documents count name ' + m[1] + ' that the runner does not define');
+      }
+      for (const m of lineText.matchAll(/\bprod_sql_[a-z_]+/g)) if (refusalIds.length && !refusalIds.includes(m[0])) failures.push(id + ': documents refusal id ' + m[0] + ' that the runner does not define');
+    }
+    need(block('A1'), /`approved_auth_email_null`/, 'A1: the inventory count approved_auth_email_null is not recorded');
     need(block('B10'), /prod_sql_flag_not_expected/, 'B10: flag verification refusal missing');
     need(block('C4'), /prod_sql_flag_not_expected/, 'C4: flag verification refusal missing');
 
@@ -290,18 +426,27 @@ export function checkCutoverRunbook(runbook, yaml, runnerSources, fmSources) {
     failures.push(`first-manager source at ${FM_TIP} unavailable or unparseable${fm?.error ? `: ${fm.error}` : ''}`);
   } else {
     const kinds = new Map();
-    for (const lineText of runbook.split('\n')) {
-      if (!/^\s*node scripts\/run-with-secrets/.test(lineText) || !/first-manager-runner\.ts/.test(lineText)) continue;
+    const fmWrapper = parseWrapperParser(fmSources.wrapper ?? '');
+    const fmCli = parseRunnerParser(fmSources.runner ?? '', 'parseFirstManagerArgs');
+    if (fmWrapper.error || fmCli.error) failures.push('first-manager argument parsers at ' + FM_TIP + ' unavailable or unrecognised: ' + (fmWrapper.error ?? fmCli.error));
+    const fmSequence = [];
+    for (const { id, lineText } of located) {
+      if (!/first-manager-runner\.ts/.test(lineText) || !/--action=/.test(lineText)) continue;
+      if (!/^\s*node scripts\/run-with-secrets/.test(lineText)) { failures.push(id + ': a first-manager command is not a plain pasted line: ' + lineText.slice(0, 60)); continue; }
       const action = lineText.match(/--action=([a-z-]+)/)?.[1];
       const confirm = lineText.match(/--confirm="([^"]*)"/)?.[1];
-      if (!action || !fm.actions.includes(action)) { failures.push(`first-manager command cites unknown action ${action ?? '(none)'}`); continue; }
-      if (confirm !== fm.phrases.get(action)) failures.push(`first-manager action ${action}: cited phrase "${confirm ?? ''}" does not match the tool source`);
-      if (!/--target=production/.test(lineText)) failures.push(`first-manager action ${action}: command lacks --target=production`);
-      if (!/run-with-secrets\.mjs --cwd pipeline --secret PRODUCTION_DB_URL -- node /.test(lineText) || /--from-env/.test(lineText)) failures.push(`first-manager action ${action}: command must be wrapped with the hidden prompt (no --from-env)`);
+      if (!action || !fm.actions.includes(action)) { failures.push('first-manager command cites unknown action ' + (action ?? '(none)')); continue; }
+      if (confirm !== fm.phrases.get(action)) failures.push('first-manager action ' + action + ': cited phrase "' + (confirm ?? '') + '" does not match the tool source');
+      if (!fmWrapper.error && !fmCli.error) {
+        for (const problem of parseCommandLine(lineText, fmWrapper, fmCli, FM_FILES.runner.replace(/^pipeline\//, '')).problems) failures.push(id + ': first-manager action ' + action + ': command argument list does not match the parsers at ' + FM_TIP + ': ' + problem);
+      }
+      const execute = /\s--execute\s*$/.test(lineText);
+      fmSequence.push(id + '|' + action + '|' + (execute ? 'execute' : 'plan'));
       const k = kinds.get(action) ?? new Set();
-      k.add(/\s--execute\s*$/.test(lineText) ? 'execute' : 'plan');
+      k.add(execute ? 'execute' : 'plan');
       kinds.set(action, k);
     }
+    sameSequence('first-manager', fmSequence, expectedSequence('fm'));
     for (const action of fm.actions) if (!kinds.get(action)?.has('plan') || !kinds.get(action)?.has('execute')) failures.push(`first-manager action ${action}: plan-only and --execute commands must both be shown`);
     const open2 = block('OPEN-2');
     need(open2, new RegExp(FM_TIP), `OPEN-2: first-manager tool commit ${FM_TIP} not cited`);
@@ -316,6 +461,20 @@ export function checkCutoverRunbook(runbook, yaml, runnerSources, fmSources) {
       if (!fm.events.includes(event)) failures.push(`first-manager tool source has no event first-manager.${event}`);
       need(open2, new RegExp(`first-manager\\.${event}\\b`), `OPEN-2: output event first-manager.${event} missing`);
     }
+    // The documented field set of each event must equal the wrapper's real allow-list for it: no invented field, none missing.
+    const realFields = parseFmOutputFields(fmSources.wrapper ?? '');
+    const documented = new Map();
+    for (const m of open2.matchAll(/^\s+- `first-manager\.([a-z_]+)` — fields: ([^\n]*?)(?: \(|\.$)/gm)) documented.set(m[1], [...m[2].matchAll(/`([a-z_]+)`/g)].map((x) => x[1]).sort());
+    if (realFields.size === 0) failures.push('first-manager output allow-list not found in the wrapper at ' + FM_TIP);
+    for (const [event, fields] of realFields) {
+      const doc = documented.get(event);
+      if (!doc) { failures.push('OPEN-2: field list for first-manager.' + event + ' is missing'); continue; }
+      const invented = doc.filter((f) => !fields.includes(f));
+      const missing = fields.filter((f) => !doc.includes(f));
+      if (invented.length) failures.push('OPEN-2: first-manager.' + event + ' documents field(s) the wrapper does not define: ' + invented.join(', '));
+      if (missing.length) failures.push('OPEN-2: first-manager.' + event + ' omits real field(s): ' + missing.join(', '));
+    }
+    for (const event of documented.keys()) if (!realFields.has(event)) failures.push('OPEN-2: documents an event first-manager.' + event + ' the wrapper does not define');
   }
   return failures;
 }
@@ -340,11 +499,14 @@ if (process.argv[1] && resolve(process.argv[1]) === fileURLToPath(import.meta.ur
   const fmRunner = gitShowAt(FM_TIP, FM_FILES.runner);
   const prodSql = gitShow(RUNNER_FILES.prodSql);
   const stagingRebuilt = gitShow(RUNNER_FILES.stagingRebuilt);
+  const prodCli = gitShow(RUNNER_FILES.cli);
+  const prodWrapper = gitShow(RUNNER_FILES.wrapper);
+  const fmWrapper = gitShowAt(FM_TIP, FM_FILES.wrapper);
   const failures = checkCutoverRunbook(
     readFileSync(resolve(root, 'docs/build-plan/17-signin-cutover-runbook-draft.md'), 'utf8'),
     readFileSync(resolve(root, 'docs/build-plan/drafts/render-recruiter-web.yaml'), 'utf8'),
-    prodSql === undefined || stagingRebuilt === undefined ? undefined : { prodSql, stagingRebuilt },
-    fmBootstrap === undefined || fmRunner === undefined ? undefined : { bootstrap: fmBootstrap, runner: fmRunner },
+    prodSql === undefined || stagingRebuilt === undefined || prodCli === undefined || prodWrapper === undefined ? undefined : { prodSql, stagingRebuilt, cli: prodCli, wrapper: prodWrapper },
+    fmBootstrap === undefined || fmRunner === undefined || fmWrapper === undefined ? undefined : { bootstrap: fmBootstrap, runner: fmRunner, wrapper: fmWrapper },
   );
   if (failures.length) {
     console.error('Cutover runbook contract check failed:');
