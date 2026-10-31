@@ -48,6 +48,7 @@ export const REFUSAL_IDS = [
   'prod_sql_shape_refused',
   'prod_sql_commit_rolled_back',
   'prod_sql_l1_shape_not_ok',
+  'prod_sql_flag_not_expected',
   'server_or_driver_error',
 ] as const;
 export type RefusalId = (typeof REFUSAL_IDS)[number];

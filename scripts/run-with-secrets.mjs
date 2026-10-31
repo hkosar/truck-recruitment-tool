@@ -134,7 +134,7 @@ export const REFUSAL_IDS = [
   'reapply_m1b_still_applied', 'reapply_m1c_not_backed_out', 'reapply_m1c_still_applied', 'owner_email_invalid',
   'owner_password_too_short', 'owner_auth_not_created', 'owner_auth_unknown_result', 'owner_promotion_refused',
   'owner_bootstrap_target_refused', 'bootstrap_target_required', 'target_not_recorded_production', 'first_manager_refused',
-  'prod_sql_target_refused', 'prod_sql_action_not_built', 'prod_sql_file_unreadable', 'prod_sql_hash_mismatch', 'prod_sql_shape_refused', 'prod_sql_commit_rolled_back', 'prod_sql_l1_shape_not_ok', 'server_or_driver_error',
+  'prod_sql_target_refused', 'prod_sql_action_not_built', 'prod_sql_file_unreadable', 'prod_sql_hash_mismatch', 'prod_sql_shape_refused', 'prod_sql_commit_rolled_back', 'prod_sql_l1_shape_not_ok', 'prod_sql_flag_not_expected', 'server_or_driver_error',
 ];
 
 /** Keep equal to pipeline/src/refusals.ts DRIVER_CODES (a test compares them). */
@@ -163,10 +163,11 @@ export const RETENTION_RULE_NAMES = ['app_sessions', 'email_events', 'recovery_f
 
 /** Keep equal to PROD_SQL_ACTION_IDS / PROD_SQL_COUNT_NAMES / PROD_SQL_COMMANDS / PROD_SQL_RESULTS / PROD_SQL_WRAPS in pipeline/src/prod-sql.ts (a test compares them). */
 export const PROD_SQL_ACTIONS = [
-  'migration-security-hardening', 'migration-profile-service-bootstrap', 'migration-dnc-activity-enum-cast', 'migration-contact-logs-dnc-guard', 'snapshot', 'm1', 'm1b', 'm1c',
-  'l1-shape', 'l1-counts', 'l1-sweep', 'retire-nologin', 'retire-terminate', 'retire-backends', 'retire-revoke', 'retire-checks', 'retire-email', 'backout-m1c', 'backout-m1b', 'backout-m1',
+  'migration-security-hardening', 'migration-profile-service-bootstrap', 'migration-dnc-activity-enum-cast', 'migration-contact-logs-dnc-guard', 'snapshot', 'm1', 'm1b', 'm1c', 'window-on',
+  'l1-shape', 'l1-counts', 'l1-sweep', 'retire-nologin', 'retire-terminate', 'retire-backends', 'retire-revoke', 'retire-checks', 'retire-email', 'backout-m1c', 'backout-m1b', 'backout-m1', 'security-hardening-backout', 'window-off',
 ];
 export const PROD_SQL_COUNT_NAMES = ['sessions', 'refresh_tokens', 'one_time_tokens', 'flow_state', 'users_with_tokens', 'recruiter_app_backends', 'backends', 'live_sessions', 'live_links', 'live_codes', 'email_mismatches'];
+export const PROD_SQL_FLAG_NAMES = ['email_edits_paused'];
 export const PROD_SQL_COMMANDS = ['select', 'insert', 'update', 'delete', 'create', 'alter', 'drop', 'grant', 'revoke', 'do', 'set', 'comment', 'other'];
 export const PROD_SQL_RESULTS = ['committed', 'rolled_back', 'rollback_not_confirmed', 'unknown', 'read_only_done'];
 export const PROD_SQL_WRAPS = ['wrapped', 'own', 'read_only'];
@@ -251,6 +252,7 @@ const EVENTS = {
   'prod-sql.plan_only': { hint: oneOf(['add --execute to run']) },
   'prod-sql.statement': { action: oneOf(PROD_SQL_ACTIONS), index: int, command: oneOf(PROD_SQL_COMMANDS), rows: int, digest: pat(/^[0-9a-f]{64}$/) },
   'prod-sql.counts': { action: oneOf(PROD_SQL_ACTIONS), index: int, counts: (v) => typeof v === 'object' && v !== null && !Array.isArray(v) && Object.keys(v).every((k) => PROD_SQL_COUNT_NAMES.includes(k) && int(v[k])) },
+  'prod-sql.flag': { action: oneOf(['window-on', 'window-off']), index: int, flag: (v) => typeof v === 'object' && v !== null && !Array.isArray(v) && Object.keys(v).every((k) => PROD_SQL_FLAG_NAMES.includes(k) && (bool(v[k]) || v[k] === 'unknown')) },
   'prod-sql.shape': { action: oneOf(['l1-shape', 'l1-sweep']), checks: (v) => typeof v === 'object' && v !== null && !Array.isArray(v) && Object.keys(v).every((k) => PROD_SQL_SHAPE_CHECKS.includes(k) && bool(v[k])), auth_tables: int, auth_tables_unreviewed: int, passed: bool },
   'prod-sql.warning': { action: oneOf(PROD_SQL_IRREVERSIBLE_ACTIONS), warning: oneOf(Object.keys(PROD_SQL_WARNINGS)), notice: oneOf(Object.values(PROD_SQL_WARNINGS)) },
   'prod-sql.result': { action: oneOf(PROD_SQL_ACTIONS), result: oneOf(PROD_SQL_RESULTS), statements: int },

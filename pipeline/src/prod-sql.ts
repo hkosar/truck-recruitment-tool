@@ -31,7 +31,7 @@ export type ProdSqlMode = 'read_only' | 'write';
  * What a finished statement may report: nothing, the row count, the row count plus a digest of the rows (for before/after comparison), pinned count columns,
  * or 'shape': the row count, and the rows are checked in the runner against the reviewed L1 inventory (see evaluateL1Shape) and stop the run when it fails.
  */
-export type ProdSqlReport = 'none' | 'rows' | 'digest' | 'counts' | 'shape';
+export type ProdSqlReport = 'none' | 'rows' | 'digest' | 'counts' | 'shape' | 'flag';
 
 export interface ProdSqlAction {
   id: string;
@@ -51,6 +51,12 @@ export interface ProdSqlAction {
   report: ProdSqlReport;
   /** For report 'counts': the only column names that are ever printed (the values are numbers). */
   countNames?: readonly string[];
+  /**
+   * For report 'flag': the one boolean column the file's closing select reads, and the value it must have. The select runs inside the action's
+   * transaction BEFORE the commit; any other value (or not exactly one row) rolls the transaction back.
+   */
+  flagName?: string;
+  flagExpect?: boolean;
   /**
    * The id of an action whose statements (a 'shape' stage of the same file) run FIRST, inside this action's own transaction, and must pass
    * evaluateL1Shape before any statement of this action runs. The gate is part of the plan, so it is the same run.
@@ -83,6 +89,8 @@ export const PROD_SQL_ACTIONS: readonly ProdSqlAction[] = [
   { id: 'm1', step: 'B2', file: 'supabase/pending/M1_same_origin_signin.sql', sha256: 'ac5bc26385ec106e8f2f093d00e22a1ff8501b8ff8363bf0444e08b7ee504d19', mode: 'write', report: 'none', phrase: 'RUN TNBS PRODUCTION SQL M1' },
   { id: 'm1b', step: 'B3', file: 'supabase/pending/M1b_add_person.sql', sha256: '82724e06f0393adf82bbe7222f2a9ae55dbe2443c2fffdf98a8bebabcbc44768', mode: 'write', report: 'none', phrase: 'RUN TNBS PRODUCTION SQL M1B' },
   { id: 'm1c', step: 'B4', file: 'supabase/pending/M1c_batch_delete_audit.sql', sha256: '86cd3de2ab4f1b2283c344088e31d05fbc8e719ebaa17318987a7082c42dfb26', mode: 'write', report: 'none', phrase: 'RUN TNBS PRODUCTION SQL M1C' },
+  // B10: the backout window on (doc 16 section 3.1 / runbook B10): the two reviewed statements, verified inside the transaction before it commits.
+  { id: 'window-on', step: 'B10', file: 'supabase/rollout/backout-window-on.sql', sha256: '029707645e436a8ecbefe652e817bd94ff62001ed5a7077d7a2e3b3639c1e09d', mode: 'write', report: 'flag', flagName: 'email_edits_paused', flagExpect: true, phrase: 'RUN TNBS PRODUCTION SQL WINDOW-ON' },
   // B13: L1, in its own stages (doc 17 B13 steps 1-4). Stage 2 is also the recount of steps 4 and 7; stage 3 is also the second sweep of step 6.
   { id: 'l1-shape', step: 'B13 stage 1', file: 'supabase/rollout/L1-close-legacy-auth.sql', sha256: '3f6e2c70f52c0f3b462769af6aa43c04b24a3984fe6d099c4184a7a4283223d5', statements: [1, 2], stageSha256: '9fb09b8013f719119d024c17a8246b6f96a18b3b8f5ef3a1ac1049c7fc03bd40', mode: 'read_only', report: 'shape', phrase: 'RUN TNBS PRODUCTION SQL L1-SHAPE' },
   { id: 'l1-counts', step: 'B13 stages 2, 4, 7', file: 'supabase/rollout/L1-close-legacy-auth.sql', sha256: '3f6e2c70f52c0f3b462769af6aa43c04b24a3984fe6d099c4184a7a4283223d5', statements: [3, 3], stageSha256: '991ccc9c661fd08ff076130d4bea321798bee54398631a609fa7c97eaf13a3e2', mode: 'read_only', report: 'counts', countNames: ['sessions', 'refresh_tokens', 'one_time_tokens', 'flow_state', 'users_with_tokens'], phrase: 'RUN TNBS PRODUCTION SQL L1-COUNTS' },
@@ -98,6 +106,10 @@ export const PROD_SQL_ACTIONS: readonly ProdSqlAction[] = [
   { id: 'backout-m1c', step: 'BO4', file: 'supabase/backout/M1c-backout.sql', sha256: '7714a74e7d26ab0829b0a0aa44dfcfec8685220447295927012504f6b8774435', mode: 'write', report: 'none', phrase: 'RUN TNBS PRODUCTION SQL BACKOUT-M1C' },
   { id: 'backout-m1b', step: 'BO5', file: 'supabase/backout/M1b-backout.sql', sha256: 'f4f0a853a1a4cd8c28bc29019556776f11ad5b5f67dc5461edd4fbba8d1341c8', mode: 'write', report: 'none', phrase: 'RUN TNBS PRODUCTION SQL BACKOUT-M1B' },
   { id: 'backout-m1', step: 'BO6', file: 'supabase/backout/M1-backout.sql', sha256: '7686946e27331b69acfd91ad3d43c94b5b07e9228d1a0b6ac2a75f6c85c39d09', mode: 'write', report: 'none', phrase: 'RUN TNBS PRODUCTION SQL BACKOUT-M1' },
+  // BO10 / A2 backout of the hardening migration: the reviewed file, byte for byte from commit f1189dc (git blob 608b69d1ef0d2fd5179446cb661c8bc8a0ac1756); own begin ... commit.
+  { id: 'security-hardening-backout', step: 'A2 backout, BO10', file: 'supabase/backout/security-hardening-backout.sql', sha256: 'f5cda7a44579cdbc86d5df2d192d9bfe41924f1ef46bdfbf2c412b84d6181d0e', mode: 'write', report: 'none', phrase: 'RUN TNBS PRODUCTION SQL SECURITY-HARDENING-BACKOUT' },
+  // C4: the backout window off (doc 16 section 3.1 step 3 / runbook C4), only on Hunter's word.
+  { id: 'window-off', step: 'C4', file: 'supabase/rollout/backout-window-off.sql', sha256: '470aa84d647675418d6be6fa25afd43ddcff4d8ba5e2cd43f2b0719918fe27f7', mode: 'write', report: 'flag', flagName: 'email_edits_paused', flagExpect: false, phrase: 'RUN TNBS PRODUCTION SQL WINDOW-OFF' },
 ];
 
 /**
@@ -105,12 +117,9 @@ export const PROD_SQL_ACTIONS: readonly ProdSqlAction[] = [
  * scripts/verify-prod-sql-runner-contract.mjs fails if a listed file appears in the repository without the table being updated.
  */
 export const PROD_SQL_MISSING: readonly { id: string; step: string; reason: string; file?: string }[] = [
-  { id: 'security-hardening-backout', step: 'A2 backout, BO10', file: 'supabase/backout/security-hardening-backout.sql', reason: 'the file exists only on the cutover-prep branch, not on this branch; add it by its own reviewed commit and pin it' },
-  { id: 'profile-bootstrap-backout', step: 'A2 backout', reason: 'doc 17 says no file is prepared' },
-  { id: 'dnc-enum-cast-backout', step: 'A2 backout', reason: 'doc 17 says no file is prepared' },
-  { id: 'window-on', step: 'B10', reason: 'an inline statement in doc 16 section 3.1, not a file in this repository' },
-  { id: 'window-off', step: 'B10 / after the window', reason: 'an inline statement in doc 16 section 3.1, not a file in this repository' },
-  { id: 'read-only-inventory', step: 'A1, BO3', reason: 'doc 17 says the query text is not recorded in the repository' },
+  { id: 'profile-bootstrap-backout', step: 'A2 backout', reason: 'doc 17 says no file is prepared; the earlier function body would have to be rewritten from the 20260720000300 migration, which is new SQL that needs its own review' },
+  { id: 'dnc-enum-cast-backout', step: 'A2 backout', reason: 'doc 17 says no file is prepared; the previous set_do_not_contact body would have to be rewritten from the earlier migration, which is new SQL that needs its own review' },
+  { id: 'read-only-inventory', step: 'A1, BO3', reason: 'doc 17 says the query text is not recorded in the repository; no reviewed query exists to pin (BO3 identity check: see retire-email)' },
   { id: 'reconciliation', step: 'doc 18 / 09 ledger', file: 'docs/build-plan/09-production-baseline-reconciliation.sql', reason: 'marked PROPOSAL ONLY (owner decision pending); not an approved production action' },
 ];
 
@@ -228,6 +237,11 @@ export function planProdSql(input: { target: string | undefined; action: string;
   if (found === 'invalid') throw new RunnerRefusal('prod_sql_shape_refused', 'The action mixes statements with partial transaction control; refusing (never guessed)');
   if (action.mode === 'read_only' && found !== 'wrapped') throw new RunnerRefusal('prod_sql_shape_refused', 'A read-only action must not carry its own transaction control; refusing');
   const shape: ProdSqlShape = action.mode === 'read_only' ? 'read_only' : found;
+  // A flag action ends with the select that reads its flag (that select is judged before the commit); without it nothing would be verified.
+  if (action.report === 'flag') {
+    const body = shape === 'own' ? statements.slice(1, -1) : statements;
+    if (action.flagName === undefined || action.flagExpect === undefined || body.length < 2 || commandOf(body[body.length - 1]!) !== 'select') throw new RunnerRefusal('prod_sql_shape_refused', 'A flag action must end with the select that reads its flag; refusing');
+  }
 
   if (input.confirm !== action.phrase) {
     throw new RunnerRefusal('confirmation_required', `Action ${action.id} requires --confirm="${action.phrase}"`);
@@ -335,6 +349,8 @@ export type ProdSqlResult = (typeof PROD_SQL_RESULTS)[number];
 export const PROD_SQL_WRAPS = ['wrapped', 'own', 'read_only'] as const;
 /** Every count column name that can ever be printed (derived from the table; the wrapper enumerates exactly these). */
 export const PROD_SQL_COUNT_NAMES: readonly string[] = [...new Set(PROD_SQL_ACTIONS.flatMap((a) => a.countNames ?? []))];
+/** Every flag column name that can ever be printed (derived from the table; the wrapper enumerates exactly these). The printed value is true, false or 'unknown'. */
+export const PROD_SQL_FLAG_NAMES: readonly string[] = [...new Set(PROD_SQL_ACTIONS.flatMap((a) => (a.flagName === undefined ? [] : [a.flagName])))];
 
 /**
  * The fixed warnings for an irreversible action (the wrapper enumerates exactly these ids and sentences; a test compares them).
@@ -364,6 +380,18 @@ const intOrMinusOne = (v: unknown): number => {
   return Number.isSafeInteger(n) && n >= 0 ? n : -1;
 };
 
+/** The flag a verify select returned: true or false only for exactly one row holding a real boolean, otherwise 'unknown'. Nothing else from the row is kept. */
+function flagValue(action: ProdSqlAction, result: { rows?: unknown } | undefined): boolean | 'unknown' {
+  const rows = Array.isArray(result?.rows) ? (result.rows as Array<Record<string, unknown>>) : [];
+  const v = rows.length === 1 && action.flagName !== undefined ? rows[0]?.[action.flagName] : undefined;
+  return typeof v === 'boolean' ? v : 'unknown';
+}
+
+/** Stops (refuses) unless the flag read inside the transaction is the expected value; the caller rolls back. */
+function enforceFlag(action: ProdSqlAction, result: { rows?: unknown } | undefined): void {
+  if (flagValue(action, result) !== action.flagExpect) throw new RunnerRefusal('prod_sql_flag_not_expected', 'The flag read inside the transaction is not the expected value; rolling back, nothing committed');
+}
+
 function reportStatement(plan: ProdSqlPlan, index: number, statement: SqlStatement, result: { rows?: unknown; rowCount?: unknown } | undefined): void {
   const { action } = plan;
   if (action.report === 'none') return;
@@ -372,6 +400,10 @@ function reportStatement(plan: ProdSqlPlan, index: number, statement: SqlStateme
     const counts: Record<string, number> = {};
     for (const name of action.countNames ?? []) counts[name] = rows.length === 1 ? intOrMinusOne(rows[0]?.[name]) : -1;
     line({ msg: 'prod-sql.counts', action: action.id, index, counts });
+    return;
+  }
+  if (action.report === 'flag' && commandOf(statement) === 'select') {
+    line({ msg: 'prod-sql.flag', action: action.id, index, flag: { [action.flagName!]: flagValue(action, result) } });
     return;
   }
   // 'shape' prints only the row count here; the rows themselves are judged by evaluateL1Shape and never printed.
@@ -429,6 +461,7 @@ export async function runProdSqlPlan(client: RebuiltSqlClient, plan: ProdSqlPlan
       ran += 1;
       if (action.report === 'shape') shapeRows.push(result?.rows);
       reportStatement(plan, (shape === 'own' ? 1 : 0) + i + 1, statement, result);
+      if (action.report === 'flag' && commandOf(statement) === 'select') enforceFlag(action, result);
     }
     if (action.report === 'shape') enforceL1Shape(action, shapeRows[0], shapeRows[1], plan.classification);
     if (shape === 'read_only') {

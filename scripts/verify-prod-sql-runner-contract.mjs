@@ -87,8 +87,8 @@ const actions = [];
 if (mod) {
   const c = code(mod);
   for (const m of c.matchAll(/MIGRATION\('([a-z0-9-]+)', '[^']*', '([^']+)', '([0-9a-f]{64})'\)/g)) actions.push({ id: m[1], file: `supabase/migrations/${m[2]}`, sha: m[3], manifestName: m[2], phrase: `RUN TNBS PRODUCTION SQL ${m[1].toUpperCase()}` });
-  for (const m of c.matchAll(/\{ id: '([a-z0-9-]+)', step: '[^']*', file: '([^']+)', sha256: '([0-9a-f]{64})'(?:, statements: \[(\d+), (\d+)\], stageSha256: '([0-9a-f]{64})')?, mode: '(read_only|write)', report: '(none|rows|digest|counts|shape)'(?:, gate: '([a-z0-9-]+)')?[^}]*?phrase: '([^']+)' \}/g)) {
-    actions.push({ id: m[1], file: m[2], sha: m[3], from: m[4] === undefined ? undefined : Number(m[4]), to: m[5] === undefined ? undefined : Number(m[5]), stageSha: m[6], mode: m[7], report: m[8], gate: m[9], phrase: m[10] });
+  for (const m of c.matchAll(/\{ id: '([a-z0-9-]+)', step: '[^']*', file: '([^']+)', sha256: '([0-9a-f]{64})'(?:, statements: \[(\d+), (\d+)\], stageSha256: '([0-9a-f]{64})')?, mode: '(read_only|write)', report: '(none|rows|digest|counts|shape|flag)'(?:, gate: '([a-z0-9-]+)')?(?:, flagName: '([a-z_]+)', flagExpect: (true|false))?[^}]*?phrase: '([^']+)' \}/g)) {
+    actions.push({ id: m[1], file: m[2], sha: m[3], from: m[4] === undefined ? undefined : Number(m[4]), to: m[5] === undefined ? undefined : Number(m[5]), stageSha: m[6], mode: m[7], report: m[8], gate: m[9], flagName: m[10], flagExpect: m[11] === undefined ? undefined : m[11] === 'true', phrase: m[12] });
   }
   const declared = [...c.slice(0, c.indexOf('export const PROD_SQL_MISSING')).matchAll(/(?:MIGRATION\(|\{ id: )'([a-z0-9-]+)'/g)].map((m) => m[1]);
   if (actions.length !== declared.length || actions.length < 20) failures.push(`prod-sql.ts: the action table could not be read completely (read ${actions.length} of ${declared.length}; expected at least 20)`);
@@ -197,7 +197,8 @@ if (mod) {
   for (const a of actions) if (a.report === 'counts' && !new RegExp(`id: '${a.id}'[^}]*countNames: \\[`).test(c)) failures.push(`prod-sql.ts: ${a.id} reports counts but pins no countNames`);
   // The files doc 17 names that exist on this branch must all have an action.
   for (const f of ['supabase/pending/M1_same_origin_signin.sql', 'supabase/pending/M1b_add_person.sql', 'supabase/pending/M1c_batch_delete_audit.sql', 'supabase/backout/pre-cutover-snapshot.sql', 'supabase/backout/retire-app-credentials.sql',
-    'supabase/backout/M1-backout.sql', 'supabase/backout/M1b-backout.sql', 'supabase/backout/M1c-backout.sql', 'supabase/rollout/L1-close-legacy-auth.sql']) {
+    'supabase/backout/M1-backout.sql', 'supabase/backout/M1b-backout.sql', 'supabase/backout/M1c-backout.sql', 'supabase/rollout/L1-close-legacy-auth.sql',
+    'supabase/backout/security-hardening-backout.sql', 'supabase/rollout/backout-window-on.sql', 'supabase/rollout/backout-window-off.sql']) {
     if (existsSync(resolve(root, f)) && !actions.some((a) => a.file === f)) failures.push(`prod-sql.ts: ${f} exists but has no action`);
   }
   // Anything listed as missing must stay absent from the table; a listed file that has appeared must be pinned by its own reviewed change (drift).
@@ -205,7 +206,54 @@ if (mod) {
     if (actions.some((a) => a.id === m[1])) failures.push(`prod-sql.ts: ${m[1]} is both runnable and listed as missing`);
     if (m[2] && !m[2].endsWith('09-production-baseline-reconciliation.sql') && existsSync(resolve(root, m[2]))) failures.push(`prod-sql.ts: ${m[2]} now exists in the repository; move it from PROD_SQL_MISSING to the action table with a pin (a reviewed change)`);
   }
-  if (!c.includes("id: 'security-hardening-backout'")) failures.push('prod-sql.ts: the missing list must name security-hardening-backout');
+  // ---- Every action the cutover runbook names resolves: it is a built action (table) or an explicit missing entry (with a reason), never both and never neither.
+  // The runbook (docs/build-plan/17-signin-cutover-runbook-draft.md) lives on the cutover-prep branch; its actions are listed here with the step that names them.
+  {
+    const BUILT = ['migration-security-hardening', 'migration-profile-service-bootstrap', 'migration-dnc-activity-enum-cast', 'migration-contact-logs-dnc-guard', 'snapshot', 'm1', 'm1b', 'm1c', 'window-on', 'l1-shape', 'l1-counts', 'l1-sweep',
+      'retire-nologin', 'retire-terminate', 'retire-backends', 'retire-revoke', 'retire-checks', 'retire-email', 'backout-m1c', 'backout-m1b', 'backout-m1', 'security-hardening-backout', 'window-off'];
+    const MISSING = ['profile-bootstrap-backout', 'dnc-enum-cast-backout', 'read-only-inventory', 'reconciliation'];
+    const tableIds = actions.map((a) => a.id);
+    const missingIds = [...c.matchAll(/\{ id: '([a-z0-9-]+)', step: '[^']*',(?: file: '[^']+',)? reason:/g)].map((m) => m[1]);
+    if (JSON.stringify([...tableIds].sort()) !== JSON.stringify([...BUILT].sort())) failures.push(`prod-sql.ts: the built actions (${tableIds.join()}) must be exactly the runbook actions this contract resolves as built (${BUILT.join()}); a new or removed action needs a reviewed change here too`);
+    if (JSON.stringify([...missingIds].sort()) !== JSON.stringify([...MISSING].sort())) failures.push(`prod-sql.ts: the missing list (${missingIds.join()}) must be exactly ${MISSING.join()}: an action leaves it only when reviewed SQL for it is pinned`);
+    for (const id of [...BUILT, ...MISSING]) if (tableIds.includes(id) === missingIds.includes(id)) failures.push(`prod-sql.ts: runbook action ${id} must be exactly one of built or missing`);
+    // No SQL was invented for a missing action: no file under supabase/ is named for one of them.
+    for (const f of ['supabase/backout/profile-bootstrap-backout.sql', 'supabase/backout/dnc-enum-cast-backout.sql', 'supabase/rollout/read-only-inventory.sql', 'supabase/backout/read-only-inventory.sql']) if (existsSync(resolve(root, f))) failures.push(`${f} exists but its action is listed as missing; pin it by a reviewed change`);
+  }
+  // ---- The window statements are the reviewed ones: two statements per file (the update, then the verify select), the same verify select in both, and each update
+  // is the one doc 16 section 3.1 and the runbook give. The flag and its expected value are pinned in the table and match the update.
+  {
+    const strip = (t) => t.replace(/--[^\n]*/g, ' ').replace(/\s+/g, ' ').trim();
+    const verifySelect = 'select email_edits_paused from internal.backout_window';
+    const doc16 = (read('docs/build-plan/16-staging-and-hosting-plan.md') ?? '').replace(/\s+/g, ' ');
+    const flagActions = actions.filter((a) => a.report === 'flag');
+    if (flagActions.map((a) => a.id).join() !== 'window-on,window-off') failures.push("prod-sql.ts: only window-on and window-off may use report 'flag'");
+    if (actions.some((a) => a.report !== 'flag' && (a.flagName !== undefined || a.flagExpect !== undefined))) failures.push('prod-sql.ts: only a flag action may pin flagName or flagExpect');
+    for (const [id, value] of [['window-on', true], ['window-off', false]]) {
+      const a = actions.find((x) => x.id === id);
+      if (!a) continue;
+      if (a.flagName !== 'email_edits_paused' || a.flagExpect !== value || a.mode !== 'write') failures.push(`prod-sql.ts: ${id} must be a write action that expects email_edits_paused = ${value}`);
+      let parts = [];
+      try { parts = splitStatements(readFileSync(resolve(root, a.file), 'utf8')).map(strip); } catch { failures.push(`${a.file} could not be split by the contract's own splitter`); continue; }
+      const update = `update internal.backout_window set email_edits_paused = ${value}`;
+      if (parts.length !== 2 || parts[0] !== update || parts[1] !== verifySelect) failures.push(`${a.file} must be exactly: ${update}; ${verifySelect}; (nothing else)`);
+      if (id === 'window-on' && !doc16.includes(update)) failures.push('docs/build-plan/16-staging-and-hosting-plan.md section 3.1 no longer holds the window-on update statement the file copies');
+      if (!doc16.includes(verifySelect)) failures.push('docs/build-plan/16-staging-and-hosting-plan.md section 3.1 no longer holds the verify select the window files copy');
+      const header = readFileSync(resolve(root, a.file), 'utf8').split('\n').filter((l) => l.startsWith('--')).join('\n');
+      if (!/docs\/build-plan\/16-staging-and-hosting-plan\.md section 3\.1/.test(header) || !/f1189dc/.test(header) || !/VERBATIM/.test(header)) failures.push(`${a.file}: the header comment must cite doc 16 section 3.1, the reviewed runbook commit f1189dc and say the statements are copied VERBATIM`);
+    }
+    // The hardening backout is the reviewed file byte for byte: its git blob id is the one recorded at f1189dc (a later merge of that branch is then identical).
+    const hb = existsSync(resolve(root, 'supabase/backout/security-hardening-backout.sql')) ? readFileSync(resolve(root, 'supabase/backout/security-hardening-backout.sql')) : undefined;
+    if (!hb) failures.push('missing supabase/backout/security-hardening-backout.sql');
+    else {
+      const blob = createHash('sha1').update(Buffer.concat([Buffer.from(`blob ${hb.length}\0`), hb])).digest('hex');
+      if (blob !== '608b69d1ef0d2fd5179446cb661c8bc8a0ac1756') failures.push(`supabase/backout/security-hardening-backout.sql is not the file reviewed at f1189dc (git blob ${blob}); it must be copied byte for byte`);
+    }
+    // The flag report is judged inside the transaction, before the commit, and is the only thing that prints the flag.
+    need('prod-sql.ts', c, /if \(action\.report === 'flag' && commandOf\(statement\) === 'select'\) enforceFlag\(action, result\);/, 'the flag is judged right after the verify select, inside the transaction and before the commit');
+    need('prod-sql.ts', c, /if \(flagValue\(action, result\) !== action\.flagExpect\) throw new RunnerRefusal\('prod_sql_flag_not_expected'/, 'a flag that is not the expected value refuses (the caller rolls back)');
+    need('prod-sql.ts', c, /if \(action\.flagName === undefined \|\| action\.flagExpect === undefined \|\| body\.length < 2 \|\| commandOf\(body\[body\.length - 1\]!\) !== 'select'\) throw new RunnerRefusal\('prod_sql_shape_refused'/, 'a flag action must pin its flag and end with the select that reads it');
+  }
 
   // ---- B2: an action whose pinned statements end database connections (pg_terminate_backend) cannot be undone by a rollback, so it must carry the
   // irreversible flag (derived here from the statements themselves, not from the table), and nothing else may carry it.
@@ -356,7 +404,7 @@ for (const f of ['pipeline/src/staging-sql-runner.ts', 'pipeline/src/staging-reb
 // ---------------------------------------------------------------------------------------------------------------
 // Wiring: refusal ids, wrapper allow-list (events, enumerated lists), prompt-only URL, package scripts, verification chain, doc.
 // ---------------------------------------------------------------------------------------------------------------
-const NEW_IDS = ['prod_sql_target_refused', 'prod_sql_action_not_built', 'prod_sql_file_unreadable', 'prod_sql_hash_mismatch', 'prod_sql_shape_refused', 'prod_sql_commit_rolled_back', 'prod_sql_l1_shape_not_ok'];
+const NEW_IDS = ['prod_sql_target_refused', 'prod_sql_action_not_built', 'prod_sql_file_unreadable', 'prod_sql_hash_mismatch', 'prod_sql_shape_refused', 'prod_sql_commit_rolled_back', 'prod_sql_l1_shape_not_ok', 'prod_sql_flag_not_expected'];
 if (refusals && wrapper) {
   for (const id of NEW_IDS) {
     if (!refusals.includes(`'${id}'`)) failures.push(`refusals.ts is missing ${id}`);
@@ -364,7 +412,7 @@ if (refusals && wrapper) {
   }
 }
 if (wrapper) {
-  for (const required of ["'prod-sql.verified'", "'prod-sql.plan_only'", "'prod-sql.statement'", "'prod-sql.counts'", "'prod-sql.shape'", "'prod-sql.warning'", "'prod-sql.result'", "'prod-sql.done'", "'prod-sql.refused'", 'export const PROD_SQL_ACTIONS', 'export const PROD_SQL_COUNT_NAMES', 'export const PROD_SQL_SHAPE_CHECKS',
+  for (const required of ["'prod-sql.verified'", "'prod-sql.plan_only'", "'prod-sql.statement'", "'prod-sql.counts'", "'prod-sql.flag'", "'prod-sql.shape'", "'prod-sql.warning'", "'prod-sql.result'", "'prod-sql.done'", "'prod-sql.refused'", 'export const PROD_SQL_ACTIONS', 'export const PROD_SQL_COUNT_NAMES', 'export const PROD_SQL_SHAPE_CHECKS',
     "export const PROMPT_ONLY = ['PRODUCTION_DB_URL']", 'can only be entered at the hidden prompt, never taken from the environment', "sha256: pat(/^[0-9a-f]{64}$/)", "target: oneOf(['production'])"]) {
     if (!wrapper.includes(required)) failures.push(`run-with-secrets.mjs is missing: ${required}`);
   }
@@ -379,6 +427,12 @@ if (wrapper) {
   // The wrapper's action list equals the table (derived here from the table text).
   const listed = /export const PROD_SQL_ACTIONS = \[([\s\S]*?)\];/.exec(wrapper)?.[1].match(/'([a-z0-9-]+)'/g)?.map((s) => s.slice(1, -1)) ?? [];
   if (JSON.stringify(listed) !== JSON.stringify(actions.map((a) => a.id))) failures.push('run-with-secrets.mjs PROD_SQL_ACTIONS must equal the action table ids, in order');
+  {
+    const flagNames = /export const PROD_SQL_FLAG_NAMES = \[([^\]]*)\]/.exec(wrapper)?.[1].match(/'([a-z_]+)'/g)?.map((q) => q.slice(1, -1)) ?? [];
+    const tableFlags = [...new Set(actions.filter((a) => a.flagName !== undefined).map((a) => a.flagName))];
+    if (JSON.stringify(flagNames) !== JSON.stringify(tableFlags)) failures.push('run-with-secrets.mjs PROD_SQL_FLAG_NAMES must equal the flagName values in the action table');
+    if (!/'prod-sql\.flag': \{ action: oneOf\(\['window-on', 'window-off'\]\)/.test(wrapper)) failures.push('run-with-secrets.mjs: the prod-sql.flag event must allow only the two window actions');
+  }
   const names = /export const PROD_SQL_COUNT_NAMES = \[([\s\S]*?)\];/.exec(wrapper)?.[1].match(/'([a-z_]+)'/g)?.map((s) => s.slice(1, -1)) ?? [];
   const tableNames = [...new Set([...(mod ? code(mod) : '').matchAll(/countNames: \[([^\]]*)\]/g)].flatMap((m) => m[1].match(/'([a-z_]+)'/g) ?? []).map((s) => s.slice(1, -1)))];
   if (JSON.stringify([...names].sort()) !== JSON.stringify([...tableNames].sort())) failures.push('run-with-secrets.mjs PROD_SQL_COUNT_NAMES must equal the countNames in the action table');

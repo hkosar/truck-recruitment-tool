@@ -190,6 +190,37 @@ async function main(): Promise<void> {
   }
   check('m1b and m1c took effect (add-person and batch-delete functions exist; the profiles account link is gone)', (await exists("to_regprocedure('public.team_add_person(text,text,public.user_role,text)')")) && (await exists("to_regprocedure('public.batch_delete(uuid)')")) && (await q("select count(*)::int as n from pg_constraint where conname = 'profiles_id_fkey' and conrelid = 'public.profiles'::regclass")).rows[0].n === 0);
 
+  // ---- 4b. The backout window (window-on / window-off) for real: M1 created internal.backout_window with email_edits_paused = false.
+  {
+    const paused = async (): Promise<unknown[]> => (await q('select email_edits_paused from internal.backout_window')).rows.map((r) => r.email_edits_paused);
+    const flagOf = (o: Outcome) => o.events.find((e) => e.msg === 'prod-sql.flag')?.flag as Record<string, unknown> | undefined;
+    check('window: the control table has exactly one row and it starts OFF (false)', JSON.stringify(await paused()) === '[false]');
+    const on = track(await run('window-on'));
+    check('window-on: one transaction (begin, lock timeout, update, verify select, commit), committed, the flag event says true, and the table is true', on.error === undefined && resultOf(on) === 'committed' && on.sent.length === 5 && on.sent[0] === 'begin' && ctlOf(on.sent[4]!) === 'commit'
+      && JSON.stringify(flagOf(on)) === JSON.stringify({ email_edits_paused: true }) && JSON.stringify(await paused()) === '[true]');
+    const onAgain = track(await run('window-on'));
+    check('window-on again is safe to repeat: committed, still true', onAgain.error === undefined && resultOf(onAgain) === 'committed' && JSON.stringify(await paused()) === '[true]');
+    const off = track(await run('window-off'));
+    check('window-off: committed, the flag event says false, and the table is false (the round trip is exact)', off.error === undefined && resultOf(off) === 'committed' && JSON.stringify(flagOf(off)) === JSON.stringify({ email_edits_paused: false }) && JSON.stringify(await paused()) === '[false]');
+    // A REAL server-side surprise: a trigger forces the flag back to false (and leaves a side effect). window-on must read false inside the transaction, refuse and roll everything back.
+    await q('create table internal.review_window_probe (n int)');
+    await q("create function internal.review_window_force() returns trigger language plpgsql as $f$ begin insert into internal.review_window_probe values (1); new.email_edits_paused := false; return new; end $f$");
+    await q('create trigger review_window_force before update on internal.backout_window for each row execute function internal.review_window_force()');
+    try {
+      const refused = track(await run('window-on'));
+      check('window-on with a trigger that keeps the flag false: refused (prod_sql_flag_not_expected), rolled_back, no commit was sent, and the trigger\'s own write was rolled back too',
+        refused.error instanceof RunnerRefusal && refused.error.id === 'prod_sql_flag_not_expected' && resultOf(refused) === 'rolled_back' && !refused.sent.some((x) => ctlOf(x) === 'commit') && JSON.stringify(flagOf(refused)) === JSON.stringify({ email_edits_paused: false })
+        && JSON.stringify(await paused()) === '[false]' && Number((await q('select count(*) as n from internal.review_window_probe')).rows[0].n) === 0);
+    } finally {
+      await q('drop trigger if exists review_window_force on internal.backout_window');
+      await q('drop function if exists internal.review_window_force()');
+      await q('drop table if exists internal.review_window_probe');
+    }
+    // A failure injected at the update (query 3) leaves the flag as it was.
+    const failed = track(await run('window-on', { failAtQuery: 3 }));
+    check('window-on with an injected failure at the update: rolled_back, nothing committed, the flag is unchanged', failed.error !== undefined && resultOf(failed) === 'rolled_back' && JSON.stringify(await paused()) === '[false]');
+  }
+
   // ---- 5. The staged files (retire-app-credentials and L1), stage by stage, on the database as it is now.
   {
     const nologin = track(await run('retire-nologin'));
@@ -277,6 +308,25 @@ async function main(): Promise<void> {
     const after = track(await run('snapshot'));
     const same = JSON.stringify(after.events.filter((e) => e.msg === 'prod-sql.statement').map((e) => e.digest)) === JSON.stringify((globalThis as { __snapBefore?: string[] }).__snapBefore);
     info('T-BACKOUT (snapshot before M1 vs after all backouts, digests)', same ? 'identical' : 'DIFFERENT (the sign-in tables and roles are retained by design; not asserted here)');
+  }
+
+  // ---- 8b. security-hardening-backout for real, on the database the forward hardening migration (20260722223300) built: anon starts WITHOUT execute on the functions.
+  {
+    const anonCan = async (): Promise<string> => JSON.stringify((await q("select has_function_privilege('anon', 'public.dashboard_totals()', 'execute') as public_fn, has_function_privilege('anon', 'internal.is_staff()', 'execute') as internal_fn")).rows[0]);
+    const bodies = async (): Promise<string> => (await q("select md5(string_agg(p.oid::regprocedure::text || ':' || md5(p.prosrc), '|' order by p.oid::regprocedure::text)) as h from pg_proc p join pg_namespace n on n.oid = p.pronamespace where n.nspname in ('public', 'internal')")).rows[0].h as string;
+    const profiles = async (): Promise<string> => String((await q('select count(*) as n from public.profiles')).rows[0].n);
+    check('hardening backout, before: the forward hardening is in force (anon cannot execute a public or an internal function)', (await anonCan()) === JSON.stringify({ public_fn: false, internal_fn: false }));
+    const fp = await fingerprint();
+    const bodiesBefore = await bodies();
+    const profilesBefore = await profiles();
+    const failed = track(await run('security-hardening-backout', { failAtQuery: 4 })); // 1 begin (the file's own), 2 set local, 3 first grant (runs), 4 second grant (injected failure)
+    check('hardening backout with an injected failure after the first re-grant: rolled_back, nothing committed, the catalogue fingerprint and anon privileges are unchanged', failed.error !== undefined && resultOf(failed) === 'rolled_back' && ranOf(failed) === 1 && (await fingerprint()) === fp && (await anonCan()) === JSON.stringify({ public_fn: false, internal_fn: false }));
+    const o = track(await run('security-hardening-backout'));
+    check('hardening backout: committed as written (one begin and one commit, both from the file) and anon can now execute the public and the internal function', o.error === undefined && resultOf(o) === 'committed' && o.sent.filter((x) => ctlOf(x) === 'begin').length === 1 && o.sent.filter((x) => ctlOf(x) === 'commit').length === 1 && o.sent.length === 7
+      && (await anonCan()) === JSON.stringify({ public_fn: true, internal_fn: true }));
+    check('hardening backout changed no function body, no table and no row (function bodies and the profile count are identical)', (await bodies()) === bodiesBefore && (await profiles()) === profilesBefore);
+    const again = track(await run('security-hardening-backout'));
+    check('hardening backout again is safe to repeat: committed, same privileges', again.error === undefined && resultOf(again) === 'committed' && (await anonCan()) === JSON.stringify({ public_fn: true, internal_fn: true }));
   }
 
   // ---- Everything printed passes the wrapper allow-list with nothing withheld and carries no database text.

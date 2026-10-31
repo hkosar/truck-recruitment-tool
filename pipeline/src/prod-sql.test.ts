@@ -12,7 +12,7 @@ import { resolve } from 'node:path';
 import { tmpdir } from 'node:os';
 import { pathToFileURL } from 'node:url';
 import {
-  AUTH_CLASSIFICATIONS, AUTH_CLASSIFICATION_FILE, AUTH_CLASSIFICATION_SHA256, L1_AUTH_TABLES, L1_USERS_TOKEN_COLUMNS, PROD_SQL_ACTIONS, PROD_SQL_ACTION_IDS, PROD_SQL_COMMANDS, PROD_SQL_COUNT_NAMES, PROD_SQL_IRREVERSIBLE_ACTIONS, PROD_SQL_MISSING, PROD_SQL_RESULTS, PROD_SQL_SHAPE_CHECKS, PROD_SQL_WARNINGS, PROD_SQL_WRAPS, PRODUCTION_PROMPT_PROOF_VARIABLE,
+  AUTH_CLASSIFICATIONS, AUTH_CLASSIFICATION_FILE, AUTH_CLASSIFICATION_SHA256, L1_AUTH_TABLES, L1_USERS_TOKEN_COLUMNS, PROD_SQL_ACTIONS, PROD_SQL_ACTION_IDS, PROD_SQL_COMMANDS, PROD_SQL_COUNT_NAMES, PROD_SQL_FLAG_NAMES, PROD_SQL_IRREVERSIBLE_ACTIONS, PROD_SQL_MISSING, PROD_SQL_RESULTS, PROD_SQL_SHAPE_CHECKS, PROD_SQL_WARNINGS, PROD_SQL_WRAPS, PRODUCTION_PROMPT_PROOF_VARIABLE,
   evaluateL1Shape, executeProdSqlPlan, loadAuthClassification, planProdSql, promptProof, selectProdSqlDbUrl, stageDigest, stagesTile, validateAuthClassification, type AuthTableClassification, type ProdSqlAction, type ProdSqlFiles,
 } from './prod-sql.js';
 import { main as runnerMain, parseProdSqlArgs } from './prod-sql-runner.js';
@@ -52,7 +52,7 @@ check('every doc 17 file that exists on this branch has an action (M1, M1b, M1c,
 check('the missing list is disjoint from the table and every listed file is really absent', PROD_SQL_MISSING.every((m) => !PROD_SQL_ACTION_IDS.includes(m.id) && (m.file === undefined || m.file.endsWith('09-production-baseline-reconciliation.sql') || !existsSync(resolve(REPOSITORY_ROOT, m.file)))));
 
 const EXPECTED_SHAPE: Record<string, string> = { snapshot: 'read_only', m1: 'wrapped', m1b: 'own', m1c: 'own', 'backout-m1': 'own', 'backout-m1b': 'own', 'backout-m1c': 'own', 'l1-shape': 'read_only', 'l1-counts': 'read_only', 'l1-sweep': 'own',
-  'retire-nologin': 'wrapped', 'retire-terminate': 'wrapped', 'retire-backends': 'read_only', 'retire-revoke': 'own', 'retire-checks': 'read_only', 'retire-email': 'read_only' };
+  'retire-nologin': 'wrapped', 'retire-terminate': 'wrapped', 'retire-backends': 'read_only', 'retire-revoke': 'own', 'retire-checks': 'read_only', 'retire-email': 'read_only', 'security-hardening-backout': 'own' };
 check('every action plans offline with its own phrase and the detected transaction shape is the expected one', PROD_SQL_ACTIONS.every((a) => plan(a.id).shape === (EXPECTED_SHAPE[a.id] ?? 'wrapped')));
 check('stage ranges tile the L1 and retire-app-credentials files from statement 1 through the parsed final statement, with no gap and no overlap',
   ['supabase/rollout/L1-close-legacy-auth.sql', 'supabase/backout/retire-app-credentials.sql'].every((file) => {
@@ -344,7 +344,7 @@ const wrapper = await import(pathToFileURL(resolve(REPOSITORY_ROOT, 'scripts/run
 {
   check('the wrapper allow-list names equal the runner lists', JSON.stringify([...wrapper.PROD_SQL_ACTIONS]) === JSON.stringify(PROD_SQL_ACTION_IDS) && JSON.stringify([...wrapper.PROD_SQL_COUNT_NAMES].sort()) === JSON.stringify([...PROD_SQL_COUNT_NAMES].sort())
     && JSON.stringify([...wrapper.PROD_SQL_COMMANDS]) === JSON.stringify([...PROD_SQL_COMMANDS]) && JSON.stringify([...wrapper.PROD_SQL_RESULTS]) === JSON.stringify([...PROD_SQL_RESULTS]) && JSON.stringify([...wrapper.PROD_SQL_WRAPS]) === JSON.stringify([...PROD_SQL_WRAPS]) && JSON.stringify([...wrapper.PROD_SQL_SHAPE_CHECKS]) === JSON.stringify([...PROD_SQL_SHAPE_CHECKS]));
-  check('the new refusal identifiers are in both lists', ['prod_sql_target_refused', 'prod_sql_action_not_built', 'prod_sql_file_unreadable', 'prod_sql_hash_mismatch', 'prod_sql_shape_refused', 'prod_sql_commit_rolled_back', 'prod_sql_l1_shape_not_ok'].every((id) => (REFUSAL_IDS as readonly string[]).includes(id) && wrapper.REFUSAL_IDS.includes(id)));
+  check('the new refusal identifiers are in both lists', ['prod_sql_target_refused', 'prod_sql_action_not_built', 'prod_sql_file_unreadable', 'prod_sql_hash_mismatch', 'prod_sql_shape_refused', 'prod_sql_commit_rolled_back', 'prod_sql_l1_shape_not_ok', 'prod_sql_flag_not_expected'].every((id) => (REFUSAL_IDS as readonly string[]).includes(id) && wrapper.REFUSAL_IDS.includes(id)));
   const all: Array<Record<string, unknown>> = [];
   for (const a of PROD_SQL_ACTIONS) {
     const c = new Recorder((sql) => ({ rows: [Object.fromEntries((a.countNames ?? ['x']).map((n) => [n, '7']))], rowCount: 1, command: sql === 'commit' ? 'COMMIT' : undefined }));
@@ -354,7 +354,7 @@ const wrapper = await import(pathToFileURL(resolve(REPOSITORY_ROOT, 'scripts/run
   const counter = { fields: 0 };
   const shown = all.map((e) => wrapper.allowListLine(JSON.stringify(e), counter));
   check('every event the runner prints for every action passes the wrapper allow-list: 0 withheld lines, 0 withheld fields', shown.every((s: string | null) => s !== null) && counter.fields === 0 && all.length > PROD_SQL_ACTIONS.length * 3);
-  check('the event names are exactly the new prod-sql family', [...new Set(all.map((e) => e.msg))].sort().join() === 'prod-sql.counts,prod-sql.plan_only,prod-sql.result,prod-sql.shape,prod-sql.statement,prod-sql.verified,prod-sql.warning');
+  check('the event names are exactly the new prod-sql family', [...new Set(all.map((e) => e.msg))].sort().join() === 'prod-sql.counts,prod-sql.flag,prod-sql.plan_only,prod-sql.result,prod-sql.shape,prod-sql.statement,prod-sql.verified,prod-sql.warning');
   {
     const good = await runPlan('l1-shape', shapeClient(goodColumns(), goodTables()));
     const bad = await runPlan('l1-sweep', shapeClient(goodColumns(), [...goodTables(), { table_name: 'x' }]));
@@ -533,6 +533,83 @@ const wrapper = await import(pathToFileURL(resolve(REPOSITORY_ROOT, 'scripts/run
     const lines = (out.stdout + out.stderr).split(/\r?\n/).filter(Boolean);
     check('executable output passes the wrapper allow-list on both streams', lines.every((l) => wrapper.allowListLine(l, counter) !== null) && counter.fields === 0);
   }
+}
+
+// ---------------------------------------------------------------------------------------------------------------
+// OPEN-1 (Route A for the SQL files): window-on, window-off and security-hardening-backout are built; the rest stay not built
+// ---------------------------------------------------------------------------------------------------------------
+{
+  const collapse = (s: string) => s.replace(/--[^\n]*/g, ' ').replace(/\s+/g, ' ').trim();
+  check('window-on, window-off and security-hardening-backout are runnable actions with their own exact phrases; none is in the missing list', ['window-on', 'window-off', 'security-hardening-backout'].every((id) => PROD_SQL_ACTION_IDS.includes(id) && action(id).phrase === `RUN TNBS PRODUCTION SQL ${id.toUpperCase()}` && !PROD_SQL_MISSING.some((m) => m.id === id)));
+  check('what is still not built is exactly: profile-bootstrap-backout, dnc-enum-cast-backout, read-only-inventory, reconciliation (each refused as not built, none invented)', PROD_SQL_MISSING.map((m) => m.id).sort().join() === 'dnc-enum-cast-backout,profile-bootstrap-backout,read-only-inventory,reconciliation');
+  const on = plan('window-on').statements.map((s) => collapse(s.raw));
+  const off = plan('window-off').statements.map((s) => collapse(s.raw));
+  check('window-on is exactly the two statements the reviewed runbook and doc 16 section 3.1 give (update to true, then the verify select), nothing else', on.join('|') === 'update internal.backout_window set email_edits_paused = true|select email_edits_paused from internal.backout_window');
+  check('window-off is exactly the inverse update (to false) and the same verify select, nothing else', off.join('|') === 'update internal.backout_window set email_edits_paused = false|select email_edits_paused from internal.backout_window');
+  const doc16 = readFileSync(resolve(REPOSITORY_ROOT, 'docs/build-plan/16-staging-and-hosting-plan.md'), 'utf8').replace(/\s+/g, ' ');
+  check('the window statements appear in doc 16 section 3.1 as the source says (activate, verify)', doc16.includes('update internal.backout_window set email_edits_paused = true') && doc16.includes('select email_edits_paused from internal.backout_window'));
+  check('both window actions are write actions in the runner\'s own transaction (wrapped), with the flag report and the expected value pinned', ['window-on', 'window-off'].every((id) => action(id).mode === 'write' && action(id).report === 'flag' && action(id).flagName === 'email_edits_paused' && plan(id).shape === 'wrapped') && action('window-on').flagExpect === true && action('window-off').flagExpect === false);
+  const hb = real('supabase/backout/security-hardening-backout.sql');
+  const blob = createHash('sha1').update(Buffer.concat([Buffer.from(`blob ${hb.length}\0`), hb])).digest('hex');
+  check('security-hardening-backout.sql is the reviewed file byte for byte: its git blob id is the one at commit f1189dc, so a later merge of that branch is identical', blob === '608b69d1ef0d2fd5179446cb661c8bc8a0ac1756' && action('security-hardening-backout').sha256 === 'f5cda7a44579cdbc86d5df2d192d9bfe41924f1ef46bdfbf2c412b84d6181d0e');
+  check('the hardening backout runs as written (own begin ... commit), is not read-only, and is not an irreversible (connection-ending) step', plan('security-hardening-backout').shape === 'own' && action('security-hardening-backout').mode === 'write' && action('security-hardening-backout').irreversible === undefined
+    && !['window-on', 'window-off', 'security-hardening-backout'].some((id) => PROD_SQL_IRREVERSIBLE_ACTIONS.includes(id) || plan(id).statements.some((s) => /pg_terminate_backend/i.test(s.clean))));
+  const windowOnly = (id: string) => (sql: string) => (sql.startsWith('select email_edits_paused') ? { rows: [{ email_edits_paused: id === 'window-on' }], rowCount: 1 } : { rows: [], rowCount: 1 });
+  for (const id of ['window-on', 'window-off']) {
+    const c = new Recorder(windowOnly(id));
+    const out = await runPlan(id, c);
+    const flag = out.events.find((e) => e.msg === 'prod-sql.flag');
+    check(`${id}: begin, lock timeout, the update, the verify select, then one commit; reports the flag and committed`, out.error === undefined && c.sent[0] === 'begin' && c.sent[1] === "set local lock_timeout = '10s'" && c.sent.length === 5 && c.sent[4] === 'commit'
+      && JSON.stringify(flag) === JSON.stringify({ msg: 'prod-sql.flag', action: id, index: 2, flag: { email_edits_paused: id === 'window-on' } }) && resultsOf(out.events).join() === 'committed');
+    for (const [name, rows] of [['the wrong value', [{ email_edits_paused: id !== 'window-on' }]], ['no row', []], ['two rows', [{ email_edits_paused: id === 'window-on' }, { email_edits_paused: id === 'window-on' }]], ['a text value', [{ email_edits_paused: id === 'window-on' ? 'true' : 'false' }]], ['another column', [{ x: id === 'window-on' }]]] as const) {
+      const bad = new Recorder((sql) => (sql.startsWith('select email_edits_paused') ? { rows, rowCount: rows.length } : { rows: [], rowCount: 1 }));
+      const o = await runPlan(id, bad);
+      check(`${id}: a verify select that returns ${name} is refused (prod_sql_flag_not_expected), rolled back, never committed`, o.error instanceof RunnerRefusal && o.error.id === 'prod_sql_flag_not_expected' && bad.sent[bad.sent.length - 1] === 'rollback' && !bad.sent.includes('commit') && resultsOf(o.events).join() === 'rolled_back');
+    }
+    const down = new Recorder((sql) => { if (sql.startsWith('update')) throw new Error('boom'); return { rows: [], rowCount: 0 }; });
+    const failed = await runPlan(id, down);
+    check(`${id}: a failing update rolls back, never commits, and prints no flag`, failed.error !== undefined && !down.sent.includes('commit') && resultsOf(failed.events).join() === 'rolled_back' && !failed.events.some((e) => e.msg === 'prod-sql.flag'));
+    const lost = new Recorder((sql) => { if (sql === 'commit') throw new Error('connection lost'); return windowOnly(id)(sql); });
+    const unknown = await runPlan(id, lost);
+    check(`${id}: a failed COMMIT is unknown, never retried or rolled back (CR17)`, unknown.error !== undefined && resultsOf(unknown.events).join() === 'unknown' && lost.sent.filter((s) => s === 'commit').length === 1 && !lost.sent.includes('rollback'));
+    const planOnly = await captureLog(() => runnerMain(argvFor(id), ENV, () => { throw new Error('must not connect'); }));
+    check(`${id}: plan-only is the default (verified, then plan_only; no client; no warning)`, planOnly.error === undefined && planOnly.events.map((e) => e.msg).join() === 'prod-sql.verified,prod-sql.plan_only' && planOnly.events[0]!.statements === 2);
+    check(`${id}: refused with another action's phrase, with no phrase, and with a changed file`, refusalOf(() => plan(id, { confirm: action(id === 'window-on' ? 'window-off' : 'window-on').phrase })) === 'confirmation_required' && refusalOf(() => plan(id, { confirm: undefined })) === 'confirmation_required'
+      && refusalOf(() => plan(id, { files: withFile(action(id).file, (b) => Buffer.from(b.toString('utf8').replace(/true|false/, id === 'window-on' ? 'false' : 'true'))) })) === 'prod_sql_hash_mismatch');
+    check(`${id}: a changed target, port or project is refused like every other action`, refusalOf(() => plan(id, { target: 'staging' })) === 'prod_sql_target_refused' && refusalOf(() => plan(id, { dbUrl: url(RECORDED_PROJECT_REFS.stagingRebuilt!) })) === 'target_not_recorded_production' && refusalOf(() => plan(id, { dbUrl: url(RECORDED_PROJECT_REFS.production, 6543) })) === 'port_must_be_5432');
+  }
+  {
+    // A flag action whose file does not end with the verifying select is refused at plan time, even when its pins were updated to match.
+    const a = action('window-on');
+    const noSelect = Buffer.from('update internal.backout_window set email_edits_paused = true;\n');
+    const oneSelect = Buffer.from('select email_edits_paused from internal.backout_window;\n');
+    const own = Buffer.from('begin;\nupdate internal.backout_window set email_edits_paused = true;\ncommit;\n');
+    for (const [name, bytes] of [['no verify select', noSelect], ['only the select', oneSelect], ['its own transaction and no select', own]] as const) {
+      const hash = createHash('sha256').update(bytes).digest('hex');
+      check(`a flag action with ${name} is refused as a shape refusal`, withPinsChanged([[a, { sha256: hash }]], () => refusalOf(() => plan('window-on', { files: withFile(a.file, bytes) }))) === 'prod_sql_shape_refused');
+    }
+    check('a flag action with no pinned flag name or expected value is refused as a shape refusal', withPinsChanged([[a, { flagName: undefined }]], () => refusalOf(() => plan('window-on'))) === 'prod_sql_shape_refused' && withPinsChanged([[a, { flagExpect: undefined }]], () => refusalOf(() => plan('window-on'))) === 'prod_sql_shape_refused');
+  }
+  {
+    const c = new Recorder();
+    const out = await runPlan('security-hardening-backout', c);
+    check('security-hardening-backout: own file, so exactly one begin and one commit are sent, both from the file (no double wrap); reported committed', out.error === undefined && nonStatement(c.sent).join('|') === `begin|set local lock_timeout = '10s'|commit` && c.sent.filter((s) => ctlOf(s) === 'begin').length === 1 && c.sent.length === 4 + 3 && resultsOf(out.events).join() === 'committed');
+    const bad = new Recorder((sql) => { if (/^grant execute on all functions in schema internal/.test(sql)) throw new Error('boom'); return { rows: [], rowCount: 0 }; });
+    const failed = await runPlan('security-hardening-backout', bad);
+    check('security-hardening-backout: a failed statement rolls back and never commits', failed.error !== undefined && bad.sent[bad.sent.length - 1] === 'rollback' && !bad.sent.some((s) => ctlOf(s) === 'commit') && resultsOf(failed.events).join() === 'rolled_back');
+  }
+  for (const id of ['profile-bootstrap-backout', 'dnc-enum-cast-backout', 'read-only-inventory']) {
+    check(`${id} is still refused as not built (no reviewed SQL exists), even with the phrase of another action`, refusalOf(() => plan(id, { confirm: action('m1').phrase })) === 'prod_sql_action_not_built');
+  }
+  const counter = { fields: 0 };
+  const good = JSON.stringify({ msg: 'prod-sql.flag', action: 'window-on', index: 2, flag: { email_edits_paused: true } });
+  const unknownFlag = JSON.stringify({ msg: 'prod-sql.flag', action: 'window-off', index: 2, flag: { email_edits_paused: 'unknown' } });
+  check('the wrapper passes a flag event (true, false or unknown) for the window actions with nothing withheld', wrapper.allowListLine(good, counter) !== null && wrapper.allowListLine(unknownFlag, counter) !== null && counter.fields === 0);
+  const c2 = { fields: 0 };
+  [{ msg: 'prod-sql.flag', action: 'm1', index: 2, flag: { email_edits_paused: true } }, { msg: 'prod-sql.flag', action: 'window-on', index: 2, flag: { other: true } }, { msg: 'prod-sql.flag', action: 'window-on', index: 2, flag: { email_edits_paused: 'yes' } }, { msg: 'prod-sql.flag', action: 'window-on', index: 'x', flag: { email_edits_paused: true }, note: 'free text' }]
+    .forEach((e) => wrapper.allowListLine(JSON.stringify(e), c2));
+  check('the wrapper withholds a flag event with another action, another flag name, a non-boolean value, a non-numeric index, and drops an unknown key (5 fields)', c2.fields === 5);
+  check('the wrapper\'s flag names and refusal list equal the runner\'s, and only the two window actions use the flag report', JSON.stringify([...wrapper.PROD_SQL_FLAG_NAMES]) === JSON.stringify([...PROD_SQL_FLAG_NAMES]) && PROD_SQL_ACTIONS.filter((a) => a.report === 'flag').map((a) => a.id).join() === 'window-on,window-off' && (REFUSAL_IDS as readonly string[]).includes('prod_sql_flag_not_expected') && wrapper.REFUSAL_IDS.includes('prod_sql_flag_not_expected'));
 }
 
 console.log(`prod-sql: ${passed} checks passed`);
