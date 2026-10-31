@@ -13,6 +13,7 @@ const PRODUCTION_REF = 'ejrfobddnojbijzrjbii';
 const failures = [];
 let warningSentences = {};
 let irreversibleIds = [];
+let listOfTables = [];
 const read = (rel) => (existsSync(resolve(root, rel)) ? readFileSync(resolve(root, rel), 'utf8').replace(/\r\n/g, '\n') : undefined);
 /** Source without comments (// and block), so a forbidden word in prose does not count and a real statement does. */
 const code = (src) => src.replace(/\/\*[\s\S]*?\*\//g, '').split('\n').map((l) => l.replace(/(^|\s)\/\/.*$/, '')).join('\n');
@@ -129,6 +130,7 @@ if (mod) {
     const l1Text = l1 && existsSync(resolve(root, l1.file)) ? splitStatements(readFileSync(resolve(root, l1.file), 'utf8')) : [];
     const listOf = (name) => (new RegExp(`export const ${name} = \\[([^\\]]*)\\] as const`).exec(c)?.[1].match(/'([a-z_]+)'/g) ?? []).map((q) => q.slice(1, -1));
     const tables = listOf('L1_AUTH_TABLES');
+    listOfTables = tables;
     const cols = listOf('L1_USERS_TOKEN_COLUMNS');
     if (tables.join() !== 'users,sessions,refresh_tokens,one_time_tokens,flow_state') failures.push('prod-sql.ts: L1_AUTH_TABLES must be the L1 file\'s own listed tables (users, sessions, refresh_tokens, one_time_tokens, flow_state)');
     if (cols.length !== 6) failures.push('prod-sql.ts: L1_USERS_TOKEN_COLUMNS must list the six auth.users token columns');
@@ -140,6 +142,55 @@ if (mod) {
     const expectedChecks = ['results_read', ...tables.map((t) => `table_${t}`), ...cols.map((col) => `users_${col}`), 'no_unreviewed_auth_tables'];
     const wrapperChecks = (wrapper ? /export const PROD_SQL_SHAPE_CHECKS = \[([\s\S]*?)\];/.exec(wrapper)?.[1].match(/'([a-z_]+)'/g) ?? [] : []).map((q) => q.slice(1, -1));
     if (JSON.stringify(wrapperChecks) !== JSON.stringify(expectedChecks)) failures.push('run-with-secrets.mjs PROD_SQL_SHAPE_CHECKS must equal the shape check names derived from L1_AUTH_TABLES and L1_USERS_TOKEN_COLUMNS');
+  }
+  // ---- B1: the reviewed auth table list is ONE pinned data file; a table is listed only with an explicit classification and a cited source; the gate keeps
+  // refusing anything not classified; nothing is bulk-added; the list is not repeated in code.
+  {
+    const FILE = 'supabase/rollout/auth-table-classification.json';
+    const CLASSES = ['credential-bearing: handled by L1', 'credential-bearing: STOP', 'not credential-bearing: reviewed'];
+    const pinFile = /export const AUTH_CLASSIFICATION_FILE = '([^']+)'/.exec(c)?.[1];
+    const pinSha = /export const AUTH_CLASSIFICATION_SHA256 = '([0-9a-f]{64})'/.exec(c)?.[1];
+    const pinnedClasses = (/export const AUTH_CLASSIFICATIONS = \[([^\]]*)\] as const/.exec(c)?.[1].match(/'([^']+)'/g) ?? []).map((q) => q.slice(1, -1));
+    if (pinFile !== FILE) failures.push(`prod-sql.ts: AUTH_CLASSIFICATION_FILE must be ${FILE}`);
+    if (JSON.stringify(pinnedClasses) !== JSON.stringify(CLASSES)) failures.push('prod-sql.ts: AUTH_CLASSIFICATIONS must be exactly "credential-bearing: handled by L1", "credential-bearing: STOP", "not credential-bearing: reviewed"');
+    const bytes = existsSync(resolve(root, FILE)) ? readFileSync(resolve(root, FILE)) : undefined;
+    if (!bytes) failures.push(`missing ${FILE}`);
+    else {
+      const actual = createHash('sha256').update(bytes).digest('hex');
+      if (actual !== pinSha) failures.push(`prod-sql.ts pins the classification file at ${String(pinSha).slice(0, 12)}... but ${FILE} is ${actual.slice(0, 12)}... (the list changed or the pin is stale: review, then update the pin)`);
+      let data;
+      try { data = JSON.parse(bytes.toString('utf8')); } catch { failures.push(`${FILE} is not valid JSON`); }
+      const entries = Array.isArray(data?.tables) ? data.tables : [];
+      if (entries.length === 0) failures.push(`${FILE} lists no tables`);
+      const seen = new Set();
+      for (const e of entries) {
+        if (typeof e?.table !== 'string' || !/^[a-z_][a-z0-9_]*$/.test(e.table) || seen.has(e.table)) failures.push(`${FILE}: an entry has a missing, badly named or repeated table`);
+        seen.add(e?.table);
+        if (!CLASSES.includes(e?.classification)) failures.push(`${FILE}: ${e?.table} has no explicit allowed classification`);
+        if (typeof e?.source !== 'string' || e.source.trim() === '') failures.push(`${FILE}: ${e?.table} has no cited source`);
+        else {
+          const cited = e.source.match(/[A-Za-z0-9_./-]+\.(?:sql|md|ts|mjs|json)\b/g) ?? [];
+          if (cited.length === 0) failures.push(`${FILE}: the source of ${e.table} must cite at least one repository file`);
+          for (const f of cited) if (!existsSync(resolve(root, f))) failures.push(`${FILE}: the source of ${e.table} cites ${f}, which does not exist`);
+        }
+      }
+      const handled = entries.filter((e) => e?.classification === 'credential-bearing: handled by L1').map((e) => e.table);
+      if ([...handled].sort().join() !== [...listOfTables].sort().join()) failures.push(`${FILE}: the tables classified "handled by L1" must be exactly L1_AUTH_TABLES (${listOfTables.join()})`);
+      const l1Sql = (read('supabase/rollout/L1-close-legacy-auth.sql') ?? '').replace(/--[^\n]*/g, '');
+      for (const t of handled) {
+        const clears = t === 'users' ? /update\s+auth\.users\b/i.test(l1Sql) : new RegExp(`delete\\s+from\\s+auth\\.${t}\\b`, 'i').test(l1Sql);
+        if (!clears) failures.push(`${FILE}: ${t} is classified "handled by L1" but the L1 file does not clear it`);
+      }
+      // Nothing was added from a name alone: the standard names the re-review left PENDING are not on the list until a reviewed capture classifies them.
+      for (const pending of ['identities', 'mfa_factors', 'mfa_challenges', 'mfa_amr_claims', 'sso_providers', 'sso_domains', 'saml_providers', 'saml_relay_states', 'audit_log_entries', 'instances']) {
+        if (seen.has(pending)) failures.push(`${FILE}: ${pending} is listed; it may be added only by a reviewed change that cites the staging-2 schema capture`);
+      }
+    }
+    need('prod-sql.ts', c, /const known = new Set<string>\(classification\.filter\(\(e\) => e\.classification !== 'credential-bearing: STOP'\)\.map\(\(e\) => e\.table\)\);/, 'the gate passes only a table the classification file lists as handled by L1 or reviewed as not credential-bearing (a STOP table and an unlisted table both stop it)');
+    need('prod-sql.ts', c, /const shape = evaluateL1Shape\(columnResult, tableResult, classification \?\? \[\]\);/, 'a plan without a verified classification fails closed');
+    need('prod-sql.ts', c, /const classification = action\.report === 'shape' \|\| action\.gate !== undefined \? loadAuthClassification\(files\) : undefined;/, 'the classification is read, pin-checked and parsed at plan time for the shape stage and the gated sweep');
+    need('prod-sql.ts', c, /if \(sha256Hex\(bytes\) !== AUTH_CLASSIFICATION_SHA256\) throw new RunnerRefusal\('prod_sql_hash_mismatch'/, 'the classification file hash refusal');
+    if (/L1_REVIEWED_OTHER_AUTH_TABLES|const known = new Set<string>\(\[/.test(c)) failures.push('prod-sql.ts must not repeat the reviewed table list in code (it lives only in the classification file)');
   }
   // Read-only actions never write; every action that has report 'counts' names its columns.
   for (const a of actions) if (a.report === 'counts' && !new RegExp(`id: '${a.id}'[^}]*countNames: \\[`).test(c)) failures.push(`prod-sql.ts: ${a.id} reports counts but pins no countNames`);
@@ -195,8 +246,8 @@ if (mod) {
   need('prod-sql.ts', c, /export function stagesTile\(file: string, total: number[^)]*\): boolean \{[\s\S]*?return stages\.length > 0 && next === total \+ 1;/, 'stagesTile: first stage at 1, no gap, no overlap, last stage ends at the final statement');
   need('prod-sql.ts', c, /if \(stageDigest\(gate\) !== gateAction\.stageSha256\) throw new RunnerRefusal\('prod_sql_hash_mismatch'/, 'the shape gate is verified against its own stage pin');
   need('prod-sql.ts', c, /if \(!shape\.passed\) throw new RunnerRefusal\('prod_sql_l1_shape_not_ok'/, 'a failed L1 shape check stops the run');
-  need('prod-sql.ts', c, /if \(plan\.gate !== undefined\) \{[\s\S]*?enforceL1Shape\(action, gateResults\[0\], gateResults\[1\]\);\s*\}\s*const shapeRows: unknown\[\] = \[\];\s*for \(const \[i, statement\] of body\.entries\(\)\)/, 'the gate runs, and must pass, before the first statement of the gated action');
-  need('prod-sql.ts', c, /if \(action\.report === 'shape'\) enforceL1Shape\(action, shapeRows\[0\], shapeRows\[1\]\);\s*if \(shape === 'read_only'\)/, 'the shape stage is judged before its read-only transaction is rolled back and reported done');
+  need('prod-sql.ts', c, /if \(plan\.gate !== undefined\) \{[\s\S]*?enforceL1Shape\(action, gateResults\[0\], gateResults\[1\], plan\.classification\);\s*\}\s*const shapeRows: unknown\[\] = \[\];\s*for \(const \[i, statement\] of body\.entries\(\)\)/, 'the gate runs, and must pass, before the first statement of the gated action');
+  need('prod-sql.ts', c, /if \(action\.report === 'shape'\) enforceL1Shape\(action, shapeRows\[0\], shapeRows\[1\], plan\.classification\);\s*if \(shape === 'read_only'\)/, 'the shape stage is judged before its read-only transaction is rolled back and reported done');
   if (!/export function evaluateL1Shape\(/.test(c) || !/no_unreviewed_auth_tables/.test(c)) failures.push('prod-sql.ts must keep evaluateL1Shape with the reviewed-inventory check');
   need('prod-sql.ts', c, /line\?\.\[1\] !== action\.sha256\) throw new RunnerRefusal\('prod_sql_hash_mismatch'/, 'the migration-manifest agreement refusal');
   need('prod-sql.ts', c, /if \(input\.confirm !== action\.phrase\) \{\s*throw new RunnerRefusal\('confirmation_required'/, 'the exact per-action phrase refusal');
@@ -246,6 +297,52 @@ if (runner) {
   if (planAt < 0 || execAt < 0 || planAt > execAt) failures.push('prod-sql-runner.ts: the plan-only return must come before anything connects');
   if (/(connection|dbUrl|password|host)[^\n]*console\.(log|error)|console\.(log|error)[^\n]*(dbUrl|password|\.host|\.db\b)/.test(c)) failures.push('prod-sql-runner.ts must not print connection details');
   if (/hint:\s*'[^']*--execute/.test(c) === false) failures.push('prod-sql-runner.ts: the plan-only event must say "add --execute to run"');
+}
+
+// ---------------------------------------------------------------------------------------------------------------
+// B1: the staging-2 auth schema inventory: a pinned, read-only, names-and-types-only query run through the existing guarded staging runner.
+// ---------------------------------------------------------------------------------------------------------------
+{
+  const INV = 'supabase/rollout/auth-schema-inventory.sql';
+  const rebuilt = read('pipeline/src/staging-rebuilt.ts');
+  const entry = rebuilt ? /'auth-schema-inventory': \{ kind: 'snapshot', file: '([^']+)', sha256: '([0-9a-f]{64})', confirmation: '([^']+)', pinned: false \},/.exec(rebuilt) : null;
+  if (!entry) failures.push("staging-rebuilt.ts must define the 'auth-schema-inventory' action as a snapshot-kind action with a pinned sha256 and a confirmation phrase");
+  else {
+    if (entry[1] !== INV) failures.push(`staging-rebuilt.ts: the auth-schema-inventory action must run ${INV}`);
+    if (entry[3] !== 'TAKE TNBS AUTH SCHEMA INVENTORY') failures.push('staging-rebuilt.ts: the auth-schema-inventory confirmation must be "TAKE TNBS AUTH SCHEMA INVENTORY"');
+    if (!existsSync(resolve(root, INV))) failures.push(`missing ${INV}`);
+    else {
+      const actual = createHash('sha256').update(readFileSync(resolve(root, INV))).digest('hex');
+      if (actual !== entry[2]) failures.push(`staging-rebuilt.ts pins the inventory query at ${entry[2].slice(0, 12)}... but ${INV} is ${actual.slice(0, 12)}... (the query changed or the pin is stale: review, then update the pin)`);
+      const text = readFileSync(resolve(root, INV), 'utf8');
+      const stripped = text.replace(/--[^\n]*/g, '');
+      let parts = [];
+      try { parts = splitStatements(text); } catch { failures.push(`${INV} could not be split by the contract's own splitter`); }
+      const words = parts.map((st) => st.replace(/--[^\n]*/g, '').replace(/'[^']*'/g, "''").trim());
+      if (words.map((w) => w.split(/\s+/)[0].toLowerCase()).join() !== 'set,set,select,select') failures.push(`${INV} must be exactly two "set local" statements and two selects`);
+      if (!words.slice(0, 2).every((w) => /^set local (statement_timeout|lock_timeout) = ''$/i.test(w))) failures.push(`${INV}: the two set statements must be set local statement_timeout / lock_timeout`);
+      for (const m of stripped.matchAll(/\b(from|join)\s+([A-Za-z_.]+)/gi)) if (!m[2].toLowerCase().startsWith('pg_catalog.')) failures.push(`${INV} reads ${m[2]}: only pg_catalog relations may follow FROM or JOIN (never a table of the auth schema, never row data)`);
+      if (/information_schema/i.test(stripped)) failures.push(`${INV} must read pg_catalog, not information_schema (which hides what the role cannot use)`);
+      if (/\b(insert|update|delete|truncate|create|alter|drop|grant|revoke|copy|call|do|begin|commit|rollback|vacuum|reindex|cluster|refresh|lock)\b/i.test(words.join(' '))) failures.push(`${INV} must hold no data change, no definition change and no transaction control (the runner provides begin read only and rollback)`);
+      if (/\bauth\./i.test(words.join(' '))) failures.push(`${INV} must not name any auth relation outside a string literal`);
+      if (/\b(select|returning)\s+[^;]*\b(password|token|secret|identity_data|raw_[a-z_]*meta_data)\b/i.test(words.join(' '))) failures.push(`${INV} must not select any value column`);
+    }
+  }
+  if (rebuilt) {
+    need('staging-rebuilt.ts', code(rebuilt), /if \(spec\.sha256 !== undefined && createHash\('sha256'\)\.update\(bytes\)\.digest\('hex'\) !== spec\.sha256\) throw new Error/, 'the plan refuses a file that does not match its pinned SHA-256');
+    need('staging-rebuilt.ts', code(rebuilt), /if \(spec\.kind === 'snapshot'\) \{\s*if \(!input\.out \|\| !isAbsolute\(input\.out\)\)[\s\S]*?snapshot output must be outside the repository[\s\S]*?refusing to overwrite/, 'the snapshot output rules the inventory relies on (absolute, outside the repository, never overwritten)');
+    need('staging-rebuilt.ts', code(rebuilt), /if \(plan\.kind === 'snapshot'\) \{\s*await client\.query\('begin read only'\);[\s\S]*?flag: 'wx'[\s\S]*?await client\.query\('rollback'\);/, 'the snapshot is sent inside begin read only, written to a new local file, and rolled back');
+  }
+  const inventoryActions = wrapper ? /export const ACTIONS = \[([\s\S]*?)\];/.exec(wrapper)?.[1].match(/'([a-z0-9-]+)'/g) ?? [] : [];
+  if (!inventoryActions.includes("'auth-schema-inventory'")) failures.push('run-with-secrets.mjs ACTIONS must list auth-schema-inventory');
+  if (doc) {
+    for (const w of ['PENDING staging-2 capture and review', 'not proof of production parity', 'auth-schema-inventory', 'auth-table-classification.json', 'credential-bearing: handled by L1', 'credential-bearing: STOP', 'not credential-bearing: reviewed', 'separate approval']) {
+      if (!doc.includes(w)) failures.push(`doc 18 must keep the auth inventory section (missing: "${w}")`);
+    }
+    for (const t of ['identities', 'mfa_factors', 'mfa_challenges', 'mfa_amr_claims', 'sso_providers', 'sso_domains', 'saml_providers', 'saml_relay_states', 'audit_log_entries', 'instances']) {
+      if (!doc.includes('`' + t + '`')) failures.push(`doc 18's PENDING classification table must name ${t}`);
+    }
+  }
 }
 
 // The older runners must still refuse production and must not know about this tool.

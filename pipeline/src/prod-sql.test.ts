@@ -9,15 +9,16 @@ import { createHash } from 'node:crypto';
 import { EventEmitter } from 'node:events';
 import { existsSync, readFileSync } from 'node:fs';
 import { resolve } from 'node:path';
+import { tmpdir } from 'node:os';
 import { pathToFileURL } from 'node:url';
 import {
-  L1_AUTH_TABLES, L1_USERS_TOKEN_COLUMNS, PROD_SQL_ACTIONS, PROD_SQL_ACTION_IDS, PROD_SQL_COMMANDS, PROD_SQL_COUNT_NAMES, PROD_SQL_IRREVERSIBLE_ACTIONS, PROD_SQL_MISSING, PROD_SQL_RESULTS, PROD_SQL_SHAPE_CHECKS, PROD_SQL_WARNINGS, PROD_SQL_WRAPS, PRODUCTION_PROMPT_PROOF_VARIABLE,
-  evaluateL1Shape, executeProdSqlPlan, planProdSql, promptProof, selectProdSqlDbUrl, stageDigest, stagesTile, type ProdSqlAction, type ProdSqlFiles,
+  AUTH_CLASSIFICATIONS, AUTH_CLASSIFICATION_FILE, AUTH_CLASSIFICATION_SHA256, L1_AUTH_TABLES, L1_USERS_TOKEN_COLUMNS, PROD_SQL_ACTIONS, PROD_SQL_ACTION_IDS, PROD_SQL_COMMANDS, PROD_SQL_COUNT_NAMES, PROD_SQL_IRREVERSIBLE_ACTIONS, PROD_SQL_MISSING, PROD_SQL_RESULTS, PROD_SQL_SHAPE_CHECKS, PROD_SQL_WARNINGS, PROD_SQL_WRAPS, PRODUCTION_PROMPT_PROOF_VARIABLE,
+  evaluateL1Shape, executeProdSqlPlan, loadAuthClassification, planProdSql, promptProof, selectProdSqlDbUrl, stageDigest, stagesTile, validateAuthClassification, type AuthTableClassification, type ProdSqlAction, type ProdSqlFiles,
 } from './prod-sql.js';
 import { main as runnerMain, parseProdSqlArgs } from './prod-sql-runner.js';
 import { splitSqlStatements, sqlControl, transactionShape, unsupportedReason } from './prod-sql-split.js';
 import { REFUSAL_IDS, RunnerRefusal } from './refusals.js';
-import { REPOSITORY_ROOT, type RebuiltSqlClient } from './staging-rebuilt.js';
+import { REBUILT_STAGING_SQL_ACTIONS, REPOSITORY_ROOT, planRebuiltSqlRun, type RebuiltSqlClient } from './staging-rebuilt.js';
 import { RECORDED_PROJECT_REFS } from './target-guard.js';
 
 const url = (ref: string, port = 5432) => `postgresql://postgres.${ref}:redacted-pw@aws-0-us-east-2.pooler.supabase.com:${port}/postgres`;
@@ -423,6 +424,90 @@ const wrapper = await import(pathToFileURL(resolve(REPOSITORY_ROOT, 'scripts/run
   const counter2 = { fields: 0 };
   const shown = JSON.parse(wrapper.allowListLine(JSON.stringify(tampered), counter2));
   check('the allow-list withholds a warning for another action, an unknown warning id, a free-text notice, and drops an unknown key', shown.action === '<withheld>' && shown.warning === '<withheld>' && shown.notice === '<withheld>' && !('extra' in shown) && counter2.fields === 4);
+}
+
+// ---------------------------------------------------------------------------------------------------------------
+// B1 (re-review of eafc55b): the reviewed auth table list lives in one pinned data file; only an explicitly classified, sourced table passes the gate;
+// the staging-2 schema inventory is a pinned, read-only, names-and-types-only action. Nothing here invents the hosted inventory.
+// ---------------------------------------------------------------------------------------------------------------
+{
+  const classification = loadAuthClassification();
+  const handledBy = (c: readonly AuthTableClassification[]) => c.filter((e) => e.classification === 'credential-bearing: handled by L1').map((e) => e.table).sort().join();
+  check('the classification file is pinned, every entry has an allowed classification and a cited source, and the handled-by-L1 tables are exactly the L1 tables', createHash('sha256').update(real(AUTH_CLASSIFICATION_FILE)).digest('hex') === AUTH_CLASSIFICATION_SHA256
+    && classification.every((e) => (AUTH_CLASSIFICATIONS as readonly string[]).includes(e.classification) && e.source.trim() !== '') && handledBy(classification) === [...L1_AUTH_TABLES].sort().join() && new Set(classification.map((e) => e.table)).size === classification.length);
+  check('the file lists only what is evidenced: the five L1 tables and the carried-over schema_migrations; none of the standard names the re-review left PENDING is listed',
+    classification.map((e) => e.table).sort().join() === [...L1_AUTH_TABLES, 'schema_migrations'].sort().join()
+    && ['identities', 'mfa_factors', 'mfa_challenges', 'mfa_amr_claims', 'sso_providers', 'sso_domains', 'saml_providers', 'saml_relay_states', 'audit_log_entries', 'instances'].every((t) => !classification.some((e) => e.table === t)));
+  check('the carried-over schema_migrations entry says plainly that its only recorded review is the old code comment and must be confirmed', (() => { const e = classification.find((x) => x.table === 'schema_migrations'); return e?.classification === 'not credential-bearing: reviewed' && /only recorded review/.test(e.note ?? '') && /staging-2 capture/.test(e.note ?? ''); })());
+  const sourceOf = (e: unknown): AuthTableClassification => ({ table: 'x', classification: 'not credential-bearing: reviewed', source: 'a cited source', ...(e as object) }) as AuthTableClassification;
+  const l1Rows = [...L1_AUTH_TABLES].map((t) => ({ table: t, classification: 'credential-bearing: handled by L1', source: 'L1 file' }));
+  const validates = (tables: unknown[]) => refusalOf(() => validateAuthClassification({ tables }));
+  check('validation accepts the L1 tables plus a classified, sourced table', validates([...l1Rows, sourceOf({})]) === undefined && validates([...l1Rows, sourceOf({ classification: 'credential-bearing: STOP' })]) === undefined);
+  check('validation refuses an unknown classification, a missing or blank source, a repeated or badly named table, and no tables at all',
+    validates([...l1Rows, sourceOf({ classification: 'probably fine' })]) === 'prod_sql_shape_refused' && validates([...l1Rows, sourceOf({ classification: undefined })]) === 'prod_sql_shape_refused' && validates([...l1Rows, sourceOf({ source: undefined })]) === 'prod_sql_shape_refused'
+    && validates([...l1Rows, sourceOf({ source: '   ' })]) === 'prod_sql_shape_refused' && validates([...l1Rows, sourceOf({}), sourceOf({})]) === 'prod_sql_shape_refused' && validates([...l1Rows, sourceOf({ table: 'Bad Name' })]) === 'prod_sql_shape_refused'
+    && validates([]) === 'prod_sql_shape_refused' && refusalOf(() => validateAuthClassification(null)) === 'prod_sql_shape_refused');
+  check('validation refuses a table passed as handled by L1 that the L1 file does not clear, and an L1 table that is no longer marked handled',
+    validates([...l1Rows, sourceOf({ table: 'identities', classification: 'credential-bearing: handled by L1' })]) === 'prod_sql_shape_refused' && validates([...l1Rows.slice(1), sourceOf({ table: 'users' })]) === 'prod_sql_shape_refused');
+  check('a changed classification file is refused at plan time as a hash mismatch for l1-shape and l1-sweep; an unreadable one as unreadable; other actions do not need it',
+    ['l1-shape', 'l1-sweep'].every((id) => refusalOf(() => plan(id, { files: withFile(AUTH_CLASSIFICATION_FILE, (b) => Buffer.from(b.toString('utf8').replace('not credential-bearing: reviewed', 'credential-bearing: STOP'))) })) === 'prod_sql_hash_mismatch'
+      && refusalOf(() => plan(id, { files: { readFile: (p) => { if (p === AUTH_CLASSIFICATION_FILE) throw new Error('ENOENT'); return real(p); } } })) === 'prod_sql_file_unreadable')
+    && refusalOf(() => plan('l1-counts', { files: { readFile: (p) => { if (p === AUTH_CLASSIFICATION_FILE) throw new Error('ENOENT'); return real(p); } } })) === undefined && plan('l1-shape').classification !== undefined && plan('l1-sweep').classification !== undefined && plan('l1-counts').classification === undefined);
+  // The gate: only a classified table passes. Hosted-like extra tables (names only, no data) from the re-review's reproduction.
+  const standard = ['identities', 'mfa_factors', 'mfa_challenges', 'mfa_amr_claims', 'sso_providers', 'sso_domains', 'saml_providers', 'saml_relay_states', 'audit_log_entries', 'instances'];
+  const tablesWith = (extra: string[]) => [...goodTables(), ...extra.map((t) => ({ table_name: t }))];
+  const judged = (extra: string[], c = classification) => evaluateL1Shape(goodColumns(), tablesWith(extra), c);
+  check('an unclassified table stops the gate (counted, not named); so do all ten standard names the re-review reproduced, none of which is classified yet', (() => {
+    const one = judged(['review_unclassified']);
+    const many = judged(standard);
+    return one.passed === false && one.checks.no_unreviewed_auth_tables === false && one.unreviewedAuthTables === 1 && Object.entries(one.checks).filter(([k]) => k !== 'no_unreviewed_auth_tables').every(([, v]) => v) && many.passed === false && many.unreviewedAuthTables === 10 && judged([]).passed === true;
+  })());
+  check('a table listed as credential-bearing: STOP stops the gate; a table classified not credential-bearing: reviewed (with a source) passes; the classification list is the only authority', (() => {
+    const stop = [...classification, sourceOf({ table: 'identities', classification: 'credential-bearing: STOP' })];
+    const reviewed = [...classification, sourceOf({ table: 'identities' })];
+    return judged(['identities'], stop).passed === false && judged(['identities'], stop).unreviewedAuthTables === 1 && judged(['identities'], reviewed).passed === true && judged(['identities'], classification).passed === false;
+  })());
+  check('with an empty classification every auth table is unreviewed, so the gate fails closed', evaluateL1Shape(goodColumns(), goodTables(), []).passed === false);
+  const gated = async (id: string, tables: unknown, mutate: (p: ReturnType<typeof plan>) => ReturnType<typeof plan> = (p) => p) => {
+    const c = shapeClient(goodColumns(), tables);
+    const out = await captureLog(() => executeProdSqlPlan(mutate(plan(id)), () => c));
+    return { c, out };
+  };
+  {
+    const { c, out } = await gated('l1-sweep', tablesWith(['review_unclassified']));
+    check('l1-sweep with an unclassified table: refused before any delete or update, nothing committed', out.error instanceof RunnerRefusal && out.error.id === 'prod_sql_l1_shape_not_ok' && !c.sent.some((s) => /^(delete|update)\b/.test(s)) && !c.sent.some((s) => ctlOf(s) === 'commit'));
+    const stopPlan = (p: ReturnType<typeof plan>) => ({ ...p, classification: [...p.classification!, sourceOf({ table: 'identities', classification: 'credential-bearing: STOP' })] });
+    const stopped = await gated('l1-sweep', tablesWith(['identities']), stopPlan);
+    check('l1-sweep with a table classified credential-bearing: STOP: refused before any delete or update, nothing committed', stopped.out.error instanceof RunnerRefusal && stopped.out.error.id === 'prod_sql_l1_shape_not_ok' && !stopped.c.sent.some((s) => /^(delete|update)\b/.test(s)) && !stopped.c.sent.some((s) => ctlOf(s) === 'commit'));
+    const reviewedPlan = (p: ReturnType<typeof plan>) => ({ ...p, classification: [...p.classification!, sourceOf({ table: 'identities' })] });
+    const passedSweep = await gated('l1-sweep', tablesWith(['identities']), reviewedPlan);
+    check('the same sweep passes the gate once that table is classified not credential-bearing: reviewed (the list, not the code, decides)', passedSweep.out.error === undefined && resultsOf(passedSweep.out.events).join() === 'committed');
+    const noClass = await gated('l1-shape', goodTables(), (p) => { const { classification: _drop, ...rest } = p; return rest as typeof p; });
+    check('a plan with no verified classification fails closed even on the reviewed shape', noClass.out.error instanceof RunnerRefusal && noClass.out.error.id === 'prod_sql_l1_shape_not_ok');
+    const shapeOnly = await gated('l1-shape', tablesWith(['review_unclassified']));
+    check('l1-shape with an unclassified table: refused, the table is counted and its name appears nowhere in the output', shapeOnly.out.error instanceof RunnerRefusal && shapeEvent(shapeOnly.out.events)?.auth_tables_unreviewed === 1 && !JSON.stringify(shapeOnly.out.events).includes('review_unclassified'));
+  }
+  // The staging-2 inventory action: pinned, read-only, names and types only; plan-only default through the existing guarded staging runner.
+  const rebuilt = RECORDED_PROJECT_REFS.stagingRebuilt ?? 'abcdefghijklmnopqrst';
+  const inv = REBUILT_STAGING_SQL_ACTIONS['auth-schema-inventory']!;
+  const invOut = resolve(tmpdir(), `tnbs-auth-inventory-test-${process.pid}.json`);
+  const invPlan = (over: Partial<Parameters<typeof planRebuiltSqlRun>[0]> = {}) => planRebuiltSqlRun({ action: 'auth-schema-inventory', dbUrl: url(rebuilt), confirm: inv.confirmation, out: invOut, recordedRebuiltRef: rebuilt, ...over });
+  const invSql = real(inv.file!).toString('utf8');
+  const invStatements = splitSqlStatements(invSql);
+  check('the inventory action is a snapshot-kind, confirmation-gated action whose file is pinned by SHA-256 and exists', inv.kind === 'snapshot' && inv.confirmation === 'TAKE TNBS AUTH SCHEMA INVENTORY' && inv.file === 'supabase/rollout/auth-schema-inventory.sql' && createHash('sha256').update(real(inv.file)).digest('hex') === inv.sha256 && inv.pinned === false);
+  check('the inventory SQL is read-only by content: only set local and select; every FROM and JOIN is a pg_catalog relation; no auth table, no information_schema, no data change, no transaction control',
+    invStatements.length === 4 && invStatements.map((s) => s.clean.trim().split(/\s+/)[0]!.toLowerCase()).join() === 'set,set,select,select' && invStatements.slice(0, 2).every((s) => /^set local /i.test(s.clean.trim()))
+    && [...invSql.replace(/--[^\n]*/g, '').matchAll(/\b(from|join)\s+([a-z_.]+)/gi)].every((m) => m[2]!.toLowerCase().startsWith('pg_catalog.')) && !/information_schema/i.test(invSql.replace(/--[^\n]*/g, ''))
+    && !/\b(insert|update|delete|truncate|create|alter|drop|grant|revoke|copy|call|do|begin|commit|rollback|vacuum|reindex|cluster|refresh|lock)\b/i.test(invStatements.map((s) => s.clean).join(' ')) && !/\bauth\./i.test(invStatements.map((s) => s.clean).join(' ')));
+  check('the inventory plan is made offline: the snapshot step reads exactly the pinned file, nothing connects, and the output must be a new absolute path outside the repository',
+    invPlan().kind === 'snapshot' && invPlan().steps.length === 1 && invPlan().steps[0]!.sql === invSql && invPlan().outPath === invOut
+    && [undefined, 'relative.json', resolve(REPOSITORY_ROOT, 'inventory.json')].every((out) => { try { invPlan({ out }); return false; } catch { return true; } }));
+  check('the inventory action refuses production, the old staging project, any other ref, the 6543 pooler, a wrong or another action\'s confirmation and a missing address (the existing staging target guard)',
+    [url(RECORDED_PROJECT_REFS.production), url(RECORDED_PROJECT_REFS.staging), url('zzzzzzzzzzzzzzzzzzzz'), url(rebuilt, 6543)].every((dbUrl) => { try { invPlan({ dbUrl }); return false; } catch { return true; } })
+    && [undefined, 'yes', REBUILT_STAGING_SQL_ACTIONS.snapshot!.confirmation].every((confirm) => { try { invPlan({ confirm }); return false; } catch { return true; } }) && (() => { try { invPlan({ dbUrl: undefined }); return false; } catch { return true; } })());
+  check('through the wrapper the inventory events are allow-listed: the action id is on its list and the verified and done events pass with nothing withheld',
+    wrapper.ACTIONS.includes('auth-schema-inventory') && [{ msg: 'staging-sql.verified', action: 'auth-schema-inventory', steps: 1, target: 'recorded rebuilt staging project' }, { msg: 'staging-sql.plan_only', hint: 'add --execute to run' }, { msg: 'staging-sql.done', action: 'auth-schema-inventory' }]
+      .every((e) => wrapper.allowListLine(JSON.stringify(e), { fields: 0 }) !== null) && (() => { const c = { fields: 0 }; wrapper.allowListLine(JSON.stringify({ msg: 'staging-sql.done', action: 'not-an-action' }), c); return c.fields === 1; })());
 }
 
 // ---------------------------------------------------------------------------------------------------------------

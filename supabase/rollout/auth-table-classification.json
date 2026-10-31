@@ -1,0 +1,37 @@
+{
+  "schema": 1,
+  "description": "The reviewed list of auth tables for the production SQL runner's L1 shape gate (pipeline/src/prod-sql.ts). A table appears here ONLY with an explicit classification and a cited source. The gate stops on any auth table that is not listed, and on any table classified 'credential-bearing: STOP'. This file is pinned by SHA-256 in prod-sql.ts: a change needs a reviewed change to that pin. Do not add a table from its name alone; the staging-2 schema capture (supabase/rollout/auth-schema-inventory.sql) is the evidence to review first, and a staging capture is not proof of production parity.",
+  "tables": [
+    {
+      "table": "users",
+      "classification": "credential-bearing: handled by L1",
+      "source": "supabase/rollout/L1-close-legacy-auth.sql (header; STEP 2 shape select; STEP 3 update of the six verification-token columns); docs/build-plan/14-same-origin-signin-design.md section 11.6 steps 2-3"
+    },
+    {
+      "table": "sessions",
+      "classification": "credential-bearing: handled by L1",
+      "source": "supabase/rollout/L1-close-legacy-auth.sql (STEP 3 delete, STEP 4 recount); docs/build-plan/14-same-origin-signin-design.md section 11.6"
+    },
+    {
+      "table": "refresh_tokens",
+      "classification": "credential-bearing: handled by L1",
+      "source": "supabase/rollout/L1-close-legacy-auth.sql (STEP 3 delete, STEP 4 recount); docs/build-plan/14-same-origin-signin-design.md section 11.6"
+    },
+    {
+      "table": "one_time_tokens",
+      "classification": "credential-bearing: handled by L1",
+      "source": "supabase/rollout/L1-close-legacy-auth.sql (STEP 3 delete, STEP 4 recount); docs/build-plan/14-same-origin-signin-design.md section 11.6"
+    },
+    {
+      "table": "flow_state",
+      "classification": "credential-bearing: handled by L1",
+      "source": "supabase/rollout/L1-close-legacy-auth.sql (STEP 3 delete, STEP 4 recount); docs/build-plan/14-same-origin-signin-design.md section 11.6"
+    },
+    {
+      "table": "schema_migrations",
+      "classification": "not credential-bearing: reviewed",
+      "source": "pipeline/src/prod-sql.ts as of commit eafc55b (the comment on L1_REVIEWED_OTHER_AUTH_TABLES: a plain list of schema versions)",
+      "note": "Carried over unchanged from eafc55b so the gate behaves as before. That comment is the only recorded review. The re-review of eafc55b found no independent definition of auth.schema_migrations in the repository (it is not supabase_migrations.schema_migrations). Confirm it in the staging-2 capture and remove this entry if the capture shows anything other than a list of versions."
+    }
+  ]
+}

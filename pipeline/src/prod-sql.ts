@@ -135,6 +135,8 @@ export interface ProdSqlPlan {
   statements: readonly SqlStatement[];
   /** The verified shape-gate statements (the 'gate' action's stage of the same file); they run first, inside the transaction, and must pass. */
   gate?: readonly SqlStatement[];
+  /** The verified auth table classification (pinned data file); present for the shape stage and the gated sweep, which judge the schema against it. */
+  classification?: readonly AuthTableClassification[];
   shape: ProdSqlShape;
   /** The pinned file hash (public, repository content). */
   sha256: string;
@@ -217,6 +219,8 @@ export function planProdSql(input: { target: string | undefined; action: string;
     if (stageDigest(gate) !== gateAction.stageSha256) throw new RunnerRefusal('prod_sql_hash_mismatch', 'The shape gate does not match its pinned SHA-256; refusing');
     if (gate.length !== 2 || gate.some((g) => unsupportedReason(g) !== null || commandOf(g) !== 'select')) throw new RunnerRefusal('prod_sql_shape_refused', 'The shape gate must be the two select statements; refusing');
   }
+  // The shape stage and the gated sweep judge the schema against the reviewed classification file: pinned, parsed and refused here, before anything connects.
+  const classification = action.report === 'shape' || action.gate !== undefined ? loadAuthClassification(files) : undefined;
   if (statements.length === 0) throw new RunnerRefusal('prod_sql_shape_refused', 'The action has no statements; refusing');
   if (statements.some((s) => unsupportedReason(s) !== null)) throw new RunnerRefusal('prod_sql_shape_refused', 'The action holds a statement that cannot run in one transaction; refusing');
 
@@ -228,7 +232,7 @@ export function planProdSql(input: { target: string | undefined; action: string;
   if (input.confirm !== action.phrase) {
     throw new RunnerRefusal('confirmation_required', `Action ${action.id} requires --confirm="${action.phrase}"`);
   }
-  return { action, target: PROD_SQL_TARGET, db, statements, ...(gate === undefined ? {} : { gate }), shape, sha256: action.sha256 };
+  return { action, target: PROD_SQL_TARGET, db, statements, ...(gate === undefined ? {} : { gate }), ...(classification === undefined ? {} : { classification }), shape, sha256: action.sha256 };
 }
 
 /** Production credential entry: the first-manager rule, unchanged. A PRODUCTION_DB_URL without the hidden prompt's proof is refused; STAGING_DB_URL must be absent. */
@@ -246,11 +250,52 @@ export const L1_AUTH_TABLES = ['users', 'sessions', 'refresh_tokens', 'one_time_
 /** The six auth.users token columns the L1 file clears; each must exist. */
 export const L1_USERS_TOKEN_COLUMNS = ['confirmation_token', 'recovery_token', 'email_change_token_new', 'email_change_token_current', 'phone_change_token', 'reauthentication_token'] as const;
 /**
- * Other auth tables whose review is on record as holding no credential (a plain list of schema versions). Any auth table that is neither in
- * L1_AUTH_TABLES nor here is unreviewed: the gate stops, a person reviews it, and only a reviewed change to this list (and the contract) lets it pass.
- * The runner never deletes or reads an unlisted table; it only counts it.
+ * The reviewed list of auth tables lives in ONE data file (AUTH_CLASSIFICATION_FILE), not in this code. A table is listed there only with an explicit
+ * classification and a cited source. Any auth table that is not listed, or is listed as 'credential-bearing: STOP', is unreviewed: the gate stops, a person
+ * reviews it, and only a reviewed change to that file (and its pin below) lets it pass. The runner never deletes or reads an unlisted table; it only counts it.
+ * The file is pinned by SHA-256 and read through the same injectable reader as the SQL files, so a changed file is refused at plan time.
  */
-export const L1_REVIEWED_OTHER_AUTH_TABLES = ['schema_migrations'] as const;
+export const AUTH_CLASSIFICATION_FILE = 'supabase/rollout/auth-table-classification.json';
+export const AUTH_CLASSIFICATION_SHA256 = '35e2a483d09ce114d920b665a5af8717919f53f75bb6a53897fe4254db3d4093';
+export const AUTH_CLASSIFICATIONS = ['credential-bearing: handled by L1', 'credential-bearing: STOP', 'not credential-bearing: reviewed'] as const;
+export type AuthClassification = (typeof AUTH_CLASSIFICATIONS)[number];
+export interface AuthTableClassification { table: string; classification: AuthClassification; source: string; note?: string }
+
+/**
+ * Validates parsed classification data. Refuses (never guesses) on an unknown classification, an empty source, a repeated or badly named table, no tables
+ * at all, or when the tables classified 'handled by L1' are not exactly L1_AUTH_TABLES (a table must not be passed as handled unless the L1 file actually
+ * clears it).
+ */
+export function validateAuthClassification(parsed: unknown): readonly AuthTableClassification[] {
+  const tables = (parsed as { tables?: unknown } | null)?.tables;
+  if (!Array.isArray(tables) || tables.length === 0) throw new RunnerRefusal('prod_sql_shape_refused', 'The auth table classification file lists no tables; refusing');
+  const out: AuthTableClassification[] = [];
+  for (const raw of tables as Array<Record<string, unknown>>) {
+    const { table, classification, source, note } = raw ?? {};
+    const valid = typeof table === 'string' && /^[a-z_][a-z0-9_]*$/.test(table) && typeof classification === 'string' && (AUTH_CLASSIFICATIONS as readonly string[]).includes(classification)
+      && typeof source === 'string' && source.trim() !== '' && (note === undefined || typeof note === 'string') && !out.some((e) => e.table === table);
+    if (!valid) throw new RunnerRefusal('prod_sql_shape_refused', 'The auth table classification file has an invalid, unclassified, unsourced or repeated entry; refusing');
+    out.push({ table: table as string, classification: classification as AuthClassification, source: source as string, ...(typeof note === 'string' ? { note } : {}) });
+  }
+  const handled = out.filter((e) => e.classification === 'credential-bearing: handled by L1').map((e) => e.table).sort().join();
+  if (handled !== [...L1_AUTH_TABLES].sort().join()) throw new RunnerRefusal('prod_sql_shape_refused', 'The tables classified as handled by L1 are not exactly the tables the L1 file clears; refusing');
+  return out;
+}
+
+/** Verifies the pin, then validates and parses the classification file. */
+export function parseAuthClassification(bytes: Buffer): readonly AuthTableClassification[] {
+  if (sha256Hex(bytes) !== AUTH_CLASSIFICATION_SHA256) throw new RunnerRefusal('prod_sql_hash_mismatch', 'The auth table classification file does not match its pinned SHA-256; refusing');
+  let parsed: unknown;
+  try { parsed = JSON.parse(bytes.toString('utf8')); } catch { throw new RunnerRefusal('prod_sql_shape_refused', 'The auth table classification file is not valid JSON; refusing'); }
+  return validateAuthClassification(parsed);
+}
+
+/** Reads and verifies the classification file (default: the repository's own). */
+export function loadAuthClassification(files: ProdSqlFiles = defaultFiles): readonly AuthTableClassification[] {
+  let bytes: Buffer;
+  try { bytes = files.readFile(AUTH_CLASSIFICATION_FILE); } catch { throw new RunnerRefusal('prod_sql_file_unreadable', 'The auth table classification file could not be read'); }
+  return parseAuthClassification(bytes);
+}
 /** Every check name the shape gate can print (fixed words; the wrapper enumerates exactly these). */
 export const PROD_SQL_SHAPE_CHECKS: readonly string[] = ['results_read', ...L1_AUTH_TABLES.map((t) => `table_${t}`), ...L1_USERS_TOKEN_COLUMNS.map((c) => `users_${c}`), 'no_unreviewed_auth_tables'];
 
@@ -263,13 +308,14 @@ const rowsOfResult = (v: unknown): Array<Record<string, unknown>> | undefined =>
  * Judges the two L1 shape results (the column listing and the table listing). Only booleans and counts come out; a table or column name
  * from the database is compared with the fixed lists and never kept. A result that is not a list of rows fails every check.
  */
-export function evaluateL1Shape(columnResult: unknown, tableResult: unknown): L1ShapeResult {
+export function evaluateL1Shape(columnResult: unknown, tableResult: unknown, classification: readonly AuthTableClassification[] = loadAuthClassification()): L1ShapeResult {
   const columns = rowsOfResult(columnResult);
   const tables = rowsOfResult(tableResult);
   const tableNames = new Set((tables ?? []).map((r) => r.table_name).filter((n): n is string => typeof n === 'string'));
   const columnTables = new Set((columns ?? []).map((r) => r.table_name).filter((n): n is string => typeof n === 'string'));
   const userColumns = new Set((columns ?? []).filter((r) => r.table_name === 'users').map((r) => r.column_name).filter((n): n is string => typeof n === 'string'));
-  const known = new Set<string>([...L1_AUTH_TABLES, ...L1_REVIEWED_OTHER_AUTH_TABLES]);
+  // Passed: handled by L1, or reviewed as not credential-bearing. Not passed: not listed at all, or classified 'credential-bearing: STOP'.
+  const known = new Set<string>(classification.filter((e) => e.classification !== 'credential-bearing: STOP').map((e) => e.table));
   const authTables = tables === undefined ? 0 : tables.length;
   const unreviewedAuthTables = tables === undefined ? 0 : tables.filter((r) => typeof r.table_name !== 'string' || !known.has(r.table_name)).length;
   const checks: Record<string, boolean> = { results_read: columns !== undefined && tables !== undefined };
@@ -337,8 +383,9 @@ function reportStatement(plan: ProdSqlPlan, index: number, statement: SqlStateme
 }
 
 /** Prints the fixed shape event and stops (refuses) unless every check passed. */
-function enforceL1Shape(action: ProdSqlAction, columnResult: unknown, tableResult: unknown): void {
-  const shape = evaluateL1Shape(columnResult, tableResult);
+function enforceL1Shape(action: ProdSqlAction, columnResult: unknown, tableResult: unknown, classification: readonly AuthTableClassification[] | undefined): void {
+  // A plan without a verified classification judges against an empty list: every auth table is unreviewed, so the gate fails closed.
+  const shape = evaluateL1Shape(columnResult, tableResult, classification ?? []);
   line({ msg: 'prod-sql.shape', action: action.id, checks: shape.checks, auth_tables: shape.authTables, auth_tables_unreviewed: shape.unreviewedAuthTables, passed: shape.passed });
   if (!shape.passed) throw new RunnerRefusal('prod_sql_l1_shape_not_ok', 'The L1 shape check did not pass (a required table or column is missing, or an auth table is unreviewed); stopping');
 }
@@ -374,7 +421,7 @@ export async function runProdSqlPlan(client: RebuiltSqlClient, plan: ProdSqlPlan
       // The gate: the two shape selects run inside this transaction before any change; a failed check refuses and the rollback below undoes nothing but the begin.
       const gateResults: unknown[] = [];
       for (const statement of plan.gate) gateResults.push((await client.query(statement.raw))?.rows);
-      enforceL1Shape(action, gateResults[0], gateResults[1]);
+      enforceL1Shape(action, gateResults[0], gateResults[1], plan.classification);
     }
     const shapeRows: unknown[] = [];
     for (const [i, statement] of body.entries()) {
@@ -383,7 +430,7 @@ export async function runProdSqlPlan(client: RebuiltSqlClient, plan: ProdSqlPlan
       if (action.report === 'shape') shapeRows.push(result?.rows);
       reportStatement(plan, (shape === 'own' ? 1 : 0) + i + 1, statement, result);
     }
-    if (action.report === 'shape') enforceL1Shape(action, shapeRows[0], shapeRows[1]);
+    if (action.report === 'shape') enforceL1Shape(action, shapeRows[0], shapeRows[1], plan.classification);
     if (shape === 'read_only') {
       await client.query('rollback');
       line({ msg: 'prod-sql.result', action: action.id, result: 'read_only_done', statements: ran });

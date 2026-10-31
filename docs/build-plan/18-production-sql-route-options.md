@@ -108,3 +108,52 @@ Numbering note: the first-manager tool's design on branch `signin/first-manager-
 **Not runnable here (listed, not invented):** `supabase/backout/security-hardening-backout.sql` exists only on the cutover-prep branch; the profile-bootstrap and DNC-enum backouts have no file; `window-on`/`window-off` are inline statements in doc 16; the A1/BO3 read-only queries are not recorded; the `09` reconciliation is a proposal. Each is refused with `prod_sql_action_not_built`.
 
 **Limits:** it never reads severity or message text of a database error, so an unexpected failure shows only a fixed id plus a SQLSTATE. The hosted half (Supabase's own roles and event triggers, TLS, the real login's privileges) is not covered by any local test. Whether the hosted runner login may run each file is **not verified**. Any change to a pinned file needs a new reviewed pin.
+
+---
+
+### Auth table inventory for the L1 gate (re-review finding B1) — PENDING staging-2 capture and review
+
+**Status: PENDING staging-2 capture and review.** The repository holds **no authoritative list of the hosted auth tables**. Doc 14 §11.6 and doc 16 say the hosted auth schema is unverified, the 20 application migrations do not define it, and the local test shim reduces auth to five tables. So the L1 shape gate **stops on any hosted project that has an auth table beyond the reviewed list** (an empty extra table stops it too; zero users does not help). That stop is correct and stays. This section prepares the safe way to get the list. It does **not** supply one, and nothing here was run against staging-2 or production.
+
+**Where the reviewed list lives now (one data file).** `supabase/rollout/auth-table-classification.json`, pinned by SHA-256 in `pipeline/src/prod-sql.ts` and read through the same reader as the SQL files, so a changed file is refused at plan time. A table is listed there **only** with an explicit classification and a cited source:
+- `credential-bearing: handled by L1` (the five tables the L1 file clears: `users`, `sessions`, `refresh_tokens`, `one_time_tokens`, `flow_state`; the contract checks that the L1 file really clears each one);
+- `credential-bearing: STOP` (listed, and the gate stops on it);
+- `not credential-bearing: reviewed` (today only `schema_migrations`, carried over unchanged from the earlier code comment; the entry's note says that comment is the only recorded review and that it must be confirmed in the capture, or removed).
+
+The gate still refuses **any table that is not classified**, and any table classified `credential-bearing: STOP`. The ten standard names in the table below are **not** in the file: adding a table from its name alone is not allowed.
+
+**How the evidence will be captured (prepared, NOT RUN, needs separate approval).** `supabase/rollout/auth-schema-inventory.sql` (SHA-256 pinned) is a read-only query of the system catalogue. It returns each auth relation with its columns' names, data types and NOT NULL flag, and the foreign keys as the catalogue prints them (so cascade behaviour can be reviewed). It never reads a row of any table and holds no data change or transaction control. It runs only through the existing guarded staging runner, action `auth-schema-inventory`, on the **rebuilt staging project (staging-2) only**: recorded-ref check, session port 5432, typed confirmation `TAKE TNBS AUTH SCHEMA INVENTORY`, plan-only unless `--execute`, `begin read only` and a rollback around the file, and the staging secrets from Doppler `stg` through `--from-env`. The result goes to a new local file outside the repository (`--out`, never overwritten); the terminal shows only the fixed `staging-sql.*` events.
+
+The command, plan-only first (**NOT RUN**; `<DIR>` is an absolute folder outside the repository):
+
+```
+doppler run --project truck-recruitment-tool --config stg -- node scripts/run-with-secrets.mjs --from-env --cwd pipeline --secret STAGING_DB_URL -- node node_modules/tsx/dist/cli.mjs src/staging-sql-runner.ts --project=rebuilt --action=auth-schema-inventory --confirm="TAKE TNBS AUTH SCHEMA INVENTORY" --out=<DIR>\auth-schema-inventory-staging2.json
+```
+
+Add `--execute` to the same command only after the plan-only output (`staging-sql.verified`, then `staging-sql.plan_only`) has been read and the owner has approved the run. After it: review the file (names and types only), record the Auth release the project runs from an approved source, classify each table in the data file with a cited source, update the pin and the regression fixtures together, and re-run the gate on staging.
+
+**A staging-2 capture is evidence for a production review. It is not proof of production parity.** Production could differ (a different Auth release, extra tables). A production read-only capture would need its own **separate approval** and its own review before any production write; no production capture is prepared or authorized here.
+
+**Classification supportable from repository evidence only (from the re-review of `eafc55b`) — PENDING staging-2 capture and review.** "STOP pending classification" means the table is not proven non-credential-bearing, so it must not be added to the list. It does not claim the table holds a credential.
+
+| Auth table | Credential classification and required treatment | Evidence / limit |
+|---|---|---|
+| `users` | Credential-bearing. L1 handles its six verification-token columns. Preserve passwords, email, ban state and all other fields. Any newly found verification-credential field needs review. | L1 header, shape select and update; doc 14 §11.6 steps 2-3. |
+| `sessions` | Credential-bearing session state; handled by the L1 delete and recount. | L1; doc 14 §11.6. |
+| `refresh_tokens` | Credential-bearing; handled by the L1 delete and recount. | L1; doc 14 §11.6. |
+| `one_time_tokens` | Credential-bearing; handled by the L1 delete and recount. | L1; doc 14 §11.6. |
+| `flow_state` | Credential-bearing verification state; handled by the L1 delete and recount. | L1; doc 14 §11.6. |
+| `schema_migrations` | Recorded as non-credential-bearing version metadata; conditionally safe **if** the captured schema confirms it. Already listed. | The earlier code comment is the only record; no independent hosted definition found (this is not `supabase_migrations.schema_migrations`). |
+| `identities` | STOP pending classification: not proven whether the identity payload holds only identifiers or a reusable credential. | Doc 16 says this hosted table is unverified; no definition in migrations or snapshots. |
+| `mfa_factors` | STOP pending classification and credential-path review: do not list without proving how factor secrets or authenticator credentials, if present, are handled. | No hosted definition in the repository; a name is not evidence. |
+| `mfa_challenges` | STOP pending classification and credential-path review: any challenge or one-time-code state needs handled-or-disabled proof. | No hosted definition in the repository. |
+| `mfa_amr_claims` | STOP pending classification: may be session assurance metadata; needs schema and dependency evidence, including how session deletion affects it. | No definition, foreign-key or cascade evidence in the repository. |
+| `sso_providers` | STOP pending classification: provider metadata is not automatically a credential; the deployed definition and login path must show it. | No definition in the repository. |
+| `sso_domains` | STOP pending classification: domain-routing metadata may qualify once verified. | No definition in the repository. |
+| `saml_providers` | STOP pending classification: public-certificate metadata may qualify; private signing material or reusable credential fields would not. | No definition in the repository. |
+| `saml_relay_states` | STOP pending classification and credential-path review: do not assume transient SAML login state is harmless. | No definition or consumption/expiry/cascade evidence in the repository. |
+| `audit_log_entries` | STOP pending classification: may qualify only after its deployed payload contract is reviewed; an audit table name is not proof. | No payload or schema review in the repository. |
+| `instances` | STOP pending classification: a configuration payload, if present, must not be assumed free of credentials. | No definition or payload contract in the repository. |
+| Any further `mfa_*`, `sso_*`, `saml_*` or other auth relation found on that deployment | STOP until individually classified. The names above are not claimed to be exhaustive for a given Auth release. | No complete versioned inventory exists in the repository. |
+
+Do not bulk-add the standard names and do not turn off `no_unreviewed_auth_tables`. Where a table holds a credential or credential-enabling state, L1 must handle it under a separately reviewed change, or the run stops; unknown tables are never deleted automatically.

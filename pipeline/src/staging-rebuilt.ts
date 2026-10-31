@@ -40,6 +40,8 @@ interface RebuiltActionSpec {
   reapply?: ReapplyTarget;
   /** The file carries a pinned-ref gate that must be re-pinned (so it must contain the old ref). */
   pinned: boolean;
+  /** SHA-256 of the file's raw bytes; when present the plan refuses a file that does not match (a reviewed read-only query is pinned). */
+  sha256?: string;
 }
 
 export const REBUILT_STAGING_SQL_ACTIONS: Readonly<Record<string, RebuiltActionSpec>> = {
@@ -68,6 +70,8 @@ export const REBUILT_STAGING_SQL_ACTIONS: Readonly<Record<string, RebuiltActionS
   'reapply-m1c': { kind: 'file', file: 'supabase/pending/M1c_batch_delete_audit.sql', confirmation: 'REAPPLY TNBS M1C AFTER BACKOUT', pinned: false, reapply: 'm1c' },
   'role-matrix-m1': { kind: 'file', file: 'supabase/staging/m1/verify-role-matrix-m1.sql', confirmation: 'RUN TNBS M1 ROLE MATRIX', pinned: true },
   snapshot: { kind: 'snapshot', file: 'supabase/backout/pre-cutover-snapshot.sql', confirmation: 'TAKE TNBS PRE-CUTOVER SNAPSHOT', pinned: false },
+  // Read-only schema inventory of the auth schema (names, types, foreign keys; never row data), written to --out like the snapshot. Evidence for the production L1 shape gate's reviewed table list (docs/build-plan/18, Route A).
+  'auth-schema-inventory': { kind: 'snapshot', file: 'supabase/rollout/auth-schema-inventory.sql', sha256: '75e0b6031361f69a1e361a905daf0a5f27e6e25130580badb9a328ce1ab32499', confirmation: 'TAKE TNBS AUTH SCHEMA INVENTORY', pinned: false },
   'window-on': {
     kind: 'inline',
     sql: 'update internal.backout_window set email_edits_paused = true; select email_edits_paused from internal.backout_window;',
@@ -217,7 +221,9 @@ export function planRebuiltSqlRun(input: {
   } else if (spec.kind === 'inline') {
     steps = [{ label: input.action, sql: spec.sql as string, transaction: true }];
   } else {
-    const sql = readFileSync(resolve(REPOSITORY_ROOT, spec.file as string), 'utf8');
+    const bytes = readFileSync(resolve(REPOSITORY_ROOT, spec.file as string));
+    if (spec.sha256 !== undefined && createHash('sha256').update(bytes).digest('hex') !== spec.sha256) throw new Error(`${spec.file} does not match its pinned SHA-256; refusing`);
+    const sql = bytes.toString('utf8');
     const retargeted = retargetSqlToRebuiltRef(sql, rebuiltRef, spec.pinned);
     steps = spec.reapply
       ? [

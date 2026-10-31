@@ -8,13 +8,15 @@
 // Run: PROD_SQL_A3_ADMIN_URL=... npx tsx src/prod-sql-a3.test.ts
 
 import assert from 'node:assert/strict';
+import { existsSync, readFileSync, rmSync } from 'node:fs';
+import { tmpdir } from 'node:os';
 import { resolve } from 'node:path';
 import { pathToFileURL } from 'node:url';
 import pg from 'pg';
 import { PROD_SQL_ACTIONS, executeProdSqlPlan, planProdSql } from './prod-sql.js';
 import { splitSqlStatements, sqlControl } from './prod-sql-split.js';
 import { RunnerRefusal } from './refusals.js';
-import { REPOSITORY_ROOT } from './staging-rebuilt.js';
+import { REBUILT_STAGING_SQL_ACTIONS, REPOSITORY_ROOT, executeRebuiltSqlPlan, planRebuiltSqlRun } from './staging-rebuilt.js';
 import { RECORDED_PROJECT_REFS } from './target-guard.js';
 
 const ADMIN = process.env.PROD_SQL_A3_ADMIN_URL;
@@ -99,6 +101,60 @@ async function main(): Promise<void> {
   // Roles are cluster-wide: on a reused throwaway cluster the earlier run's roles may still exist, so only the tables are asserted absent.
   check('the database starts with no M1 sign-in tables', !(await exists("to_regclass('internal.app_sessions')")) && !(await exists("to_regclass('internal.roster_lock')")));
   const preM1 = await fingerprint();
+
+  // ---- 0. The auth-schema inventory action (re-review B1), through the REAL staging-rebuilt planner and executor with a loopback client: the plan is made with a
+  // synthetic rebuilt-project address (the recorded-ref guard is the unit under test elsewhere), only the CLIENT is replaced. Read-only, names and types only.
+  {
+    const inventoryRef = 'abcdefghijklmnopqrst';
+    const spec = REBUILT_STAGING_SQL_ACTIONS['auth-schema-inventory']!;
+    const out = resolve(tmpdir(), `tnbs-auth-inventory-a3-${process.pid}.json`);
+    rmSync(out, { force: true });
+    const authRowCounts = async (): Promise<string> => JSON.stringify((await q(`select (select count(*) from auth.users) as u, (select count(*) from auth.sessions) as s, (select count(*) from auth.refresh_tokens) as r,
+      (select count(*) from auth.one_time_tokens) as o, (select count(*) from auth.flow_state) as f, (select count(*) from auth.identities) as i`)).rows);
+    await q("create table auth.identities (id uuid primary key, user_id uuid, provider_id text not null, identity_data jsonb, email text)");
+    await q("create table auth.mfa_factors (id uuid primary key, user_id uuid, secret text)");
+    await q("alter table auth.identities add constraint review_identities_user_fk foreign key (user_id) references auth.users(id) on delete cascade");
+    await q("insert into auth.identities (id, provider_id, identity_data, email) values ('f1000000-0000-4000-8000-000000000001', 'SENTINEL-PROVIDER-VALUE', '{\"token\":\"SENTINEL-SECRET-VALUE\"}', 'sentinel-address@example.invalid')");
+    await q("insert into auth.mfa_factors (id, secret) values ('f1000000-0000-4000-8000-000000000002', 'SENTINEL-FACTOR-SECRET')");
+    try {
+      const before = await fingerprint();
+      const countsBefore = await authRowCounts();
+      const plan = planRebuiltSqlRun({ action: 'auth-schema-inventory', dbUrl: `postgresql://postgres.${inventoryRef}:redacted-pw@aws-0-us-east-2.pooler.supabase.com:5432/postgres`, confirm: spec.confirmation, out, recordedRebuiltRef: inventoryRef });
+      const sent: string[] = [];
+      const client = new pg.Client({ connectionString: ADMIN });
+      const seam = { connect: () => client.connect(), end: () => client.end(), query: async (sql: string, p?: unknown[]) => { sent.push(sql.trim()); return client.query(sql, p); } };
+      const log = console.log;
+      const printed: string[] = [];
+      console.log = (...x: unknown[]) => { printed.push(String(x[0])); };
+      let error: unknown;
+      try { await executeRebuiltSqlPlan(plan, () => seam as never); } catch (e) { error = e; } finally { console.log = log; }
+      const written = existsSync(out) ? readFileSync(out, 'utf8') : '';
+      const results = written === '' ? [] : (JSON.parse(written) as Array<{ statement: number; rowCount: number | null; rows: Array<Record<string, unknown>> }>);
+      const columns = results.find((r) => r.rows.length > 0 && 'column_name' in r.rows[0]!)?.rows ?? [];
+      const foreignKeys = results.find((r) => r.rows.length > 0 && 'foreign_key_definition' in r.rows[0]!)?.rows ?? [];
+      const relations = new Set(columns.map((r) => r.relation_name as string));
+      check('inventory: the executor opened a read-only transaction before the file, sent the pinned file once, rolled back, and never sent a commit', error === undefined && sent.includes('begin read only') && sent.indexOf('begin read only') < sent.indexOf(plan.steps[0]!.sql.trim()) && sent[sent.length - 1] === 'rollback' && !sent.some((x) => ctlOf(x) === 'commit') && sent.filter((x) => x === plan.steps[0]!.sql.trim()).length === 1);
+      check('inventory: the result file lists the auth relations with their column names and types, including the extra synthetic tables (no row of any table is read)', relations.has('users') && relations.has('sessions') && relations.has('refresh_tokens') && relations.has('one_time_tokens') && relations.has('flow_state') && relations.has('identities') && relations.has('mfa_factors')
+        && columns.some((r) => r.relation_name === 'identities' && r.column_name === 'identity_data' && r.column_type === 'jsonb' && r.attnotnull === false) && columns.some((r) => r.relation_name === 'identities' && r.column_name === 'provider_id' && r.column_type === 'text' && r.attnotnull === true));
+      check('inventory: the foreign keys are listed as definitions (names and referenced columns), e.g. the cascade on identities', foreignKeys.some((r) => r.relation_name === 'identities' && /REFERENCES auth\.users\(id\) ON DELETE CASCADE/.test(String(r.foreign_key_definition))));
+      check('inventory: every result row has only the fixed name/type keys (no value column), and the file has no sentinel value, address, token or secret from the seeded rows',
+        columns.every((r) => Object.keys(r).sort().join() === 'attnotnull,column_name,column_type,relation_name,relkind') && foreignKeys.every((r) => Object.keys(r).sort().join() === 'conname,foreign_key_definition,relation_name') && !/SENTINEL|sentinel|example\.invalid|redacted-pw/.test(written));
+      check('inventory: the terminal shows nothing from the database (the executor prints no event of its own for this action) and the run changed nothing: catalogue fingerprint and auth row counts are identical', printed.length === 0 && (await fingerprint()) === before && (await authRowCounts()) === countsBefore);
+      // The server itself refuses a write in the transaction mode the executor uses, so even a changed file could not write.
+      const writer = new pg.Client({ connectionString: ADMIN });
+      await writer.connect();
+      let refused: unknown;
+      try { await writer.query('begin read only'); await writer.query("insert into auth.mfa_factors (id, secret) values ('f1000000-0000-4000-8000-000000000003', 'x')"); } catch (e) { refused = e; } finally { await writer.query('rollback').catch(() => undefined); await writer.end(); }
+      check('inventory: a write inside begin read only is refused by the server (SQLSTATE 25006), so the read-only mode the executor uses is enforced, not assumed', (refused as { code?: string } | undefined)?.code === '25006' && (await authRowCounts()) === countsBefore);
+      let secondRefused = false;
+      try { planRebuiltSqlRun({ action: 'auth-schema-inventory', dbUrl: `postgresql://postgres.${inventoryRef}:redacted-pw@aws-0-us-east-2.pooler.supabase.com:5432/postgres`, confirm: spec.confirmation, out, recordedRebuiltRef: inventoryRef }); } catch (e) { secondRefused = /already exists/.test(String((e as Error).message)); }
+      check('inventory: a second plan with the same --out is refused because the result file already exists (never overwritten)', secondRefused);
+    } finally {
+      rmSync(out, { force: true });
+      await q('drop table if exists auth.identities');
+      await q('drop table if exists auth.mfa_factors');
+    }
+  }
 
   // ---- 1. The read-only snapshot, twice: nothing changes and the per-statement digests are identical (the before/after comparison).
   {
