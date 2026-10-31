@@ -1,4 +1,12 @@
 -- ============================================================================
+-- DO NOT USE. DO NOT RUN THIS FILE. The Route A action for it is REFUSED (prod_sql_action_do_not_use) and is kept only as a historical record.
+-- WHY: a byte-exact restore brings back a guard that FAILS OPEN for a user whose role is NULL (a pending or disabled user): internal.current_app_role()
+-- returns NULL for them, so "current_app_role() <> 'manager'" is NULL, the IF does not raise, and the existing self-update policy lets that user set
+-- their own role to manager and status to approved. The header statement below that only a manager may change those fields is FALSE for such a user.
+-- (Reproduced on PostgreSQL 16 under SET LOCAL ROLE authenticated by the independent review of 2026-10-30 UTC.)
+-- RETAIN THE FORWARD FIX during any application backout: 20260723004500_profile_service_bootstrap.sql (it refuses self-promotion).
+-- A replacement would be new SQL and needs its own separate review (see docs/build-plan/18-production-sql-route-options.md); none is written here.
+-- ============================================================================
 -- profile-bootstrap-backout.sql -- DRAFT, PENDING REVIEW. NOT EXECUTED ANYWHERE.
 -- Serves doc 17 (sign-in cutover runbook, cited at commits 301418b and f1189dc), step A2 "Backouts": "Profile bootstrap -> restore
 -- the earlier function body (20260720000300 / 20260720000800; no file prepared)" and the Route A action profile-bootstrap-backout
@@ -24,7 +32,7 @@
 -- If M1 was applied, run the M1 backouts first (doc 16 section 3.3). M1 does not redefine this function.
 --
 -- DATA: NO DATA IS DESTROYED. It changes one function body and nothing else: no table, no row, no grant, no trigger.
--- BEHAVIOUR YOU LOSE (read before the go): once this runs, a service_role request that changes a profile's role, status or approval
+-- BEHAVIOUR YOU LOSE (historical; the action is refused, so none of this can happen through the runner): once this runs, a service_role request that changes a profile's role, status or approval
 -- is refused ("only managers may change role/approval") unless a manager is the caller. Anything that provisions roles through the
 -- Admin API depends on the migration's body and stops working until the migration is applied again.
 --

@@ -134,7 +134,7 @@ export const REFUSAL_IDS = [
   'reapply_m1b_still_applied', 'reapply_m1c_not_backed_out', 'reapply_m1c_still_applied', 'owner_email_invalid',
   'owner_password_too_short', 'owner_auth_not_created', 'owner_auth_unknown_result', 'owner_promotion_refused',
   'owner_bootstrap_target_refused', 'bootstrap_target_required', 'target_not_recorded_production', 'first_manager_refused',
-  'prod_sql_target_refused', 'prod_sql_action_not_built', 'prod_sql_file_unreadable', 'prod_sql_hash_mismatch', 'prod_sql_shape_refused', 'prod_sql_commit_rolled_back', 'prod_sql_l1_shape_not_ok', 'prod_sql_flag_not_expected', 'server_or_driver_error',
+  'prod_sql_target_refused', 'prod_sql_action_not_built', 'prod_sql_action_do_not_use', 'prod_sql_file_unreadable', 'prod_sql_hash_mismatch', 'prod_sql_shape_refused', 'prod_sql_commit_rolled_back', 'prod_sql_l1_shape_not_ok', 'prod_sql_flag_not_expected', 'server_or_driver_error',
 ];
 
 /** Keep equal to pipeline/src/refusals.ts DRIVER_CODES (a test compares them). */
@@ -164,9 +164,9 @@ export const RETENTION_RULE_NAMES = ['app_sessions', 'email_events', 'recovery_f
 /** Keep equal to PROD_SQL_ACTION_IDS / PROD_SQL_COUNT_NAMES / PROD_SQL_COMMANDS / PROD_SQL_RESULTS / PROD_SQL_WRAPS in pipeline/src/prod-sql.ts (a test compares them). */
 export const PROD_SQL_ACTIONS = [
   'migration-security-hardening', 'migration-profile-service-bootstrap', 'migration-dnc-activity-enum-cast', 'migration-contact-logs-dnc-guard', 'snapshot', 'm1', 'm1b', 'm1c', 'window-on',
-  'l1-shape', 'l1-counts', 'l1-sweep', 'retire-nologin', 'retire-terminate', 'retire-backends', 'retire-revoke', 'retire-checks', 'retire-email', 'backout-m1c', 'backout-m1b', 'backout-m1', 'security-hardening-backout', 'read-only-inventory', 'profile-bootstrap-backout', 'dnc-enum-cast-backout', 'window-off',
+  'l1-shape', 'l1-counts', 'l1-sweep', 'retire-nologin', 'retire-terminate', 'retire-backends', 'retire-revoke', 'retire-checks', 'retire-email', 'bootstrap-identity-check', 'backout-m1c', 'backout-m1b', 'backout-m1', 'security-hardening-backout', 'read-only-inventory', 'window-off',
 ];
-export const PROD_SQL_COUNT_NAMES = ['sessions', 'refresh_tokens', 'one_time_tokens', 'flow_state', 'users_with_tokens', 'recruiter_app_backends', 'backends', 'live_sessions', 'live_links', 'live_codes', 'email_mismatches', 'profiles_total', 'auth_users_total', 'profiles_manager_pending', 'profiles_manager_approved', 'profiles_manager_disabled', 'profiles_edit_pending', 'profiles_edit_approved', 'profiles_edit_disabled', 'profiles_view_pending', 'profiles_view_approved', 'profiles_view_disabled', 'profiles_guest_pending', 'profiles_guest_approved', 'profiles_guest_disabled', 'profiles_other_role_status', 'duplicate_email_groups', 'duplicate_email_rows', 'approved_profiles_without_auth_user', 'approved_auth_email_null'];
+export const PROD_SQL_COUNT_NAMES = ['sessions', 'refresh_tokens', 'one_time_tokens', 'flow_state', 'users_with_tokens', 'recruiter_app_backends', 'backends', 'live_sessions', 'live_links', 'live_codes', 'email_mismatches', 'bootstrap_events', 'bootstrap_profiles_present', 'bootstrap_profiles_with_auth_user', 'other_approved_profiles_without_auth_user', 'profiles_total', 'auth_users_total', 'profiles_manager_pending', 'profiles_manager_approved', 'profiles_manager_disabled', 'profiles_edit_pending', 'profiles_edit_approved', 'profiles_edit_disabled', 'profiles_view_pending', 'profiles_view_approved', 'profiles_view_disabled', 'profiles_guest_pending', 'profiles_guest_approved', 'profiles_guest_disabled', 'profiles_other_role_status', 'duplicate_email_groups', 'duplicate_email_rows', 'approved_profiles_without_auth_user', 'approved_auth_email_null'];
 export const PROD_SQL_FLAG_NAMES = ['email_edits_paused'];
 export const PROD_SQL_COMMANDS = ['select', 'insert', 'update', 'delete', 'create', 'alter', 'drop', 'grant', 'revoke', 'do', 'set', 'comment', 'other'];
 export const PROD_SQL_RESULTS = ['committed', 'rolled_back', 'rollback_not_confirmed', 'unknown', 'read_only_done'];

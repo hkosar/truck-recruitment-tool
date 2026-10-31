@@ -102,6 +102,8 @@ export const PROD_SQL_ACTIONS: readonly ProdSqlAction[] = [
   { id: 'retire-revoke', step: 'BO2 step 4', file: 'supabase/backout/retire-app-credentials.sql', sha256: '3e716371979ffb876bb54f7ab91753eced9b89df15276c9d6d4ba7cc0ef7fa15', statements: [4, 10], stageSha256: 'e3e17e9e9a22c367c76b8682bd72ef993c6099cfa2f20e86fc5a3e9d1a5a2e24', mode: 'write', report: 'rows', phrase: 'RUN TNBS PRODUCTION SQL RETIRE-REVOKE' },
   { id: 'retire-checks', step: 'BO2 step 5', file: 'supabase/backout/retire-app-credentials.sql', sha256: '3e716371979ffb876bb54f7ab91753eced9b89df15276c9d6d4ba7cc0ef7fa15', statements: [11, 11], stageSha256: 'd46b5cd6f8b6991178dedfb8d545b533835d4e834b7406db05e65d87af319a96', mode: 'read_only', report: 'counts', countNames: ['backends', 'live_sessions', 'live_links', 'live_codes'], phrase: 'RUN TNBS PRODUCTION SQL RETIRE-CHECKS' },
   { id: 'retire-email', step: 'BO2 step 6', file: 'supabase/backout/retire-app-credentials.sql', sha256: '3e716371979ffb876bb54f7ab91753eced9b89df15276c9d6d4ba7cc0ef7fa15', statements: [12, 12], stageSha256: '86a09b805eebd79a673415a77492bd2d50cd38211ba8677b0dd6b3e1088af0f2', mode: 'read_only', report: 'counts', countNames: ['email_mismatches'], phrase: 'RUN TNBS PRODUCTION SQL RETIRE-EMAIL' },
+  // BO3 identity proof (DRAFT, PENDING REVIEW): ONE select over internal.auth_events, public.profiles and auth.users, whole numbers only. It runs BEFORE the M1 backouts below, while internal.auth_events still exists.
+  { id: 'bootstrap-identity-check', step: 'BO3 (before the M1 backouts)', file: 'supabase/rollout/bootstrap-identity-check.sql', sha256: '96368325e13439aad0269f1ecaba9ea446decf791d8dfd2fd1c3627c0312ee01', mode: 'read_only', report: 'counts', countNames: ['bootstrap_events', 'bootstrap_profiles_present', 'bootstrap_profiles_with_auth_user', 'other_approved_profiles_without_auth_user'], phrase: 'RUN TNBS PRODUCTION SQL BOOTSTRAP-IDENTITY-CHECK' },
   // BO4-BO6: the backouts, each with its own begin ... commit (run as written, never wrapped again).
   { id: 'backout-m1c', step: 'BO4', file: 'supabase/backout/M1c-backout.sql', sha256: '7714a74e7d26ab0829b0a0aa44dfcfec8685220447295927012504f6b8774435', mode: 'write', report: 'none', phrase: 'RUN TNBS PRODUCTION SQL BACKOUT-M1C' },
   { id: 'backout-m1b', step: 'BO5', file: 'supabase/backout/M1b-backout.sql', sha256: 'f4f0a853a1a4cd8c28bc29019556776f11ad5b5f67dc5461edd4fbba8d1341c8', mode: 'write', report: 'none', phrase: 'RUN TNBS PRODUCTION SQL BACKOUT-M1B' },
@@ -109,10 +111,7 @@ export const PROD_SQL_ACTIONS: readonly ProdSqlAction[] = [
   // BO10 / A2 backout of the hardening migration: the reviewed file, byte for byte from commit f1189dc (git blob 608b69d1ef0d2fd5179446cb661c8bc8a0ac1756); own begin ... commit.
   { id: 'security-hardening-backout', step: 'A2 backout, BO10', file: 'supabase/backout/security-hardening-backout.sql', sha256: 'f5cda7a44579cdbc86d5df2d192d9bfe41924f1ef46bdfbf2c412b84d6181d0e', mode: 'write', report: 'none', phrase: 'RUN TNBS PRODUCTION SQL SECURITY-HARDENING-BACKOUT' },
   // A1 / BO3: the read-only inventory (DRAFT, PENDING REVIEW): ONE select, one row of whole-number counts, in a read-only transaction that is rolled back.
-  { id: 'read-only-inventory', step: 'A1, BO3', file: 'supabase/rollout/read-only-inventory.sql', sha256: 'c01a868623f06dd478b7659fb92c159e38341f00aefdc1ff6f4c5ea61afcbe77', mode: 'read_only', report: 'counts', countNames: ['profiles_total', 'auth_users_total', 'profiles_manager_pending', 'profiles_manager_approved', 'profiles_manager_disabled', 'profiles_edit_pending', 'profiles_edit_approved', 'profiles_edit_disabled', 'profiles_view_pending', 'profiles_view_approved', 'profiles_view_disabled', 'profiles_guest_pending', 'profiles_guest_approved', 'profiles_guest_disabled', 'profiles_other_role_status', 'duplicate_email_groups', 'duplicate_email_rows', 'email_mismatches', 'approved_profiles_without_auth_user', 'approved_auth_email_null'], phrase: 'RUN TNBS PRODUCTION SQL READ-ONLY-INVENTORY' },
-  // A2 backouts of the profile-bootstrap and DNC enum-cast migrations (DRAFT, PENDING REVIEW): each restores one earlier function body; own begin ... commit.
-  { id: 'profile-bootstrap-backout', step: 'A2 backout', file: 'supabase/backout/profile-bootstrap-backout.sql', sha256: '4c766cb7f631512830797ef97c5049e90400cf2cf2ea1fec8d6147d82b4b1971', mode: 'write', report: 'none', phrase: 'RUN TNBS PRODUCTION SQL PROFILE-BOOTSTRAP-BACKOUT' },
-  { id: 'dnc-enum-cast-backout', step: 'A2 backout', file: 'supabase/backout/dnc-enum-cast-backout.sql', sha256: '8148c1212a4a7aec293e878377eb2b994db5f9a427fde9951e648583ba6a699e', mode: 'write', report: 'none', phrase: 'RUN TNBS PRODUCTION SQL DNC-ENUM-CAST-BACKOUT' },
+  { id: 'read-only-inventory', step: 'A1, BO3', file: 'supabase/rollout/read-only-inventory.sql', sha256: '50e6cd622a4d34fe9d50c53ef95205f517af82e8b365878a29a878d4b73d48e1', mode: 'read_only', report: 'counts', countNames: ['profiles_total', 'auth_users_total', 'profiles_manager_pending', 'profiles_manager_approved', 'profiles_manager_disabled', 'profiles_edit_pending', 'profiles_edit_approved', 'profiles_edit_disabled', 'profiles_view_pending', 'profiles_view_approved', 'profiles_view_disabled', 'profiles_guest_pending', 'profiles_guest_approved', 'profiles_guest_disabled', 'profiles_other_role_status', 'duplicate_email_groups', 'duplicate_email_rows', 'email_mismatches', 'approved_profiles_without_auth_user', 'approved_auth_email_null'], phrase: 'RUN TNBS PRODUCTION SQL READ-ONLY-INVENTORY' },
   // C4: the backout window off (doc 16 section 3.1 step 3 / runbook C4), only on Hunter's word.
   { id: 'window-off', step: 'C4', file: 'supabase/rollout/backout-window-off.sql', sha256: '470aa84d647675418d6be6fa25afd43ddcff4d8ba5e2cd43f2b0719918fe27f7', mode: 'write', report: 'flag', flagName: 'email_edits_paused', flagExpect: false, phrase: 'RUN TNBS PRODUCTION SQL WINDOW-OFF' },
 ];
@@ -123,6 +122,16 @@ export const PROD_SQL_ACTIONS: readonly ProdSqlAction[] = [
  */
 export const PROD_SQL_MISSING: readonly { id: string; step: string; reason: string; file?: string }[] = [
   { id: 'reconciliation', step: 'doc 18 / 09 ledger', file: 'docs/build-plan/09-production-baseline-reconciliation.sql', reason: 'marked PROPOSAL ONLY (owner decision pending); not an approved production action' },
+];
+
+/**
+ * Files that exist but must NEVER run. Each is refused ('prod_sql_action_do_not_use') with a fixed message, before any connection and whatever the phrase or --execute say.
+ * Both are historical byte-exact restores that an independent review (2026-10-30 UTC) showed to be unsafe; the forward fix is RETAINED during any application backout.
+ * A replacement would be new SQL and needs its own separate review (docs/build-plan/18-production-sql-route-options.md). scripts/verify-prod-sql-runner-contract.mjs checks the file headers say DO NOT USE.
+ */
+export const PROD_SQL_DO_NOT_USE: readonly { id: string; step: string; file: string; reason: string }[] = [
+  { id: 'profile-bootstrap-backout', step: 'A2 backout', file: 'supabase/backout/profile-bootstrap-backout.sql', reason: 'the restored guard fails open for a user with no role (pending or disabled), which re-opens self-approval; keep the forward fix' },
+  { id: 'dnc-enum-cast-backout', step: 'A2 backout', file: 'supabase/backout/dnc-enum-cast-backout.sql', reason: 'the restored function fails with SQLSTATE 42804 for an authorized editor (the forward fix exists for PostgreSQL 17); keep the forward fix' },
 ];
 
 export const PROD_SQL_ACTION_IDS: readonly string[] = PROD_SQL_ACTIONS.map((a) => a.id);
@@ -176,6 +185,7 @@ export function planProdSql(input: { target: string | undefined; action: string;
   }
   const action = find(input.action);
   if (action === undefined) {
+    if (PROD_SQL_DO_NOT_USE.some((m) => m.id === input.action)) throw new RunnerRefusal('prod_sql_action_do_not_use', 'This action is marked DO NOT USE and can never be executed; the forward fix stays in place');
     if (PROD_SQL_MISSING.some((m) => m.id === input.action)) throw new RunnerRefusal('prod_sql_action_not_built', `Action "${input.action}" is named in doc 17 but is not a runnable file here`);
     throw new RunnerRefusal('unknown_action', `Unknown production SQL action "${input.action}"`);
   }

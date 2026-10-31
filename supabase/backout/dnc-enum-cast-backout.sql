@@ -1,4 +1,11 @@
 -- ============================================================================
+-- DO NOT USE. DO NOT RUN THIS FILE. The Route A action for it is REFUSED (prod_sql_action_do_not_use) and is kept only as a historical record.
+-- WHY: the restored body fails with SQLSTATE 42804 (column "activity_type" is of type activity_type but expression is of type text) for an authorized
+-- editor setting OR clearing do-not-contact, and the whole call aborts. The forward migration exists to fix exactly this on PostgreSQL 17; production
+-- is recorded as 17.6 (doc 11). Reproduced on local PostgreSQL 16 under SET LOCAL ROLE authenticated by the independent review of 2026-10-30 UTC.
+-- RETAIN THE FORWARD FIX during any application backout: 20260723010400_dnc_activity_enum_cast.sql (a function repair; no table or data change to remove).
+-- A replacement would be new SQL and needs its own separate review (see docs/build-plan/18-production-sql-route-options.md); none is written here.
+-- ============================================================================
 -- dnc-enum-cast-backout.sql -- DRAFT, PENDING REVIEW. NOT EXECUTED ANYWHERE.
 -- Serves doc 17 (sign-in cutover runbook, cited at commits 301418b and f1189dc), step A2 "Backouts": "DNC enum cast -> previous body
 -- (no file prepared)" and the Route A action dnc-enum-cast-backout (phrase RUN TNBS PRODUCTION SQL DNC-ENUM-CAST-BACKOUT).
@@ -21,7 +28,7 @@
 -- this file undoes (M1-backout.sql line 255). This file then takes it one step further back.
 --
 -- DATA: NO DATA IS DESTROYED. It changes one function body and nothing else: no table, no row, no grant, no trigger, no enum.
--- BEHAVIOUR YOU LOSE (read before the go): the migration header says the earlier body fails on PostgreSQL 17 ("column activity_type
+-- BEHAVIOUR YOU LOSE (historical; the action is refused, so none of this can happen through the runner): the migration header says the earlier body fails on PostgreSQL 17 ("column activity_type
 -- is of type activity_type but expression is text") when an authorized editor sets or clears do-not-contact: the final insert aborts
 -- the whole call. Restoring the earlier body brings that failure back on any server that behaves that way. It was REPRODUCED on a local
 -- PostgreSQL 16 throwaway database (pipeline/src/prod-sql-a2-backouts-a3.test.ts prints it). Whether the hosted production server

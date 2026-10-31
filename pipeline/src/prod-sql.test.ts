@@ -12,7 +12,7 @@ import { resolve } from 'node:path';
 import { tmpdir } from 'node:os';
 import { pathToFileURL } from 'node:url';
 import {
-  AUTH_CLASSIFICATIONS, AUTH_CLASSIFICATION_FILE, AUTH_CLASSIFICATION_SHA256, L1_AUTH_TABLES, L1_USERS_TOKEN_COLUMNS, PROD_SQL_ACTIONS, PROD_SQL_ACTION_IDS, PROD_SQL_COMMANDS, PROD_SQL_COUNT_NAMES, PROD_SQL_FLAG_NAMES, PROD_SQL_IRREVERSIBLE_ACTIONS, PROD_SQL_MISSING, PROD_SQL_RESULTS, PROD_SQL_SHAPE_CHECKS, PROD_SQL_WARNINGS, PROD_SQL_WRAPS, PRODUCTION_PROMPT_PROOF_VARIABLE,
+  AUTH_CLASSIFICATIONS, AUTH_CLASSIFICATION_FILE, AUTH_CLASSIFICATION_SHA256, L1_AUTH_TABLES, L1_USERS_TOKEN_COLUMNS, PROD_SQL_ACTIONS, PROD_SQL_ACTION_IDS, PROD_SQL_COMMANDS, PROD_SQL_COUNT_NAMES, PROD_SQL_DO_NOT_USE, PROD_SQL_FLAG_NAMES, PROD_SQL_IRREVERSIBLE_ACTIONS, PROD_SQL_MISSING, PROD_SQL_RESULTS, PROD_SQL_SHAPE_CHECKS, PROD_SQL_WARNINGS, PROD_SQL_WRAPS, PRODUCTION_PROMPT_PROOF_VARIABLE,
   evaluateL1Shape, executeProdSqlPlan, loadAuthClassification, planProdSql, promptProof, selectProdSqlDbUrl, stageDigest, stagesTile, validateAuthClassification, type AuthTableClassification, type ProdSqlAction, type ProdSqlFiles,
 } from './prod-sql.js';
 import { main as runnerMain, parseProdSqlArgs } from './prod-sql-runner.js';
@@ -52,7 +52,7 @@ check('every doc 17 file that exists on this branch has an action (M1, M1b, M1c,
 check('the missing list is disjoint from the table and every listed file is really absent', PROD_SQL_MISSING.every((m) => !PROD_SQL_ACTION_IDS.includes(m.id) && (m.file === undefined || m.file.endsWith('09-production-baseline-reconciliation.sql') || !existsSync(resolve(REPOSITORY_ROOT, m.file)))));
 
 const EXPECTED_SHAPE: Record<string, string> = { snapshot: 'read_only', m1: 'wrapped', m1b: 'own', m1c: 'own', 'backout-m1': 'own', 'backout-m1b': 'own', 'backout-m1c': 'own', 'l1-shape': 'read_only', 'l1-counts': 'read_only', 'l1-sweep': 'own',
-  'retire-nologin': 'wrapped', 'retire-terminate': 'wrapped', 'retire-backends': 'read_only', 'retire-revoke': 'own', 'retire-checks': 'read_only', 'retire-email': 'read_only', 'security-hardening-backout': 'own', 'read-only-inventory': 'read_only', 'profile-bootstrap-backout': 'own', 'dnc-enum-cast-backout': 'own' };
+  'retire-nologin': 'wrapped', 'retire-terminate': 'wrapped', 'retire-backends': 'read_only', 'retire-revoke': 'own', 'retire-checks': 'read_only', 'retire-email': 'read_only', 'security-hardening-backout': 'own', 'read-only-inventory': 'read_only', 'bootstrap-identity-check': 'read_only' };
 check('every action plans offline with its own phrase and the detected transaction shape is the expected one', PROD_SQL_ACTIONS.every((a) => plan(a.id).shape === (EXPECTED_SHAPE[a.id] ?? 'wrapped')));
 check('stage ranges tile the L1 and retire-app-credentials files from statement 1 through the parsed final statement, with no gap and no overlap',
   ['supabase/rollout/L1-close-legacy-auth.sql', 'supabase/backout/retire-app-credentials.sql'].every((file) => {
@@ -122,6 +122,8 @@ check('refuses a wrong, lower-case, padded and another action\'s phrase', ['run 
 check('no action accepts any other action\'s phrase', PROD_SQL_ACTIONS.every((a) => PROD_SQL_ACTIONS.filter((b) => b.id !== a.id).every((b) => refusalOf(() => plan(a.id, { confirm: b.phrase })) === 'confirmation_required')));
 check('refuses an unknown action', refusalOf(() => plan('m2', { confirm: 'x' })) === 'unknown_action');
 check('refuses every action doc 17 names that is not a runnable file ("not built"), without inventing it', PROD_SQL_MISSING.every((m) => refusalOf(() => plan(m.id, { confirm: 'x' })) === 'prod_sql_action_not_built'));
+check('profile-bootstrap-backout and dnc-enum-cast-backout are DO NOT USE: listed, never in the action table, never in the missing list', PROD_SQL_DO_NOT_USE.map((m) => m.id).join() === 'profile-bootstrap-backout,dnc-enum-cast-backout' && PROD_SQL_DO_NOT_USE.every((m) => !PROD_SQL_ACTION_IDS.includes(m.id) && !PROD_SQL_MISSING.some((x) => x.id === m.id) && !PROD_SQL_ACTIONS.some((a) => a.file === m.file)));
+check('a DO NOT USE action is refused with the fixed prod_sql_action_do_not_use whatever the phrase, the connection string or the files say (it is checked before any of them)', PROD_SQL_DO_NOT_USE.every((m) => refusalOf(() => plan(m.id, { confirm: 'RUN TNBS PRODUCTION SQL ' + m.id.toUpperCase() })) === 'prod_sql_action_do_not_use' && refusalOf(() => plan(m.id, { confirm: undefined, dbUrl: undefined })) === 'prod_sql_action_do_not_use' && refusalOf(() => plan(m.id, { files: { readFile: () => { throw new Error('must not read'); } } })) === 'prod_sql_action_do_not_use' && refusalOf(() => plan(m.id, { target: 'production', dbUrl: url(RECORDED_PROJECT_REFS.production) })) === 'prod_sql_action_do_not_use'));
 
 // ---- Ambient URL: only the hidden prompt's proof is accepted.
 {
@@ -344,7 +346,7 @@ const wrapper = await import(pathToFileURL(resolve(REPOSITORY_ROOT, 'scripts/run
 {
   check('the wrapper allow-list names equal the runner lists', JSON.stringify([...wrapper.PROD_SQL_ACTIONS]) === JSON.stringify(PROD_SQL_ACTION_IDS) && JSON.stringify([...wrapper.PROD_SQL_COUNT_NAMES].sort()) === JSON.stringify([...PROD_SQL_COUNT_NAMES].sort())
     && JSON.stringify([...wrapper.PROD_SQL_COMMANDS]) === JSON.stringify([...PROD_SQL_COMMANDS]) && JSON.stringify([...wrapper.PROD_SQL_RESULTS]) === JSON.stringify([...PROD_SQL_RESULTS]) && JSON.stringify([...wrapper.PROD_SQL_WRAPS]) === JSON.stringify([...PROD_SQL_WRAPS]) && JSON.stringify([...wrapper.PROD_SQL_SHAPE_CHECKS]) === JSON.stringify([...PROD_SQL_SHAPE_CHECKS]));
-  check('the new refusal identifiers are in both lists', ['prod_sql_target_refused', 'prod_sql_action_not_built', 'prod_sql_file_unreadable', 'prod_sql_hash_mismatch', 'prod_sql_shape_refused', 'prod_sql_commit_rolled_back', 'prod_sql_l1_shape_not_ok', 'prod_sql_flag_not_expected'].every((id) => (REFUSAL_IDS as readonly string[]).includes(id) && wrapper.REFUSAL_IDS.includes(id)));
+  check('the new refusal identifiers are in both lists', ['prod_sql_target_refused', 'prod_sql_action_not_built', 'prod_sql_action_do_not_use', 'prod_sql_file_unreadable', 'prod_sql_hash_mismatch', 'prod_sql_shape_refused', 'prod_sql_commit_rolled_back', 'prod_sql_l1_shape_not_ok', 'prod_sql_flag_not_expected'].every((id) => (REFUSAL_IDS as readonly string[]).includes(id) && wrapper.REFUSAL_IDS.includes(id)));
   const all: Array<Record<string, unknown>> = [];
   for (const a of PROD_SQL_ACTIONS) {
     const c = new Recorder((sql) => ({ rows: [Object.fromEntries((a.countNames ?? ['x']).map((n) => [n, '7']))], rowCount: 1, command: sql === 'commit' ? 'COMMIT' : undefined }));
@@ -610,23 +612,26 @@ const wrapper = await import(pathToFileURL(resolve(REPOSITORY_ROOT, 'scripts/run
 }
 
 // ---------------------------------------------------------------------------------------------------------------
-// DRAFT, PENDING REVIEW: read-only-inventory (A1, BO3), profile-bootstrap-backout and dnc-enum-cast-backout (A2 backouts)
+// DRAFT, PENDING REVIEW: read-only-inventory (A1), bootstrap-identity-check (BO3); profile-bootstrap-backout and dnc-enum-cast-backout are DO NOT USE
 // ---------------------------------------------------------------------------------------------------------------
 {
-  const NEW = ['read-only-inventory', 'profile-bootstrap-backout', 'dnc-enum-cast-backout'] as const;
+  const NEW = ['read-only-inventory', 'bootstrap-identity-check'] as const;
+  const DNU = ['profile-bootstrap-backout', 'dnc-enum-cast-backout'] as const;
+  const dnuText = (id: string) => real(PROD_SQL_DO_NOT_USE.find((m) => m.id === id)!.file).toString('utf8');
   const text = (id: string) => real(action(id).file).toString('utf8');
   const strip = (t: string) => t.replace(/--[^\n]*/g, ' ').replace(/\s+/g, ' ').trim();
-  check('the three DRAFT actions are runnable with their own exact phrases and none is in the missing list', NEW.every((id) => PROD_SQL_ACTION_IDS.includes(id) && action(id).phrase === 'RUN TNBS PRODUCTION SQL ' + id.toUpperCase() && !PROD_SQL_MISSING.some((m) => m.id === id)));
+  check('the two DRAFT read-only actions are runnable with their own exact phrases and none is in the missing list', NEW.every((id) => PROD_SQL_ACTION_IDS.includes(id) && action(id).phrase === 'RUN TNBS PRODUCTION SQL ' + id.toUpperCase() && !PROD_SQL_MISSING.some((m) => m.id === id)));
   check('each new file says DRAFT, PENDING REVIEW, NOT EXECUTED ANYWHERE, and cites doc 17 and its runbook step in its header comment', NEW.every((id) => {
     const header = text(id).split('\n').filter((l) => l.startsWith('--')).join('\n');
-    return /DRAFT, PENDING REVIEW/.test(header) && /NOT EXECUTED ANYWHERE/.test(header) && /doc 17/.test(header) && /301418b/.test(header) && /f1189dc/.test(header) && (id === 'read-only-inventory' ? /A1/.test(header) && /BO3/.test(header) : /A2/.test(header));
+    return /DRAFT, PENDING REVIEW/.test(header) && /NOT EXECUTED ANYWHERE/.test(header) && /doc 17/.test(header) && /301418b/.test(header) && /f1189dc/.test(header) && (id === 'read-only-inventory' ? /A1/.test(header) && /BO3/.test(header) : /BO3/.test(header) && /BEFORE the M1 backouts/.test(header));
   }));
   check('every proposed item of the inventory is marked "(proposed, not from a reviewed doc)" in its header', (text('read-only-inventory').match(/\(proposed, not from a reviewed doc/g) ?? []).length === 3);
-  check('the two backout headers name the exact migration they reverse, the data statement (no data destroyed), and what they lose', ['profile-bootstrap-backout:20260723004500_profile_service_bootstrap.sql', 'dnc-enum-cast-backout:20260723010400_dnc_activity_enum_cast.sql'].every((pair) => {
-    const [id, mig] = pair.split(':') as [string, string];
-    const t = text(id);
-    return t.includes(mig) && /NO DATA IS DESTROYED/.test(t) && /BEHAVIOUR YOU LOSE/.test(t) && /SAFE TO REPEAT: yes/.test(t);
+  check('both DO NOT USE headers start with DO NOT USE, say the forward fix is RETAINED, name the migration they would reverse, and say a replacement needs its own separate review', DNU.every((id) => {
+    const t2 = dnuText(id);
+    const mig = id === 'profile-bootstrap-backout' ? '20260723004500_profile_service_bootstrap.sql' : '20260723010400_dnc_activity_enum_cast.sql';
+    return t2.startsWith('-- ====') && /^-- DO NOT USE\. DO NOT RUN THIS FILE\./m.test(t2.split('\n').slice(0, 4).join('\n')) && /RETAIN THE FORWARD FIX/.test(t2) && t2.includes(mig) && /separate review/.test(t2) && /prod_sql_action_do_not_use/.test(t2);
   }));
+  check('the profile header says why: the restored guard fails open for a NULL-role (pending or disabled) user; the DNC header says why: SQLSTATE 42804 for an authorized editor', /FAILS OPEN/.test(dnuText('profile-bootstrap-backout')) && /NULL/.test(dnuText('profile-bootstrap-backout')) && /42804/.test(dnuText('dnc-enum-cast-backout')) && /17\.6/.test(dnuText('dnc-enum-cast-backout')));
 
   // ---- the inventory
   const inv = action('read-only-inventory');
@@ -662,25 +667,38 @@ const wrapper = await import(pathToFileURL(resolve(REPOSITORY_ROOT, 'scripts/run
     check('the inventory\'s email_mismatches compares lower(profile email) with lower(auth email) for approved profiles, as retire-email does', /where p\.status = 'approved' and lower\(p\.email\) <> lower\(u\.email\)/.test(retire) && /lower\(pr\.email\) <> lower\(u\.email\)/.test(invSql) && /pr\.status::text = 'approved'/.test(invSql));
   }
 
-  // ---- the two backouts
-  const ctrl = (id: string) => plan(id).statements.map((st) => st.clean.toLowerCase().split(/[^a-z]+/).filter(Boolean).slice(0, 3).join(' '));
-  check('profile-bootstrap-backout statements are exactly: begin, check (do), create or replace function, check (do), commit; nothing else', ctrl('profile-bootstrap-backout').join('|') === 'begin|do|create or replace|do|commit');
-  check('dnc-enum-cast-backout statements are exactly: begin, check (do), create or replace function, check (do), commit; nothing else', ctrl('dnc-enum-cast-backout').join('|') === 'begin|do|create or replace|do|commit');
-  const bodyOf = (t: string, open: RegExp) => { const i = t.search(open); return t.slice(i, t.indexOf('$$;', i) + 3); };
-  check('profile-bootstrap-backout restores the guard body of 20260720000300_profiles.sql byte for byte (same text between as $$ and $$;)', bodyOf(text('profile-bootstrap-backout'), /as \$\$\nbegin\n  if \(new\.role/) === bodyOf(real('supabase/migrations/20260720000300_profiles.sql').toString('utf8'), /as \$\$\nbegin\n  if \(new\.role/));
-  check('dnc-enum-cast-backout restores the set_do_not_contact body of 20260720001100_rpc.sql byte for byte (same text between as $$ and $$;)', bodyOf(text('dnc-enum-cast-backout'), /as \$\$\ndeclare\n  v_uid/) === bodyOf(real('supabase/migrations/20260720001100_rpc.sql').toString('utf8').slice(real('supabase/migrations/20260720001100_rpc.sql').toString('utf8').indexOf('create or replace function public.set_do_not_contact(')), /as \$\$\ndeclare\n  v_uid/));
-  check('neither backout touches a grant, a revoke, a table, a trigger or any row (no grant, revoke, drop, delete, insert-into-table, alter or truncate statement)', ['profile-bootstrap-backout', 'dnc-enum-cast-backout'].every((id) => plan(id).statements.every((st) => !/^(grant|revoke|drop|delete|alter|truncate)\b/i.test(st.clean.trim()))));
-  for (const id of ['profile-bootstrap-backout', 'dnc-enum-cast-backout']) {
-    check(id + ': an own begin ... commit file, write mode, no report, not irreversible', plan(id).shape === 'own' && action(id).mode === 'write' && action(id).report === 'none' && action(id).irreversible === undefined && !PROD_SQL_IRREVERSIBLE_ACTIONS.includes(id));
-    const c = new Recorder();
-    const out = await runPlan(id, c);
-    check(id + ': exactly one begin and one commit are sent, both from the file (no double wrap); reported committed', out.error === undefined && c.sent.filter((x) => ctlOf(x) === 'begin').length === 1 && c.sent.filter((x) => ctlOf(x) === 'commit').length === 1 && c.sent.length === 1 + 1 + 3 + 1 && resultsOf(out.events).join() === 'committed');
-    const bad = new Recorder((sql) => { if (/^create or replace function/i.test(sql)) throw new Error('boom'); return { rows: [], rowCount: 0 }; });
-    const failed = await runPlan(id, bad);
-    check(id + ': a failed statement rolls back and never commits', failed.error !== undefined && bad.sent[bad.sent.length - 1] === 'rollback' && !bad.sent.some((x) => ctlOf(x) === 'commit') && resultsOf(failed.events).join() === 'rolled_back');
-    const lost = new Recorder((sql) => { if (sql === 'commit;' || sql === 'commit') throw new Error('connection lost'); return { rows: [], rowCount: 0 }; });
-    const unknown = await runPlan(id, lost);
-    check(id + ': a failed COMMIT is unknown, never retried or rolled back (CR17)', unknown.error !== undefined && resultsOf(unknown.events).join() === 'unknown' && !lost.sent.includes('rollback'));
+  // ---- the BO3 identity check
+  {
+    const idc = action('bootstrap-identity-check');
+    const idcSql = strip(text('bootstrap-identity-check'));
+    const idcPlan = plan('bootstrap-identity-check');
+    check('the identity check is a read-only action with the counts report, exactly one select, no transaction control of its own', idc.mode === 'read_only' && idc.report === 'counts' && idcPlan.shape === 'read_only' && idcPlan.statements.length === 1 && /^select /.test(idcSql) && sqlControl(idcPlan.statements[0]!) === null);
+    check('the identity check holds no write, DDL, lock or state-changing function', !/\b(insert|update|delete|truncate|create|alter|drop|grant|revoke|copy|call|do|set|reset|lock|vacuum|analyze|comment|pg_[a-z_]+|nextval|setval|for update|into)\b/i.test(idcSql));
+    check('the identity check reads only public.profiles, auth.users and internal.auth_events, and ties the exception to kind first_manager_bootstrap and its user_id', [...idcSql.matchAll(/\b(?:from|join)\s+([a-z_]+\.[a-z_]+)/gi)].map((m) => m[1]!.toLowerCase()).every((x) => ['public.profiles', 'auth.users', 'internal.auth_events'].includes(x)) && /internal\.auth_events/.test(idcSql) && /kind = 'first_manager_bootstrap'/.test(idcSql) && /user_id/.test(idcSql));
+    check('its four pinned count names are exactly its output columns in order, whole-number counts only (the identity itself is never an output column)', (() => {
+      const outer = idcSql.slice('select '.length, idcSql.indexOf(' from (')).split(',').map((x) => x.trim().replace(/^[a-z]\./, ''));
+      return JSON.stringify(outer) === JSON.stringify(idc.countNames) && outer.join() === 'bootstrap_events,bootstrap_profiles_present,bootstrap_profiles_with_auth_user,other_approved_profiles_without_auth_user' && !outer.some((n) => /(^|_)(id|email|name)$/.test(n) || n === 'user_id');
+    })());
+    check('the action order is BO3 before the M1 backouts (the identity check is listed before backout-m1c, backout-m1b and backout-m1), and its header says so', ['backout-m1c', 'backout-m1b', 'backout-m1'].every((b) => PROD_SQL_ACTION_IDS.indexOf('bootstrap-identity-check') < PROD_SQL_ACTION_IDS.indexOf(b)) && /BEFORE the M1 backouts/.test(text('bootstrap-identity-check')));
+    const row = Object.fromEntries((idc.countNames ?? []).map((n, i) => [n, String(i)]));
+    const c = new Recorder((sql) => (/^select\b/i.test(sql.trim()) ? { rows: [row], rowCount: 1 } : { rows: [], rowCount: 0 }));
+    const out = await runPlan('bootstrap-identity-check', c);
+    const ev = out.events.filter((e) => e.msg === 'prod-sql.counts');
+    check('identity check run: begin read only, the one pinned select, rollback; never a commit; one counts event with exactly the four pinned names and the numbers; read_only_done', out.error === undefined && c.sent[0] === 'begin read only' && c.sent.length === 3 && c.sent[2] === 'rollback' && !c.sent.some((x) => ctlOf(x) === 'commit') && ev.length === 1 && JSON.stringify(Object.keys(ev[0]!.counts as object)) === JSON.stringify(idc.countNames) && Object.values(ev[0]!.counts as object).join() === '0,1,2,3' && resultsOf(out.events).join() === 'read_only_done');
+    const odd = new Recorder((sql) => (/^select\b/i.test(sql.trim()) ? { rows: [{ bootstrap_events: '71000000-0000-4000-8000-000000000001', bootstrap_profiles_present: true }], rowCount: 1 } : { rows: [], rowCount: 0 }));
+    const o2 = await runPlan('bootstrap-identity-check', odd);
+    const cc = { fields: 0 };
+    check('identity check run: an id, a boolean or a missing value is printed as -1, never echoed; the wrapper passes the event with nothing withheld', Object.values(o2.events.find((e) => e.msg === 'prod-sql.counts')!.counts as object).every((v) => v === -1) && !JSON.stringify(o2.events).includes('71000000') && wrapper.allowListLine(JSON.stringify(ev[0]), cc) !== null && cc.fields === 0);
+  }
+
+  // ---- the two DO NOT USE backouts: never runnable; the historical text is kept as a record only
+  const bodyOf = (t2: string, open: RegExp) => { const i = t2.search(open); return t2.slice(i, t2.indexOf('$$;', i) + 3); };
+  check('the profile record file still holds the guard body of 20260720000300_profiles.sql byte for byte (a historical record, never run)', bodyOf(dnuText('profile-bootstrap-backout'), /as \$\$\nbegin\n  if \(new\.role/) === bodyOf(real('supabase/migrations/20260720000300_profiles.sql').toString('utf8'), /as \$\$\nbegin\n  if \(new\.role/));
+  check('the DNC record file still holds the set_do_not_contact body of 20260720001100_rpc.sql byte for byte (a historical record, never run)', bodyOf(dnuText('dnc-enum-cast-backout'), /as \$\$\ndeclare\n  v_uid/) === bodyOf(real('supabase/migrations/20260720001100_rpc.sql').toString('utf8').slice(real('supabase/migrations/20260720001100_rpc.sql').toString('utf8').indexOf('create or replace function public.set_do_not_contact(')), /as \$\$\ndeclare\n  v_uid/));
+  for (const id of DNU) {
+    const refusal = refusalOf(() => plan(id, { confirm: 'RUN TNBS PRODUCTION SQL ' + id.toUpperCase() }));
+    const refused = await captureLog(() => runnerMain(['--target=production', '--action=' + id, '--confirm=RUN TNBS PRODUCTION SQL ' + id.toUpperCase(), '--execute'], ENV, () => { throw new Error('must not connect'); }));
+    check(id + ': even with its old phrase and --execute the runner is refused (prod_sql_action_do_not_use), prints no verified or plan event, and never connects', refusal === 'prod_sql_action_do_not_use' && refused.error !== undefined && !refused.events.some((e) => e.msg === 'prod-sql.verified' || e.msg === 'prod-sql.plan_only' || e.msg === 'prod-sql.statement'));
   }
   for (const id of NEW) {
     const other = action(NEW.find((n) => n !== id)!).phrase;

@@ -22,18 +22,25 @@
 --                                            view, guest; user_status: pending, approved, disabled). Roles and statuses are compared
 --                                            as text, so a value added later cannot make this query fail.
 --   profiles_other_role_status ............ rows whose role or status is NOT one of those words (expected 0).
---                                            (proposed, not from a reviewed doc: a guard so a new enum value is not missed)
+--                                            (proposed, not from a reviewed doc: a guard so a new enum value is not missed). Role and status are
+--                                            NOT NULL in the baseline, so this predicate is adequate there; a nonzero value means stop and look, and
+--                                            is not itself a complete inventory.
 --   duplicate_email_groups ................ A1 / doc 14 O1 "duplicate emails": how many lower-cased addresses appear on more than one profile.
 --   duplicate_email_rows .................. A1 / doc 14 O1: how many profile rows are in those groups.
 --                                            (both count all profiles; the unique-index question in doc 14 section 11.3 is about
 --                                            active staff, so Hunter reads these as an upper bound)
 --   email_mismatches ...................... BO3. The SAME expression as step 6 of retire-app-credentials.sql (action retire-email):
 --                                            approved profiles joined to auth.users by id where lower(profile email) <> lower(auth email).
---   approved_profiles_without_auth_user ... BO3 "except the first manager row": approved profiles with no auth.users row. The join in
---                                            email_mismatches silently skips these. Expected after the first-manager bootstrap (B9): 1.
---                                            (proposed, not from a reviewed doc: the runbook names the exception but not a count for it)
+--   approved_profiles_without_auth_user ... BO3: approved profiles with no auth.users row (the join in email_mismatches silently skips these).
+--                                            THIS IS A TOTAL ONLY. It CANNOT show that the missing one is the first manager: with two approved
+--                                            managers, swapping which one has an Auth user leaves every count in this file unchanged (independent
+--                                            review, 2026-10-30 UTC). Do NOT call BO3 closed on this count. The identity-specific proof is the
+--                                            separate action bootstrap-identity-check (supabase/rollout/bootstrap-identity-check.sql), which runs
+--                                            BEFORE the M1 backouts, while internal.auth_events still exists.
+--                                            (proposed, not from a reviewed doc: a total, kept as evidence)
 --   approved_auth_email_null .............. approved profiles whose auth.users row has no email. A null makes "<>" unknown, so
---                                            email_mismatches cannot see it. Expected 0.
+--                                            email_mismatches cannot see it. Expected 0; a nonzero value needs investigation (profile email
+--                                            is NOT NULL in the baseline, so a null on the Auth side is the only way to get here).
 --                                            (proposed, not from a reviewed doc)
 -- ============================================================================
 select

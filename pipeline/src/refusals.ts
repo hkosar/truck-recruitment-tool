@@ -43,6 +43,7 @@ export const REFUSAL_IDS = [
   'first_manager_refused',
   'prod_sql_target_refused',
   'prod_sql_action_not_built',
+  'prod_sql_action_do_not_use',
   'prod_sql_file_unreadable',
   'prod_sql_hash_mismatch',
   'prod_sql_shape_refused',
