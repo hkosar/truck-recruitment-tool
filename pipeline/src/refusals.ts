@@ -41,6 +41,12 @@ export const REFUSAL_IDS = [
   'bootstrap_target_required',
   'target_not_recorded_production',
   'first_manager_refused',
+  'prod_sql_target_refused',
+  'prod_sql_action_not_built',
+  'prod_sql_file_unreadable',
+  'prod_sql_hash_mismatch',
+  'prod_sql_shape_refused',
+  'prod_sql_commit_rolled_back',
   'server_or_driver_error',
 ] as const;
 export type RefusalId = (typeof REFUSAL_IDS)[number];

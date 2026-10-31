@@ -133,7 +133,8 @@ export const REFUSAL_IDS = [
   'retention_dry_run_failed', 'reapply_m1_not_backed_out', 'reapply_m1_still_applied', 'reapply_m1b_not_backed_out',
   'reapply_m1b_still_applied', 'reapply_m1c_not_backed_out', 'reapply_m1c_still_applied', 'owner_email_invalid',
   'owner_password_too_short', 'owner_auth_not_created', 'owner_auth_unknown_result', 'owner_promotion_refused',
-  'owner_bootstrap_target_refused', 'bootstrap_target_required', 'target_not_recorded_production', 'first_manager_refused', 'server_or_driver_error',
+  'owner_bootstrap_target_refused', 'bootstrap_target_required', 'target_not_recorded_production', 'first_manager_refused',
+  'prod_sql_target_refused', 'prod_sql_action_not_built', 'prod_sql_file_unreadable', 'prod_sql_hash_mismatch', 'prod_sql_shape_refused', 'prod_sql_commit_rolled_back', 'server_or_driver_error',
 ];
 
 /** Keep equal to pipeline/src/refusals.ts DRIVER_CODES (a test compares them). */
@@ -159,6 +160,16 @@ export const FIRST_MANAGER_STATES = ['schema_not_ready', 'manager_exists', 'alre
 export const FIRST_MANAGER_ACTIONS = ['first-manager-check', 'first-manager-create'];
 /** Keep equal to RETENTION_RULES names in pipeline/src/retention.ts (a test compares them). */
 export const RETENTION_RULE_NAMES = ['app_sessions', 'email_events', 'recovery_failures', 'request_buckets', 'signin_links'];
+
+/** Keep equal to PROD_SQL_ACTION_IDS / PROD_SQL_COUNT_NAMES / PROD_SQL_COMMANDS / PROD_SQL_RESULTS / PROD_SQL_WRAPS in pipeline/src/prod-sql.ts (a test compares them). */
+export const PROD_SQL_ACTIONS = [
+  'migration-security-hardening', 'migration-profile-service-bootstrap', 'migration-dnc-activity-enum-cast', 'migration-contact-logs-dnc-guard', 'snapshot', 'm1', 'm1b', 'm1c',
+  'l1-shape', 'l1-counts', 'l1-sweep', 'retire-nologin', 'retire-terminate', 'retire-backends', 'retire-revoke', 'retire-checks', 'retire-email', 'backout-m1c', 'backout-m1b', 'backout-m1',
+];
+export const PROD_SQL_COUNT_NAMES = ['sessions', 'refresh_tokens', 'one_time_tokens', 'flow_state', 'users_with_tokens', 'recruiter_app_backends', 'backends', 'live_sessions', 'live_links', 'live_codes', 'email_mismatches'];
+export const PROD_SQL_COMMANDS = ['select', 'insert', 'update', 'delete', 'create', 'alter', 'drop', 'grant', 'revoke', 'do', 'set', 'comment', 'other'];
+export const PROD_SQL_RESULTS = ['committed', 'rolled_back', 'rollback_not_confirmed', 'unknown', 'read_only_done'];
+export const PROD_SQL_WRAPS = ['wrapped', 'own', 'read_only'];
 
 const PRIVILEGES = ['SELECT', 'INSERT', 'UPDATE', 'DELETE', 'TRUNCATE', 'REFERENCES', 'TRIGGER', 'MAINTAIN', 'USAGE', 'EXECUTE', 'CREATE', 'OTHER'];
 const bool = (v) => typeof v === 'boolean';
@@ -227,6 +238,14 @@ const EVENTS = {
   'first-manager.result': { result: oneOf(['committed', 'rolled_back', 'rollback_not_confirmed', 'unknown']), path: oneOf(['insert', 'promote']) },
   'first-manager.done': { action: oneOf(FIRST_MANAGER_ACTIONS), target: oneOf(['staging', 'production']) },
   'first-manager.refused': { refusal: oneOf(REFUSAL_IDS), err_code: code },
+  // Guarded production SQL runner (pipeline/src/prod-sql.ts): the pinned file hash (public repository content), counts and enumerated words only.
+  'prod-sql.verified': { action: oneOf(PROD_SQL_ACTIONS), target: oneOf(['production']), statements: int, wrap: oneOf(PROD_SQL_WRAPS), sha256: pat(/^[0-9a-f]{64}$/) },
+  'prod-sql.plan_only': { hint: oneOf(['add --execute to run']) },
+  'prod-sql.statement': { action: oneOf(PROD_SQL_ACTIONS), index: int, command: oneOf(PROD_SQL_COMMANDS), rows: int, digest: pat(/^[0-9a-f]{64}$/) },
+  'prod-sql.counts': { action: oneOf(PROD_SQL_ACTIONS), index: int, counts: (v) => typeof v === 'object' && v !== null && !Array.isArray(v) && Object.keys(v).every((k) => PROD_SQL_COUNT_NAMES.includes(k) && int(v[k])) },
+  'prod-sql.result': { action: oneOf(PROD_SQL_ACTIONS), result: oneOf(PROD_SQL_RESULTS), statements: int },
+  'prod-sql.done': { action: oneOf(PROD_SQL_ACTIONS), target: oneOf(['production']) },
+  'prod-sql.refused': { refusal: oneOf(REFUSAL_IDS), err_code: code },
 };
 
 const SEED_LINES = [
