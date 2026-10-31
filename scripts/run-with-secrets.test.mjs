@@ -300,3 +300,22 @@ test('a prompted secret already set under another capitalisation is refused befo
     );
   }
 });
+
+// ---- Guarded production SQL runner events (pipeline/src/prod-sql.ts): enumerated names, pinned hash, numbers only.
+test('allow-list: the prod-sql events pass with exactly their own keys; a free-text, unpinned or non-numeric value is withheld and counted', () => {
+  const run = (o) => { const counter = { fields: 0 }; const raw = allowListLine(JSON.stringify(o), counter); return { shown: raw === null ? null : JSON.parse(raw), fields: counter.fields }; };
+  const sha = 'a'.repeat(64);
+  assert.deepEqual(run({ msg: 'prod-sql.verified', action: 'm1', target: 'production', statements: 142, wrap: 'wrapped', sha256: sha }), { shown: { msg: 'prod-sql.verified', action: 'm1', target: 'production', statements: 142, wrap: 'wrapped', sha256: sha }, fields: 0 });
+  assert.deepEqual(run({ msg: 'prod-sql.counts', action: 'l1-counts', index: 3, counts: { sessions: 0, users_with_tokens: 2 } }).fields, 0);
+  assert.deepEqual(run({ msg: 'prod-sql.result', action: 'backout-m1', result: 'unknown', statements: 102 }).fields, 0);
+  assert.deepEqual(run({ msg: 'prod-sql.statement', action: 'snapshot', index: 1, command: 'select', rows: 5, digest: sha }).fields, 0);
+  assert.equal(run({ msg: 'prod-sql.verified', action: 'm1', target: 'staging', statements: 1, wrap: 'wrapped', sha256: sha }).shown.target, '<withheld>');
+  assert.equal(run({ msg: 'prod-sql.verified', action: 'not-an-action', target: 'production', statements: 1, wrap: 'wrapped', sha256: sha }).shown.action, '<withheld>');
+  assert.equal(run({ msg: 'prod-sql.statement', action: 'm1', index: 1, command: 'select', rows: 1, digest: 'secret-fragment' }).shown.digest, '<withheld>');
+  assert.equal(run({ msg: 'prod-sql.counts', action: 'l1-counts', index: 1, counts: { email: 3 } }).shown.counts, '<withheld>');
+  assert.equal(run({ msg: 'prod-sql.counts', action: 'l1-counts', index: 1, counts: { sessions: 'x' } }).shown.counts, '<withheld>');
+  assert.equal(run({ msg: 'prod-sql.refused', refusal: 'prod_sql_hash_mismatch', err_code: 'password=1' }).shown.err_code, '<withheld>');
+  assert.equal(run({ msg: 'prod-sql.refused', refusal: 'prod_sql_hash_mismatch' }).fields, 0);
+  assert.equal(run({ msg: 'prod-sql.result', action: 'm1', result: 'committed', statements: 1, sql: 'select 1' }).fields, 1, 'an unknown key is dropped and counted');
+  assert.equal(allowListLine('{"msg":"prod-sql.sql_text","sql":"select 1"}'), null);
+});

@@ -133,13 +133,14 @@ export const REFUSAL_IDS = [
   'retention_dry_run_failed', 'reapply_m1_not_backed_out', 'reapply_m1_still_applied', 'reapply_m1b_not_backed_out',
   'reapply_m1b_still_applied', 'reapply_m1c_not_backed_out', 'reapply_m1c_still_applied', 'owner_email_invalid',
   'owner_password_too_short', 'owner_auth_not_created', 'owner_auth_unknown_result', 'owner_promotion_refused',
-  'owner_bootstrap_target_refused', 'bootstrap_target_required', 'target_not_recorded_production', 'first_manager_refused', 'server_or_driver_error',
+  'owner_bootstrap_target_refused', 'bootstrap_target_required', 'target_not_recorded_production', 'first_manager_refused',
+  'prod_sql_target_refused', 'prod_sql_action_not_built', 'prod_sql_action_do_not_use', 'prod_sql_file_unreadable', 'prod_sql_hash_mismatch', 'prod_sql_shape_refused', 'prod_sql_commit_rolled_back', 'prod_sql_l1_shape_not_ok', 'prod_sql_flag_not_expected', 'server_or_driver_error',
 ];
 
 /** Keep equal to pipeline/src/refusals.ts DRIVER_CODES (a test compares them). */
 export const DRIVER_CODES = ['ECONNREFUSED', 'ECONNRESET', 'ECONNABORTED', 'ETIMEDOUT', 'ENOTFOUND', 'EAI_AGAIN', 'EPIPE', 'EHOSTUNREACH', 'ENETUNREACH', 'ENETDOWN', 'EADDRNOTAVAIL'];
 /** Keep equal to the action tables in pipeline/src/staging-sql-runner.ts and staging-rebuilt.ts plus owner-auth-create (a test compares them). */
-export const ACTIONS = ['install-marker', 'reset', 'cleanup', 'apply-migrations', 'ledger-preflight', 'environment-preflight', 'owner-login-check', 'owner-promote', 'retention-dry-run', 'profile-fixtures', 'install-shutdown-fixtures', 'remove-shutdown-fixtures', 'cleanup-ledgers-m1', 'apply-m1', 'apply-m1b', 'apply-m1c', 'reapply-m1', 'reapply-m1b', 'reapply-m1c', 'role-matrix-m1', 'snapshot', 'window-on', 'window-off', 'backout-m1c', 'backout-m1b', 'backout-m1', 'owner-auth-create'];
+export const ACTIONS = ['install-marker', 'reset', 'cleanup', 'apply-migrations', 'ledger-preflight', 'environment-preflight', 'owner-login-check', 'owner-promote', 'retention-dry-run', 'profile-fixtures', 'install-shutdown-fixtures', 'remove-shutdown-fixtures', 'cleanup-ledgers-m1', 'apply-m1', 'apply-m1b', 'apply-m1c', 'reapply-m1', 'reapply-m1b', 'reapply-m1c', 'role-matrix-m1', 'snapshot', 'auth-schema-inventory', 'window-on', 'window-off', 'backout-m1c', 'backout-m1b', 'backout-m1', 'owner-auth-create'];
 /** Keep equal to pipeline/src/environment-preflight.ts REVIEWED_EVENT_TRIGGER_* (a test compares them). */
 export const EVENT_TRIGGER_NAMES = ['issue_graphql_placeholder', 'issue_pg_cron_access', 'issue_pg_graphql_access', 'issue_pg_net_access', 'pgrst_ddl_watch', 'pgrst_drop_watch', 'ensure_rls'];
 export const EVENT_TRIGGER_FUNCTIONS = ['set_graphql_placeholder', 'grant_pg_cron_access', 'grant_pg_graphql_access', 'grant_pg_net_access', 'pgrst_ddl_watch', 'pgrst_drop_watch', 'rls_auto_enable'];
@@ -159,6 +160,25 @@ export const FIRST_MANAGER_STATES = ['schema_not_ready', 'manager_exists', 'alre
 export const FIRST_MANAGER_ACTIONS = ['first-manager-check', 'first-manager-create'];
 /** Keep equal to RETENTION_RULES names in pipeline/src/retention.ts (a test compares them). */
 export const RETENTION_RULE_NAMES = ['app_sessions', 'email_events', 'recovery_failures', 'request_buckets', 'signin_links'];
+
+/** Keep equal to PROD_SQL_ACTION_IDS / PROD_SQL_COUNT_NAMES / PROD_SQL_COMMANDS / PROD_SQL_RESULTS / PROD_SQL_WRAPS in pipeline/src/prod-sql.ts (a test compares them). */
+export const PROD_SQL_ACTIONS = [
+  'migration-security-hardening', 'migration-profile-service-bootstrap', 'migration-dnc-activity-enum-cast', 'migration-contact-logs-dnc-guard', 'snapshot', 'm1', 'm1b', 'm1c', 'window-on',
+  'l1-shape', 'l1-counts', 'l1-sweep', 'retire-nologin', 'retire-terminate', 'retire-backends', 'retire-revoke', 'retire-checks', 'retire-email', 'bootstrap-identity-check', 'backout-m1c', 'backout-m1b', 'backout-m1', 'security-hardening-backout', 'read-only-inventory', 'window-off',
+];
+export const PROD_SQL_COUNT_NAMES = ['sessions', 'refresh_tokens', 'one_time_tokens', 'flow_state', 'users_with_tokens', 'recruiter_app_backends', 'backends', 'live_sessions', 'live_links', 'live_codes', 'email_mismatches', 'bootstrap_events', 'bootstrap_profiles_present', 'bootstrap_profiles_with_auth_user', 'other_approved_profiles_without_auth_user', 'profiles_total', 'auth_users_total', 'profiles_manager_pending', 'profiles_manager_approved', 'profiles_manager_disabled', 'profiles_edit_pending', 'profiles_edit_approved', 'profiles_edit_disabled', 'profiles_view_pending', 'profiles_view_approved', 'profiles_view_disabled', 'profiles_guest_pending', 'profiles_guest_approved', 'profiles_guest_disabled', 'profiles_other_role_status', 'duplicate_email_groups', 'duplicate_email_rows', 'approved_profiles_without_auth_user', 'approved_auth_email_null'];
+export const PROD_SQL_FLAG_NAMES = ['email_edits_paused'];
+export const PROD_SQL_COMMANDS = ['select', 'insert', 'update', 'delete', 'create', 'alter', 'drop', 'grant', 'revoke', 'do', 'set', 'comment', 'other'];
+export const PROD_SQL_RESULTS = ['committed', 'rolled_back', 'rollback_not_confirmed', 'unknown', 'read_only_done'];
+export const PROD_SQL_WRAPS = ['wrapped', 'own', 'read_only'];
+/** Keep equal to PROD_SQL_WARNINGS and PROD_SQL_IRREVERSIBLE_ACTIONS in pipeline/src/prod-sql.ts (a test compares them): the fixed warning ids and sentences for an action that cannot be undone by a rollback, and the actions that carry one. */
+export const PROD_SQL_WARNINGS = {
+  connections_end_cannot_be_undone: 'WARNING: this step ENDS every database connection of the application role. Ended connections cannot be brought back and a rollback does not restore them. Take the owner go for this step only.',
+  rollback_does_not_restore_connections: 'WARNING: a rolled_back or unknown result covers SQL changes only; any connections this step already ended stay ended. STOP, do not retry, and read the real connection count with the retire-backends action.',
+};
+export const PROD_SQL_IRREVERSIBLE_ACTIONS = ['retire-terminate'];
+/** Keep equal to PROD_SQL_SHAPE_CHECKS in pipeline/src/prod-sql.ts (a test compares them): the fixed names of the L1 shape gate's yes/no checks. */
+export const PROD_SQL_SHAPE_CHECKS = ['results_read', 'table_users', 'table_sessions', 'table_refresh_tokens', 'table_one_time_tokens', 'table_flow_state', 'users_confirmation_token', 'users_recovery_token', 'users_email_change_token_new', 'users_email_change_token_current', 'users_phone_change_token', 'users_reauthentication_token', 'no_unreviewed_auth_tables'];
 
 const PRIVILEGES = ['SELECT', 'INSERT', 'UPDATE', 'DELETE', 'TRUNCATE', 'REFERENCES', 'TRIGGER', 'MAINTAIN', 'USAGE', 'EXECUTE', 'CREATE', 'OTHER'];
 const bool = (v) => typeof v === 'boolean';
@@ -227,6 +247,17 @@ const EVENTS = {
   'first-manager.result': { result: oneOf(['committed', 'rolled_back', 'rollback_not_confirmed', 'unknown']), path: oneOf(['insert', 'promote']) },
   'first-manager.done': { action: oneOf(FIRST_MANAGER_ACTIONS), target: oneOf(['staging', 'production']) },
   'first-manager.refused': { refusal: oneOf(REFUSAL_IDS), err_code: code },
+  // Guarded production SQL runner (pipeline/src/prod-sql.ts): the pinned file hash (public repository content), counts and enumerated words only.
+  'prod-sql.verified': { action: oneOf(PROD_SQL_ACTIONS), target: oneOf(['production']), statements: int, wrap: oneOf(PROD_SQL_WRAPS), sha256: pat(/^[0-9a-f]{64}$/) },
+  'prod-sql.plan_only': { hint: oneOf(['add --execute to run']) },
+  'prod-sql.statement': { action: oneOf(PROD_SQL_ACTIONS), index: int, command: oneOf(PROD_SQL_COMMANDS), rows: int, digest: pat(/^[0-9a-f]{64}$/) },
+  'prod-sql.counts': { action: oneOf(PROD_SQL_ACTIONS), index: int, counts: (v) => typeof v === 'object' && v !== null && !Array.isArray(v) && Object.keys(v).every((k) => PROD_SQL_COUNT_NAMES.includes(k) && int(v[k])) },
+  'prod-sql.flag': { action: oneOf(['window-on', 'window-off']), index: int, flag: (v) => typeof v === 'object' && v !== null && !Array.isArray(v) && Object.keys(v).every((k) => PROD_SQL_FLAG_NAMES.includes(k) && (bool(v[k]) || v[k] === 'unknown')) },
+  'prod-sql.shape': { action: oneOf(['l1-shape', 'l1-sweep']), checks: (v) => typeof v === 'object' && v !== null && !Array.isArray(v) && Object.keys(v).every((k) => PROD_SQL_SHAPE_CHECKS.includes(k) && bool(v[k])), auth_tables: int, auth_tables_unreviewed: int, passed: bool },
+  'prod-sql.warning': { action: oneOf(PROD_SQL_IRREVERSIBLE_ACTIONS), warning: oneOf(Object.keys(PROD_SQL_WARNINGS)), notice: oneOf(Object.values(PROD_SQL_WARNINGS)) },
+  'prod-sql.result': { action: oneOf(PROD_SQL_ACTIONS), result: oneOf(PROD_SQL_RESULTS), statements: int },
+  'prod-sql.done': { action: oneOf(PROD_SQL_ACTIONS), target: oneOf(['production']) },
+  'prod-sql.refused': { refusal: oneOf(REFUSAL_IDS), err_code: code },
 };
 
 const SEED_LINES = [
