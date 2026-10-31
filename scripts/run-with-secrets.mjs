@@ -164,9 +164,9 @@ export const RETENTION_RULE_NAMES = ['app_sessions', 'email_events', 'recovery_f
 /** Keep equal to PROD_SQL_ACTION_IDS / PROD_SQL_COUNT_NAMES / PROD_SQL_COMMANDS / PROD_SQL_RESULTS / PROD_SQL_WRAPS in pipeline/src/prod-sql.ts (a test compares them). */
 export const PROD_SQL_ACTIONS = [
   'migration-security-hardening', 'migration-profile-service-bootstrap', 'migration-dnc-activity-enum-cast', 'migration-contact-logs-dnc-guard', 'snapshot', 'm1', 'm1b', 'm1c', 'window-on',
-  'l1-shape', 'l1-counts', 'l1-sweep', 'retire-nologin', 'retire-terminate', 'retire-backends', 'retire-revoke', 'retire-checks', 'retire-email', 'backout-m1c', 'backout-m1b', 'backout-m1', 'security-hardening-backout', 'window-off',
+  'l1-shape', 'l1-counts', 'l1-sweep', 'retire-nologin', 'retire-terminate', 'retire-backends', 'retire-revoke', 'retire-checks', 'retire-email', 'backout-m1c', 'backout-m1b', 'backout-m1', 'security-hardening-backout', 'read-only-inventory', 'profile-bootstrap-backout', 'dnc-enum-cast-backout', 'window-off',
 ];
-export const PROD_SQL_COUNT_NAMES = ['sessions', 'refresh_tokens', 'one_time_tokens', 'flow_state', 'users_with_tokens', 'recruiter_app_backends', 'backends', 'live_sessions', 'live_links', 'live_codes', 'email_mismatches'];
+export const PROD_SQL_COUNT_NAMES = ['sessions', 'refresh_tokens', 'one_time_tokens', 'flow_state', 'users_with_tokens', 'recruiter_app_backends', 'backends', 'live_sessions', 'live_links', 'live_codes', 'email_mismatches', 'profiles_total', 'auth_users_total', 'profiles_manager_pending', 'profiles_manager_approved', 'profiles_manager_disabled', 'profiles_edit_pending', 'profiles_edit_approved', 'profiles_edit_disabled', 'profiles_view_pending', 'profiles_view_approved', 'profiles_view_disabled', 'profiles_guest_pending', 'profiles_guest_approved', 'profiles_guest_disabled', 'profiles_other_role_status', 'duplicate_email_groups', 'duplicate_email_rows', 'approved_profiles_without_auth_user', 'approved_auth_email_null'];
 export const PROD_SQL_FLAG_NAMES = ['email_edits_paused'];
 export const PROD_SQL_COMMANDS = ['select', 'insert', 'update', 'delete', 'create', 'alter', 'drop', 'grant', 'revoke', 'do', 'set', 'comment', 'other'];
 export const PROD_SQL_RESULTS = ['committed', 'rolled_back', 'rollback_not_confirmed', 'unknown', 'read_only_done'];

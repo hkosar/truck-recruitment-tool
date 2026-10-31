@@ -108,6 +108,11 @@ export const PROD_SQL_ACTIONS: readonly ProdSqlAction[] = [
   { id: 'backout-m1', step: 'BO6', file: 'supabase/backout/M1-backout.sql', sha256: '7686946e27331b69acfd91ad3d43c94b5b07e9228d1a0b6ac2a75f6c85c39d09', mode: 'write', report: 'none', phrase: 'RUN TNBS PRODUCTION SQL BACKOUT-M1' },
   // BO10 / A2 backout of the hardening migration: the reviewed file, byte for byte from commit f1189dc (git blob 608b69d1ef0d2fd5179446cb661c8bc8a0ac1756); own begin ... commit.
   { id: 'security-hardening-backout', step: 'A2 backout, BO10', file: 'supabase/backout/security-hardening-backout.sql', sha256: 'f5cda7a44579cdbc86d5df2d192d9bfe41924f1ef46bdfbf2c412b84d6181d0e', mode: 'write', report: 'none', phrase: 'RUN TNBS PRODUCTION SQL SECURITY-HARDENING-BACKOUT' },
+  // A1 / BO3: the read-only inventory (DRAFT, PENDING REVIEW): ONE select, one row of whole-number counts, in a read-only transaction that is rolled back.
+  { id: 'read-only-inventory', step: 'A1, BO3', file: 'supabase/rollout/read-only-inventory.sql', sha256: 'c01a868623f06dd478b7659fb92c159e38341f00aefdc1ff6f4c5ea61afcbe77', mode: 'read_only', report: 'counts', countNames: ['profiles_total', 'auth_users_total', 'profiles_manager_pending', 'profiles_manager_approved', 'profiles_manager_disabled', 'profiles_edit_pending', 'profiles_edit_approved', 'profiles_edit_disabled', 'profiles_view_pending', 'profiles_view_approved', 'profiles_view_disabled', 'profiles_guest_pending', 'profiles_guest_approved', 'profiles_guest_disabled', 'profiles_other_role_status', 'duplicate_email_groups', 'duplicate_email_rows', 'email_mismatches', 'approved_profiles_without_auth_user', 'approved_auth_email_null'], phrase: 'RUN TNBS PRODUCTION SQL READ-ONLY-INVENTORY' },
+  // A2 backouts of the profile-bootstrap and DNC enum-cast migrations (DRAFT, PENDING REVIEW): each restores one earlier function body; own begin ... commit.
+  { id: 'profile-bootstrap-backout', step: 'A2 backout', file: 'supabase/backout/profile-bootstrap-backout.sql', sha256: '4c766cb7f631512830797ef97c5049e90400cf2cf2ea1fec8d6147d82b4b1971', mode: 'write', report: 'none', phrase: 'RUN TNBS PRODUCTION SQL PROFILE-BOOTSTRAP-BACKOUT' },
+  { id: 'dnc-enum-cast-backout', step: 'A2 backout', file: 'supabase/backout/dnc-enum-cast-backout.sql', sha256: '8148c1212a4a7aec293e878377eb2b994db5f9a427fde9951e648583ba6a699e', mode: 'write', report: 'none', phrase: 'RUN TNBS PRODUCTION SQL DNC-ENUM-CAST-BACKOUT' },
   // C4: the backout window off (doc 16 section 3.1 step 3 / runbook C4), only on Hunter's word.
   { id: 'window-off', step: 'C4', file: 'supabase/rollout/backout-window-off.sql', sha256: '470aa84d647675418d6be6fa25afd43ddcff4d8ba5e2cd43f2b0719918fe27f7', mode: 'write', report: 'flag', flagName: 'email_edits_paused', flagExpect: false, phrase: 'RUN TNBS PRODUCTION SQL WINDOW-OFF' },
 ];
@@ -117,9 +122,6 @@ export const PROD_SQL_ACTIONS: readonly ProdSqlAction[] = [
  * scripts/verify-prod-sql-runner-contract.mjs fails if a listed file appears in the repository without the table being updated.
  */
 export const PROD_SQL_MISSING: readonly { id: string; step: string; reason: string; file?: string }[] = [
-  { id: 'profile-bootstrap-backout', step: 'A2 backout', reason: 'doc 17 says no file is prepared; the earlier function body would have to be rewritten from the 20260720000300 migration, which is new SQL that needs its own review' },
-  { id: 'dnc-enum-cast-backout', step: 'A2 backout', reason: 'doc 17 says no file is prepared; the previous set_do_not_contact body would have to be rewritten from the earlier migration, which is new SQL that needs its own review' },
-  { id: 'read-only-inventory', step: 'A1, BO3', reason: 'doc 17 says the query text is not recorded in the repository; no reviewed query exists to pin (BO3 identity check: see retire-email)' },
   { id: 'reconciliation', step: 'doc 18 / 09 ledger', file: 'docs/build-plan/09-production-baseline-reconciliation.sql', reason: 'marked PROPOSAL ONLY (owner decision pending); not an approved production action' },
 ];
 

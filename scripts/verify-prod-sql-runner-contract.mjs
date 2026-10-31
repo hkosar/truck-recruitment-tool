@@ -78,7 +78,7 @@ const ci = read('.github/workflows/ci.yml');
 const safety = read('.github/ci/repository-safety.sh');
 const doc = read('docs/build-plan/18-production-sql-route-options.md');
 for (const [name, v] of [['prod-sql.ts', mod], ['prod-sql-split.ts', split], ['prod-sql-runner.ts', runner], ['refusals.ts', refusals], ['run-with-secrets.mjs', wrapper], ['pipeline/package.json', pkg]]) if (!v) failures.push(`missing ${name}`);
-for (const f of ['pipeline/src/prod-sql.test.ts', 'pipeline/src/prod-sql-a3.test.ts']) if (!existsSync(resolve(root, f))) failures.push(`missing ${f}`);
+for (const f of ['pipeline/src/prod-sql.test.ts', 'pipeline/src/prod-sql-a3.test.ts', 'pipeline/src/prod-sql-a2-backouts-a3.test.ts']) if (!existsSync(resolve(root, f))) failures.push(`missing ${f}`);
 
 // ---------------------------------------------------------------------------------------------------------------
 // The action table: every pinned file exists and still has the pinned SHA-256; stages tile their file; phrases are unique and exact.
@@ -198,7 +198,8 @@ if (mod) {
   // The files doc 17 names that exist on this branch must all have an action.
   for (const f of ['supabase/pending/M1_same_origin_signin.sql', 'supabase/pending/M1b_add_person.sql', 'supabase/pending/M1c_batch_delete_audit.sql', 'supabase/backout/pre-cutover-snapshot.sql', 'supabase/backout/retire-app-credentials.sql',
     'supabase/backout/M1-backout.sql', 'supabase/backout/M1b-backout.sql', 'supabase/backout/M1c-backout.sql', 'supabase/rollout/L1-close-legacy-auth.sql',
-    'supabase/backout/security-hardening-backout.sql', 'supabase/rollout/backout-window-on.sql', 'supabase/rollout/backout-window-off.sql']) {
+    'supabase/backout/security-hardening-backout.sql', 'supabase/rollout/backout-window-on.sql', 'supabase/rollout/backout-window-off.sql',
+    'supabase/rollout/read-only-inventory.sql', 'supabase/backout/profile-bootstrap-backout.sql', 'supabase/backout/dnc-enum-cast-backout.sql']) {
     if (existsSync(resolve(root, f)) && !actions.some((a) => a.file === f)) failures.push(`prod-sql.ts: ${f} exists but has no action`);
   }
   // Anything listed as missing must stay absent from the table; a listed file that has appeared must be pinned by its own reviewed change (drift).
@@ -210,16 +211,55 @@ if (mod) {
   // The runbook (docs/build-plan/17-signin-cutover-runbook-draft.md) lives on the cutover-prep branch; its actions are listed here with the step that names them.
   {
     const BUILT = ['migration-security-hardening', 'migration-profile-service-bootstrap', 'migration-dnc-activity-enum-cast', 'migration-contact-logs-dnc-guard', 'snapshot', 'm1', 'm1b', 'm1c', 'window-on', 'l1-shape', 'l1-counts', 'l1-sweep',
-      'retire-nologin', 'retire-terminate', 'retire-backends', 'retire-revoke', 'retire-checks', 'retire-email', 'backout-m1c', 'backout-m1b', 'backout-m1', 'security-hardening-backout', 'window-off'];
-    const MISSING = ['profile-bootstrap-backout', 'dnc-enum-cast-backout', 'read-only-inventory', 'reconciliation'];
+      'retire-nologin', 'retire-terminate', 'retire-backends', 'retire-revoke', 'retire-checks', 'retire-email', 'backout-m1c', 'backout-m1b', 'backout-m1', 'security-hardening-backout', 'read-only-inventory', 'profile-bootstrap-backout', 'dnc-enum-cast-backout', 'window-off'];
+    const MISSING = ['reconciliation'];
     const tableIds = actions.map((a) => a.id);
     const missingIds = [...c.matchAll(/\{ id: '([a-z0-9-]+)', step: '[^']*',(?: file: '[^']+',)? reason:/g)].map((m) => m[1]);
     if (JSON.stringify([...tableIds].sort()) !== JSON.stringify([...BUILT].sort())) failures.push(`prod-sql.ts: the built actions (${tableIds.join()}) must be exactly the runbook actions this contract resolves as built (${BUILT.join()}); a new or removed action needs a reviewed change here too`);
     if (JSON.stringify([...missingIds].sort()) !== JSON.stringify([...MISSING].sort())) failures.push(`prod-sql.ts: the missing list (${missingIds.join()}) must be exactly ${MISSING.join()}: an action leaves it only when reviewed SQL for it is pinned`);
     for (const id of [...BUILT, ...MISSING]) if (tableIds.includes(id) === missingIds.includes(id)) failures.push(`prod-sql.ts: runbook action ${id} must be exactly one of built or missing`);
-    // No SQL was invented for a missing action: no file under supabase/ is named for one of them.
-    for (const f of ['supabase/backout/profile-bootstrap-backout.sql', 'supabase/backout/dnc-enum-cast-backout.sql', 'supabase/rollout/read-only-inventory.sql', 'supabase/backout/read-only-inventory.sql']) if (existsSync(resolve(root, f))) failures.push(`${f} exists but its action is listed as missing; pin it by a reviewed change`);
+    // No SQL was invented for a missing action: no file under supabase/ is named for it.
+    for (const f of ['supabase/backout/reconciliation.sql', 'supabase/rollout/reconciliation.sql']) if (existsSync(resolve(root, f))) failures.push(`${f} exists but its action is listed as missing; pin it by a reviewed change`);
   }
+  // ---- DRAFT, PENDING REVIEW: read-only-inventory (A1, BO3), profile-bootstrap-backout and dnc-enum-cast-backout (A2 backouts).
+  {
+    const strip = (t) => t.replace(/--[^\n]*/g, ' ').replace(/\s+/g, ' ').trim();
+    const spec = [['read-only-inventory', 'read_only', 'counts'], ['profile-bootstrap-backout', 'write', 'none'], ['dnc-enum-cast-backout', 'write', 'none']];
+    for (const [id, mode, report] of spec) {
+      const a = actions.find((x) => x.id === id);
+      if (!a) { failures.push('prod-sql.ts: missing action ' + id); continue; }
+      if (a.mode !== mode || a.report !== report || a.from !== undefined || a.flagName !== undefined) failures.push('prod-sql.ts: ' + id + ' must be a whole-file ' + mode + ' action with report ' + report);
+      const text = readFileSync(resolve(root, a.file), 'utf8');
+      const header = text.split('\n').filter((l) => l.startsWith('--')).join('\n');
+      if (!/DRAFT, PENDING REVIEW/.test(header) || !/NOT EXECUTED ANYWHERE/.test(header) || !/doc 17/.test(header) || !/301418b/.test(header) || !/f1189dc/.test(header)) failures.push(a.file + ': the header must say DRAFT, PENDING REVIEW and NOT EXECUTED ANYWHERE and cite doc 17 at 301418b and f1189dc');
+      if (id !== 'read-only-inventory' && (!/NO DATA IS DESTROYED/.test(header) || !/BEHAVIOUR YOU LOSE/.test(header))) failures.push(a.file + ': a backout header must say what data it destroys (NO DATA IS DESTROYED) and BEHAVIOUR YOU LOSE');
+      const parts = splitStatements(text).map(strip);
+      if (id === 'read-only-inventory') {
+        if (parts.length !== 1 || !/^select /.test(parts[0])) failures.push(a.file + ': must be exactly one select statement');
+        if (/\b(insert|update|delete|truncate|create|alter|drop|grant|revoke|copy|call|do|set|reset|lock|vacuum|analyze|comment|nextval|setval|into|begin|commit|rollback)\b|\bpg_[a-z_]+/i.test(parts[0] ?? '')) failures.push(a.file + ': the inventory must hold no write, DDL, lock, transaction control or pg_ function');
+        const tables = [...(parts[0] ?? '').matchAll(/\b(?:from|join)\s+([a-z_]+\.[a-z_]+)/gi)].map((m) => m[1].toLowerCase());
+        if (tables.length === 0 || tables.some((t) => t !== 'public.profiles' && t !== 'auth.users')) failures.push(a.file + ': the inventory may read only public.profiles and auth.users');
+        const outer = (parts[0] ?? '').slice('select '.length, (parts[0] ?? '').indexOf(' from (')).split(',').map((x) => x.trim().replace(/^[a-z]\./, ''));
+        const pinned = [...c.matchAll(/id: 'read-only-inventory'[^}]*?countNames: \[([^\]]*)\]/g)].map((m) => [...m[1].matchAll(/'([a-z_]+)'/g)].map((n) => n[1]))[0] ?? [];
+        if (outer.join() !== pinned.join() || pinned.length !== 20) failures.push(a.file + ': the pinned countNames must equal the 20 output columns in order');
+        if ((text.match(/\(proposed, not from a reviewed doc/g) ?? []).length !== 3) failures.push(a.file + ': each proposed count must be marked "(proposed, not from a reviewed doc)" (3 of them)');
+      } else {
+        const first = (p) => (p.split(/[^a-z]+/i).filter(Boolean)[0] ?? '').toLowerCase();
+        if (parts.map(first).join('|') !== 'begin|do|create|do|commit' || parts.filter((p) => /^create or replace function /i.test(p)).length !== 1) failures.push(a.file + ': statements must be exactly begin, do (check), create or replace function, do (check), commit');
+        if (parts.some((p) => /^(grant|revoke|drop|delete|alter|truncate)\b/i.test(p))) failures.push(a.file + ': a backout of a function body must not grant, revoke, drop, delete, alter or truncate anything');
+        const migration = id === 'profile-bootstrap-backout' ? '20260723004500_profile_service_bootstrap.sql' : '20260723010400_dnc_activity_enum_cast.sql';
+        if (!text.includes(migration)) failures.push(a.file + ': the header must name the migration it reverses (' + migration + ')');
+        const earlier = id === 'profile-bootstrap-backout' ? 'supabase/migrations/20260720000300_profiles.sql' : 'supabase/migrations/20260720001100_rpc.sql';
+        const marker = id === 'profile-bootstrap-backout' ? 'as $$\nbegin\n  if (new.role' : 'as $$\ndeclare\n  v_uid';
+        const src = read(earlier) ?? '';
+        const from = id === 'profile-bootstrap-backout' ? 0 : src.indexOf('create or replace function public.set_do_not_contact(');
+        const bodyOf = (t, start) => { const i = t.indexOf(marker, start); return i < 0 ? null : t.slice(i, t.indexOf('$$;', i) + 3); };
+        const mine = bodyOf(text, 0);
+        if (mine === null || mine !== bodyOf(src, from)) failures.push(a.file + ': the restored function body must equal, byte for byte, the earlier definition in ' + earlier);
+      }
+    }
+  }
+
   // ---- The window statements are the reviewed ones: two statements per file (the update, then the verify select), the same verify select in both, and each update
   // is the one doc 16 section 3.1 and the runbook give. The flag and its expected value are pinned in the table and match the update.
   {
