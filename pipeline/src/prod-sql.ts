@@ -455,18 +455,24 @@ export const stopTablesOf = (classification: readonly AuthTableClassification[])
   classification.filter((e) => e.classification === STOP_CLASSIFICATION).map((e) => e.table).sort();
 
 /**
- * Lock mode for the sweep. SHARE conflicts with ROW EXCLUSIVE (what INSERT, UPDATE, DELETE and COPY take) and with every stronger mode (so also with TRUNCATE,
- * DROP and ALTER, which take ACCESS EXCLUSIVE): once the lock is granted no other session can add a row to the table until this transaction ends. It does NOT conflict
+ * Lock mode for the sweep: SHARE ROW EXCLUSIVE. It conflicts with ROW EXCLUSIVE (what INSERT, UPDATE, DELETE and COPY take) and with every stronger mode (so also with
+ * TRUNCATE, DROP and ALTER, which take ACCESS EXCLUSIVE): once the lock is granted no other session can add a row to the table until this transaction ends. It does NOT conflict
  * with ACCESS SHARE or ROW SHARE, so plain reads, SELECT ... FOR UPDATE/SHARE and foreign-key checks that read the table keep working. It is granted only after every
  * transaction that already holds ROW EXCLUSIVE (an insert that has not committed yet) has ended, so that insert is committed and counted, or rolled back and absent.
  * Without ONLY the lock also covers partitions and inheritance children.
- * What it does not do: it protects nothing after this transaction ends (the emptiness is a fact about the moment of COMMIT, not afterwards), and it does not stop
- * writes to any other table. Writers to a STOP table (for example a Supabase Auth service enrolling a second factor) wait until the sweep ends, bounded by their own timeouts.
- * Deadlock: the locks are taken first, in sorted order, before any L1 statement, so two runs cannot deadlock each other. A deadlock needs another transaction that holds a
- * row lock on an L1 table and then writes a STOP table (which waits for us) while our delete waits for that row lock; PostgreSQL ends one of the two after deadlock_timeout
- * (40P01). If it ends ours, the run rolls back and prints server_or_driver_error with that code; if it ends theirs, the sweep goes on.
+ * Why not plain SHARE: SHARE is compatible with SHARE, so two sweeps could both be granted every lock and pass every count; each then needs ROW EXCLUSIVE on a STOP table for
+ * L1's own delete cascade (flow_state -> saml_relay_states), which the other sweep's SHARE blocks, and PostgreSQL ends one of them with 40P01 (reproduced by the independent
+ * review). SHARE ROW EXCLUSIVE conflicts with itself, so the second sweep waits at its LOCK statement (it holds none of the L1 row locks yet) until the first ends or the 10 second
+ * lock_timeout refuses it (prod_sql_l1_stop_table_lock_failed). The locks are requested in one statement in sorted order, so two sweeps cannot hold them in opposite order.
+ * What it does not do: it protects nothing after this transaction ends (the emptiness is a fact about the moment of COMMIT, not afterwards), it does not stop writes to any
+ * other table, and it cannot stop this transaction's own writes (a trigger or cascade fired by L1; that is why the sweep counts again after the L1 statements, before COMMIT).
+ * Residual limits: a STOP table that does not exist when the presence lookup runs is not locked; if something creates it afterwards and fills it, only the re-count before COMMIT
+ * (which repeats the lookup) can see it, and a row written after that re-count by another session cannot be excluded for a table that was not locked. Writers to a locked STOP table
+ * (for example a Supabase Auth service enrolling a second factor) wait until the sweep ends, bounded by their own timeouts.
+ * Deadlock: a deadlock needs another transaction that holds a row lock on an L1 table and then writes a STOP table (which waits for us) while our delete waits for that row lock;
+ * PostgreSQL ends one of the two after deadlock_timeout (40P01). If it ends ours, the run rolls back and prints server_or_driver_error with that code; if it ends theirs, the sweep goes on.
  */
-export const STOP_LOCK_MODE = 'share';
+export const STOP_LOCK_MODE = 'share row exclusive';
 /** A lock that cannot be granted within lock_timeout (55P03), a deadlock (40P01) or an object that cannot be locked (42809) is the same fixed refusal: nothing was changed. */
 const STOP_LOCK_FAILURE_CODES: readonly string[] = ['55P03', '40P01', '42809'];
 
@@ -482,7 +488,7 @@ export const stopTableCountSql = (table: string): string => `select count(*)::bi
 export interface StopTableCounts { counts: Record<string, number | 'absent'>; present: number; populated: number; locked: boolean }
 
 /**
- * Reads how many rows each STOP table holds. With `lock` (the sweep) the tables that exist are first locked in SHARE mode, in sorted order, and the locks are held
+ * Reads how many rows each STOP table holds. With `lock` (the sweep) the tables that exist are first locked in SHARE ROW EXCLUSIVE mode, in sorted order, and the locks are held
  * until the caller's COMMIT or ROLLBACK, so the answer cannot go stale before the sweep ends. Without it (the read-only shape stage) nothing is locked and the answer is
  * information only. Only counts are selected; no row content is read.
  */
@@ -564,6 +570,12 @@ export async function runProdSqlPlan(client: RebuiltSqlClient, plan: ProdSqlPlan
       // Information only, no lock (the transaction is read-only): how many rows each STOP table holds right now. The sweep is what refuses, under a lock.
       if (action.stopTables === 'report' && plan.classification !== undefined) reportStopTables(action, await readStopTables(client, plan.classification, false));
       enforceL1Shape(action, shapeRows[0], shapeRows[1], plan.classification);
+    }
+    if (action.stopTables === 'must_be_empty' && plan.classification !== undefined) {
+      // The locks cannot stop this transaction's own writes (a trigger or cascade fired by the L1 statements). Count every STOP table that exists again, after the last L1 statement
+      // and before COMMIT; a row anywhere refuses with the same fixed id and the rollback below undoes the whole sweep. No second event: the counts are never printed here.
+      const after = await readStopTables(client, plan.classification, false);
+      if (after.populated > 0) throw new RunnerRefusal('prod_sql_l1_stop_table_populated', 'A credential-bearing STOP table holds rows after the L1 statements ran (a trigger or cascade wrote to it); nothing is committed, rolling back');
     }
     if (shape === 'read_only') {
       await client.query('rollback');

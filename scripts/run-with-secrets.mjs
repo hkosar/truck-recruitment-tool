@@ -177,6 +177,8 @@ export const PROD_SQL_WARNINGS = {
   rollback_does_not_restore_connections: 'WARNING: a rolled_back or unknown result covers SQL changes only; any connections this step already ended stay ended. STOP, do not retry, and read the real connection count with the retire-backends action.',
 };
 export const PROD_SQL_IRREVERSIBLE_ACTIONS = ['retire-terminate'];
+/** Keep equal to the STOP entries of supabase/rollout/auth-table-classification.json (a test and the runner contract compare them): the only table names a stop_tables event may carry. */
+export const PROD_SQL_STOP_TABLES = ['custom_oauth_providers', 'instances', 'mfa_challenges', 'mfa_factors', 'mfa_recovery_codes', 'oauth_authorizations', 'oauth_client_states', 'oauth_clients', 'saml_relay_states', 'scim_tokens', 'scim_users', 'webauthn_challenges', 'webauthn_credentials'];
 /** Keep equal to PROD_SQL_SHAPE_CHECKS in pipeline/src/prod-sql.ts (a test compares them): the fixed names of the L1 shape gate's yes/no checks. */
 export const PROD_SQL_SHAPE_CHECKS = ['results_read', 'table_users', 'table_sessions', 'table_refresh_tokens', 'table_one_time_tokens', 'table_flow_state', 'users_confirmation_token', 'users_recovery_token', 'users_email_change_token_new', 'users_email_change_token_current', 'users_phone_change_token', 'users_reauthentication_token', 'no_unreviewed_auth_tables'];
 
@@ -254,8 +256,8 @@ const EVENTS = {
   'prod-sql.counts': { action: oneOf(PROD_SQL_ACTIONS), index: int, counts: (v) => typeof v === 'object' && v !== null && !Array.isArray(v) && Object.keys(v).every((k) => PROD_SQL_COUNT_NAMES.includes(k) && int(v[k])) },
   'prod-sql.flag': { action: oneOf(['window-on', 'window-off']), index: int, flag: (v) => typeof v === 'object' && v !== null && !Array.isArray(v) && Object.keys(v).every((k) => PROD_SQL_FLAG_NAMES.includes(k) && (bool(v[k]) || v[k] === 'unknown')) },
   'prod-sql.shape': { action: oneOf(['l1-shape', 'l1-sweep']), checks: (v) => typeof v === 'object' && v !== null && !Array.isArray(v) && Object.keys(v).every((k) => PROD_SQL_SHAPE_CHECKS.includes(k) && bool(v[k])), auth_tables: int, auth_tables_unreviewed: int, passed: bool },
-  // STOP tables (names come from the pinned classification file, not the database; counts are numbers, or 'absent' for a table the schema does not have).
-  'prod-sql.stop_tables': { action: oneOf(['l1-shape', 'l1-sweep']), classification: oneOf(['credential-bearing: STOP']), locked: bool, tables: (v) => typeof v === 'object' && v !== null && !Array.isArray(v) && Object.keys(v).length <= 64 && Object.keys(v).every((k) => ident(k) && (int(v[k]) || v[k] === 'absent')), tables_present: int, tables_populated: int, passed: bool },
+  // STOP tables (a key must be one of the STOP names of the pinned classification file (PROD_SQL_STOP_TABLES), not merely identifier-shaped; counts are numbers, or 'absent' for a table the schema does not have).
+  'prod-sql.stop_tables': { action: oneOf(['l1-shape', 'l1-sweep']), classification: oneOf(['credential-bearing: STOP']), locked: bool, tables: (v) => typeof v === 'object' && v !== null && !Array.isArray(v) && Object.keys(v).every((k) => PROD_SQL_STOP_TABLES.includes(k) && (int(v[k]) || v[k] === 'absent')), tables_present: int, tables_populated: int, passed: bool },
   'prod-sql.warning': { action: oneOf(PROD_SQL_IRREVERSIBLE_ACTIONS), warning: oneOf(Object.keys(PROD_SQL_WARNINGS)), notice: oneOf(Object.values(PROD_SQL_WARNINGS)) },
   'prod-sql.result': { action: oneOf(PROD_SQL_ACTIONS), result: oneOf(PROD_SQL_RESULTS), statements: int },
   'prod-sql.done': { action: oneOf(PROD_SQL_ACTIONS), target: oneOf(['production']) },

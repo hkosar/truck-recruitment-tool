@@ -377,9 +377,10 @@ const wrapper = await import(pathToFileURL(resolve(REPOSITORY_ROOT, 'scripts/run
     const at = (re: RegExp) => c.sent.findIndex((s) => re.test(s));
     const lockAt = at(/^lock table/); const firstCount = at(/^select count/); const firstDelete = c.sent.findIndex(isChange);
     check('all 13 STOP tables empty: the sweep proceeds and commits; one stop_tables event: locked, 13 present, 0 populated, passed, classification named', out.error === undefined && resultsOf(out.events).join() === 'committed' && ev?.locked === true && ev.tables_present === 13 && ev.tables_populated === 0 && ev.passed === true && ev.classification === STOP_CLASSIFICATION && ev.action === 'l1-sweep' && Object.values(ev.tables).every((v) => v === 0) && Object.keys(ev.tables).sort().join() === STOP.join());
-    check('order: begin, read committed, lock timeout, the two shape selects, the catalogue lookup, ONE lock statement for all 13 tables in sorted order in share mode, 13 counts, and only then the first delete',
+    check('order: begin, read committed, lock timeout, the two shape selects, the catalogue lookup, ONE lock statement for all 13 tables in sorted order in share row exclusive mode, 13 counts, and only then the first delete (13 more counts follow, see the next check)',
       ctlOf(c.sent[0]!) === 'begin' && c.sent[1] === 'set transaction isolation level read committed' && c.sent[2] === "set local lock_timeout = '10s'" && at(/information_schema\.tables/) === 4 && at(/^select c\.relname/) === 5 && lockAt === 6
-      && c.sent[lockAt] === `lock table ${STOP.map((t) => `auth."${t}"`).join(', ')} in share mode` && firstCount === 7 && c.sent.filter((s) => /^select count/.test(s)).length === 13 && firstDelete === 7 + 13 && c.sent.filter((s) => /^lock table/.test(s)).length === 1);
+      && c.sent[lockAt] === `lock table ${STOP.map((t) => `auth."${t}"`).join(', ')} in share row exclusive mode` && firstCount === 7 && c.sent.filter((s) => /^select count/.test(s)).length === 26 && firstDelete === 7 + 13 && c.sent.filter((s) => /^lock table/.test(s)).length === 1);
+    check('after the last L1 statement and before COMMIT the sweep looks up the STOP tables again and counts all 13 again', (() => { const lastChange = c.sent.map((s, i) => (isChange(s) ? i : -1)).filter((i) => i >= 0).pop()!; const commitAt = c.sent.lastIndexOf('commit'); const reCounts = c.sent.map((s, i) => (/^select count/.test(s) ? i : -1)).filter((i) => i > lastChange); return reCounts.length === 13 && reCounts.every((i) => i < commitAt) && c.sent.slice(lastChange + 1, reCounts[0]!).some((s) => /^select c\.relname/.test(s)) && c.sent.filter((s) => /^lock table/.test(s)).length === 1; })());
     check('only counts are read: every statement that names a STOP table is the lock or a count(*) select (never a column, never *)', c.sent.filter((s) => STOP.some((t) => s.includes(`auth."${t}"`))).every((s) => /^lock table /.test(s) || /^select count\(\*\)::bigint as n from auth\."[a-z_]+"$/.test(s)));
     check('the stop_tables event passes the wrapper allow-list with nothing withheld', (() => { const k = { fields: 0 }; return out.events.every((e) => wrapper.allowListLine(JSON.stringify(e), k) !== null) && k.fields === 0; })());
   }
@@ -398,6 +399,16 @@ const wrapper = await import(pathToFileURL(resolve(REPOSITORY_ROOT, 'scripts/run
     const none = stopFake({});
     const noneOut = await runPlan('l1-sweep', none);
     check('no STOP table present at all: no lock statement is sent and the sweep proceeds', noneOut.error === undefined && !none.sent.some((s) => /^lock table/.test(s)) && stopEvent(noneOut.events)?.tables_present === 0);
+  }
+  {
+    // A trigger or cascade inside the sweep's own transaction writes a STOP table after the first count (SHARE ROW EXCLUSIVE cannot stop the transaction's own writes).
+    const state: Record<string, number | string> = allZero();
+    const c = stopFake(state);
+    const inner = c.query.bind(c);
+    c.query = async (sql: string) => { const r = await inner(sql); if (/^delete from auth\.flow_state/.test(sql.trim())) state.scim_users = 1; return r; };
+    const out = await runPlan('l1-sweep', c);
+    check('a STOP table that holds a row after the L1 statements (written inside the transaction): fixed refusal prod_sql_l1_stop_table_populated, no commit, rolled back', out.error instanceof RunnerRefusal && out.error.id === 'prod_sql_l1_stop_table_populated' && !c.sent.includes('commit') && resultsOf(out.events).join() === 'rolled_back' && c.sent.some((s) => /^delete from auth\.flow_state/.test(s)));
+    check('the re-count before COMMIT adds no second stop_tables event and no new refusal id', stopEvent(out.events)?.passed === true && out.events.filter((e) => e.msg === 'prod-sql.stop_tables').length === 1);
   }
   for (const code of ['55P03', '40P01', '42809']) {
     const c = stopFake(allZero(), { code });
@@ -440,6 +451,10 @@ const wrapper = await import(pathToFileURL(resolve(REPOSITORY_ROOT, 'scripts/run
     const k2 = { fields: 0 };
     const bad = JSON.parse(wrapper.allowListLine(JSON.stringify({ msg: 'prod-sql.stop_tables', action: 'm1', classification: 'fine', locked: 'yes', tables: { 'bad name; drop': 1 }, tables_present: 'many', tables_populated: 1.5, passed: true, row: { secret: 'x' } }), k2));
     check('the allow-list withholds a stop event with another action, another classification word, a non-boolean, a table key that is not an identifier, a non-numeric count, and drops an unknown key', bad.action === '<withheld>' && bad.classification === '<withheld>' && bad.locked === '<withheld>' && bad.tables === '<withheld>' && bad.tables_present === '<withheld>' && bad.tables_populated === '<withheld>' && !('row' in bad) && k2.fields === 7);
+    check('the wrapper PROD_SQL_STOP_TABLES equals the STOP entries of the pinned classification, in sorted order', JSON.stringify([...wrapper.PROD_SQL_STOP_TABLES]) === JSON.stringify(stopTablesOf(loadAuthClassification())) && wrapper.PROD_SQL_STOP_TABLES.length === 13);
+    const k4 = { fields: 0 };
+    const unpinned = JSON.parse(wrapper.allowListLine(JSON.stringify({ msg: 'prod-sql.stop_tables', action: 'l1-sweep', classification: STOP_CLASSIFICATION, locked: true, tables: { review_unpinned_name: 1 }, tables_present: 1, tables_populated: 1, passed: false }), k4));
+    check('the allow-list withholds (and counts) a valid-looking table key that is not a pinned STOP table, and a pinned non-STOP table', unpinned.tables === '<withheld>' && k4.fields === 1 && (() => { const k = { fields: 0 }; return JSON.parse(wrapper.allowListLine(JSON.stringify({ msg: 'prod-sql.stop_tables', tables: { audit_log_entries: 0 } }), k)).tables === '<withheld>' && k.fields === 1; })());
     const k3 = { fields: 0 };
     check('the allow-list withholds a stop table whose value is a string other than absent, or a nested object', JSON.parse(wrapper.allowListLine(JSON.stringify({ msg: 'prod-sql.stop_tables', tables: { scim_users: 'secret value' } }), k3)).tables === '<withheld>' && JSON.parse(wrapper.allowListLine(JSON.stringify({ msg: 'prod-sql.stop_tables', tables: { scim_users: { a: 1 } } }), k3)).tables === '<withheld>');
   }
@@ -460,7 +475,7 @@ const wrapper = await import(pathToFileURL(resolve(REPOSITORY_ROOT, 'scripts/run
     check('the contract script passes on an unchanged copy of the repository files (so each failure below is caused by its own mutation)', base.status === 0);
     const mutations: Array<[string, (t: string) => string]> = [
       ["remove stopTables: 'must_be_empty' from the sweep (no emptiness check, no lock)", (t) => t.replace(", stopTables: 'must_be_empty'", '')],
-      ['remove the lock: a mode that does not block writers', (t) => t.replace("export const STOP_LOCK_MODE = 'share';", "export const STOP_LOCK_MODE = 'access share';")],
+      ['remove the lock: a mode that does not block writers', (t) => t.replace("export const STOP_LOCK_MODE = 'share row exclusive';", "export const STOP_LOCK_MODE = 'access share';")],
       ['remove the lock: the sweep asks for no lock (lock = false)', (t) => t.replace('readStopTables(client, plan.classification, true)', 'readStopTables(client, plan.classification, false)')],
       ['remove the lock statement from readStopTables', (t) => t.replace('await client.query(stopTablesLockSql(existing));', 'void stopTablesLockSql(existing);')],
       ['drop the populated refusal', (t) => t.replace("if (stop.populated > 0) throw new RunnerRefusal('prod_sql_l1_stop_table_populated'", "if (stop.populated > 99) throw new RunnerRefusal('prod_sql_l1_stop_table_populated'")],

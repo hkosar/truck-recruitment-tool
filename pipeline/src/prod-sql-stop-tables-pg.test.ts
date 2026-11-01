@@ -9,6 +9,7 @@
 // Run: PROD_SQL_STOP_PG_URL=postgresql://postgres@127.0.0.1:<port>/tr_stop_test npx tsx src/prod-sql-stop-tables-pg.test.ts
 
 import assert from 'node:assert/strict';
+import { AsyncLocalStorage } from 'node:async_hooks';
 import { resolve } from 'node:path';
 import { pathToFileURL } from 'node:url';
 import pg from 'pg';
@@ -66,8 +67,8 @@ async function main(): Promise<void> {
     // mfa_factors first: mfa_challenges has a foreign key to it.
     for (const t of [...STOP, ...OTHER].sort((x, y) => (x === 'mfa_factors' ? -1 : y === 'mfa_factors' ? 1 : 0))) {
       if (opts.drop?.includes(t)) continue;
-      // Each table gets an id and one data column; mfa_challenges and mfa_amr_claims keep their real foreign keys (to the STOP table mfa_factors and to sessions).
-      const fk = t === 'mfa_challenges' ? ', factor_id uuid references auth.mfa_factors(id) on delete cascade' : t === 'mfa_amr_claims' ? ', session_id uuid references auth.sessions(id) on delete cascade' : '';
+      // Each table gets an id and one data column; mfa_challenges, mfa_amr_claims and saml_relay_states keep their real foreign keys (to the STOP table mfa_factors, to sessions, and to flow_state: the captured saml_relay_states -> flow_state ON DELETE CASCADE, which L1's own flow_state delete fires).
+      const fk = t === 'mfa_challenges' ? ', factor_id uuid references auth.mfa_factors(id) on delete cascade' : t === 'mfa_amr_claims' ? ', session_id uuid references auth.sessions(id) on delete cascade' : t === 'saml_relay_states' ? ', flow_state_id uuid references auth.flow_state(id) on delete cascade' : '';
       await q(`create table auth."${t}" (id uuid primary key default gen_random_uuid(), data text${fk})`);
     }
     for (const t of opts.extra ?? []) await q(`create table auth."${t}" (id int)`);
@@ -89,6 +90,13 @@ async function main(): Promise<void> {
   const stopRows = async (): Promise<number> => Number((await q(`select ${STOP.filter((t) => true).map((t) => `(select count(*) from auth."${t}")`).join(' + ')} as n`)).rows[0].n);
   const l1Cleared = async (): Promise<boolean> => (await l1Fingerprint()).startsWith('0,0,0,0,0,');
 
+  const eventSink = new AsyncLocalStorage<Array<Record<string, unknown>>>();
+  {
+    const log = console.log;
+    console.log = (...x: unknown[]) => { const sink = eventSink.getStore(); if (sink !== undefined) { try { const e = JSON.parse(String(x[0])); if (typeof e === 'object' && e !== null && typeof e.msg === 'string' && e.msg.startsWith('prod-sql.')) { sink.push(e); return; } } catch { /* not an event */ } } log(...x); };
+    const err = console.error;
+    console.error = (...x: unknown[]) => { if (eventSink.getStore() === undefined) err(...x); };
+  }
   /** Runs one action's real plan through the real executor against a real loopback client; `before` may hold a query back (it runs before the statement is sent). */
   const run = async (id: string, hooks: Hooks = {}): Promise<Outcome & { pid: Promise<number> }> => {
     const a = PROD_SQL_ACTIONS.find((x) => x.id === id)!;
@@ -104,12 +112,10 @@ async function main(): Promise<void> {
       on: (ev: 'error', l: () => void) => client.on(ev, l),
       query: async (sql: string, p?: unknown[]) => { sent.push(sql.trim()); if (hooks.before) await hooks.before(sql.trim(), client); return client.query(sql, p as unknown[]); },
     };
-    const log = console.log; const err = console.error;
     const started = Date.now();
-    console.log = (...x: unknown[]) => { try { const e = JSON.parse(String(x[0])); if (typeof e === 'object' && e !== null && typeof e.msg === 'string' && e.msg.startsWith('prod-sql.')) { events.push(e); return; } } catch { /* not an event */ } log(...x); };
-    console.error = () => undefined;
     let error: unknown;
-    try { await executeProdSqlPlan(plan, () => seam as never); } catch (e) { error = e; } finally { console.log = log; console.error = err; }
+    // Each run's events go to its own list through AsyncLocalStorage, so two sweeps running at the same time do not mix them.
+    try { await eventSink.run(events, () => executeProdSqlPlan(plan, () => seam as never)); } catch (e) { error = e; }
     return { events, error, sent, ms: Date.now() - started, pid };
   };
   /** Starts a run in the background; resolves when it has finished. */
@@ -172,8 +178,8 @@ async function main(): Promise<void> {
     const sweep = runLater('l1-sweep', { before: async (sql) => { if (isFirstDelete(sql)) { paused(); await gate; if (mode === 'rollback') throw Object.assign(new Error('injected failure before the first delete'), { code: 'XX999' }); } } });
     await reachedFirstDelete;
     // The sweep holds its locks and has not deleted anything yet.
-    const holders = (await q("select l.pid, l.mode, l.granted, c.relname from pg_locks l join pg_class c on c.oid = l.relation join pg_namespace s on s.oid = c.relnamespace where s.nspname = 'auth' and l.mode = 'ShareLock' and l.granted")).rows as Array<{ pid: number; relname: string }>;
-    check(`real PG (${mode}): while the sweep is paused it holds a granted ShareLock on each of the 13 STOP tables`, STOP.every((t) => holders.some((h) => h.relname === t)) && new Set(holders.map((h) => h.pid)).size === 1);
+    const holders = (await q("select l.pid, l.mode, l.granted, c.relname from pg_locks l join pg_class c on c.oid = l.relation join pg_namespace s on s.oid = c.relnamespace where s.nspname = 'auth' and l.mode = 'ShareRowExclusiveLock' and l.granted")).rows as Array<{ pid: number; relname: string }>;
+    check(`real PG (${mode}): while the sweep is paused it holds a granted ShareRowExclusiveLock on each of the 13 STOP tables`, STOP.every((t) => holders.some((h) => h.relname === t)) && new Set(holders.map((h) => h.pid)).size === 1);
     const holderPid = holders[0]!.pid;
     const reader = await newClient();
     const readStart = Date.now();
@@ -185,7 +191,7 @@ async function main(): Promise<void> {
     const insertP = writer.query("insert into auth.mfa_factors (data) values ('inserted during the sweep')").then(() => { writerDone = true; writerEnd = Date.now(); });
     await sleep(1200);
     const waiting = (await q("select l.pid, l.mode, l.granted, c.relname from pg_locks l join pg_class c on c.oid = l.relation join pg_namespace s on s.oid = c.relnamespace where s.nspname = 'auth' and c.relname = 'mfa_factors' and not l.granted")).rows as Array<{ pid: number; mode: string }>;
-    check(`real PG (${mode}): a concurrent INSERT into a STOP table stays blocked for the whole pause (1.2 s) and pg_locks shows it waiting for RowExclusiveLock behind the sweep's ShareLock`, !writerDone && waiting.length === 1 && waiting[0]!.mode === 'RowExclusiveLock' && waiting[0]!.pid !== holderPid);
+    check(`real PG (${mode}): a concurrent INSERT into a STOP table stays blocked for the whole pause (1.2 s) and pg_locks shows it waiting for RowExclusiveLock behind the sweep's ShareRowExclusiveLock`, !writerDone && waiting.length === 1 && waiting[0]!.mode === 'RowExclusiveLock' && waiting[0]!.pid !== holderPid);
     check(`real PG (${mode}): the inserted row is not visible and the L1 data is untouched while the sweep is paused`, Number((await q('select count(*) as n from auth.mfa_factors')).rows[0].n) === 0 && await l1Fingerprint() === before);
     const releasedAt = Date.now();
     release();
@@ -210,8 +216,8 @@ async function main(): Promise<void> {
     let done = false;
     const sweep = runLater('l1-sweep').then((o) => { done = true; return o; });
     const earlyPid = (await early.query('select pg_backend_pid() as p')).rows[0].p as number;
-    await waitFor('the sweep to wait for the lock', async () => (await q("select count(*)::int as n from pg_locks l join pg_class c on c.oid = l.relation where c.relname = 'oauth_clients' and not l.granted and l.mode = 'ShareLock'")).rows[0].n === 1);
-    check(`real PG (${outcome}): the sweep waits (does not count) while an earlier insert is still in flight; pg_locks shows its ShareLock request not granted`, !done && (await lockRows(earlyPid)).some((r) => r.relname === 'oauth_clients' && r.granted));
+    await waitFor('the sweep to wait for the lock', async () => (await q("select count(*)::int as n from pg_locks l join pg_class c on c.oid = l.relation where c.relname = 'oauth_clients' and not l.granted and l.mode = 'ShareRowExclusiveLock'")).rows[0].n === 1);
+    check(`real PG (${outcome}): the sweep waits (does not count) while an earlier insert is still in flight; pg_locks shows its ShareRowExclusiveLock request not granted`, !done && (await lockRows(earlyPid)).some((r) => r.relname === 'oauth_clients' && r.granted));
     await early.query(outcome === 'commit' ? 'commit' : 'rollback');
     const out = await sweep;
     await early.end();
@@ -256,7 +262,7 @@ async function main(): Promise<void> {
     await early.query('begin');
     await early.query("insert into auth.mfa_factors (data) values ('in flight')");
     const sweep = runLater('l1-sweep', { options: '-c default_transaction_isolation=repeatable\\ read' });
-    await waitFor('the sweep to wait for the lock', async () => (await q("select count(*)::int as n from pg_locks l join pg_class c on c.oid = l.relation where c.relname = 'mfa_factors' and not l.granted and l.mode = 'ShareLock'")).rows[0].n === 1);
+    await waitFor('the sweep to wait for the lock', async () => (await q("select count(*)::int as n from pg_locks l join pg_class c on c.oid = l.relation where c.relname = 'mfa_factors' and not l.granted and l.mode = 'ShareRowExclusiveLock'")).rows[0].n === 1);
     await early.query('commit'); await early.end();
     const out = await sweep;
     check('real PG, with the SERVER default set to repeatable read the sweep still counts the row committed during the lock wait (the runner sets read committed first): refused as populated', out.error instanceof RunnerRefusal && out.error.id === 'prod_sql_l1_stop_table_populated' && stopEvent(out)?.tables.mfa_factors === 1);
@@ -319,6 +325,48 @@ async function main(): Promise<void> {
     const out = await run('l1-sweep');
     const ev = stopEvent(out);
     check('real PG, two STOP tables missing from the schema are reported as absent and not locked; the other 11 are checked, and the sweep commits', out.error === undefined && resultOf(out) === 'committed' && ev?.tables_present === 11 && ev.tables.webauthn_challenges === 'absent' && ev.tables.scim_tokens === 'absent' && !out.sent.some((s) => s.startsWith('lock table') && /webauthn_challenges|scim_tokens/.test(s)));
+  }
+
+  // ---- 10. Two concurrent sweeps do not deadlock: SHARE ROW EXCLUSIVE conflicts with itself, so the second waits at its LOCK statement; L1's own cascade into saml_relay_states works.
+  {
+    await resetSchema(); await seedL1();
+    await q("insert into auth.saml_relay_states (flow_state_id, data) select id, 'x' from auth.flow_state limit 0");
+    let paused: (v: void) => void = () => undefined;
+    const reached = new Promise<void>((r) => { paused = r; });
+    let release: (v: void) => void = () => undefined;
+    const gate = new Promise<void>((r) => { release = r; });
+    const first = runLater('l1-sweep', { before: async (sql) => { if (isFirstDelete(sql)) { paused(); await gate; } } });
+    await reached;
+    const second = runLater('l1-sweep');
+    let secondDone = false; second.then(() => { secondDone = true; }, () => { secondDone = true; });
+    await waitFor('the second sweep to wait for the first sweep\'s lock', async () => (await q("select count(*)::int as n from pg_locks l join pg_class c on c.oid = l.relation where not l.granted and l.mode = 'ShareRowExclusiveLock' and c.relname = any($1)", [STOP])).rows[0].n >= 1);
+    await sleep(300);
+    check('real PG, a second sweep started while the first holds its locks waits (pg_locks: a not-granted ShareRowExclusiveLock request on a STOP table), it has not finished, and it has not deleted anything', !secondDone && (await q("select count(*)::int as n from pg_locks l join pg_class c on c.oid = l.relation where not l.granted and l.mode = 'ShareRowExclusiveLock' and c.relname = any($1)", [STOP])).rows[0].n >= 1);
+    release();
+    const [o1, o2] = [await first, await second];
+    const codes = [o1, o2].map((o) => (o.error as { code?: string } | undefined)?.code);
+    info('two sweeps', `first ${resultOf(o1)}, second ${resultOf(o2)}; error codes ${JSON.stringify(codes)}`);
+    check('real PG, with the captured saml_relay_states -> flow_state cascade in place, two concurrent sweeps do not deadlock: no 40P01, the first commits, the second waits for it and then also commits (nothing left to clear), L1 data is cleared and every STOP table is empty', o1.error === undefined && o2.error === undefined && resultOf(o1) === 'committed' && resultOf(o2) === 'committed' && !codes.includes('40P01') && await l1Cleared() && await stopRows() === 0);
+    check('real PG, both sweeps\' events pass the wrapper allow-list with nothing withheld', (() => { const k = { fields: 0 }; return [...o1.events, ...o2.events].every((e) => wrapper.allowListLine(JSON.stringify(e), k) !== null) && k.fields === 0; })());
+  }
+
+  // ---- 11. Own cascade: L1's flow_state delete cascades into the (empty) saml_relay_states and leaves it empty; the re-count before COMMIT agrees.
+  {
+    await resetSchema(); await seedL1();
+    const out = await run('l1-sweep');
+    const recount = out.sent.map((s, i) => (/^select count/.test(s) ? i : -1)).filter((i) => i >= 0);
+    check('real PG, the captured cascade into saml_relay_states is exercised (the foreign key exists), the table was counted empty before and again before COMMIT (26 counts in all), nothing was deleted from it, and the sweep commits', out.error === undefined && resultOf(out) === 'committed' && recount.length === 26 && Number((await q('select count(*) as n from auth.saml_relay_states')).rows[0].n) === 0 && (await q("select count(*)::int as n from pg_constraint where conname like 'saml_relay_states_flow_state_id_fkey' and confdeltype = 'c'")).rows[0].n === 1);
+  }
+
+  // ---- 12. A trigger of the sweep's own transaction writes a STOP table after the first count (SHARE ROW EXCLUSIVE cannot stop the transaction's own writes): the re-count refuses and everything rolls back.
+  {
+    await resetSchema(); await seedL1();
+    await q("create function auth.synthetic_stop_writer() returns trigger language plpgsql as $$ begin insert into auth.scim_users (data) values ('written inside the sweep'); return old; end $$");
+    await q('create trigger synthetic_stop_writer after delete on auth.flow_state for each row execute function auth.synthetic_stop_writer()');
+    const before = await l1Fingerprint();
+    const out = await run('l1-sweep');
+    check('real PG, a synthetic AFTER DELETE trigger on flow_state that inserts into scim_users (a STOP table, written by the sweep\'s own transaction): the re-count before COMMIT refuses with prod_sql_l1_stop_table_populated, the run is rolled_back, no COMMIT was sent, scim_users is empty again and every L1 row is as before', out.error instanceof RunnerRefusal && out.error.id === 'prod_sql_l1_stop_table_populated' && resultOf(out) === 'rolled_back' && !out.sent.includes('commit') && out.sent.some((s) => /^delete from auth\.flow_state/.test(s)) && await stopRows() === 0 && await l1Fingerprint() === before && stopEvent(out)?.passed === true);
+    await q('drop trigger synthetic_stop_writer on auth.flow_state');
   }
 
   await q('drop schema if exists auth cascade');
