@@ -7,9 +7,9 @@ import { readFileSync } from 'node:fs';
 import { resolve } from 'node:path';
 import { fileURLToPath } from 'node:url';
 
-/** The Route A runner's reviewed tip ("missing-sql r2: ready"; branch bb/fix-draft-sql-findings-backouts-do-not-use-bo3-i-thr_8uxydx6hqr); never merged here. */
-export const RUNNER_TIP = '7111139';
-export const RUNNER_FILES = { prodSql: 'pipeline/src/prod-sql.ts', stagingRebuilt: 'pipeline/src/staging-rebuilt.ts', cli: 'pipeline/src/prod-sql-runner.ts', wrapper: 'scripts/run-with-secrets.mjs' };
+/** The Route A runner tip that holds the item 28 "stop unless empty" L1 sweep (branch bb/fix-stop-unless-empty-review-findings-allow-list-thr_rxrah2w4hi; earlier reviewed tip 7111139); never merged here. */
+export const RUNNER_TIP = '9e3e340';
+export const RUNNER_FILES = { prodSql: 'pipeline/src/prod-sql.ts', stagingRebuilt: 'pipeline/src/staging-rebuilt.ts', cli: 'pipeline/src/prod-sql-runner.ts', wrapper: 'scripts/run-with-secrets.mjs', classification: 'supabase/rollout/auth-table-classification.json' };
 /** The first-manager tool's reviewed commit ("fm-listener r2: ready"; branch bb/fix-first-manager-listener-output-commit-outcome-thr_q9ajbvqpa6, contained in signin/combined-reviewed-abc); never merged here. */
 export const FM_TIP = '7285a7e';
 export const FM_FILES = { bootstrap: 'pipeline/src/first-manager-bootstrap.ts', runner: 'pipeline/src/first-manager-runner.ts', wrapper: 'scripts/run-with-secrets.mjs' };
@@ -319,7 +319,7 @@ export function checkCutoverRunbook(runbook, yaml, runnerSources, fmSources) {
   need(open1, new RegExp(`tip \`${RUNNER_TIP}\``), `OPEN-1: runner tip ${RUNNER_TIP} not cited`);
   need(open1, /Route B[^\n]*reviewed paste box still owed/i, 'OPEN-1: Route B paste box owed missing');
   need(open1, /5101b81/, 'OPEN-1: review trail 5101b81 missing');
-  need(open1, /bb\/fix-draft-sql-findings-backouts-do-not-use-bo3-i-thr_8uxydx6hqr/, 'OPEN-1: runner branch not cited');
+  need(open1, /bb\/fix-stop-unless-empty-review-findings-allow-list-thr_rxrah2w4hi/, 'OPEN-1: runner branch not cited');
   if (/🔴 \*\*OPEN-1\b/.test(runbook)) failures.push('OPEN-1: still marked as a pending action');
   if (/production SQL route/i.test(runbook)) failures.push('placeholder "production SQL route" remains');
   if (/production SQL gets run \(no route/i.test(runbook)) failures.push('stale OPEN-1 "no route is recorded" text remains');
@@ -434,13 +434,13 @@ export function checkCutoverRunbook(runbook, yaml, runnerSources, fmSources) {
     need(bo3Success, /if[^.]*`approved_auth_email_null` is above 0[^.]*\*\*stop\*\*/, 'BO3: STOP rule must name approved_auth_email_null above 0');
     // Documented counts and refusal ids must exist in the wrapper's allow-lists at the runner tip (no invented name).
     const countNames = [...(runnerSources.wrapper ?? '').matchAll(/PROD_SQL_COUNT_NAMES = \[([^\]]*)\]/g)].flatMap((m) => [...m[1].matchAll(/'([a-z_]+)'/g)].map((x) => x[1]));
-    const refusalIds = [...((runnerSources.wrapper ?? '').match(/REFUSAL_IDS = \[([^\]]*)\]/)?.[1] ?? '').matchAll(/'([a-z_]+)'/g)].map((x) => x[1]);
+    const refusalIds = [...((runnerSources.wrapper ?? '').match(/REFUSAL_IDS = \[([^\]]*)\]/)?.[1] ?? '').matchAll(/'([a-z0-9_]+)'/g)].map((x) => x[1]);
     if (countNames.length === 0 || refusalIds.length === 0) failures.push('count names or refusal ids not found in the wrapper at ' + RUNNER_TIP);
     for (const { id, lineText } of located) {
       if (/prod-sql\.counts/.test(lineText)) {
         for (const m of lineText.matchAll(/`([a-z]+(?:_[a-z<>]+)+)`/g)) if (!countNames.includes(m[1]) && !/^profiles_<role>_<status>$/.test(m[1])) failures.push(id + ': documents count name ' + m[1] + ' that the runner does not define');
       }
-      for (const m of lineText.matchAll(/\bprod_sql_[a-z_]+/g)) if (refusalIds.length && !refusalIds.includes(m[0])) failures.push(id + ': documents refusal id ' + m[0] + ' that the runner does not define');
+      for (const m of lineText.matchAll(/\bprod_sql_[a-z0-9_]+/g)) if (refusalIds.length && !refusalIds.includes(m[0])) failures.push(id + ': documents refusal id ' + m[0] + ' that the runner does not define');
     }
     need(block('A1'), /`approved_auth_email_null`/, 'A1: the inventory count approved_auth_email_null is not recorded');
     need(block('B10'), /prod_sql_flag_not_expected/, 'B10: flag verification refusal missing');
@@ -460,6 +460,22 @@ export function checkCutoverRunbook(runbook, yaml, runnerSources, fmSources) {
     need(g2, /classif/i, 'GATE-2: human classification missing');
     if (!runner.stagingInventoryPhrase) failures.push('GATE-2: inventory phrase not found in the staging runner source');
     else need(g2, new RegExp(`--confirm="${runner.stagingInventoryPhrase}"`), 'GATE-2: inventory phrase does not match the runner source');
+    // B13 STOP tables (item 28, stop unless empty): the 13 names from the pinned classification, both refusal ids, the event fields, the STOP rules.
+    const b13 = block('B13');
+    const stopNames = (runnerSources.classification?.tables ?? []).filter((t) => t.classification === 'credential-bearing: STOP').map((t) => t.table);
+    if (stopNames.length !== 13) failures.push('B13: expected 13 STOP tables in the classification at ' + RUNNER_TIP + ', found ' + stopNames.length);
+    for (const name of stopNames) need(b13, new RegExp('`' + name + '`'), 'B13: STOP table ' + name + ' not named');
+    for (const id of ['prod_sql_l1_stop_table_populated', 'prod_sql_l1_stop_table_lock_failed']) {
+      if (!(runnerSources.wrapper ?? '').includes("'" + id + "'") || !(runnerSources.prodSql ?? '').includes("'" + id + "'")) failures.push('B13: refusal id ' + id + ' not found in the runner source at ' + RUNNER_TIP);
+      need(b13, new RegExp(id), 'B13: refusal id ' + id + ' missing');
+    }
+    for (const f of ['action', 'classification', 'locked', 'tables', 'tables_present', 'tables_populated', 'passed']) need(b13, new RegExp('`' + f + '`'), 'B13: prod-sql.stop_tables field ' + f + ' missing');
+    need(b13, /prod-sql\.stop_tables/, 'B13: prod-sql.stop_tables event missing');
+    need(b13, /STOP rule, `prod_sql_l1_stop_table_populated`[^\n]*\*\*STOP\.\*\*[^\n]*Do not retry[^\n]*Do not clear[^\n]*decide together/, 'B13: STOP rule for a populated table (no retry, nothing cleared, decide together) missing');
+    need(b13, /STOP rule, `prod_sql_l1_stop_table_lock_failed`[^\n]*\*\*STOP\.\*\*[^\n]*Do not loop the retry/, 'B13: lock_failed rule missing');
+    need(b13, /"Empty" is true only up to COMMIT/, 'B13: "empty is true only up to COMMIT" limit missing');
+    need(b13, /re-?count|counts again/i, 'B13: re-count before COMMIT missing');
+    if (/stops on any[^\n]*STOP table|classified `credential-bearing: STOP`[^\n]*\*\*STOP\*\* for review/.test(runbook)) failures.push('old "L1 stops on any STOP table" wording remains');
     const g3 = block('GATE-3');
     if (runner.warnings.length !== 2) failures.push('GATE-3: expected two fixed warnings in the runner source');
     for (const w of runner.warnings) {
@@ -555,6 +571,14 @@ export const MUTATIONS = [
   ['a2-migration-order-swapped', (t) => swapPair(t, 'migration-security-hardening', 'migration-profile-service-bootstrap', 'RUN TNBS PRODUCTION SQL MIGRATION-SECURITY-HARDENING', 'RUN TNBS PRODUCTION SQL MIGRATION-PROFILE-SERVICE-BOOTSTRAP')],
   ['first-manager-extra-output-field', (t) => t.replace('`first-manager.verified` — fields: `action`, `target`.', '`first-manager.verified` — fields: `action`, `target`, `invented_field`.')],
   ['first-manager-missing-output-field', (t) => t.replace('fields: `action`, `target`.\n  - `first-manager.plan_only`', 'fields: `action`.\n  - `first-manager.plan_only`')],
+  ['b13-missing-populated-stop-rule', (t) => t.replace('Do not retry. Do not clear, delete or edit anything in those tables.', 'Look at it.')],
+  ['b13-missing-lock-failed-rule', (t) => t.replace('Do not loop the retry.', 'Retry freely.')],
+  ['b13-wrong-populated-refusal-id', (t) => t.replaceAll('prod_sql_l1_stop_table_populated', 'prod_sql_l1_stop_table_full')],
+  ['b13-wrong-lock-refusal-id', (t) => t.replaceAll('prod_sql_l1_stop_table_lock_failed', 'prod_sql_l1_lock_error')],
+  ['b13-missing-empty-until-commit', (t) => t.replace('**"Empty" is true only up to COMMIT:**', '**Empty is permanent:**')],
+  ['b13-drops-a-stop-table', (t) => { const [a, b] = blockRange(t, 'B13'); return t.slice(0, a) + t.slice(a, b).replaceAll('`scim_users`', '`scim_x`') + t.slice(b); }],
+  ['b13-missing-event-field', (t) => t.replaceAll('`tables_populated`', '`tables_x`')],
+  ['b13-old-stop-on-any-wording', (t) => t.replace('(STOP rule above), so tell Hunter now', '(STOP rule above), so tell Hunter now. L1 stops on any STOP table')],
   ['bo3-drops-approved-auth-email-null', (t) => { const [s, e] = blockRange(t, 'BO3'); return t.slice(0, s) + t.slice(s, e).replaceAll('approved_auth_email_null', 'approved_x') + t.slice(e); }],
   ['bo3-success-rule-only-drops-null', (t) => t.replace('; and `approved_auth_email_null` is 0. If', '. If')],
   ['bo3-after-bo4', (t) => { const [a0, a1] = blockRange(t, 'BO3'); const [b0, b1] = blockRange(t, 'BO4'); return t.slice(0, a0) + t.slice(b0, b1) + t.slice(a0, a1) + t.slice(b1); }],
@@ -676,10 +700,13 @@ if (process.argv[1] && resolve(process.argv[1]) === fileURLToPath(import.meta.ur
   const stagingRebuilt = gitShow(RUNNER_FILES.stagingRebuilt);
   const prodCli = gitShow(RUNNER_FILES.cli);
   const prodWrapper = gitShow(RUNNER_FILES.wrapper);
+  const classificationText = gitShow(RUNNER_FILES.classification);
+  let classification;
+  try { classification = classificationText === undefined ? undefined : JSON.parse(classificationText); } catch { classification = undefined; }
   const fmWrapper = gitShowAt(FM_TIP, FM_FILES.wrapper);
   const runbookText = readFileSync(resolve(root, 'docs/build-plan/17-signin-cutover-runbook-draft.md'), 'utf8');
   const yamlText = readFileSync(resolve(root, 'docs/build-plan/drafts/render-recruiter-web.yaml'), 'utf8');
-  const runnerSources = prodSql === undefined || stagingRebuilt === undefined || prodCli === undefined || prodWrapper === undefined ? undefined : { prodSql, stagingRebuilt, cli: prodCli, wrapper: prodWrapper };
+  const runnerSources = prodSql === undefined || stagingRebuilt === undefined || prodCli === undefined || prodWrapper === undefined ? undefined : { prodSql, stagingRebuilt, cli: prodCli, wrapper: prodWrapper, classification };
   const fmSources = fmBootstrap === undefined || fmRunner === undefined || fmWrapper === undefined ? undefined : { bootstrap: fmBootstrap, runner: fmRunner, wrapper: fmWrapper };
   const failures = checkCutoverRunbook(runbookText, yamlText, runnerSources, fmSources);
   // The strict-parsing self-test: every mutation class from the reviews must fail on a copy of the real document. Skipped only when the real check itself could not load its sources.
