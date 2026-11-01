@@ -1,8 +1,9 @@
 #!/usr/bin/env node
 // Legacy rehearsal frontend (doc 16 section 1.3 step 7, approval 5): build configuration check and
 // project-id proof. The backout returns users to the OLD app, so the rehearsal builds the
-// pre-cutover SPA (the commit the current staging Worker serves, 353be1c) pointed at the NEW
-// staging project, and proves that before M1 is applied.
+// pre-cutover SPA (the live staging bundle is artifact-equivalent to a build of b9ed289, verified
+// 2026-11-01; not provenance-proven) pointed at the NEW staging project, and proves that before
+// M1 is applied.
 //
 //   node scripts/legacy-rehearsal-config.mjs config --new-ref=<20-letter ref>
 //        Reads VITE_SUPABASE_URL, VITE_SUPABASE_ANON_KEY, VITE_EXPECTED_SUPABASE_REF and
