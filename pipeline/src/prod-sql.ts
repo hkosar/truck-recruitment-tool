@@ -465,11 +465,11 @@ export const stopTablesOf = (classification: readonly AuthTableClassification[])
  * review). SHARE ROW EXCLUSIVE conflicts with itself, so the second sweep waits at its LOCK statement (it holds none of the L1 row locks yet) until the first ends or the 10 second
  * lock_timeout refuses it (prod_sql_l1_stop_table_lock_failed). The locks are requested in one statement in sorted order, so two sweeps cannot hold them in opposite order.
  * What it does not do: it protects nothing after this transaction ends (the emptiness is a fact about the moment of COMMIT, not afterwards), it does not stop writes to any
- * other table, and it cannot stop this transaction's own writes (a trigger or cascade fired by L1; that is why the sweep counts again after the L1 statements, before COMMIT).
+ * other table, and it cannot stop this transaction's own writes (a trigger or cascade fired by L1; that is why the sweep runs SET CONSTRAINTS ALL IMMEDIATE, which fires any deferred constraint trigger queued by L1, and then counts again, before COMMIT).
  * Residual limits: a STOP table that does not exist when the presence lookup runs is not locked; if something creates it afterwards and fills it, only the re-count before COMMIT
  * (which repeats the lookup) can see it, and a row written after that re-count by another session cannot be excluded for a table that was not locked. Writers to a locked STOP table
  * (for example a Supabase Auth service enrolling a second factor) wait until the sweep ends, bounded by their own timeouts.
- * Deadlock: a deadlock needs another transaction that holds a row lock on an L1 table and then writes a STOP table (which waits for us) while our delete waits for that row lock;
+ * Deadlock: a deadlock needs another transaction that holds a row lock on an L1 table and then waits for a lock we hold (a STOP table lock, or a row lock on a non-STOP table such as users or sessions) while our statement waits for that row lock; it needs no STOP write (reproduced by the independent review with writes to non-STOP tables only).
  * PostgreSQL ends one of the two after deadlock_timeout (40P01). If it ends ours, the run rolls back and prints server_or_driver_error with that code; if it ends theirs, the sweep goes on.
  */
 export const STOP_LOCK_MODE = 'share row exclusive';
@@ -527,6 +527,8 @@ export class ProdSqlResultUnknown extends Error {
 }
 
 const LOCK_TIMEOUT_SQL = "set local lock_timeout = '10s'";
+/** Fires every pending deferred constraint trigger and deferred constraint check of the transaction now; run immediately before the final STOP re-count. */
+export const SET_CONSTRAINTS_IMMEDIATE_SQL = 'set constraints all immediate';
 const READ_COMMITTED_SQL = 'set transaction isolation level read committed';
 
 /**
@@ -572,8 +574,13 @@ export async function runProdSqlPlan(client: RebuiltSqlClient, plan: ProdSqlPlan
       enforceL1Shape(action, shapeRows[0], shapeRows[1], plan.classification);
     }
     if (action.stopTables === 'must_be_empty' && plan.classification !== undefined) {
-      // The locks cannot stop this transaction's own writes (a trigger or cascade fired by the L1 statements). Count every STOP table that exists again, after the last L1 statement
-      // and before COMMIT; a row anywhere refuses with the same fixed id and the rollback below undoes the whole sweep. No second event: the counts are never printed here.
+      // The locks cannot stop this transaction's own writes (a trigger or cascade fired by the L1 statements). Deferred constraint triggers and deferred foreign-key checks queued
+      // by those statements would otherwise fire only inside COMMIT, after any count. SET CONSTRAINTS ALL IMMEDIATE fires every one of them now (PostgreSQL: a constraint switched to
+      // immediate is checked at once, and events it queues fire at the end of that statement), so a STOP row they insert is visible to the count below and nothing deferred is left
+      // for COMMIT. No statement runs between the count and COMMIT, so nothing new can be queued there. A deferred check that fails here errors out and rolls back (server_or_driver_error
+      // with its SQLSTATE, e.g. 23503, and result rolled_back). Then count every STOP table that exists again; a row anywhere refuses with the same fixed id and the rollback below
+      // undoes the whole sweep. No second event: the counts are never printed here.
+      await client.query(SET_CONSTRAINTS_IMMEDIATE_SQL);
       const after = await readStopTables(client, plan.classification, false);
       if (after.populated > 0) throw new RunnerRefusal('prod_sql_l1_stop_table_populated', 'A credential-bearing STOP table holds rows after the L1 statements ran (a trigger or cascade wrote to it); nothing is committed, rolling back');
     }
