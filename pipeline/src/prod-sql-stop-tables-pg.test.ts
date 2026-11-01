@@ -13,7 +13,7 @@ import { AsyncLocalStorage } from 'node:async_hooks';
 import { resolve } from 'node:path';
 import { pathToFileURL } from 'node:url';
 import pg from 'pg';
-import { PROD_SQL_ACTIONS, STOP_CLASSIFICATION, executeProdSqlPlan, loadAuthClassification, planProdSql, stopTablesOf } from './prod-sql.js';
+import { PROD_SQL_ACTIONS, STATEMENT_TIMEOUT_MS, STOP_CLASSIFICATION, executeProdSqlPlan, loadAuthClassification, planProdSql, stopTablesOf } from './prod-sql.js';
 import { RunnerRefusal } from './refusals.js';
 import { REPOSITORY_ROOT } from './staging-rebuilt.js';
 import { RECORDED_PROJECT_REFS } from './target-guard.js';
@@ -413,6 +413,30 @@ async function main(): Promise<void> {
     info('deferred foreign key failing at the flush', `error code ${code}, result ${resultOf(out2)}`);
     check('real PG, a DEFERRED foreign key that the L1 flow_state delete violates: the flush raises 23503 (a clean server error, not a commit-time failure), the run is rolled_back, COMMIT was never sent, and every L1 row and the child row are as before', code === '23503' && resultOf(out2) === 'rolled_back' && !out2.sent.includes('commit') && out2.sent.includes('set constraints all immediate') && await l1Fingerprint() === before2 && Number((await q('select count(*) as n from auth.audit_log_entries')).rows[0].n) === 1);
     check('real PG, that failure event set is only the fixed result event (no driver text), and the wrapper allow-list passes every event', (() => { const k = { fields: 0 }; return out2.events.every((e) => wrapper.allowListLine(JSON.stringify(e), k) !== null) && k.fields === 0 && !JSON.stringify(out2.events).includes('audit_log_entries'); })());
+  }
+
+  // ---- 15. The statement-time bound (the independent reviewer's availability probe): a deferred trigger that sleeps far longer than the bound must be ended by the bound at the flush,
+  // refused with prod_sql_l1_statement_timeout, rolled back (every L1 row restored), never committed, and every STOP lock released. A stricter existing server timeout is kept, not extended.
+  {
+    const lockModesHeld = async (): Promise<number> => Number((await q("select count(*) as n from pg_locks l join pg_class c on c.oid = l.relation join pg_namespace n on n.oid = c.relnamespace where n.nspname = 'auth' and l.mode in ('ShareRowExclusiveLock', 'RowExclusiveLock', 'RowShareLock') and l.pid <> pg_backend_pid()")).rows[0].n);
+    await resetSchema(); await seedL1();
+    await q("create function auth.synthetic_slow_flush() returns trigger language plpgsql as $$ begin perform pg_sleep(60); return old; end $$");
+    await q('create constraint trigger synthetic_slow_flush after delete on auth.flow_state deferrable initially deferred for each row execute function auth.synthetic_slow_flush()');
+    const before = await l1Fingerprint();
+    let seen: { s: string; l: string } | undefined;
+    const slow = await run('l1-sweep', { before: async (sql, c) => { if (sql === 'set constraints all immediate') seen = (await c.query("select current_setting('statement_timeout') as s, current_setting('lock_timeout') as l")).rows[0]; } });
+    check(`real PG, before the flush the sweep's session has statement_timeout 30s and lock_timeout 10s (the server default is 0, unlimited)`, seen?.s === '30s' && seen?.l === '10s');
+    check(`real PG, a deferred trigger that sleeps 60 s is ended by the ${STATEMENT_TIMEOUT_MS / 1000} s bound at the flush (took ${slow.ms} ms, well under the 60 s sleep): fixed refusal prod_sql_l1_statement_timeout, rolled_back, no COMMIT sent`, slow.error instanceof RunnerRefusal && slow.error.id === 'prod_sql_l1_statement_timeout' && resultOf(slow) === 'rolled_back' && !slow.sent.includes('commit') && slow.ms >= STATEMENT_TIMEOUT_MS - 1000 && slow.ms < STATEMENT_TIMEOUT_MS + 15000);
+    check('real PG, after the timeout every L1 row is as before, every STOP table is empty, no STOP lock or other auth table lock is left by the ended sweep, and a writer is not blocked', await l1Fingerprint() === before && await stopRows() === 0 && await lockModesHeld() === 0 && await settledWithin(q("insert into auth.scim_users (data) values ('writer after the timeout')").then(() => q('delete from auth.scim_users')), 5000));
+    check('real PG, the refusal event set passes the wrapper allow-list with nothing withheld', (() => { const k = { fields: 0 }; return slow.events.every((e) => wrapper.allowListLine(JSON.stringify(e), k) !== null) && k.fields === 0 && !JSON.stringify(slow.events).includes('57014'); })());
+    // A stricter timeout already set on the server session is kept (the bound never extends it) and ends the flush the same way, much sooner.
+    await resetSchema(); await seedL1();
+    await q("create function auth.synthetic_slow_flush() returns trigger language plpgsql as $$ begin perform pg_sleep(60); return old; end $$");
+    await q('create constraint trigger synthetic_slow_flush after delete on auth.flow_state deferrable initially deferred for each row execute function auth.synthetic_slow_flush()');
+    const before2 = await l1Fingerprint();
+    let seen2: string | undefined;
+    const strict = await run('l1-sweep', { options: '-c statement_timeout=700ms', before: async (sql, c) => { if (sql === 'set constraints all immediate') seen2 = (await c.query("select current_setting('statement_timeout') as s")).rows[0].s; } });
+    check('real PG, a stricter server timeout (700 ms) is kept (not raised to 30 s) and ends the slow flush with the same fixed refusal, rolled_back, every L1 row restored', seen2 === '700ms' && strict.error instanceof RunnerRefusal && strict.error.id === 'prod_sql_l1_statement_timeout' && resultOf(strict) === 'rolled_back' && !strict.sent.includes('commit') && strict.ms < 10000 && await l1Fingerprint() === before2);
   }
 
   await q('drop schema if exists auth cascade');

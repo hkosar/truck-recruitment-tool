@@ -12,7 +12,7 @@ import { dirname, resolve } from 'node:path';
 import { tmpdir } from 'node:os';
 import { pathToFileURL } from 'node:url';
 import {
-  STOP_CLASSIFICATION, stopTablesOf, readStopTables, AUTH_CLASSIFICATIONS, AUTH_CLASSIFICATION_FILE, AUTH_CLASSIFICATION_SHA256, L1_AUTH_TABLES, L1_USERS_TOKEN_COLUMNS, PROD_SQL_ACTIONS, PROD_SQL_ACTION_IDS, PROD_SQL_COMMANDS, PROD_SQL_COUNT_NAMES, PROD_SQL_DO_NOT_USE, PROD_SQL_FLAG_NAMES, PROD_SQL_IRREVERSIBLE_ACTIONS, PROD_SQL_MISSING, PROD_SQL_RESULTS, PROD_SQL_SHAPE_CHECKS, PROD_SQL_WARNINGS, PROD_SQL_WRAPS, PRODUCTION_PROMPT_PROOF_VARIABLE,
+  STATEMENT_TIMEOUT_MS, STATEMENT_TIMEOUT_SQL, STOP_CLASSIFICATION, stopTablesOf, readStopTables, AUTH_CLASSIFICATIONS, AUTH_CLASSIFICATION_FILE, AUTH_CLASSIFICATION_SHA256, L1_AUTH_TABLES, L1_USERS_TOKEN_COLUMNS, PROD_SQL_ACTIONS, PROD_SQL_ACTION_IDS, PROD_SQL_COMMANDS, PROD_SQL_COUNT_NAMES, PROD_SQL_DO_NOT_USE, PROD_SQL_FLAG_NAMES, PROD_SQL_IRREVERSIBLE_ACTIONS, PROD_SQL_MISSING, PROD_SQL_RESULTS, PROD_SQL_SHAPE_CHECKS, PROD_SQL_WARNINGS, PROD_SQL_WRAPS, PRODUCTION_PROMPT_PROOF_VARIABLE,
   evaluateL1Shape, executeProdSqlPlan, loadAuthClassification, planProdSql, promptProof, selectProdSqlDbUrl, stageDigest, stagesTile, validateAuthClassification, type AuthTableClassification, type ProdSqlAction, type ProdSqlFiles,
 } from './prod-sql.js';
 import { main as runnerMain, parseProdSqlArgs } from './prod-sql-runner.js';
@@ -321,8 +321,8 @@ for (const id of ['m1', 'backout-m1c']) {
   const out = await runPlan('l1-sweep', good);
   const firstDelete = good.sent.findIndex((s) => s.startsWith('delete from'));
   const gateAt = [good.sent.findIndex((s) => s.includes('information_schema.columns')), good.sent.findIndex((s) => s.includes('information_schema.tables'))];
-  check('l1-sweep with the reviewed shape: read committed, then the lock timeout, then the two shape selects, all inside the same transaction and before the first delete; then the sweep commits as before', out.error === undefined && resultsOf(out.events).join() === 'committed' && shapeEvent(out.events)?.passed === true && shapeEvent(out.events)?.action === 'l1-sweep'
-    && gateAt[0] === 3 && gateAt[1] === 4 && gateAt[1]! < firstDelete && ctlOf(good.sent[0]!) === 'begin' && good.sent[1] === 'set transaction isolation level read committed' && good.sent[2] === "set local lock_timeout = '10s'" && ctlOf(good.sent[good.sent.length - 1]!) === 'commit' && out.events.filter((e) => e.msg === 'prod-sql.statement').length === 5);
+  check('l1-sweep with the reviewed shape: read committed, then the lock timeout, then the statement timeout, then the two shape selects, all inside the same transaction and before the first delete; then the sweep commits as before', out.error === undefined && resultsOf(out.events).join() === 'committed' && shapeEvent(out.events)?.passed === true && shapeEvent(out.events)?.action === 'l1-sweep'
+    && gateAt[0] === 4 && gateAt[1] === 5 && gateAt[1]! < firstDelete && ctlOf(good.sent[0]!) === 'begin' && good.sent[1] === 'set transaction isolation level read committed' && good.sent[2] === "set local lock_timeout = '10s'" && good.sent[3] === STATEMENT_TIMEOUT_SQL && ctlOf(good.sent[good.sent.length - 1]!) === 'commit' && out.events.filter((e) => e.msg === 'prod-sql.statement').length === 5);
   for (const [name, columns, tables] of [
     ['an extra unlisted auth table', goodColumns(), [...goodTables(), { table_name: 'review_unlisted_credentials' }]],
     ['a hidden confirmation_token column', goodColumns().filter((r) => r.column_name !== 'confirmation_token'), goodTables()],
@@ -377,9 +377,9 @@ const wrapper = await import(pathToFileURL(resolve(REPOSITORY_ROOT, 'scripts/run
     const at = (re: RegExp) => c.sent.findIndex((s) => re.test(s));
     const lockAt = at(/^lock table/); const firstCount = at(/^select count/); const firstDelete = c.sent.findIndex(isChange);
     check('all 13 STOP tables empty: the sweep proceeds and commits; one stop_tables event: locked, 13 present, 0 populated, passed, classification named', out.error === undefined && resultsOf(out.events).join() === 'committed' && ev?.locked === true && ev.tables_present === 13 && ev.tables_populated === 0 && ev.passed === true && ev.classification === STOP_CLASSIFICATION && ev.action === 'l1-sweep' && Object.values(ev.tables).every((v) => v === 0) && Object.keys(ev.tables).sort().join() === STOP.join());
-    check('order: begin, read committed, lock timeout, the two shape selects, the catalogue lookup, ONE lock statement for all 13 tables in sorted order in share row exclusive mode, 13 counts, and only then the first delete (13 more counts follow, see the next check)',
-      ctlOf(c.sent[0]!) === 'begin' && c.sent[1] === 'set transaction isolation level read committed' && c.sent[2] === "set local lock_timeout = '10s'" && at(/information_schema\.tables/) === 4 && at(/^select c\.relname/) === 5 && lockAt === 6
-      && c.sent[lockAt] === `lock table ${STOP.map((t) => `auth."${t}"`).join(', ')} in share row exclusive mode` && firstCount === 7 && c.sent.filter((s) => /^select count/.test(s)).length === 26 && firstDelete === 7 + 13 && c.sent.filter((s) => /^lock table/.test(s)).length === 1);
+    check('order: begin, read committed, lock timeout, statement timeout, the two shape selects, the catalogue lookup, ONE lock statement for all 13 tables in sorted order in share row exclusive mode, 13 counts, and only then the first delete (13 more counts follow, see the next check)',
+      ctlOf(c.sent[0]!) === 'begin' && c.sent[1] === 'set transaction isolation level read committed' && c.sent[2] === "set local lock_timeout = '10s'" && c.sent[3] === STATEMENT_TIMEOUT_SQL && at(/information_schema\.tables/) === 5 && at(/^select c\.relname/) === 6 && lockAt === 7
+      && c.sent[lockAt] === `lock table ${STOP.map((t) => `auth."${t}"`).join(', ')} in share row exclusive mode` && firstCount === 8 && c.sent.filter((s) => /^select count/.test(s)).length === 26 && firstDelete === 8 + 13 && c.sent.filter((s) => /^lock table/.test(s)).length === 1);
     check('after the last L1 statement and before COMMIT the sweep looks up the STOP tables again and counts all 13 again', (() => { const lastChange = c.sent.map((s, i) => (isChange(s) ? i : -1)).filter((i) => i >= 0).pop()!; const commitAt = c.sent.lastIndexOf('commit'); const reCounts = c.sent.map((s, i) => (/^select count/.test(s) ? i : -1)).filter((i) => i > lastChange); return reCounts.length === 13 && reCounts.every((i) => i < commitAt) && c.sent.slice(lastChange + 1, reCounts[0]!).some((s) => /^select c\.relname/.test(s)) && c.sent.filter((s) => /^lock table/.test(s)).length === 1; })());
     check('only counts are read: every statement that names a STOP table is the lock or a count(*) select (never a column, never *)', c.sent.filter((s) => STOP.some((t) => s.includes(`auth."${t}"`))).every((s) => /^lock table /.test(s) || /^select count\(\*\)::bigint as n from auth\."[a-z_]+"$/.test(s)));
     check('the stop_tables event passes the wrapper allow-list with nothing withheld', (() => { const k = { fields: 0 }; return out.events.every((e) => wrapper.allowListLine(JSON.stringify(e), k) !== null) && k.fields === 0; })());
@@ -438,6 +438,31 @@ const wrapper = await import(pathToFileURL(resolve(REPOSITORY_ROOT, 'scripts/run
     const out = await runPlan('l1-sweep', c);
     check('a lock that fails for another reason (a missing privilege, 42501) is not relabelled: the original error propagates (reported as server_or_driver_error with its SQLSTATE) and the run is rolled back', out.error !== undefined && !(out.error instanceof RunnerRefusal) && (out.error as { code?: string }).code === '42501' && resultsOf(out.events).join() === 'rolled_back' && !c.sent.some(isChange));
     check('the lock timeout is ten seconds and is set before the lock is taken (it bounds the wait for the lock)', c.sent.findIndex((s) => s === "set local lock_timeout = '10s'") >= 0 && c.sent.findIndex((s) => s === "set local lock_timeout = '10s'") < c.sent.findIndex((s) => /^lock table/.test(s)));
+  }
+  {
+    // A statement ended by the bound (SQLSTATE 57014) at the lock, the pre-count, the flush, a final count or an L1 statement is the fixed refusal; the run rolls back and never commits.
+    const base = stopFake(allZero());
+    await runPlan('l1-sweep', base);
+    check('the statement timeout is 30 seconds, transaction-local, set before the lock, and never extends a stricter existing value', STATEMENT_TIMEOUT_MS === 30000 && /^select set_config\('statement_timeout', '30s', true\) from pg_catalog\.pg_settings where name = 'statement_timeout' and \(setting::bigint = 0 or setting::bigint > 30000\)$/.test(STATEMENT_TIMEOUT_SQL)
+      && base.sent.indexOf(STATEMENT_TIMEOUT_SQL) >= 0 && base.sent.indexOf(STATEMENT_TIMEOUT_SQL) < base.sent.findIndex((s) => /^lock table/.test(s)));
+    const timeoutAt = async (where: string) => {
+      const c = stopFake(allZero(), where === 'lock' ? { code: '57014' } : undefined);
+      const inner = c.query.bind(c);
+      let flushed = false; let counts = 0;
+      c.query = async (sql: string) => {
+        const raw = sql.trim();
+        if (raw === 'set constraints all immediate') { flushed = true; if (where === 'flush') { c.sent.push(raw); throw Object.assign(new Error('canceling statement due to statement timeout at host db.example.com'), { code: '57014' }); } }
+        if (/^select count/.test(raw)) { counts += 1; if ((where === 'pre-count' && counts === 1) || (where === 'final-count' && flushed && counts === 14)) { c.sent.push(raw); throw Object.assign(new Error('canceling statement due to statement timeout at host db.example.com'), { code: '57014' }); } }
+        if (where === 'l1-statement' && /^delete from auth\.flow_state/.test(raw)) { c.sent.push(raw); throw Object.assign(new Error('canceling statement due to statement timeout at host db.example.com'), { code: '57014' }); }
+        return inner(sql);
+      };
+      return { c, out: await runPlan('l1-sweep', c) };
+    };
+    for (const where of ['lock', 'pre-count', 'l1-statement', 'flush', 'final-count']) {
+      const { c, out } = await timeoutAt(where);
+      check(`a statement that the bound ends at the ${where} (57014): fixed refusal prod_sql_l1_statement_timeout, never committed, rolled back last, the driver text is not printed`, out.error instanceof RunnerRefusal && out.error.id === 'prod_sql_l1_statement_timeout' && !c.sent.some((s) => ctlOf(s) === 'commit') && c.sent[c.sent.length - 1] === 'rollback' && resultsOf(out.events).join() === 'rolled_back' && !JSON.stringify(out.events).includes('db.example.com')
+        && (where !== 'pre-count' && where !== 'lock' || !c.sent.some(isChange)));
+    }
   }
   {
     const p = plan('l1-sweep'); const { classification: _drop, ...rest } = p;
@@ -501,6 +526,9 @@ const wrapper = await import(pathToFileURL(resolve(REPOSITORY_ROOT, 'scripts/run
       ['remove SET CONSTRAINTS ALL IMMEDIATE before the final re-count (a deferred constraint trigger could write a STOP table inside COMMIT)', (t) => t.replace('await client.query(SET_CONSTRAINTS_IMMEDIATE_SQL);', '')],
       ['change the flush to a statement that does not fire deferred triggers', (t) => t.replace("'set constraints all immediate'", "'set constraints all deferred'")],
       ['hard-code a STOP table in code', (t) => t.replace("export const STOP_LOCK_MODE", "const hardCoded = ['scim_users'];\nexport const STOP_LOCK_MODE")],
+      ['remove the statement timeout from the sweep', (t) => t.replace("if (action.stopTables === 'must_be_empty') await client.query(STATEMENT_TIMEOUT_SQL);", '')],
+      ['a statement timeout (57014) is no longer a fixed refusal', (t) => t.replace("(err as { code?: unknown } | null)?.code === STATEMENT_TIMEOUT_CODE", "(err as { code?: unknown } | null)?.code === 'never'")],
+      ['an unbounded statement timeout (0 is unlimited)', (t) => t.replace('export const STATEMENT_TIMEOUT_MS = 30000;', 'export const STATEMENT_TIMEOUT_MS = 0;')],
       ['a lock timeout is no longer a fixed refusal', (t) => t.replace("['55P03', '40P01', '42809']", "['40P01', '42809']")],
       ['select the rows, not a count', (t) => t.replace('select count(*)::bigint as n from', 'select * from')],
       ['the shape stage locks (a read-only report must not)', (t) => t.replace('await readStopTables(client, plan.classification, false)', 'await readStopTables(client, plan.classification, true)')],
@@ -524,7 +552,7 @@ const wrapper = await import(pathToFileURL(resolve(REPOSITORY_ROOT, 'scripts/run
 {
   check('the wrapper allow-list names equal the runner lists', JSON.stringify([...wrapper.PROD_SQL_ACTIONS]) === JSON.stringify(PROD_SQL_ACTION_IDS) && JSON.stringify([...wrapper.PROD_SQL_COUNT_NAMES].sort()) === JSON.stringify([...PROD_SQL_COUNT_NAMES].sort())
     && JSON.stringify([...wrapper.PROD_SQL_COMMANDS]) === JSON.stringify([...PROD_SQL_COMMANDS]) && JSON.stringify([...wrapper.PROD_SQL_RESULTS]) === JSON.stringify([...PROD_SQL_RESULTS]) && JSON.stringify([...wrapper.PROD_SQL_WRAPS]) === JSON.stringify([...PROD_SQL_WRAPS]) && JSON.stringify([...wrapper.PROD_SQL_SHAPE_CHECKS]) === JSON.stringify([...PROD_SQL_SHAPE_CHECKS]));
-  check('the new refusal identifiers are in both lists', ['prod_sql_target_refused', 'prod_sql_action_not_built', 'prod_sql_action_do_not_use', 'prod_sql_file_unreadable', 'prod_sql_hash_mismatch', 'prod_sql_shape_refused', 'prod_sql_commit_rolled_back', 'prod_sql_l1_shape_not_ok', 'prod_sql_flag_not_expected', 'prod_sql_l1_stop_table_populated', 'prod_sql_l1_stop_table_lock_failed'].every((id) => (REFUSAL_IDS as readonly string[]).includes(id) && wrapper.REFUSAL_IDS.includes(id)));
+  check('the new refusal identifiers are in both lists', ['prod_sql_target_refused', 'prod_sql_action_not_built', 'prod_sql_action_do_not_use', 'prod_sql_file_unreadable', 'prod_sql_hash_mismatch', 'prod_sql_shape_refused', 'prod_sql_commit_rolled_back', 'prod_sql_l1_shape_not_ok', 'prod_sql_flag_not_expected', 'prod_sql_l1_stop_table_populated', 'prod_sql_l1_stop_table_lock_failed', 'prod_sql_l1_statement_timeout'].every((id) => (REFUSAL_IDS as readonly string[]).includes(id) && wrapper.REFUSAL_IDS.includes(id)));
   const all: Array<Record<string, unknown>> = [];
   for (const a of PROD_SQL_ACTIONS) {
     const c = new Recorder((sql) => ({ rows: [Object.fromEntries((a.countNames ?? ['x']).map((n) => [n, '7']))], rowCount: 1, command: sql === 'commit' ? 'COMMIT' : undefined }));

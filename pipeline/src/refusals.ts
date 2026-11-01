@@ -52,6 +52,7 @@ export const REFUSAL_IDS = [
   'prod_sql_flag_not_expected',
   'prod_sql_l1_stop_table_populated',
   'prod_sql_l1_stop_table_lock_failed',
+  'prod_sql_l1_statement_timeout',
   'server_or_driver_error',
 ] as const;
 export type RefusalId = (typeof REFUSAL_IDS)[number];

@@ -527,6 +527,17 @@ export class ProdSqlResultUnknown extends Error {
 }
 
 const LOCK_TIMEOUT_SQL = "set local lock_timeout = '10s'";
+/**
+ * The sweep's statement-time bound: 30 seconds for EVERY statement the sweep sends after it (the two shape selects, the catalogue lookups, the STOP LOCK, every count, each L1 delete and
+ * update, and SET CONSTRAINTS ALL IMMEDIATE, which runs the deferred triggers queued by L1). lock_timeout only limits a wait for a lock; it does not limit a slow trigger, CPU or I/O, and
+ * the server default is statement_timeout = 0 (unlimited), while the sweep holds the STOP writer locks. A stricter timeout already set on the session or role is kept (the statement
+ * changes nothing when the current value is below the bound, and compares in milliseconds from pg_settings). SQLSTATE 57014 then becomes the fixed refusal
+ * prod_sql_l1_statement_timeout and the whole transaction rolls back, which releases every lock. COMMIT is not covered by this refusal (a failed COMMIT is the separate unknown outcome).
+ */
+export const STATEMENT_TIMEOUT_MS = 30000;
+export const STATEMENT_TIMEOUT_SQL = `select set_config('statement_timeout', '${STATEMENT_TIMEOUT_MS / 1000}s', true) from pg_catalog.pg_settings where name = 'statement_timeout' and (setting::bigint = 0 or setting::bigint > ${STATEMENT_TIMEOUT_MS})`;
+/** SQLSTATE query_canceled: what PostgreSQL answers when statement_timeout ends a statement. */
+const STATEMENT_TIMEOUT_CODE = '57014';
 /** Fires every pending deferred constraint trigger and deferred constraint check of the transaction now; run immediately before the final STOP re-count. */
 export const SET_CONSTRAINTS_IMMEDIATE_SQL = 'set constraints all immediate';
 const READ_COMMITTED_SQL = 'set transaction isolation level read committed';
@@ -547,6 +558,7 @@ export async function runProdSqlPlan(client: RebuiltSqlClient, plan: ProdSqlPlan
     // not see rows committed while the lock was awaited. This must run before any query of the transaction. It changes nothing else.
     if (action.stopTables === 'must_be_empty') await client.query(READ_COMMITTED_SQL);
     if (shape !== 'read_only') await client.query(LOCK_TIMEOUT_SQL);
+    if (action.stopTables === 'must_be_empty') await client.query(STATEMENT_TIMEOUT_SQL);
     if (plan.gate !== undefined) {
       // The gate: the two shape selects run inside this transaction before any change; a failed check refuses and the rollback below undoes nothing but the begin.
       const gateResults: unknown[] = [];
@@ -600,11 +612,14 @@ export async function runProdSqlPlan(client: RebuiltSqlClient, plan: ProdSqlPlan
       line({ msg: 'prod-sql.result', action: action.id, result: 'unknown', statements: ran });
       throw new ProdSqlResultUnknown(err);
     }
+    // A statement ended by the sweep's own statement_timeout is the fixed refusal; the rollback below releases every lock.
+    const timedOut = action.stopTables === 'must_be_empty' && (err as { code?: unknown } | null)?.code === STATEMENT_TIMEOUT_CODE;
+    const failure = timedOut ? new RunnerRefusal('prod_sql_l1_statement_timeout', 'A statement of the sweep ran longer than the 30 second bound (the STOP lock, a count, the deferred-trigger flush or an L1 statement); nothing is committed, rolling back') : err;
     // 'rolled_back' only when the server acknowledged the ROLLBACK; otherwise the caller still STOPS and reads the state.
     let acknowledged = true;
     await client.query('rollback').catch(() => { acknowledged = false; });
     line({ msg: 'prod-sql.result', action: action.id, result: acknowledged ? 'rolled_back' : 'rollback_not_confirmed', statements: ran });
-    throw err;
+    throw failure;
   }
   line({ msg: 'prod-sql.result', action: action.id, result: 'committed', statements: ran });
 }
