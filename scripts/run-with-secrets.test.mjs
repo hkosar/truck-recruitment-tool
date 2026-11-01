@@ -114,6 +114,12 @@ test('allow-list: only enumerated events with their own keys; every value fits i
   assert.deepEqual(run({ msg: 'staging-sql.ledger_preflight', case: 'table_present', ok: false, checks: 15, failed: 1, secretish: 'x', host: 'db.example.supabase.co' }), { shown: { msg: 'staging-sql.ledger_preflight', case: 'table_present', ok: false, checks: 15, failed: 1 }, fields: 2 });
   assert.equal(run({ msg: 'staging-sql.step_failed', step: 'supabase/pending/M1c_batch_delete_audit.sql (precheck)' }).shown.step, 'supabase/pending/M1c_batch_delete_audit.sql (precheck)');
   for (const bad of ['postgresql://u:p@h/db', 'a\nb', 'x (anything)', 'db.abcdefghijklmnopqrst.supabase.co:5432']) { const r = run({ msg: 'staging-sql.step_failed', step: bad }); assert.equal(r.shown.step, '<withheld>'); assert.equal(r.fields, 1); }
+  // role matrix: fixed counts only; an unexpected field (probe text) is withheld, bad values are withheld
+  assert.deepEqual(run({ msg: 'staging-sql.role_matrix', ok: false, total: 62, passed: 60, failed: 2 }), { shown: { msg: 'staging-sql.role_matrix', ok: false, total: 62, passed: 60, failed: 2 }, fields: 0 });
+  assert.deepEqual(run({ msg: 'staging-sql.role_matrix', ok: true, total: 62, passed: 62, failed: 0, observed: 'ROW DATA', test: 'select carriers' }), { shown: { msg: 'staging-sql.role_matrix', ok: true, total: 62, passed: 62, failed: 0 }, fields: 2 });
+  assert.equal(run({ msg: 'staging-sql.role_matrix', ok: 'yes', total: 62, passed: 62, failed: 0 }).shown.ok, '<withheld>');
+  assert.equal(run({ msg: 'staging-sql.role_matrix', ok: true, total: '62', passed: 62, failed: 0 }).shown.total, '<withheld>');
+  for (const id of ['role_matrix_failed', 'role_matrix_result_missing']) assert.deepEqual(run({ msg: 'staging-sql.refused', refusal: id }).shown, { msg: 'staging-sql.refused', refusal: id });
   // refusal: an identifier from the fixed list, never text
   assert.deepEqual(run({ msg: 'staging-sql.refused', refusal: 'ledger_preflight_failed' }).shown, { msg: 'staging-sql.refused', refusal: 'ledger_preflight_failed' });
   assert.deepEqual(run({ msg: 'staging-sql.refused', refusal: 're-apply M1c refused: the retained audit table is missing; fragment-Zq9981' }), { shown: { msg: 'staging-sql.refused', refusal: '<withheld>' }, fields: 1 });

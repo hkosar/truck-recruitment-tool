@@ -42,6 +42,8 @@ interface RebuiltActionSpec {
   pinned: boolean;
   /** SHA-256 of the file's raw bytes; when present the plan refuses a file that does not match (a reviewed read-only query is pinned). */
   sha256?: string;
+  /** The file is the rollback-only role matrix: its final row is read, reported as fixed counts, and any failed probe refuses the run. */
+  roleMatrix?: true;
 }
 
 export const REBUILT_STAGING_SQL_ACTIONS: Readonly<Record<string, RebuiltActionSpec>> = {
@@ -68,7 +70,7 @@ export const REBUILT_STAGING_SQL_ACTIONS: Readonly<Record<string, RebuiltActionS
   'reapply-m1': { kind: 'file', file: 'supabase/pending/M1_same_origin_signin.sql', confirmation: 'REAPPLY TNBS M1 AFTER BACKOUT', pinned: false, reapply: 'm1' },
   'reapply-m1b': { kind: 'file', file: 'supabase/pending/M1b_add_person.sql', confirmation: 'REAPPLY TNBS M1B AFTER BACKOUT', pinned: false, reapply: 'm1b' },
   'reapply-m1c': { kind: 'file', file: 'supabase/pending/M1c_batch_delete_audit.sql', confirmation: 'REAPPLY TNBS M1C AFTER BACKOUT', pinned: false, reapply: 'm1c' },
-  'role-matrix-m1': { kind: 'file', file: 'supabase/staging/m1/verify-role-matrix-m1.sql', confirmation: 'RUN TNBS M1 ROLE MATRIX', pinned: true },
+  'role-matrix-m1': { kind: 'file', file: 'supabase/staging/m1/verify-role-matrix-m1.sql', confirmation: 'RUN TNBS M1 ROLE MATRIX', pinned: true, roleMatrix: true },
   snapshot: { kind: 'snapshot', file: 'supabase/backout/pre-cutover-snapshot.sql', confirmation: 'TAKE TNBS PRE-CUTOVER SNAPSHOT', pinned: false },
   // Read-only schema inventory of the auth schema (names, types, foreign keys; never row data), written to --out like the snapshot. Evidence for the production L1 shape gate's reviewed table list (docs/build-plan/18, Route A).
   'auth-schema-inventory': { kind: 'snapshot', file: 'supabase/rollout/auth-schema-inventory.sql', sha256: '75e0b6031361f69a1e361a905daf0a5f27e6e25130580badb9a328ce1ab32499', confirmation: 'TAKE TNBS AUTH SCHEMA INVENTORY', pinned: false },
@@ -116,6 +118,8 @@ export interface RebuiltSqlPlan {
   outPath?: string;
   /** reapply-m1c only: step index of the revoke that alone is sent when the interrupted-run state is detected. */
   m1cRecoveryStep?: number;
+  /** role-matrix-m1 only: the executor reports the matrix counts and refuses on any failed probe. */
+  roleMatrix?: true;
 }
 
 /** Re-pin the old staging ref literal in a reviewed SQL file to the rebuilt ref, in memory only. */
@@ -238,7 +242,7 @@ export function planRebuiltSqlRun(input: {
     ['app.staging_project_ref', target.projectRef],
   ];
   if (spec.confirmationSetting) settings.push([spec.confirmationSetting, spec.confirmation]);
-  return { action: input.action, kind: spec.kind, target, settings, steps, ...(outPath ? { outPath } : {}), ...(spec.reapply === 'm1c' ? { m1cRecoveryStep: steps.length - 1 } : {}) };
+  return { action: input.action, kind: spec.kind, target, settings, steps, ...(outPath ? { outPath } : {}), ...(spec.roleMatrix ? { roleMatrix: true as const } : {}), ...(spec.reapply === 'm1c' ? { m1cRecoveryStep: steps.length - 1 } : {}) };
 }
 
 /** The part of pg.Client the executor uses; tests (and the local-database proof) inject their own. */
@@ -260,6 +264,30 @@ const defaultClientFactory = (target: SupabaseDbTarget): RebuiltSqlClient =>
     // Same relaxed pooler TLS setting as the pipeline (see db.ts TODO(live-db)).
     ssl: { rejectUnauthorized: false },
   });
+
+export interface RoleMatrixCounts { total: number; passed: number; failed: number }
+
+/**
+ * Reads the role matrix's final row (the jsonb column `role_matrix`) out of the multi-statement result and returns
+ * only the three counts. Anything else in the row (probe names, expected/observed text) is dropped here. Returns null
+ * when no well-formed row is present or the counts do not add up (including a matrix with zero probes).
+ */
+export function readRoleMatrixCounts(result: unknown): RoleMatrixCounts | null {
+  const list = Array.isArray(result) ? result : [result];
+  for (let i = list.length - 1; i >= 0; i--) {
+    const row = (list[i] as { rows?: Array<Record<string, unknown>> } | null)?.rows?.[0];
+    const m = row?.role_matrix as Record<string, unknown> | undefined;
+    if (!m || typeof m !== 'object') continue;
+    const n = (v: unknown): number | null => {
+      const x = typeof v === 'string' && /^\d{1,9}$/.test(v) ? Number(v) : v;
+      return typeof x === 'number' && Number.isSafeInteger(x) && x >= 0 ? x : null;
+    };
+    const total = n(m.total), passed = n(m.passed), failed = n(m.failures);
+    if (total === null || passed === null || failed === null || total === 0 || passed + failed !== total) return null;
+    return { total, passed, failed };
+  }
+  return null;
+}
 
 export async function executeRebuiltSqlPlan(plan: RebuiltSqlPlan, clientFactory: (target: SupabaseDbTarget) => RebuiltSqlClient = defaultClientFactory): Promise<void> {
   const client = clientFactory(plan.target);
@@ -343,6 +371,7 @@ export async function executeRebuiltSqlPlan(plan: RebuiltSqlPlan, clientFactory:
       return;
     }
     let steps = plan.steps;
+    let matrixCounts: RoleMatrixCounts | null = null;
     if (plan.m1cRecoveryStep !== undefined) {
       const probe = await client.query(M1C_STATE_PROBE_SQL);
       const { state, failed } = classifyM1cState(probe.rows[0] as M1cStateFacts);
@@ -357,7 +386,8 @@ export async function executeRebuiltSqlPlan(plan: RebuiltSqlPlan, clientFactory:
     for (const step of steps) {
       if (step.transaction) await client.query('begin');
       try {
-        await client.query(step.sql);
+        const result = await client.query(step.sql);
+        if (plan.roleMatrix) matrixCounts = readRoleMatrixCounts(result);
         if (step.ledger) await client.query(LEDGER_INSERT_SQL, [step.ledger.version, step.ledger.name]);
         if (step.transaction) await client.query('commit');
       } catch (err) {
@@ -365,6 +395,15 @@ export async function executeRebuiltSqlPlan(plan: RebuiltSqlPlan, clientFactory:
         // Stop on the first failure; name the step but never echo SQL or connection details.
         console.error(JSON.stringify({ msg: 'staging-sql.step_failed', step: step.label }));
         throw err;
+      }
+      if (plan.roleMatrix) {
+        // Fixed counts only. The matrix itself is rollback-only; a failed probe must never end in step_done.
+        if (matrixCounts === null) {
+          console.error(JSON.stringify({ msg: 'staging-sql.role_matrix', ok: false, total: 0, passed: 0, failed: 0 }));
+          throw new RunnerRefusal('role_matrix_result_missing', 'role matrix: no well-formed result row came back; the role check proved nothing');
+        }
+        console.log(JSON.stringify({ msg: 'staging-sql.role_matrix', ok: matrixCounts.failed === 0, total: matrixCounts.total, passed: matrixCounts.passed, failed: matrixCounts.failed }));
+        if (matrixCounts.failed > 0) throw new RunnerRefusal('role_matrix_failed', `role matrix: ${matrixCounts.failed} of ${matrixCounts.total} probe(s) failed`);
       }
       console.log(JSON.stringify({ msg: 'staging-sql.step_done', step: step.label }));
     }

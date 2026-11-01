@@ -106,9 +106,26 @@ if (runner) {
     "'backout-m1'",
     "'role-matrix-m1'",
     'snapshot',
+    // role-matrix-m1 must report its counts and refuse on a failed probe (never end in step_done on failures)
+    "roleMatrix: true }",
+    "msg: 'staging-sql.role_matrix'",
+    "new RunnerRefusal('role_matrix_failed'",
+    "new RunnerRefusal('role_matrix_result_missing'",
+    'if (matrixCounts.failed > 0)',
   ]) {
     if (!runner.includes(required)) failures.push(`rebuilt runner is missing: ${required}`);
   }
+  const refuseAt = runner.indexOf("new RunnerRefusal('role_matrix_failed'");
+  const doneAt = runner.indexOf("msg: 'staging-sql.step_done'");
+  if (refuseAt < 0 || doneAt < 0 || refuseAt > doneAt) failures.push('rebuilt runner: the role matrix refusal must come before step_done is printed');
+  if (/staging-sql\.role_matrix.*(actor|test_name|observed|expected)/.test(runner)) failures.push('rebuilt runner: the role matrix event must carry counts only, no probe text');
+  const refusalsSrc = read('pipeline/src/refusals.ts') ?? '';
+  const wrapperSrc = read('scripts/run-with-secrets.mjs') ?? '';
+  for (const id of ['role_matrix_failed', 'role_matrix_result_missing']) {
+    if (!refusalsSrc.includes(`'${id}'`)) failures.push(`refusals.ts REFUSAL_IDS is missing ${id}`);
+    if (!wrapperSrc.includes(`'${id}'`)) failures.push(`run-with-secrets.mjs REFUSAL_IDS is missing ${id}`);
+  }
+  if (!wrapperSrc.includes("'staging-sql.role_matrix': { ok: bool, total: int, passed: int, failed: int }")) failures.push('run-with-secrets.mjs must allow-list staging-sql.role_matrix with exactly ok, total, passed, failed');
 }
 
 // The recorded rebuilt staging ref (doc 16 R1 step 2): exactly one 20-letter literal, not the production or old staging ref.
