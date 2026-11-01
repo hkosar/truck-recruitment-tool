@@ -91,6 +91,9 @@ if (runner) {
     'supabase_migrations.schema_migrations',
     'ledger?: { version: string; name: string }',
     "'retention-dry-run'",
+    "'retention-run'",
+    "'install-retention-fixtures'",
+    "'remove-retention-fixtures'",
     "'ledger-preflight'",
     "'environment-preflight'",
     "'owner-login-check'",
@@ -141,6 +144,44 @@ if (owner) {
 const doc16 = read('docs/build-plan/16-staging-and-hosting-plan.md');
 for (const required of ['Data API must already be enabled with', 'never authorizes another create', 'rollback_not_confirmed']) {
   if (!doc16 || !doc16.replace(/\s+/g, ' ').includes(required)) failures.push('doc 16 is missing: ' + required);
+}
+
+// Retention fixture boundary (doc 16 section 4 step 3): seed and remove files are scoped to one exact tag, the tag literal is
+// the same in the seed file, the removal file and retention-run.ts, and the seed file refuses unless nothing is aged yet.
+{
+  const TAG = 'ret-fixture-20261101';
+  const ins = read('supabase/staging/rebuild/install-retention-fixtures.sql');
+  const rem = read('supabase/staging/rebuild/remove-retention-fixtures.sql');
+  const run = read('pipeline/src/retention-run.ts');
+  const rules = read('pipeline/src/retention.ts');
+  if (!ins || !rem || !run || !rules) failures.push('retention fixture files or retention-run.ts are missing');
+  else {
+    for (const [name, sql] of [['install-retention-fixtures', ins], ['remove-retention-fixtures', rem]]) {
+      const c = code(sql);
+      if (sql.includes(PRODUCTION_REF)) failures.push(name + ': contains the production project ref');
+      if (!c.includes("current_setting('app.staging_runner_verified_ref', true) is distinct from '" + OLD_STAGING_REF + "'")) failures.push(name + ': must refuse unless the runner verified the pinned ref');
+      if (!c.includes("to_regclass('staging_identity.marker') is null") || !c.includes('marker_id =')) failures.push(name + ': must require the staging identity marker');
+      if (!/^begin;$/m.test(c) || !/^commit;$/m.test(c)) failures.push(name + ': must be one transaction');
+      if (/password\s+'|postgres(ql)?:\/\/|truncate/i.test(c)) failures.push(name + ': contains a credential, connection string or truncate');
+    }
+    if (!code(ins).includes("'INSTALL TNBS RETENTION TEST FIXTURES'") || !code(rem).includes("'REMOVE TNBS RETENTION TEST FIXTURES'")) failures.push('retention fixture confirmation phrases missing');
+    if (!run.includes("RETENTION_FIXTURE_TAG = '" + TAG + "'")) failures.push('retention-run.ts: tag literal differs from the seed file');
+    for (const [name, sql] of [['install', ins], ['remove', rem]]) {
+      if (!code(sql).includes("'" + TAG + "-aged'") || !code(sql).includes("'" + TAG + "-fresh'")) failures.push(name + '-retention-fixtures: must use the exact -aged and -fresh tags');
+    }
+    // Every delete in the removal file is by exact tag; none is unconditional or by age.
+    const deletes = code(rem).split(';').map((x) => x.trim()).filter((x) => /^delete\s+from/i.test(x));
+    if (deletes.length !== 5) failures.push('remove-retention-fixtures: expected exactly five tag-scoped deletes');
+    for (const d of deletes) if (!d.includes("in ('" + TAG + "-aged', '" + TAG + "-fresh')")) failures.push('remove-retention-fixtures: delete is not scoped to the exact tags');
+    // The seed file's "nothing aged yet" gate uses every retention rule predicate (text taken from retention.ts).
+    const insFlat = code(ins).replace(/\s+/g, ' ');
+    for (const m of rules.matchAll(/where: "([^"]+)"/g)) {
+      if (!insFlat.includes(m[1])) failures.push('install-retention-fixtures: aged gate is missing a retention rule predicate: ' + m[1]);
+    }
+    for (const required of ['each_rule_must_match_exactly_one_row', 'aged_fixture_missing_or_duplicated', 'ledger_did_not_shrink_by_exactly_one', 'least_privilege_checks_failed']) {
+      if (!run.includes(required)) failures.push('retention-run.ts is missing: ' + required);
+    }
+  }
 }
 
 if (failures.length) {

@@ -325,7 +325,7 @@ test('rebuilt staging runner: the recorded ref is the exact reviewed value, and 
   for (const [action, spec] of Object.entries(REBUILT_STAGING_SQL_ACTIONS)) {
     const p = planRebuiltSqlRun({
       action,
-      dbUrl: spec.kind === 'retention' ? pooler(rebuilt).replace('postgres.', 'recruiter_maintenance.') : pooler(rebuilt),
+      dbUrl: (spec.kind === 'retention' || spec.kind === 'retention-run') ? pooler(rebuilt).replace('postgres.', 'recruiter_maintenance.') : pooler(rebuilt),
       confirm: spec.confirmation,
       recordedRebuiltRef: rebuilt,
       ...(spec.kind === 'snapshot' ? { out: resolve(tmpdir(), `tnbs-snapshot-test-${process.pid}.json`) } : {}),
@@ -672,6 +672,7 @@ test('retention-dry-run: only as recruiter_maintenance on the rebuilt project; c
     async end() {},
     async query(sql: string, params?: unknown[]) {
       sent.push(sql);
+      if (/delete_outside/.test(sql)) return { rows: [{ delete_outside: 0, delete_inside: 5, write_anywhere: 0, select_outside: 0, internal_functions: 0, powerful_attributes: 0, memberships: 0 }] };
       if (/current_user as u/.test(sql)) return { rows: [{ u: 'recruiter_maintenance' }] };
       if (/count\(\*\)::int/.test(sql)) return { rows: [{ n: 3 }] };
       if (/has_table_privilege/.test(sql)) return { rows: [{ s: true, d: true, i: false, u: false, t: false }] };
@@ -706,6 +707,72 @@ test('retention-dry-run: only as recruiter_maintenance on the rebuilt project; c
   try {
     await assert.rejects(executeRebuiltSqlPlan(plan(url('recruiter_maintenance')), () => session(false)), /check\(s\) failed/);
   } finally { console.log = origLog; }
+});
+
+test('retention-run: only as recruiter_maintenance; refused before any delete unless exactly the tagged aged fixtures are due; one event the output wrapper passes', async () => {
+  const rebuilt = 'abcdefghijklmnopqrst';
+  const url = (role: string) => `postgresql://${role}.${rebuilt}:redacted-pw@aws-0-us-east-2.pooler.supabase.com:5432/postgres`;
+  const confirm = REBUILT_STAGING_SQL_ACTIONS['retention-run']!.confirmation;
+  const plan = (dbUrl: string, over: Record<string, unknown> = {}) => planRebuiltSqlRun({ action: 'retention-run', dbUrl, confirm, recordedRebuiltRef: rebuilt, ...over });
+  assert.equal(plan(url('recruiter_maintenance')).kind, 'retention-run');
+  assert.throws(() => plan(url('postgres')), /must connect as recruiter_maintenance/);
+  assert.throws(() => plan(url('recruiter_maintenance').replace(':5432/', ':6543/')), /port 5432/);
+  assert.throws(() => plan(url('recruiter_maintenance'), { confirm: REBUILT_STAGING_SQL_ACTIONS['retention-dry-run']!.confirmation }), /--confirm=/);
+  for (const action of ['install-retention-fixtures', 'remove-retention-fixtures']) {
+    assert.equal(planRebuiltSqlRun({ action, dbUrl: url('postgres'), confirm: REBUILT_STAGING_SQL_ACTIONS[action]!.confirmation, recordedRebuiltRef: rebuilt }).kind, 'file', action);
+  }
+
+  const sent: string[] = [];
+  // aged = how many rows each rule would delete; deleteOk = whether the (fake) delete statements remove one row per rule.
+  const session = (aged: number) => {
+    let deleted = false;
+    return {
+      async connect() {},
+      async end() {},
+      async query(sql: string) {
+        sent.push(sql);
+        if (/delete_outside/.test(sql)) return { rows: [{ delete_outside: 0, delete_inside: 5, write_anywhere: 0, select_outside: 0, internal_functions: 0, powerful_attributes: 0, memberships: 0 }] };
+        if (/current_user as u/.test(sql)) return { rows: [{ u: 'recruiter_maintenance' }] };
+        if (/has_table_privilege/.test(sql)) return { rows: [{ s: true, d: true, i: false, u: false, t: false }] };
+        if (/count\(\*\)::int as total/.test(sql)) return { rows: [{ total: deleted ? 4 : 5, aged: deleted ? 0 : 1, fresh: 1 }] };
+        if (/count\(\*\)::int as n/.test(sql)) return { rows: [{ n: deleted ? 0 : aged }] };
+        if (/^delete from/.test(sql)) { deleted = true; return { rowCount: 1 }; }
+        if (DENIED_RUN.includes(sql)) throw Object.assign(new Error('permission denied'), { code: '42501' });
+        return { rows: [], rowCount: 0 };
+      },
+    };
+  };
+  const DENIED_RUN = DENIED_STATEMENTS.map((d) => d.sql);
+  const origLog = console.log;
+  const lines: string[] = [];
+  console.log = (m: string) => lines.push(m);
+  try {
+    await executeRebuiltSqlPlan(plan(url('recruiter_maintenance')), () => session(1));
+  } finally { console.log = origLog; }
+  const event = JSON.parse(lines.find((l) => l.includes('staging-sql.retention_run'))!);
+  assert.equal(event.ok, true);
+  assert.equal(event.deletes_sent, true);
+  assert.deepEqual(event.failed_checks, []);
+  assert.deepEqual(event.deleted, { request_buckets: 1, recovery_failures: 1, email_events: 1, signin_links: 1, app_sessions: 1 });
+  const w = await wrapperModule();
+  const counter = { fields: 0 };
+  assert.notEqual(w.allowListLine(lines.find((l) => l.includes('staging-sql.retention_run'))!, counter), null);
+  assert.equal(counter.fields, 0, 'the real retention run event passes the output wrapper with no field withheld');
+  assert.ok(sent.filter((q) => /^delete from/.test(q)).length >= 5, 'one delete per rule');
+
+  // More than the one fixture row due (an unknown aged row): refused, and no delete statement is ever sent.
+  sent.length = 0;
+  const refusalLines: string[] = [];
+  console.log = (m: string) => refusalLines.push(m);
+  try {
+    await assert.rejects(executeRebuiltSqlPlan(plan(url('recruiter_maintenance')), () => session(2)), /retention run refused or failed/);
+  } finally { console.log = origLog; }
+  assert.ok(!sent.some((q) => /^\s*delete/i.test(q)), 'refused before any delete');
+  const refused = JSON.parse(refusalLines.find((l) => l.includes('staging-sql.retention_run'))!);
+  assert.equal(refused.ok, false);
+  assert.equal(refused.deletes_sent, false);
+  assert.deepEqual(refused.failed_checks, ['each_rule_must_match_exactly_one_row']);
+  assert.ok(!refusalLines.join('').includes('redacted-pw'));
 });
 
 const LEDGER_ABSENT: LedgerFacts = { profiles_absent: true, schema_exists: false, table_exists: false, db_create: true, schema_usage: null, schema_create: null, table_ordinary: null, version_text_not_null: null, statements_type: null, name_type: null, other_columns: null, special_columns: null, version_key: null, other_constraints: null, other_indexes: null, has_triggers_rules_rls: null, can_select: null, can_insert: null, owner_is_runner: null };

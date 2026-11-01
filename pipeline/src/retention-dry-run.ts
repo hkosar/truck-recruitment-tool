@@ -33,6 +33,30 @@ export const DENIED_STATEMENTS: ReadonlyArray<{ name: string; sql: string }> = [
   { name: 'cannot truncate a ledger', sql: 'truncate internal.email_events' },
 ];
 
+/**
+ * Catalogue-wide boundary proof (counts and yes/no only): the table list comes from the catalogue, so a table added later
+ * or a grant widened by mistake is caught. System schemas are excluded (they are readable by PUBLIC by design); the
+ * select/function checks cover only this application's own schemas, where nothing is granted to PUBLIC.
+ */
+export const BOUNDARY_SQL = `
+  with rels as (
+    select c.oid, n.nspname || '.' || c.relname as name, n.nspname as schema
+      from pg_class c join pg_namespace n on n.oid = c.relnamespace
+     where c.relkind in ('r', 'p', 'v', 'm', 'f') and n.nspname not in ('pg_catalog', 'information_schema') and n.nspname !~ '^pg_'
+  )
+  select
+    (select count(*)::int from rels where has_table_privilege(current_user, oid, 'DELETE') and name <> all ($1::text[])) as delete_outside,
+    (select count(*)::int from rels where name = any ($1::text[]) and has_table_privilege(current_user, oid, 'DELETE')) as delete_inside,
+    (select count(*)::int from rels where has_any_column_privilege(current_user, oid, 'INSERT') or has_any_column_privilege(current_user, oid, 'UPDATE')
+        or has_table_privilege(current_user, oid, 'TRUNCATE') or has_table_privilege(current_user, oid, 'REFERENCES') or has_table_privilege(current_user, oid, 'TRIGGER')) as write_anywhere,
+    (select count(*)::int from rels where schema in ('public', 'internal', 'auth', 'staging_identity', 'supabase_migrations')
+        and has_any_column_privilege(current_user, oid, 'SELECT') and name <> all ($1::text[])) as select_outside,
+    (select count(*)::int from pg_proc p join pg_namespace n on n.oid = p.pronamespace
+      where n.nspname = 'internal' and has_function_privilege(current_user, p.oid, 'EXECUTE')) as internal_functions,
+    (select count(*)::int from pg_roles r where r.rolname = current_user
+        and (r.rolsuper or r.rolcreaterole or r.rolcreatedb or r.rolbypassrls or r.rolreplication)) as powerful_attributes,
+    (select count(*)::int from pg_auth_members m join pg_roles r on r.oid = m.member where r.rolname = current_user) as memberships`;
+
 async function refusedWith42501(client: DryRunClient, sql: string): Promise<boolean> {
   await client.query('savepoint dry_run_check');
   try {
@@ -76,6 +100,13 @@ export async function runRetentionDryRun(client: DryRunClient, expectedRole: str
       )).rows[0];
       check(`${table}: select and delete only`, row?.s === true && row?.d === true && row?.i === false && row?.u === false && row?.t === false);
     }
+    const boundary = (await client.query(BOUNDARY_SQL, [MAINTENANCE_LEDGER_TABLES])).rows[0] ?? {};
+    check('delete is held on exactly the five ledgers', boundary.delete_inside === MAINTENANCE_LEDGER_TABLES.length && boundary.delete_outside === 0);
+    check('no insert, update, truncate, references or trigger privilege on any table', boundary.write_anywhere === 0);
+    check('select is held on no table outside the five ledgers (application schemas)', boundary.select_outside === 0);
+    check('no execute privilege on any internal-schema function', boundary.internal_functions === 0);
+    check('no superuser, create-role, create-db, bypass-rls or replication attribute', boundary.powerful_attributes === 0);
+    check('member of no other role', boundary.memberships === 0);
   } finally {
     await client.query('rollback');
   }
