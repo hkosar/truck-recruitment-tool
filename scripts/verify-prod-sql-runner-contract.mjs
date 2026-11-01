@@ -14,6 +14,8 @@ const failures = [];
 let warningSentences = {};
 let irreversibleIds = [];
 let listOfTables = [];
+let listOfStopTables = [];
+const PROD_SQL_STOP_ACTIONS_UNEXPECTED = (src) => [...src.matchAll(/\{ id: '([a-z0-9-]+)'[^}]*?stopTables: '([a-z_]+)'/g)].map((m) => `${m[1]}:${m[2]}`).join() !== 'l1-shape:report,l1-sweep:must_be_empty';
 const read = (rel) => (existsSync(resolve(root, rel)) ? readFileSync(resolve(root, rel), 'utf8').replace(/\r\n/g, '\n') : undefined);
 /** Source without comments (// and block), so a forbidden word in prose does not count and a real statement does. */
 const code = (src) => src.replace(/\/\*[\s\S]*?\*\//g, '').split('\n').map((l) => l.replace(/(^|\s)\/\/.*$/, '')).join('\n');
@@ -161,6 +163,7 @@ if (mod) {
       let data;
       try { data = JSON.parse(bytes.toString('utf8')); } catch { failures.push(`${FILE} is not valid JSON`); }
       const entries = Array.isArray(data?.tables) ? data.tables : [];
+      listOfStopTables = entries.filter((e) => e?.classification === 'credential-bearing: STOP').map((e) => e.table);
       if (entries.length === 0) failures.push(`${FILE} lists no tables`);
       const seen = new Set();
       for (const e of entries) {
@@ -196,10 +199,10 @@ if (mod) {
         if (secretCol && e.classification === 'not credential-bearing: reviewed') failures.push(`${FILE}: ${e.table} has the column ${secretCol.column} but is classified as not credential-bearing`);
       }
     }
-    need('prod-sql.ts', c, /const known = new Set<string>\(classification\.filter\(\(e\) => e\.classification !== 'credential-bearing: STOP'\)\.map\(\(e\) => e\.table\)\);/, 'the gate passes only a table the classification file lists as handled by L1 or reviewed as not credential-bearing (a STOP table and an unlisted table both stop it)');
+    need('prod-sql.ts', c, /const known = new Set<string>\(classification\.map\(\(e\) => e\.table\)\);/, 'the shape gate knows exactly the tables the classification file lists (a STOP table is listed, so it is judged by emptiness below; an unlisted table stops the gate)');
     need('prod-sql.ts', c, /const unreviewedAuthTables = tables === undefined \? 0 : tables\.filter\(\(r\) => typeof r\.table_name !== 'string' \|\| !known\.has\(r\.table_name\)\)\.length;/, 'every auth table that is not in the known set (or has no name) is counted unreviewed, and unreviewed stops the gate');
     need('prod-sql.ts', c, /const shape = evaluateL1Shape\(columnResult, tableResult, classification \?\? \[\]\);/, 'a plan without a verified classification fails closed');
-    need('prod-sql.ts', c, /const classification = action\.report === 'shape' \|\| action\.gate !== undefined \? loadAuthClassification\(files\) : undefined;/, 'the classification is read, pin-checked and parsed at plan time for the shape stage and the gated sweep');
+    need('prod-sql.ts', c, /const classification = action\.report === 'shape' \|\| action\.gate !== undefined \|\| action\.stopTables !== undefined \? loadAuthClassification\(files\) : undefined;/, 'the classification is read, pin-checked and parsed at plan time for the shape stage and the gated sweep');
     need('prod-sql.ts', c, /if \(sha256Hex\(bytes\) !== AUTH_CLASSIFICATION_SHA256\) throw new RunnerRefusal\('prod_sql_hash_mismatch'/, 'the classification file hash refusal');
     if (/L1_REVIEWED_OTHER_AUTH_TABLES|const known = new Set<string>\(\[/.test(c)) failures.push('prod-sql.ts must not repeat the reviewed table list in code (it lives only in the classification file)');
   }
@@ -362,8 +365,8 @@ if (mod) {
   need('prod-sql.ts', c, /export function stagesTile\(file: string, total: number[^)]*\): boolean \{[\s\S]*?return stages\.length > 0 && next === total \+ 1;/, 'stagesTile: first stage at 1, no gap, no overlap, last stage ends at the final statement');
   need('prod-sql.ts', c, /if \(stageDigest\(gate\) !== gateAction\.stageSha256\) throw new RunnerRefusal\('prod_sql_hash_mismatch'/, 'the shape gate is verified against its own stage pin');
   need('prod-sql.ts', c, /if \(!shape\.passed\) throw new RunnerRefusal\('prod_sql_l1_shape_not_ok'/, 'a failed L1 shape check stops the run');
-  need('prod-sql.ts', c, /if \(plan\.gate !== undefined\) \{[\s\S]*?enforceL1Shape\(action, gateResults\[0\], gateResults\[1\], plan\.classification\);\s*\}\s*const shapeRows: unknown\[\] = \[\];\s*for \(const \[i, statement\] of body\.entries\(\)\)/, 'the gate runs, and must pass, before the first statement of the gated action');
-  need('prod-sql.ts', c, /if \(action\.report === 'shape'\) enforceL1Shape\(action, shapeRows\[0\], shapeRows\[1\], plan\.classification\);\s*if \(shape === 'read_only'\)/, 'the shape stage is judged before its read-only transaction is rolled back and reported done');
+  need('prod-sql.ts', c, /if \(plan\.gate !== undefined\) \{[\s\S]*?enforceL1Shape\(action, gateResults\[0\], gateResults\[1\], plan\.classification\);\s*\}\s*if \(action\.stopTables === 'must_be_empty'\) \{[\s\S]*?\}\s*const shapeRows: unknown\[\] = \[\];\s*for \(const \[i, statement\] of body\.entries\(\)\)/, 'the gate runs, and must pass, and then the STOP-table check runs, before the first statement of the gated action');
+  need('prod-sql.ts', c, /if \(action\.report === 'shape'\) \{[\s\S]*?enforceL1Shape\(action, shapeRows\[0\], shapeRows\[1\], plan\.classification\);\s*\}\s*if \(shape === 'read_only'\)/, 'the shape stage is judged before its read-only transaction is rolled back and reported done');
   if (!/export function evaluateL1Shape\(/.test(c) || !/no_unreviewed_auth_tables/.test(c)) failures.push('prod-sql.ts must keep evaluateL1Shape with the reviewed-inventory check');
   need('prod-sql.ts', c, /line\?\.\[1\] !== action\.sha256\) throw new RunnerRefusal\('prod_sql_hash_mismatch'/, 'the migration-manifest agreement refusal');
   need('prod-sql.ts', c, /if \(input\.confirm !== action\.phrase\) \{\s*throw new RunnerRefusal\('confirmation_required'/, 'the exact per-action phrase refusal');
@@ -387,6 +390,26 @@ if (mod) {
   // No ambient environment, no network, no hard-coded address or secret, no repeated production ref.
   for (const forbidden of [/process\.env/, /\bfetch\s*\(/, /sb_secret_|postgres(ql)?:\/\//i, /password\s*[:=]/i, /service_role_key/i, /doppler/i]) if (forbidden.test(c)) failures.push(`prod-sql.ts must not contain ${forbidden}`);
   if (mod.includes(PRODUCTION_REF)) failures.push('prod-sql.ts must read the production ref from target-guard.ts, not repeat it');
+  // ---- STOP tables (Hunter's item 28, option 1): the sweep proceeds only while every credential-bearing STOP table is EMPTY, checked under a lock held to COMMIT.
+  need('prod-sql.ts', c, /\{ id: 'l1-sweep'[^}]*?gate: 'l1-shape', stopTables: 'must_be_empty'/, "the l1-sweep action carries stopTables: 'must_be_empty' (removing it removes the emptiness check and the lock)");
+  need('prod-sql.ts', c, /\{ id: 'l1-shape'[^}]*?report: 'shape', stopTables: 'report'/, "the l1-shape action reports the STOP tables as information (stopTables: 'report'; read-only, no lock)");
+  if (PROD_SQL_STOP_ACTIONS_UNEXPECTED(c)) failures.push("prod-sql.ts: only l1-shape ('report') and l1-sweep ('must_be_empty') may carry stopTables");
+  need('prod-sql.ts', c, /if \(action\.stopTables === 'must_be_empty'\) await client\.query\(READ_COMMITTED_SQL\);\s*if \(shape !== 'read_only'\) await client\.query\(LOCK_TIMEOUT_SQL\);\s*if \(plan\.gate !== undefined\)/, 'read committed is set before any query of the sweep transaction (so the count after the lock sees a fresh snapshot), then the 10 second lock timeout, then the gate');
+  need('prod-sql.ts', c, /const LOCK_TIMEOUT_SQL = "set local lock_timeout = '10s'";/, 'a bounded lock timeout of 10 seconds');
+  need('prod-sql.ts', c, /if \(action\.stopTables === 'must_be_empty'\) \{\s*if \(plan\.classification === undefined\) throw new RunnerRefusal\('prod_sql_shape_refused'[^\n]*\n\s*const stop = await readStopTables\(client, plan\.classification, true\);\s*reportStopTables\(action, stop\);\s*if \(stop\.populated > 0\) throw new RunnerRefusal\('prod_sql_l1_stop_table_populated'/, 'inside the sweep transaction: lock and count the STOP tables (lock = true), print the fixed event, and refuse (rolling back) unless none is populated; no classification means refuse');
+  need('prod-sql.ts', c, /if \(action\.stopTables === 'report' && plan\.classification !== undefined\) reportStopTables\(action, await readStopTables\(client, plan\.classification, false\)\);\s*enforceL1Shape/, 'the read-only shape stage reports the STOP-table counts without a lock (lock = false) and still enforces the shape');
+  const lockMode = /export const STOP_LOCK_MODE = '([a-z ]+)';/.exec(c)?.[1];
+  if (!['share', 'share row exclusive', 'exclusive', 'access exclusive'].includes(lockMode ?? '')) failures.push(`prod-sql.ts: STOP_LOCK_MODE must be a table lock mode that conflicts with ROW EXCLUSIVE (what INSERT takes): share, share row exclusive, exclusive or access exclusive; found ${String(lockMode)}`);
+  need('prod-sql.ts', c, /export const stopTablesLockSql = \(tables: readonly string\[\]\): string => `lock table \$\{tables\.map\(qualified\)\.join\(', '\)\} in \$\{STOP_LOCK_MODE\} mode`;/, 'the lock statement: LOCK TABLE <every existing STOP table> IN <STOP_LOCK_MODE> MODE, one statement, no NOWAIT (the lock timeout bounds the wait), no ONLY (children are locked too)');
+  need('prod-sql.ts', c, /export const stopTableCountSql = \(table: string\): string => `select count\(\*\)::bigint as n from \$\{qualified\(table\)\}`;/, 'the STOP-table read is a count only; no column or row of the table is ever selected');
+  const rst = c.slice(c.indexOf('export async function readStopTables'), c.indexOf('function reportStopTables'));
+  if (!/await client\.query\(stopTablesLockSql\(existing\)\);/.test(rst) || rst.indexOf('await client.query(stopTablesLockSql(existing))') > rst.indexOf('await client.query(stopTableCountSql(t))') || rst.indexOf('await client.query(stopTableCountSql(t))') < 0) failures.push('prod-sql.ts: readStopTables must take the lock BEFORE it counts');
+  if (!/if \(lock && existing\.length > 0\)/.test(rst)) failures.push('prod-sql.ts: readStopTables must lock only when asked to (the sweep) and only the tables that exist');
+  if (!/STOP_LOCK_FAILURE_CODES: readonly string\[\] = \['55P03', '40P01', '42809'\];/.test(c) || !/throw new RunnerRefusal\('prod_sql_l1_stop_table_lock_failed'/.test(rst)) failures.push('prod-sql.ts: a lock timeout (55P03), a deadlock (40P01) or an unlockable object (42809) must be the fixed refusal prod_sql_l1_stop_table_lock_failed');
+  need('prod-sql.ts', c, /const populated = existing\.filter\(\(t\) => counts\[t\] !== 0\)\.length;/, 'anything but an exact zero count (including an unreadable answer, -1) counts as populated');
+  need('prod-sql.ts', c, /export const stopTablesOf = \(classification: readonly AuthTableClassification\[\]\): string\[\] =>\s*classification\.filter\(\(e\) => e\.classification === STOP_CLASSIFICATION\)\.map\(\(e\) => e\.table\)\.sort\(\);/, 'the STOP tables are taken from the pinned classification file, in sorted order');
+  if (listOfStopTables.length !== 13) failures.push(`prod-sql.ts contract: the classification file lists ${listOfStopTables.length} STOP tables; item 28 was approved for 13 (review before changing this number)`);
+  for (const t of listOfStopTables) if (c.includes(`'${t}'`) || c.includes(`"${t}"`) || new RegExp(`auth\\.${t}\\b`).test(c)) failures.push(`prod-sql.ts must not hard-code the STOP table ${t} (the list lives only in the classification file)`);
   // Reporting prints counts, enumerated words and the pinned hash only.
   const reporting = mod.slice(mod.indexOf('// Reporting'), mod.indexOf('// Execution'));
   if (/\.host\b|\.user\b|\.password\b|\.database\b|err\b|\.message\b/.test(reporting)) failures.push('prod-sql.ts: the reporting section must not print connection details or error text');
@@ -471,7 +494,7 @@ for (const f of ['pipeline/src/staging-sql-runner.ts', 'pipeline/src/staging-reb
 // ---------------------------------------------------------------------------------------------------------------
 // Wiring: refusal ids, wrapper allow-list (events, enumerated lists), prompt-only URL, package scripts, verification chain, doc.
 // ---------------------------------------------------------------------------------------------------------------
-const NEW_IDS = ['prod_sql_target_refused', 'prod_sql_action_not_built', 'prod_sql_file_unreadable', 'prod_sql_hash_mismatch', 'prod_sql_shape_refused', 'prod_sql_commit_rolled_back', 'prod_sql_l1_shape_not_ok', 'prod_sql_flag_not_expected', 'prod_sql_action_do_not_use'];
+const NEW_IDS = ['prod_sql_target_refused', 'prod_sql_action_not_built', 'prod_sql_file_unreadable', 'prod_sql_hash_mismatch', 'prod_sql_shape_refused', 'prod_sql_commit_rolled_back', 'prod_sql_l1_shape_not_ok', 'prod_sql_flag_not_expected', 'prod_sql_action_do_not_use', 'prod_sql_l1_stop_table_populated', 'prod_sql_l1_stop_table_lock_failed'];
 if (refusals && wrapper) {
   for (const id of NEW_IDS) {
     if (!refusals.includes(`'${id}'`)) failures.push(`refusals.ts is missing ${id}`);
@@ -479,7 +502,7 @@ if (refusals && wrapper) {
   }
 }
 if (wrapper) {
-  for (const required of ["'prod-sql.verified'", "'prod-sql.plan_only'", "'prod-sql.statement'", "'prod-sql.counts'", "'prod-sql.flag'", "'prod-sql.shape'", "'prod-sql.warning'", "'prod-sql.result'", "'prod-sql.done'", "'prod-sql.refused'", 'export const PROD_SQL_ACTIONS', 'export const PROD_SQL_COUNT_NAMES', 'export const PROD_SQL_SHAPE_CHECKS',
+  for (const required of ["'prod-sql.verified'", "'prod-sql.plan_only'", "'prod-sql.statement'", "'prod-sql.counts'", "'prod-sql.flag'", "'prod-sql.shape'", "'prod-sql.stop_tables'", "'prod-sql.warning'", "'prod-sql.result'", "'prod-sql.done'", "'prod-sql.refused'", 'export const PROD_SQL_ACTIONS', 'export const PROD_SQL_COUNT_NAMES', 'export const PROD_SQL_SHAPE_CHECKS',
     "export const PROMPT_ONLY = ['PRODUCTION_DB_URL']", 'can only be entered at the hidden prompt, never taken from the environment', "sha256: pat(/^[0-9a-f]{64}$/)", "target: oneOf(['production'])"]) {
     if (!wrapper.includes(required)) failures.push(`run-with-secrets.mjs is missing: ${required}`);
   }
@@ -513,6 +536,9 @@ if (!safety || !safety.includes('verify-prod-sql-runner-contract.mjs')) failures
 if (!doc) failures.push('missing docs/build-plan/18-production-sql-route-options.md');
 else if (!doc.includes("BUILT, PENDING REVIEW AND HUNTER'S OPEN-1 CHOICE")) failures.push('doc 18 must carry the section marked "BUILT, PENDING REVIEW AND HUNTER\'S OPEN-1 CHOICE"');
 if (doc) {
+  for (const w of ['STOP tables: stop unless empty', 'IN SHARE MODE', 'prod_sql_l1_stop_table_populated', 'prod_sql_l1_stop_table_lock_failed', 'prod-sql.stop_tables', 'lock_timeout', 'deadlock']) {
+    if (!doc.includes(w)) failures.push(`doc 18 must describe the STOP-table check (missing: "${w}")`);
+  }
   for (const w of ['Irreversible step: ending connections', 'retire-terminate', 'cannot be undone', 'rollback does not restore', 'prod-sql.warning', 'rolled_back', 'retire-backends', 'three times in a row', '60 seconds']) {
     if (!doc.includes(w)) failures.push(`doc 18 must keep the irreversible-step warning (missing: "${w}")`);
   }

@@ -134,7 +134,7 @@ export const REFUSAL_IDS = [
   'reapply_m1b_still_applied', 'reapply_m1c_not_backed_out', 'reapply_m1c_still_applied', 'owner_email_invalid',
   'owner_password_too_short', 'owner_auth_not_created', 'owner_auth_unknown_result', 'owner_promotion_refused',
   'owner_bootstrap_target_refused', 'bootstrap_target_required', 'target_not_recorded_production', 'first_manager_refused',
-  'prod_sql_target_refused', 'prod_sql_action_not_built', 'prod_sql_action_do_not_use', 'prod_sql_file_unreadable', 'prod_sql_hash_mismatch', 'prod_sql_shape_refused', 'prod_sql_commit_rolled_back', 'prod_sql_l1_shape_not_ok', 'prod_sql_flag_not_expected', 'server_or_driver_error',
+  'prod_sql_target_refused', 'prod_sql_action_not_built', 'prod_sql_action_do_not_use', 'prod_sql_file_unreadable', 'prod_sql_hash_mismatch', 'prod_sql_shape_refused', 'prod_sql_commit_rolled_back', 'prod_sql_l1_shape_not_ok', 'prod_sql_flag_not_expected', 'prod_sql_l1_stop_table_populated', 'prod_sql_l1_stop_table_lock_failed', 'server_or_driver_error',
 ];
 
 /** Keep equal to pipeline/src/refusals.ts DRIVER_CODES (a test compares them). */
@@ -254,6 +254,8 @@ const EVENTS = {
   'prod-sql.counts': { action: oneOf(PROD_SQL_ACTIONS), index: int, counts: (v) => typeof v === 'object' && v !== null && !Array.isArray(v) && Object.keys(v).every((k) => PROD_SQL_COUNT_NAMES.includes(k) && int(v[k])) },
   'prod-sql.flag': { action: oneOf(['window-on', 'window-off']), index: int, flag: (v) => typeof v === 'object' && v !== null && !Array.isArray(v) && Object.keys(v).every((k) => PROD_SQL_FLAG_NAMES.includes(k) && (bool(v[k]) || v[k] === 'unknown')) },
   'prod-sql.shape': { action: oneOf(['l1-shape', 'l1-sweep']), checks: (v) => typeof v === 'object' && v !== null && !Array.isArray(v) && Object.keys(v).every((k) => PROD_SQL_SHAPE_CHECKS.includes(k) && bool(v[k])), auth_tables: int, auth_tables_unreviewed: int, passed: bool },
+  // STOP tables (names come from the pinned classification file, not the database; counts are numbers, or 'absent' for a table the schema does not have).
+  'prod-sql.stop_tables': { action: oneOf(['l1-shape', 'l1-sweep']), classification: oneOf(['credential-bearing: STOP']), locked: bool, tables: (v) => typeof v === 'object' && v !== null && !Array.isArray(v) && Object.keys(v).length <= 64 && Object.keys(v).every((k) => ident(k) && (int(v[k]) || v[k] === 'absent')), tables_present: int, tables_populated: int, passed: bool },
   'prod-sql.warning': { action: oneOf(PROD_SQL_IRREVERSIBLE_ACTIONS), warning: oneOf(Object.keys(PROD_SQL_WARNINGS)), notice: oneOf(Object.values(PROD_SQL_WARNINGS)) },
   'prod-sql.result': { action: oneOf(PROD_SQL_ACTIONS), result: oneOf(PROD_SQL_RESULTS), statements: int },
   'prod-sql.done': { action: oneOf(PROD_SQL_ACTIONS), target: oneOf(['production']) },

@@ -7,12 +7,12 @@ import assert from 'node:assert/strict';
 import { spawnSync } from 'node:child_process';
 import { createHash } from 'node:crypto';
 import { EventEmitter } from 'node:events';
-import { existsSync, readFileSync } from 'node:fs';
-import { resolve } from 'node:path';
+import { copyFileSync, existsSync, mkdirSync, mkdtempSync, readFileSync, rmSync, writeFileSync } from 'node:fs';
+import { dirname, resolve } from 'node:path';
 import { tmpdir } from 'node:os';
 import { pathToFileURL } from 'node:url';
 import {
-  AUTH_CLASSIFICATIONS, AUTH_CLASSIFICATION_FILE, AUTH_CLASSIFICATION_SHA256, L1_AUTH_TABLES, L1_USERS_TOKEN_COLUMNS, PROD_SQL_ACTIONS, PROD_SQL_ACTION_IDS, PROD_SQL_COMMANDS, PROD_SQL_COUNT_NAMES, PROD_SQL_DO_NOT_USE, PROD_SQL_FLAG_NAMES, PROD_SQL_IRREVERSIBLE_ACTIONS, PROD_SQL_MISSING, PROD_SQL_RESULTS, PROD_SQL_SHAPE_CHECKS, PROD_SQL_WARNINGS, PROD_SQL_WRAPS, PRODUCTION_PROMPT_PROOF_VARIABLE,
+  STOP_CLASSIFICATION, stopTablesOf, readStopTables, AUTH_CLASSIFICATIONS, AUTH_CLASSIFICATION_FILE, AUTH_CLASSIFICATION_SHA256, L1_AUTH_TABLES, L1_USERS_TOKEN_COLUMNS, PROD_SQL_ACTIONS, PROD_SQL_ACTION_IDS, PROD_SQL_COMMANDS, PROD_SQL_COUNT_NAMES, PROD_SQL_DO_NOT_USE, PROD_SQL_FLAG_NAMES, PROD_SQL_IRREVERSIBLE_ACTIONS, PROD_SQL_MISSING, PROD_SQL_RESULTS, PROD_SQL_SHAPE_CHECKS, PROD_SQL_WARNINGS, PROD_SQL_WRAPS, PRODUCTION_PROMPT_PROOF_VARIABLE,
   evaluateL1Shape, executeProdSqlPlan, loadAuthClassification, planProdSql, promptProof, selectProdSqlDbUrl, stageDigest, stagesTile, validateAuthClassification, type AuthTableClassification, type ProdSqlAction, type ProdSqlFiles,
 } from './prod-sql.js';
 import { main as runnerMain, parseProdSqlArgs } from './prod-sql-runner.js';
@@ -321,8 +321,8 @@ for (const id of ['m1', 'backout-m1c']) {
   const out = await runPlan('l1-sweep', good);
   const firstDelete = good.sent.findIndex((s) => s.startsWith('delete from'));
   const gateAt = [good.sent.findIndex((s) => s.includes('information_schema.columns')), good.sent.findIndex((s) => s.includes('information_schema.tables'))];
-  check('l1-sweep with the reviewed shape: the two shape selects run inside the same transaction, after the lock timeout and before the first delete; then the sweep commits as before', out.error === undefined && resultsOf(out.events).join() === 'committed' && shapeEvent(out.events)?.passed === true && shapeEvent(out.events)?.action === 'l1-sweep'
-    && gateAt[0] === 2 && gateAt[1] === 3 && gateAt[1]! < firstDelete && ctlOf(good.sent[0]!) === 'begin' && good.sent[1] === "set local lock_timeout = '10s'" && ctlOf(good.sent[good.sent.length - 1]!) === 'commit' && out.events.filter((e) => e.msg === 'prod-sql.statement').length === 5);
+  check('l1-sweep with the reviewed shape: read committed, then the lock timeout, then the two shape selects, all inside the same transaction and before the first delete; then the sweep commits as before', out.error === undefined && resultsOf(out.events).join() === 'committed' && shapeEvent(out.events)?.passed === true && shapeEvent(out.events)?.action === 'l1-sweep'
+    && gateAt[0] === 3 && gateAt[1] === 4 && gateAt[1]! < firstDelete && ctlOf(good.sent[0]!) === 'begin' && good.sent[1] === 'set transaction isolation level read committed' && good.sent[2] === "set local lock_timeout = '10s'" && ctlOf(good.sent[good.sent.length - 1]!) === 'commit' && out.events.filter((e) => e.msg === 'prod-sql.statement').length === 5);
   for (const [name, columns, tables] of [
     ['an extra unlisted auth table', goodColumns(), [...goodTables(), { table_name: 'review_unlisted_credentials' }]],
     ['a hidden confirmation_token column', goodColumns().filter((r) => r.column_name !== 'confirmation_token'), goodTables()],
@@ -339,14 +339,158 @@ for (const id of ['m1', 'backout-m1c']) {
   check('l1-counts and the other actions are not gated and print no shape event; only l1-sweep has a gate and only l1-shape is a shape stage', counts.error === undefined && shapeEvent(counts.events) === undefined && PROD_SQL_ACTIONS.filter((a) => a.gate !== undefined).map((a) => a.id).join() === 'l1-sweep' && PROD_SQL_ACTIONS.filter((a) => a.report === 'shape').map((a) => a.id).join() === 'l1-shape');
 }
 
+const wrapper = await import(pathToFileURL(resolve(REPOSITORY_ROOT, 'scripts/run-with-secrets.mjs')).href);
+// ---------------------------------------------------------------------------------------------------------------
+// STOP tables: proceed only while all thirteen are empty; locked, counted, refused and rolled back otherwise
+// ---------------------------------------------------------------------------------------------------------------
+{
+  const classification = loadAuthClassification();
+  const STOP = stopTablesOf(classification);
+  const stopEvent = (events: Array<Record<string, unknown>>) => events.find((e) => e.msg === 'prod-sql.stop_tables') as { action: string; classification: string; locked: boolean; tables: Record<string, number | string>; tables_present: number; tables_populated: number; passed: boolean } | undefined;
+  /** The fake catalogue holds the listed STOP tables with the given counts (a string is the raw, possibly unreadable, answer); the lock and count statements answer from it. `lockError` makes the lock statement fail. */
+  const stopFake = (state: Record<string, number | string>, lockError?: { code?: string }) => {
+    const c = shapeClient(goodColumns(), goodTables());
+    const base = c.query.bind(c);
+    // The recorder hands handlers the statement with quoted names blanked, so the STOP statements are matched here on the raw text.
+    c.query = async (sql: string) => {
+      const raw = sql.trim();
+      const m = /^select count\(\*\)::bigint as n from auth\."([a-z_]+)"$/.exec(raw);
+      if (raw.startsWith('select c.relname') || raw.startsWith('lock table') || m !== null) {
+        c.sent.push(raw);
+        if (raw.startsWith('select c.relname')) return { rows: Object.keys(state).filter((t) => raw.includes(`'${t}'`)).map((relname) => ({ relname })), rowCount: Object.keys(state).length };
+        if (raw.startsWith('lock table')) { if (lockError !== undefined) throw Object.assign(new Error('lock failed at host db.example.com'), lockError); return { rows: [], rowCount: 0 }; }
+        return { rows: [{ n: String(state[m![1]!]) }], rowCount: 1 };
+      }
+      return base(sql);
+    };
+    return c;
+  };
+  const allZero = () => Object.fromEntries(STOP.map((t) => [t, 0]));
+  const isChange = (s: string) => /^(delete|update)\b/.test(s);
+
+  check('there are exactly 13 STOP tables and they come from the pinned classification file (the sweep code names none of them)', STOP.length === 13 && STOP.every((t) => classification.find((e) => e.table === t)?.classification === STOP_CLASSIFICATION) && !readFileSync(resolve(REPOSITORY_ROOT, 'pipeline/src/prod-sql.ts'), 'utf8').includes("'scim_users'"));
+  check('only the sweep must find the STOP tables empty; the shape stage only reports them', PROD_SQL_ACTIONS.filter((a) => a.stopTables !== undefined).map((a) => `${a.id}:${a.stopTables}`).join() === 'l1-shape:report,l1-sweep:must_be_empty');
+  {
+    const c = stopFake(allZero());
+    const out = await runPlan('l1-sweep', c);
+    const ev = stopEvent(out.events);
+    const at = (re: RegExp) => c.sent.findIndex((s) => re.test(s));
+    const lockAt = at(/^lock table/); const firstCount = at(/^select count/); const firstDelete = c.sent.findIndex(isChange);
+    check('all 13 STOP tables empty: the sweep proceeds and commits; one stop_tables event: locked, 13 present, 0 populated, passed, classification named', out.error === undefined && resultsOf(out.events).join() === 'committed' && ev?.locked === true && ev.tables_present === 13 && ev.tables_populated === 0 && ev.passed === true && ev.classification === STOP_CLASSIFICATION && ev.action === 'l1-sweep' && Object.values(ev.tables).every((v) => v === 0) && Object.keys(ev.tables).sort().join() === STOP.join());
+    check('order: begin, read committed, lock timeout, the two shape selects, the catalogue lookup, ONE lock statement for all 13 tables in sorted order in share mode, 13 counts, and only then the first delete',
+      ctlOf(c.sent[0]!) === 'begin' && c.sent[1] === 'set transaction isolation level read committed' && c.sent[2] === "set local lock_timeout = '10s'" && at(/information_schema\.tables/) === 4 && at(/^select c\.relname/) === 5 && lockAt === 6
+      && c.sent[lockAt] === `lock table ${STOP.map((t) => `auth."${t}"`).join(', ')} in share mode` && firstCount === 7 && c.sent.filter((s) => /^select count/.test(s)).length === 13 && firstDelete === 7 + 13 && c.sent.filter((s) => /^lock table/.test(s)).length === 1);
+    check('only counts are read: every statement that names a STOP table is the lock or a count(*) select (never a column, never *)', c.sent.filter((s) => STOP.some((t) => s.includes(`auth."${t}"`))).every((s) => /^lock table /.test(s) || /^select count\(\*\)::bigint as n from auth\."[a-z_]+"$/.test(s)));
+    check('the stop_tables event passes the wrapper allow-list with nothing withheld', (() => { const k = { fields: 0 }; return out.events.every((e) => wrapper.allowListLine(JSON.stringify(e), k) !== null) && k.fields === 0; })());
+  }
+  {
+    const populated = { ...allZero(), mfa_factors: 2 };
+    const c = stopFake(populated);
+    const out = await runPlan('l1-sweep', c);
+    const ev = stopEvent(out.events);
+    check('one row in one STOP table: refused (prod_sql_l1_stop_table_populated), no delete or update, never committed, rolled back; the event holds only the category, the count per table and the populated count', out.error instanceof RunnerRefusal && out.error.id === 'prod_sql_l1_stop_table_populated' && !c.sent.some(isChange) && !c.sent.some((s) => ctlOf(s) === 'commit') && c.sent[c.sent.length - 1] === 'rollback' && resultsOf(out.events).join() === 'rolled_back'
+      && ev?.passed === false && ev.tables_populated === 1 && ev.tables.mfa_factors === 2 && Object.entries(ev.tables).filter(([t]) => t !== 'mfa_factors').every(([, v]) => v === 0) && out.events.filter((e) => e.msg === 'prod-sql.statement').length === 0);
+    const unreadable = await runPlan('l1-sweep', stopFake({ ...allZero(), scim_users: 'not a number' }));
+    check('a count that cannot be read counts as populated (-1), never as empty', unreadable.error instanceof RunnerRefusal && unreadable.error.id === 'prod_sql_l1_stop_table_populated' && stopEvent(unreadable.events)?.tables.scim_users === -1);
+    const some = await runPlan('l1-sweep', stopFake({ instances: 0, scim_tokens: 0 }));
+    const sev = stopEvent(some.events);
+    check('a STOP table the schema does not have is reported as absent and is not locked; the others still must be empty', some.error === undefined && sev?.tables_present === 2 && Object.values(sev.tables).filter((v) => v === 'absent').length === 11 && sev?.passed === true);
+    const none = stopFake({});
+    const noneOut = await runPlan('l1-sweep', none);
+    check('no STOP table present at all: no lock statement is sent and the sweep proceeds', noneOut.error === undefined && !none.sent.some((s) => /^lock table/.test(s)) && stopEvent(noneOut.events)?.tables_present === 0);
+  }
+  for (const code of ['55P03', '40P01', '42809']) {
+    const c = stopFake(allZero(), { code });
+    const out = await runPlan('l1-sweep', c);
+    check(`a lock that fails with SQLSTATE ${code}: fixed refusal prod_sql_l1_stop_table_lock_failed, no count, no delete or update, never committed, rolled back; the driver text is not printed`, out.error instanceof RunnerRefusal && out.error.id === 'prod_sql_l1_stop_table_lock_failed' && !c.sent.some((s) => /^select count/.test(s)) && !c.sent.some(isChange) && !c.sent.some((s) => ctlOf(s) === 'commit') && c.sent[c.sent.length - 1] === 'rollback'
+      && resultsOf(out.events).join() === 'rolled_back' && !JSON.stringify(out.events).includes('db.example.com'));
+  }
+  {
+    const c = stopFake(allZero(), { code: '42501' });
+    const out = await runPlan('l1-sweep', c);
+    check('a lock that fails for another reason (a missing privilege, 42501) is not relabelled: the original error propagates (reported as server_or_driver_error with its SQLSTATE) and the run is rolled back', out.error !== undefined && !(out.error instanceof RunnerRefusal) && (out.error as { code?: string }).code === '42501' && resultsOf(out.events).join() === 'rolled_back' && !c.sent.some(isChange));
+    check('the lock timeout is ten seconds and is set before the lock is taken (it bounds the wait for the lock)', c.sent.findIndex((s) => s === "set local lock_timeout = '10s'") >= 0 && c.sent.findIndex((s) => s === "set local lock_timeout = '10s'") < c.sent.findIndex((s) => /^lock table/.test(s)));
+  }
+  {
+    const p = plan('l1-sweep'); const { classification: _drop, ...rest } = p;
+    const c = stopFake(allZero());
+    const out = await captureLog(() => executeProdSqlPlan(rest as typeof p, () => c));
+    check('a sweep plan without the verified classification refuses and sends no delete', out.error instanceof RunnerRefusal && !c.sent.some(isChange));
+    const noStop = { ...p, classification: classification.filter((e) => e.classification !== STOP_CLASSIFICATION) };
+    const c2 = stopFake(allZero());
+    const out2 = await captureLog(() => executeProdSqlPlan(noStop, () => c2));
+    check('if the classification lists no STOP table nothing is locked or counted (and the event says 0 present)', out2.error === undefined && !c2.sent.some((s) => /^lock table|^select count|^select c\.relname/.test(s)) && stopEvent(out2.events)?.tables_present === 0);
+  }
+  {
+    const c = stopFake({ ...allZero(), oauth_clients: 5, mfa_factors: 1 });
+    const out = await runPlan('l1-shape', c);
+    const ev = stopEvent(out.events);
+    check('l1-shape reports the same per-table counts as information (locked: false), takes no lock, does not refuse on a populated STOP table, and ends read_only_done', out.error === undefined && resultsOf(out.events).join() === 'read_only_done' && ev?.locked === false && ev.action === 'l1-shape' && ev.tables_populated === 2 && ev.passed === false && ev.tables.oauth_clients === 5 && shapeEvent(out.events)?.passed === true
+      && !c.sent.some((s) => /^lock table|^set /.test(s)) && c.sent[0] === 'begin read only' && c.sent[c.sent.length - 1] === 'rollback');
+    const unclassified = await runPlan('l1-shape', shapeClient(goodColumns(), [...goodTables(), { table_name: 'review_unclassified' }]));
+    check('l1-shape still refuses on an unclassified table (counted, not named)', unclassified.error instanceof RunnerRefusal && unclassified.error.id === 'prod_sql_l1_shape_not_ok' && shapeEvent(unclassified.events)?.auth_tables_unreviewed === 1 && !JSON.stringify(unclassified.events).includes('review_unclassified'));
+    const su = shapeClient(goodColumns(), [...goodTables(), { table_name: 'review_unclassified' }]);
+    const suOut = await runPlan('l1-sweep', su);
+    check('l1-sweep with an unclassified table still stops at the gate, before any lock or count', suOut.error instanceof RunnerRefusal && suOut.error.id === 'prod_sql_l1_shape_not_ok' && !su.sent.some((s) => /^lock table|^select count/.test(s)));
+  }
+  {
+    const k1 = { fields: 0 };
+    const good = JSON.stringify({ msg: 'prod-sql.stop_tables', action: 'l1-sweep', classification: STOP_CLASSIFICATION, locked: true, tables: { scim_users: 0, instances: 'absent' }, tables_present: 1, tables_populated: 0, passed: true });
+    check('the wrapper allow-list shows a well-formed stop event whole', wrapper.allowListLine(good, k1) === good && k1.fields === 0);
+    const k2 = { fields: 0 };
+    const bad = JSON.parse(wrapper.allowListLine(JSON.stringify({ msg: 'prod-sql.stop_tables', action: 'm1', classification: 'fine', locked: 'yes', tables: { 'bad name; drop': 1 }, tables_present: 'many', tables_populated: 1.5, passed: true, row: { secret: 'x' } }), k2));
+    check('the allow-list withholds a stop event with another action, another classification word, a non-boolean, a table key that is not an identifier, a non-numeric count, and drops an unknown key', bad.action === '<withheld>' && bad.classification === '<withheld>' && bad.locked === '<withheld>' && bad.tables === '<withheld>' && bad.tables_present === '<withheld>' && bad.tables_populated === '<withheld>' && !('row' in bad) && k2.fields === 7);
+    const k3 = { fields: 0 };
+    check('the allow-list withholds a stop table whose value is a string other than absent, or a nested object', JSON.parse(wrapper.allowListLine(JSON.stringify({ msg: 'prod-sql.stop_tables', tables: { scim_users: 'secret value' } }), k3)).tables === '<withheld>' && JSON.parse(wrapper.allowListLine(JSON.stringify({ msg: 'prod-sql.stop_tables', tables: { scim_users: { a: 1 } } }), k3)).tables === '<withheld>');
+  }
+}
+
+// ---------------------------------------------------------------------------------------------------------------
+// Drift: the contract script fails when the emptiness check or the lock is removed (mutation test on a temporary copy of the repository files)
+// ---------------------------------------------------------------------------------------------------------------
+{
+  const copy = mkdtempSync(resolve(tmpdir(), 'tnbs-stop-drift-'));
+  try {
+    const listed = spawnSync('git', ['ls-files', '-z', '--', 'scripts', 'supabase', 'docs', 'pipeline/src', 'pipeline/package.json', '.github'], { cwd: REPOSITORY_ROOT, encoding: 'utf8' }).stdout.split('\0').filter(Boolean);
+    for (const f of listed) { mkdirSync(dirname(resolve(copy, f)), { recursive: true }); copyFileSync(resolve(REPOSITORY_ROOT, f), resolve(copy, f)); }
+    const target = resolve(copy, 'pipeline/src/prod-sql.ts');
+    const original = readFileSync(target, 'utf8').replace(/\r\n/g, '\n');
+    const contract = () => spawnSync(process.execPath, [resolve(copy, 'scripts/verify-prod-sql-runner-contract.mjs')], { cwd: copy, encoding: 'utf8', timeout: 60000 });
+    const base = contract();
+    check('the contract script passes on an unchanged copy of the repository files (so each failure below is caused by its own mutation)', base.status === 0);
+    const mutations: Array<[string, (t: string) => string]> = [
+      ["remove stopTables: 'must_be_empty' from the sweep (no emptiness check, no lock)", (t) => t.replace(", stopTables: 'must_be_empty'", '')],
+      ['remove the lock: a mode that does not block writers', (t) => t.replace("export const STOP_LOCK_MODE = 'share';", "export const STOP_LOCK_MODE = 'access share';")],
+      ['remove the lock: the sweep asks for no lock (lock = false)', (t) => t.replace('readStopTables(client, plan.classification, true)', 'readStopTables(client, plan.classification, false)')],
+      ['remove the lock statement from readStopTables', (t) => t.replace('await client.query(stopTablesLockSql(existing));', 'void stopTablesLockSql(existing);')],
+      ['drop the populated refusal', (t) => t.replace("if (stop.populated > 0) throw new RunnerRefusal('prod_sql_l1_stop_table_populated'", "if (stop.populated > 99) throw new RunnerRefusal('prod_sql_l1_stop_table_populated'")],
+      ['count after the delete: move the check behind the first statement', (t) => t.replace("if (action.stopTables === 'must_be_empty') {\n      // Lock the STOP tables", "if (action.stopTables === 'never') {\n      // Lock the STOP tables")],
+      ['no read committed before the lock', (t) => t.replace("if (action.stopTables === 'must_be_empty') await client.query(READ_COMMITTED_SQL);", '')],
+      ['hard-code a STOP table in code', (t) => t.replace("export const STOP_LOCK_MODE", "const hardCoded = ['scim_users'];\nexport const STOP_LOCK_MODE")],
+      ['a lock timeout is no longer a fixed refusal', (t) => t.replace("['55P03', '40P01', '42809']", "['40P01', '42809']")],
+      ['select the rows, not a count', (t) => t.replace('select count(*)::bigint as n from', 'select * from')],
+      ['the shape stage locks (a read-only report must not)', (t) => t.replace('await readStopTables(client, plan.classification, false)', 'await readStopTables(client, plan.classification, true)')],
+    ];
+    for (const [name, mutate] of mutations) {
+      const mutated = mutate(original);
+      assert.notEqual(mutated, original, `the mutation "${name}" did not change the file (the test is stale)`);
+      writeFileSync(target, mutated);
+      const out = contract();
+      check(`the contract script fails when: ${name}`, out.status === 1 && /prod-sql\.ts/.test(out.stderr));
+    }
+    writeFileSync(target, original);
+  } finally {
+    rmSync(copy, { recursive: true, force: true });
+  }
+}
+
 // ---------------------------------------------------------------------------------------------------------------
 // Output: every event the runner can print passes the wrapper's allow-list with nothing withheld, and nothing sensitive appears
 // ---------------------------------------------------------------------------------------------------------------
-const wrapper = await import(pathToFileURL(resolve(REPOSITORY_ROOT, 'scripts/run-with-secrets.mjs')).href);
 {
   check('the wrapper allow-list names equal the runner lists', JSON.stringify([...wrapper.PROD_SQL_ACTIONS]) === JSON.stringify(PROD_SQL_ACTION_IDS) && JSON.stringify([...wrapper.PROD_SQL_COUNT_NAMES].sort()) === JSON.stringify([...PROD_SQL_COUNT_NAMES].sort())
     && JSON.stringify([...wrapper.PROD_SQL_COMMANDS]) === JSON.stringify([...PROD_SQL_COMMANDS]) && JSON.stringify([...wrapper.PROD_SQL_RESULTS]) === JSON.stringify([...PROD_SQL_RESULTS]) && JSON.stringify([...wrapper.PROD_SQL_WRAPS]) === JSON.stringify([...PROD_SQL_WRAPS]) && JSON.stringify([...wrapper.PROD_SQL_SHAPE_CHECKS]) === JSON.stringify([...PROD_SQL_SHAPE_CHECKS]));
-  check('the new refusal identifiers are in both lists', ['prod_sql_target_refused', 'prod_sql_action_not_built', 'prod_sql_action_do_not_use', 'prod_sql_file_unreadable', 'prod_sql_hash_mismatch', 'prod_sql_shape_refused', 'prod_sql_commit_rolled_back', 'prod_sql_l1_shape_not_ok', 'prod_sql_flag_not_expected'].every((id) => (REFUSAL_IDS as readonly string[]).includes(id) && wrapper.REFUSAL_IDS.includes(id)));
+  check('the new refusal identifiers are in both lists', ['prod_sql_target_refused', 'prod_sql_action_not_built', 'prod_sql_action_do_not_use', 'prod_sql_file_unreadable', 'prod_sql_hash_mismatch', 'prod_sql_shape_refused', 'prod_sql_commit_rolled_back', 'prod_sql_l1_shape_not_ok', 'prod_sql_flag_not_expected', 'prod_sql_l1_stop_table_populated', 'prod_sql_l1_stop_table_lock_failed'].every((id) => (REFUSAL_IDS as readonly string[]).includes(id) && wrapper.REFUSAL_IDS.includes(id)));
   const all: Array<Record<string, unknown>> = [];
   for (const a of PROD_SQL_ACTIONS) {
     const c = new Recorder((sql) => ({ rows: [Object.fromEntries((a.countNames ?? ['x']).map((n) => [n, '7']))], rowCount: 1, command: sql === 'commit' ? 'COMMIT' : undefined }));
@@ -356,7 +500,7 @@ const wrapper = await import(pathToFileURL(resolve(REPOSITORY_ROOT, 'scripts/run
   const counter = { fields: 0 };
   const shown = all.map((e) => wrapper.allowListLine(JSON.stringify(e), counter));
   check('every event the runner prints for every action passes the wrapper allow-list: 0 withheld lines, 0 withheld fields', shown.every((s: string | null) => s !== null) && counter.fields === 0 && all.length > PROD_SQL_ACTIONS.length * 3);
-  check('the event names are exactly the new prod-sql family', [...new Set(all.map((e) => e.msg))].sort().join() === 'prod-sql.counts,prod-sql.flag,prod-sql.plan_only,prod-sql.result,prod-sql.shape,prod-sql.statement,prod-sql.verified,prod-sql.warning');
+  check('the event names are exactly the new prod-sql family', [...new Set(all.map((e) => e.msg))].sort().join() === 'prod-sql.counts,prod-sql.flag,prod-sql.plan_only,prod-sql.result,prod-sql.shape,prod-sql.statement,prod-sql.stop_tables,prod-sql.verified,prod-sql.warning');
   {
     const good = await runPlan('l1-shape', shapeClient(goodColumns(), goodTables()));
     const bad = await runPlan('l1-sweep', shapeClient(goodColumns(), [...goodTables(), { table_name: 'x' }]));
@@ -450,15 +594,15 @@ const wrapper = await import(pathToFileURL(resolve(REPOSITORY_ROOT, 'scripts/run
     ['scim_tokens', 'token_hash'], ['webauthn_credentials', 'credential_id'], ['webauthn_challenges', 'session_data'], ['mfa_factors', 'web_authn_credential'], ['scim_users', 'resource'],
   ].every(([t, c]) => mirror.tables[t!]?.some((x) => x.column === c) && classification.find((e) => e.table === t)?.classification === 'credential-bearing: STOP'));
   check('the schema_migrations entry is confirmed by the capture (one column, version) and the two remaining free-form-json assumptions are recorded as notes', (() => { const e = classification.find((x) => x.table === 'schema_migrations'); const cols = mirror.tables.schema_migrations ?? []; return e?.classification === 'not credential-bearing: reviewed' && cols.length === 1 && cols[0]?.column === 'version' && /Confirmed by the staging-2 capture/.test(e.note ?? '') && ['audit_log_entries', 'identities'].every((t) => /Assumption/.test(classification.find((x) => x.table === t)?.note ?? '')); })());
-  check('the whole captured schema (every table and column of the mirror) is judged by the real gate: it refuses, counting exactly the thirteen STOP tables as unreviewed', (() => {
+  check('the whole captured schema (every table and column of the mirror) is judged by the real shape gate: every one of the 27 tables is classified, so the SHAPE passes; the STOP tables are judged by emptiness (readStopTables), not by their names', (() => {
     const cols = Object.entries(mirror.tables).flatMap(([t, cs]) => cs.map((c) => ({ table_name: t, column_name: c.column })));
     const r = evaluateL1Shape(cols, mirrorTables.map((t) => ({ table_name: t })), classification);
-    return r.passed === false && r.authTables === 27 && r.unreviewedAuthTables === 13 && Object.entries(r.checks).filter(([k]) => k !== 'no_unreviewed_auth_tables').every(([, v]) => v) && r.checks.no_unreviewed_auth_tables === false;
+    return r.passed === true && r.authTables === 27 && r.unreviewedAuthTables === 0 && Object.values(r.checks).every((v) => v);
   })());
-  check('removing the thirteen STOP tables from the captured schema lets the gate pass (so the refusal is caused by exactly those tables)', (() => {
-    const keep = mirrorTables.filter((t) => !stopTables.includes(t));
-    const cols = keep.flatMap((t) => mirror.tables[t]!.map((c) => ({ table_name: t, column_name: c.column })));
-    return evaluateL1Shape(cols, keep.map((t) => ({ table_name: t })), classification).passed === true;
+  check('the same captured schema plus one table that is not in the classification file stops the shape gate (counted, one unreviewed)', (() => {
+    const cols = Object.entries(mirror.tables).flatMap(([t, cs]) => cs.map((c) => ({ table_name: t, column_name: c.column })));
+    const r = evaluateL1Shape(cols, [...mirrorTables, 'review_unclassified'].map((t) => ({ table_name: t })), classification);
+    return r.passed === false && r.unreviewedAuthTables === 1 && r.checks.no_unreviewed_auth_tables === false;
   })());
   const sourceOf = (e: unknown): AuthTableClassification => ({ table: 'x', classification: 'not credential-bearing: reviewed', source: 'a cited source', ...(e as object) }) as AuthTableClassification;
   const l1Rows = [...L1_AUTH_TABLES].map((t) => ({ table: t, classification: 'credential-bearing: handled by L1', source: 'L1 file' }));
@@ -478,16 +622,15 @@ const wrapper = await import(pathToFileURL(resolve(REPOSITORY_ROOT, 'scripts/run
   const standard = ['identities', 'mfa_factors', 'mfa_challenges', 'mfa_amr_claims', 'sso_providers', 'sso_domains', 'saml_providers', 'saml_relay_states', 'audit_log_entries', 'instances'];
   const tablesWith = (extra: string[]) => [...goodTables(), ...extra.map((t) => ({ table_name: t }))];
   const judged = (extra: string[], c = classification) => evaluateL1Shape(goodColumns(), tablesWith(extra), c);
-  check('an unclassified table stops the gate (counted, not named); of the ten standard names, only the four classified STOP stop it (instances, mfa_factors, mfa_challenges, saml_relay_states); the six reviewed ones pass', (() => {
+  check('an unclassified table stops the gate (counted, not named); the ten standard names are all classified, so the shape passes for them (the four STOP ones are judged by emptiness instead)', (() => {
     const one = judged(['review_unclassified']);
     const many = judged(standard);
-    return one.passed === false && one.checks.no_unreviewed_auth_tables === false && one.unreviewedAuthTables === 1 && Object.entries(one.checks).filter(([k]) => k !== 'no_unreviewed_auth_tables').every(([, v]) => v) && many.passed === false && many.unreviewedAuthTables === 4 && judged([]).passed === true
-      && judged(standard.filter((t) => !['instances', 'mfa_factors', 'mfa_challenges', 'saml_relay_states'].includes(t))).passed === true;
+    return one.passed === false && one.checks.no_unreviewed_auth_tables === false && one.unreviewedAuthTables === 1 && Object.entries(one.checks).filter(([k]) => k !== 'no_unreviewed_auth_tables').every(([, v]) => v) && many.passed === true && many.unreviewedAuthTables === 0 && judged([]).passed === true;
   })());
-  check('a table listed as credential-bearing: STOP stops the gate; a table classified not credential-bearing: reviewed (with a source) passes; the classification list is the only authority', (() => {
+  check('a table the classification file lists (STOP or reviewed) is known to the shape gate; a table it does not list is not; the classification list is the only authority', (() => {
     const stop = [...classification, sourceOf({ table: 'review_extra_table', classification: 'credential-bearing: STOP' })];
     const reviewed = [...classification, sourceOf({ table: 'review_extra_table' })];
-    return judged(['review_extra_table'], stop).passed === false && judged(['review_extra_table'], stop).unreviewedAuthTables === 1 && judged(['review_extra_table'], reviewed).passed === true && judged(['review_extra_table'], classification).passed === false;
+    return judged(['review_extra_table'], stop).passed === true && judged(['review_extra_table'], reviewed).passed === true && judged(['review_extra_table'], classification).passed === false && stopTablesOf(stop).includes('review_extra_table') && !stopTablesOf(reviewed).includes('review_extra_table');
   })());
   check('with an empty classification every auth table is unreviewed, so the gate fails closed', evaluateL1Shape(goodColumns(), goodTables(), []).passed === false);
   const gated = async (id: string, tables: unknown, mutate: (p: ReturnType<typeof plan>) => ReturnType<typeof plan> = (p) => p) => {
@@ -499,8 +642,8 @@ const wrapper = await import(pathToFileURL(resolve(REPOSITORY_ROOT, 'scripts/run
     const { c, out } = await gated('l1-sweep', tablesWith(['review_unclassified']));
     check('l1-sweep with an unclassified table: refused before any delete or update, nothing committed', out.error instanceof RunnerRefusal && out.error.id === 'prod_sql_l1_shape_not_ok' && !c.sent.some((s) => /^(delete|update)\b/.test(s)) && !c.sent.some((s) => ctlOf(s) === 'commit'));
     const stopPlan = (p: ReturnType<typeof plan>) => ({ ...p, classification: [...p.classification!, sourceOf({ table: 'review_extra_table', classification: 'credential-bearing: STOP' })] });
-    const stopped = await gated('l1-sweep', tablesWith(['review_extra_table']), stopPlan);
-    check('l1-sweep with a table classified credential-bearing: STOP: refused before any delete or update, nothing committed', stopped.out.error instanceof RunnerRefusal && stopped.out.error.id === 'prod_sql_l1_shape_not_ok' && !stopped.c.sent.some((s) => /^(delete|update)\b/.test(s)) && !stopped.c.sent.some((s) => ctlOf(s) === 'commit'));
+    const stopKnown = await gated('l1-sweep', tablesWith(['review_extra_table']), stopPlan);
+    check('l1-sweep with an extra table classified credential-bearing: STOP: the SHAPE gate no longer refuses on the name; the table is judged by emptiness (it is absent from the fake catalogue here, so the sweep commits)', stopKnown.out.error === undefined && resultsOf(stopKnown.out.events).join() === 'committed' && shapeEvent(stopKnown.out.events)?.passed === true);
     const reviewedPlan = (p: ReturnType<typeof plan>) => ({ ...p, classification: [...p.classification!, sourceOf({ table: 'review_extra_table' })] });
     const passedSweep = await gated('l1-sweep', tablesWith(['review_extra_table']), reviewedPlan);
     check('the same sweep passes the gate once that table is classified not credential-bearing: reviewed (the list, not the code, decides)', passedSweep.out.error === undefined && resultsOf(passedSweep.out.events).join() === 'committed');

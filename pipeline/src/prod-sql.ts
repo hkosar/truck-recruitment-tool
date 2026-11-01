@@ -63,6 +63,12 @@ export interface ProdSqlAction {
    */
   gate?: string;
   /**
+   * The credential-bearing STOP tables of the pinned classification file (never listed here a second time). 'report' (read-only shape stage): print each table's
+   * row count as information, no lock, never a refusal. 'must_be_empty' (the gated sweep): inside the sweep's own transaction, after the gate and before the first
+   * delete or update, lock every STOP table that exists (SHARE mode, held to COMMIT), count its rows, and refuse and roll back unless every count is zero.
+   */
+  stopTables?: 'report' | 'must_be_empty';
+  /**
    * Set on an action whose statements have an effect that SQL ROLLBACK cannot undo (ending database connections). The runner prints a fixed
    * warning for it with the plan, before anything connects, and again after a failed run (see PROD_SQL_WARNINGS). The contract check derives
    * the set from the pinned statements themselves (every stage that calls pg_terminate_backend must carry it).
@@ -92,9 +98,9 @@ export const PROD_SQL_ACTIONS: readonly ProdSqlAction[] = [
   // B10: the backout window on (doc 16 section 3.1 / runbook B10): the two reviewed statements, verified inside the transaction before it commits.
   { id: 'window-on', step: 'B10', file: 'supabase/rollout/backout-window-on.sql', sha256: '029707645e436a8ecbefe652e817bd94ff62001ed5a7077d7a2e3b3639c1e09d', mode: 'write', report: 'flag', flagName: 'email_edits_paused', flagExpect: true, phrase: 'RUN TNBS PRODUCTION SQL WINDOW-ON' },
   // B13: L1, in its own stages (doc 17 B13 steps 1-4). Stage 2 is also the recount of steps 4 and 7; stage 3 is also the second sweep of step 6.
-  { id: 'l1-shape', step: 'B13 stage 1', file: 'supabase/rollout/L1-close-legacy-auth.sql', sha256: '3f6e2c70f52c0f3b462769af6aa43c04b24a3984fe6d099c4184a7a4283223d5', statements: [1, 2], stageSha256: '9fb09b8013f719119d024c17a8246b6f96a18b3b8f5ef3a1ac1049c7fc03bd40', mode: 'read_only', report: 'shape', phrase: 'RUN TNBS PRODUCTION SQL L1-SHAPE' },
+  { id: 'l1-shape', step: 'B13 stage 1', file: 'supabase/rollout/L1-close-legacy-auth.sql', sha256: '3f6e2c70f52c0f3b462769af6aa43c04b24a3984fe6d099c4184a7a4283223d5', statements: [1, 2], stageSha256: '9fb09b8013f719119d024c17a8246b6f96a18b3b8f5ef3a1ac1049c7fc03bd40', mode: 'read_only', report: 'shape', stopTables: 'report', phrase: 'RUN TNBS PRODUCTION SQL L1-SHAPE' },
   { id: 'l1-counts', step: 'B13 stages 2, 4, 7', file: 'supabase/rollout/L1-close-legacy-auth.sql', sha256: '3f6e2c70f52c0f3b462769af6aa43c04b24a3984fe6d099c4184a7a4283223d5', statements: [3, 3], stageSha256: '991ccc9c661fd08ff076130d4bea321798bee54398631a609fa7c97eaf13a3e2', mode: 'read_only', report: 'counts', countNames: ['sessions', 'refresh_tokens', 'one_time_tokens', 'flow_state', 'users_with_tokens'], phrase: 'RUN TNBS PRODUCTION SQL L1-COUNTS' },
-  { id: 'l1-sweep', step: 'B13 stages 3, 6', file: 'supabase/rollout/L1-close-legacy-auth.sql', sha256: '3f6e2c70f52c0f3b462769af6aa43c04b24a3984fe6d099c4184a7a4283223d5', statements: [4, 10], stageSha256: 'b0c4997d598809dd05f22e88fd81132b58e3d0439ee69353216feded075a1e09', mode: 'write', report: 'rows', gate: 'l1-shape', phrase: 'RUN TNBS PRODUCTION SQL L1-SWEEP' },
+  { id: 'l1-sweep', step: 'B13 stages 3, 6', file: 'supabase/rollout/L1-close-legacy-auth.sql', sha256: '3f6e2c70f52c0f3b462769af6aa43c04b24a3984fe6d099c4184a7a4283223d5', statements: [4, 10], stageSha256: 'b0c4997d598809dd05f22e88fd81132b58e3d0439ee69353216feded075a1e09', mode: 'write', report: 'rows', gate: 'l1-shape', stopTables: 'must_be_empty', phrase: 'RUN TNBS PRODUCTION SQL L1-SWEEP' },
   // BO2: retire-app-credentials.sql, stage by stage (its own steps 2-6).
   { id: 'retire-nologin', step: 'BO2 step 2', file: 'supabase/backout/retire-app-credentials.sql', sha256: '3e716371979ffb876bb54f7ab91753eced9b89df15276c9d6d4ba7cc0ef7fa15', statements: [1, 1], stageSha256: '6df1df01d959cec06fa2f00c92114f91ff38a4ab422534b70051089cbc257f6f', mode: 'write', report: 'rows', phrase: 'RUN TNBS PRODUCTION SQL RETIRE-NOLOGIN' },
   { id: 'retire-terminate', step: 'BO2 step 3', file: 'supabase/backout/retire-app-credentials.sql', sha256: '3e716371979ffb876bb54f7ab91753eced9b89df15276c9d6d4ba7cc0ef7fa15', statements: [2, 2], stageSha256: 'c9442fb30289dbf20fc87d8dfc35b37bbd68effaca248b85353b555e61cc343d', mode: 'write', report: 'rows', irreversible: 'terminates_connections', phrase: 'RUN TNBS PRODUCTION SQL RETIRE-TERMINATE' },
@@ -241,7 +247,7 @@ export function planProdSql(input: { target: string | undefined; action: string;
     if (gate.length !== 2 || gate.some((g) => unsupportedReason(g) !== null || commandOf(g) !== 'select')) throw new RunnerRefusal('prod_sql_shape_refused', 'The shape gate must be the two select statements; refusing');
   }
   // The shape stage and the gated sweep judge the schema against the reviewed classification file: pinned, parsed and refused here, before anything connects.
-  const classification = action.report === 'shape' || action.gate !== undefined ? loadAuthClassification(files) : undefined;
+  const classification = action.report === 'shape' || action.gate !== undefined || action.stopTables !== undefined ? loadAuthClassification(files) : undefined;
   if (statements.length === 0) throw new RunnerRefusal('prod_sql_shape_refused', 'The action has no statements; refusing');
   if (statements.some((s) => unsupportedReason(s) !== null)) throw new RunnerRefusal('prod_sql_shape_refused', 'The action holds a statement that cannot run in one transaction; refusing');
 
@@ -340,8 +346,9 @@ export function evaluateL1Shape(columnResult: unknown, tableResult: unknown, cla
   const tableNames = new Set((tables ?? []).map((r) => r.table_name).filter((n): n is string => typeof n === 'string'));
   const columnTables = new Set((columns ?? []).map((r) => r.table_name).filter((n): n is string => typeof n === 'string'));
   const userColumns = new Set((columns ?? []).filter((r) => r.table_name === 'users').map((r) => r.column_name).filter((n): n is string => typeof n === 'string'));
-  // Passed: handled by L1, or reviewed as not credential-bearing. Not passed: not listed at all, or classified 'credential-bearing: STOP'.
-  const known = new Set<string>(classification.filter((e) => e.classification !== 'credential-bearing: STOP').map((e) => e.table));
+  // Unreviewed means NOT LISTED in the classification file. A table listed as 'credential-bearing: STOP' is reviewed: it must be EMPTY, which is judged separately
+  // and inside the sweep's own transaction under a lock (see readStopTables), not by the table listing.
+  const known = new Set<string>(classification.map((e) => e.table));
   const authTables = tables === undefined ? 0 : tables.length;
   const unreviewedAuthTables = tables === undefined ? 0 : tables.filter((r) => typeof r.table_name !== 'string' || !known.has(r.table_name)).length;
   const checks: Record<string, boolean> = { results_read: columns !== undefined && tables !== undefined };
@@ -431,12 +438,79 @@ function enforceL1Shape(action: ProdSqlAction, columnResult: unknown, tableResul
   // A plan without a verified classification judges against an empty list: every auth table is unreviewed, so the gate fails closed.
   const shape = evaluateL1Shape(columnResult, tableResult, classification ?? []);
   line({ msg: 'prod-sql.shape', action: action.id, checks: shape.checks, auth_tables: shape.authTables, auth_tables_unreviewed: shape.unreviewedAuthTables, passed: shape.passed });
-  if (!shape.passed) throw new RunnerRefusal('prod_sql_l1_shape_not_ok', 'The L1 shape check did not pass (a required table or column is missing, or an auth table is unreviewed); stopping');
+  if (!shape.passed) throw new RunnerRefusal('prod_sql_l1_shape_not_ok', 'The L1 shape check did not pass (a required table or column is missing, or an auth table is not in the classification file); stopping');
 }
 
 // ---------------------------------------------------------------------------------------------------------------
 // Execution
 // ---------------------------------------------------------------------------------------------------------------
+
+// ---------------------------------------------------------------------------------------------------------------
+// The STOP tables (credential-bearing tables that L1 does NOT clear): proceed only while every one of them is EMPTY
+// ---------------------------------------------------------------------------------------------------------------
+
+export const STOP_CLASSIFICATION: AuthClassification = 'credential-bearing: STOP';
+/** The STOP tables, from the pinned classification file only (sorted, so every run takes the locks in the same order). */
+export const stopTablesOf = (classification: readonly AuthTableClassification[]): string[] =>
+  classification.filter((e) => e.classification === STOP_CLASSIFICATION).map((e) => e.table).sort();
+
+/**
+ * Lock mode for the sweep. SHARE conflicts with ROW EXCLUSIVE (what INSERT, UPDATE, DELETE and COPY take) and with every stronger mode (so also with TRUNCATE,
+ * DROP and ALTER, which take ACCESS EXCLUSIVE): once the lock is granted no other session can add a row to the table until this transaction ends. It does NOT conflict
+ * with ACCESS SHARE or ROW SHARE, so plain reads, SELECT ... FOR UPDATE/SHARE and foreign-key checks that read the table keep working. It is granted only after every
+ * transaction that already holds ROW EXCLUSIVE (an insert that has not committed yet) has ended, so that insert is committed and counted, or rolled back and absent.
+ * Without ONLY the lock also covers partitions and inheritance children.
+ * What it does not do: it protects nothing after this transaction ends (the emptiness is a fact about the moment of COMMIT, not afterwards), and it does not stop
+ * writes to any other table. Writers to a STOP table (for example a Supabase Auth service enrolling a second factor) wait until the sweep ends, bounded by their own timeouts.
+ * Deadlock: the locks are taken first, in sorted order, before any L1 statement, so two runs cannot deadlock each other. A deadlock needs another transaction that holds a
+ * row lock on an L1 table and then writes a STOP table (which waits for us) while our delete waits for that row lock; PostgreSQL ends one of the two after deadlock_timeout
+ * (40P01). If it ends ours, the run rolls back and prints server_or_driver_error with that code; if it ends theirs, the sweep goes on.
+ */
+export const STOP_LOCK_MODE = 'share';
+/** A lock that cannot be granted within lock_timeout (55P03), a deadlock (40P01) or an object that cannot be locked (42809) is the same fixed refusal: nothing was changed. */
+const STOP_LOCK_FAILURE_CODES: readonly string[] = ['55P03', '40P01', '42809'];
+
+/** Names reach SQL only from the pinned file, after validateAuthClassification checked each against ^[a-z_][a-z0-9_]*$; they are still quoted. */
+const qualified = (table: string): string => `auth."${table}"`;
+export const stopTablesPresentSql = (tables: readonly string[]): string =>
+  `select c.relname from pg_catalog.pg_class c join pg_catalog.pg_namespace n on n.oid = c.relnamespace where n.nspname = 'auth' and c.relkind in ('r', 'p', 'v', 'm', 'f') and c.relname in (${tables.map((t) => `'${t}'`).join(', ')})`;
+export const stopTablesLockSql = (tables: readonly string[]): string => `lock table ${tables.map(qualified).join(', ')} in ${STOP_LOCK_MODE} mode`;
+/** A count only; no column of the table is ever selected. */
+export const stopTableCountSql = (table: string): string => `select count(*)::bigint as n from ${qualified(table)}`;
+
+/** A row count per STOP table: a number (-1 when unreadable, which never counts as empty) or 'absent' (no such table in auth, so it holds no rows). */
+export interface StopTableCounts { counts: Record<string, number | 'absent'>; present: number; populated: number; locked: boolean }
+
+/**
+ * Reads how many rows each STOP table holds. With `lock` (the sweep) the tables that exist are first locked in SHARE mode, in sorted order, and the locks are held
+ * until the caller's COMMIT or ROLLBACK, so the answer cannot go stale before the sweep ends. Without it (the read-only shape stage) nothing is locked and the answer is
+ * information only. Only counts are selected; no row content is read.
+ */
+export async function readStopTables(client: RebuiltSqlClient, classification: readonly AuthTableClassification[], lock: boolean): Promise<StopTableCounts> {
+  const tables = stopTablesOf(classification);
+  const counts: Record<string, number | 'absent'> = {};
+  if (tables.length === 0) return { counts, present: 0, populated: 0, locked: lock };
+  const found = (await client.query(stopTablesPresentSql(tables)))?.rows;
+  const present = new Set((Array.isArray(found) ? found : []).map((r: Record<string, unknown>) => r?.relname).filter((n: unknown): n is string => typeof n === 'string'));
+  const existing = tables.filter((t) => present.has(t));
+  if (lock && existing.length > 0) {
+    try {
+      await client.query(stopTablesLockSql(existing));
+    } catch (err) {
+      const code = (err as { code?: unknown } | null)?.code;
+      if (typeof code === 'string' && STOP_LOCK_FAILURE_CODES.includes(code)) throw new RunnerRefusal('prod_sql_l1_stop_table_lock_failed', 'The STOP tables could not be locked (lock timeout, deadlock or a table that cannot be locked); nothing was changed, rolling back');
+      throw err;
+    }
+  }
+  for (const t of tables) counts[t] = present.has(t) ? intOrMinusOne((await client.query(stopTableCountSql(t)))?.rows?.[0]?.n) : 'absent';
+  const populated = existing.filter((t) => counts[t] !== 0).length;
+  return { counts, present: existing.length, populated, locked: lock };
+}
+
+/** Prints the fixed STOP-table event: table names come from the pinned file (not the database); counts are numbers. */
+function reportStopTables(action: ProdSqlAction, r: StopTableCounts): void {
+  line({ msg: 'prod-sql.stop_tables', action: action.id, classification: STOP_CLASSIFICATION, locked: r.locked, tables: r.counts, tables_present: r.present, tables_populated: r.populated, passed: r.populated === 0 });
+}
 
 /** The existing unknown result event is the final report; the executable must not relabel it as refused. */
 export class ProdSqlResultUnknown extends Error {
@@ -447,6 +521,7 @@ export class ProdSqlResultUnknown extends Error {
 }
 
 const LOCK_TIMEOUT_SQL = "set local lock_timeout = '10s'";
+const READ_COMMITTED_SQL = 'set transaction isolation level read committed';
 
 /**
  * Runs the planned statements one at a time. Any refusal or error rolls back. If the COMMIT itself fails the outcome is unknown: an event
@@ -460,12 +535,22 @@ export async function runProdSqlPlan(client: RebuiltSqlClient, plan: ProdSqlPlan
   const body = shape === 'own' ? statements.slice(1, -1) : statements;
   await client.query(shape === 'read_only' ? 'begin read only' : shape === 'own' ? statements[0]!.raw : 'begin');
   try {
+    // A server whose default isolation is repeatable read or serializable would take its snapshot at the first query, before the STOP-table locks; the count would then
+    // not see rows committed while the lock was awaited. This must run before any query of the transaction. It changes nothing else.
+    if (action.stopTables === 'must_be_empty') await client.query(READ_COMMITTED_SQL);
     if (shape !== 'read_only') await client.query(LOCK_TIMEOUT_SQL);
     if (plan.gate !== undefined) {
       // The gate: the two shape selects run inside this transaction before any change; a failed check refuses and the rollback below undoes nothing but the begin.
       const gateResults: unknown[] = [];
       for (const statement of plan.gate) gateResults.push((await client.query(statement.raw))?.rows);
       enforceL1Shape(action, gateResults[0], gateResults[1], plan.classification);
+    }
+    if (action.stopTables === 'must_be_empty') {
+      // Lock the STOP tables, then count them, before the first delete or update; both are inside the sweep's own transaction and the locks last until its COMMIT or ROLLBACK.
+      if (plan.classification === undefined) throw new RunnerRefusal('prod_sql_shape_refused', 'The STOP tables cannot be judged without the verified classification; refusing');
+      const stop = await readStopTables(client, plan.classification, true);
+      reportStopTables(action, stop);
+      if (stop.populated > 0) throw new RunnerRefusal('prod_sql_l1_stop_table_populated', 'A credential-bearing STOP table that L1 does not clear holds rows; nothing was changed, rolling back');
     }
     const shapeRows: unknown[] = [];
     for (const [i, statement] of body.entries()) {
@@ -475,7 +560,11 @@ export async function runProdSqlPlan(client: RebuiltSqlClient, plan: ProdSqlPlan
       reportStatement(plan, (shape === 'own' ? 1 : 0) + i + 1, statement, result);
       if (action.report === 'flag' && commandOf(statement) === 'select') enforceFlag(action, result);
     }
-    if (action.report === 'shape') enforceL1Shape(action, shapeRows[0], shapeRows[1], plan.classification);
+    if (action.report === 'shape') {
+      // Information only, no lock (the transaction is read-only): how many rows each STOP table holds right now. The sweep is what refuses, under a lock.
+      if (action.stopTables === 'report' && plan.classification !== undefined) reportStopTables(action, await readStopTables(client, plan.classification, false));
+      enforceL1Shape(action, shapeRows[0], shapeRows[1], plan.classification);
+    }
     if (shape === 'read_only') {
       await client.query('rollback');
       line({ msg: 'prod-sql.result', action: action.id, result: 'read_only_done', statements: ran });

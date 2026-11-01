@@ -286,10 +286,18 @@ async function main(): Promise<void> {
         for (const n of mirrorOnly.filter((x) => stopSet.includes(x))) { await q(mirrorDdl(n)); created.push(n); }
         const full = Number((await q("select count(*) as n from pg_catalog.pg_class c join pg_catalog.pg_namespace s on s.oid = c.relnamespace where s.nspname = 'auth' and c.relkind = 'r'")).rows[0].n);
         const mirrorShape = track(await run('l1-shape'));
-        const mirrorSweep = track(await run('l1-sweep'));
         const mirrorEvent = mirrorShape.events.find((e) => e.msg === 'prod-sql.shape') as { passed?: boolean; auth_tables_unreviewed?: number; checks?: Record<string, boolean> } | undefined;
-        check('staging-2 mirror, all 27 captured auth tables present: the real gate refuses l1-shape, counting exactly the 13 STOP tables and naming none', full === 27 && stopSet.length === 13 && mirrorShape.error instanceof RunnerRefusal && mirrorShape.error.id === 'prod_sql_l1_shape_not_ok' && mirrorEvent?.passed === false && mirrorEvent.auth_tables_unreviewed === 13 && mirrorEvent.checks?.no_unreviewed_auth_tables === false && !stopSet.some((n) => JSON.stringify(mirrorShape.events).includes(n)));
-        check('staging-2 mirror, all 27 present: l1-sweep refuses in the same run before any delete or update, nothing committed, every seeded row survives', mirrorSweep.error instanceof RunnerRefusal && mirrorSweep.error.id === 'prod_sql_l1_shape_not_ok' && resultOf(mirrorSweep) === 'rolled_back' && !mirrorSweep.sent.some((s) => ctlOf(s) === 'commit') && !mirrorSweep.sent.some((s) => /^(delete|update)/i.test(s)) && (await authCounts()) === seeded);
+        const stopOf = (o: Outcome) => o.events.find((e) => e.msg === 'prod-sql.stop_tables') as { locked: boolean; tables: Record<string, number | string>; tables_present: number; tables_populated: number; passed: boolean } | undefined;
+        check('staging-2 mirror, all 27 captured auth tables present and the 13 STOP tables empty: the real gate PASSES l1-shape (every table is classified: 0 unreviewed) and reports the 13 STOP tables as present with 0 rows each (information, no lock)', full === 27 && stopSet.length === 13 && mirrorShape.error === undefined && mirrorEvent?.passed === true && mirrorEvent.auth_tables_unreviewed === 0 && stopOf(mirrorShape)?.tables_present === 13 && stopOf(mirrorShape)?.tables_populated === 0 && stopOf(mirrorShape)?.locked === false && Object.values(stopOf(mirrorShape)?.tables ?? {}).every((v) => v === 0));
+        // One row in one STOP table (the captured columns are NOT NULL; the NOT NULL flags of this throwaway mirror table are dropped so a row of nulls can be inserted).
+        for (const c of mirror.tables.scim_users!) await q(`alter table auth.scim_users alter column ${c.column} drop not null`);
+        await q('insert into auth.scim_users default values');
+        const populatedShape = track(await run('l1-shape'));
+        const mirrorSweep = track(await run('l1-sweep'));
+        check('staging-2 mirror, one row in scim_users: l1-shape still passes (information only: 1 populated, no lock) and l1-sweep refuses with prod_sql_l1_stop_table_populated in the same run, before any delete or update, nothing committed, every seeded row and the STOP row survive',
+          populatedShape.error === undefined && stopOf(populatedShape)?.tables_populated === 1 && stopOf(populatedShape)?.tables.scim_users === 1 && mirrorSweep.error instanceof RunnerRefusal && mirrorSweep.error.id === 'prod_sql_l1_stop_table_populated' && resultOf(mirrorSweep) === 'rolled_back' && !mirrorSweep.sent.some((s) => ctlOf(s) === 'commit') && !mirrorSweep.sent.some((s) => /^(delete|update)/i.test(s))
+          && (await authCounts()) === seeded && Number((await q('select count(*) as n from auth.scim_users')).rows[0].n) === 1);
+        await q('delete from auth.scim_users');
       } finally {
         for (const n of created) await q(`drop table if exists auth.${n}`);
       }
