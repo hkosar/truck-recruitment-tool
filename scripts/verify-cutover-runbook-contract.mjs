@@ -7,8 +7,8 @@ import { readFileSync } from 'node:fs';
 import { resolve } from 'node:path';
 import { fileURLToPath } from 'node:url';
 
-/** The Route A runner tip that holds the item 28 "stop unless empty" L1 sweep (branch bb/fix-stop-unless-empty-review-findings-allow-list-thr_rxrah2w4hi; earlier reviewed tip 7111139); never merged here. */
-export const RUNNER_TIP = '9e3e340';
+/** The Route A runner tip that holds the item 28 "stop unless empty" L1 sweep (branch bb/stop-unless-empty-r3-flush-deferred-triggers-bef-thr_2h7fkxxygs; earlier reviewed tip 7111139); never merged here. */
+export const RUNNER_TIP = '47f4920';
 export const RUNNER_FILES = { prodSql: 'pipeline/src/prod-sql.ts', stagingRebuilt: 'pipeline/src/staging-rebuilt.ts', cli: 'pipeline/src/prod-sql-runner.ts', wrapper: 'scripts/run-with-secrets.mjs', classification: 'supabase/rollout/auth-table-classification.json' };
 /** The first-manager tool's reviewed commit ("fm-listener r2: ready"; branch bb/fix-first-manager-listener-output-commit-outcome-thr_q9ajbvqpa6, contained in signin/combined-reviewed-abc); never merged here. */
 export const FM_TIP = '7285a7e';
@@ -319,7 +319,7 @@ export function checkCutoverRunbook(runbook, yaml, runnerSources, fmSources) {
   need(open1, new RegExp(`tip \`${RUNNER_TIP}\``), `OPEN-1: runner tip ${RUNNER_TIP} not cited`);
   need(open1, /Route B[^\n]*reviewed paste box still owed/i, 'OPEN-1: Route B paste box owed missing');
   need(open1, /5101b81/, 'OPEN-1: review trail 5101b81 missing');
-  need(open1, /bb\/fix-stop-unless-empty-review-findings-allow-list-thr_rxrah2w4hi/, 'OPEN-1: runner branch not cited');
+  need(open1, /bb\/stop-unless-empty-r3-flush-deferred-triggers-bef-thr_2h7fkxxygs/, 'OPEN-1: runner branch not cited');
   if (/🔴 \*\*OPEN-1\b/.test(runbook)) failures.push('OPEN-1: still marked as a pending action');
   if (/production SQL route/i.test(runbook)) failures.push('placeholder "production SQL route" remains');
   if (/production SQL gets run \(no route/i.test(runbook)) failures.push('stale OPEN-1 "no route is recorded" text remains');
@@ -473,6 +473,9 @@ export function checkCutoverRunbook(runbook, yaml, runnerSources, fmSources) {
     need(b13, /prod-sql\.stop_tables/, 'B13: prod-sql.stop_tables event missing');
     need(b13, /STOP rule, `prod_sql_l1_stop_table_populated`[^\n]*\*\*STOP\.\*\*[^\n]*Do not retry[^\n]*Do not clear[^\n]*decide together/, 'B13: STOP rule for a populated table (no retry, nothing cleared, decide together) missing');
     need(b13, /STOP rule, `prod_sql_l1_stop_table_lock_failed`[^\n]*\*\*STOP\.\*\*[^\n]*Do not loop the retry/, 'B13: lock_failed rule missing');
+    need(b13, /SET CONSTRAINTS ALL IMMEDIATE/, "B13: the deferred-constraint flush before the final re-count is not described");
+    if (!(runnerSources.prodSql ?? "").includes("set constraints all immediate")) failures.push("B13: runner source at " + RUNNER_TIP + " does not contain set constraints all immediate");
+    need(b13, /STOP rule, deferred foreign-key failure[^\n]*`server_or_driver_error`[^\n]*`23503`[^\n]*\*\*STOP\.\*\*[^\n]*Do not retry[^\n]*decide together/, 'B13: deferred foreign-key failure (server_or_driver_error, 23503) STOP rule (no retry, decide together) missing');
     need(b13, /"Empty" is true only up to COMMIT/, 'B13: "empty is true only up to COMMIT" limit missing');
     need(b13, /re-?count|counts again/i, 'B13: re-count before COMMIT missing');
     if (/stops on any[^\n]*STOP table|classified `credential-bearing: STOP`[^\n]*\*\*STOP\*\* for review/.test(runbook)) failures.push('old "L1 stops on any STOP table" wording remains');
@@ -579,6 +582,9 @@ export const MUTATIONS = [
   ['b13-drops-a-stop-table', (t) => { const [a, b] = blockRange(t, 'B13'); return t.slice(0, a) + t.slice(a, b).replaceAll('`scim_users`', '`scim_x`') + t.slice(b); }],
   ['b13-missing-event-field', (t) => t.replaceAll('`tables_populated`', '`tables_x`')],
   ['b13-old-stop-on-any-wording', (t) => t.replace('(STOP rule above), so tell Hunter now', '(STOP rule above), so tell Hunter now. L1 stops on any STOP table')],
+  ['b13-missing-flush-description', (t) => t.replaceAll('SET CONSTRAINTS ALL IMMEDIATE', 'SET SOMETHING ELSE')],
+  ['b13-fk-failure-rule-allows-retry', (t) => t.replace('Do not retry. Do not change any data to make the check pass.', 'Retry freely.')],
+  ['b13-fk-failure-wrong-sqlstate', (t) => t.replaceAll('SQLSTATE `23503`', 'SQLSTATE `23505`')],
   ['bo3-drops-approved-auth-email-null', (t) => { const [s, e] = blockRange(t, 'BO3'); return t.slice(0, s) + t.slice(s, e).replaceAll('approved_auth_email_null', 'approved_x') + t.slice(e); }],
   ['bo3-success-rule-only-drops-null', (t) => t.replace('; and `approved_auth_email_null` is 0. If', '. If')],
   ['bo3-after-bo4', (t) => { const [a0, a1] = blockRange(t, 'BO3'); const [b0, b1] = blockRange(t, 'BO4'); return t.slice(0, a0) + t.slice(b0, b1) + t.slice(a0, a1) + t.slice(b1); }],
