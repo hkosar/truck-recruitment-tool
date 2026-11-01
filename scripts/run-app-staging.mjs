@@ -15,15 +15,16 @@
 //  - EMAIL_MODE is unset or `test`, HOST is unset or 127.0.0.1, and no SENDGRID_* name is present.
 // The child gets ONLY: the base names below, the four secrets, and values this launcher forces (APP_ORIGIN=http://localhost:<port>,
 // EMAIL_MODE=test, HOST=127.0.0.1, PORT, TRUSTED_PROXY_HOPS=0, STAGING_BANNER=true). Every other parent variable (all other Doppler
-// secrets, DOPPLER_TOKEN, SENDGRID_*) is dropped. Output: only the app's own structured log lines ({"at","event",...}; flat, short
-// values) and the exact fixed config-error messages of app/server/config.ts pass, with the secrets masked in the raw line, in each
-// parsed value and in the final line (plain, URL-encoded and JSON-escaped forms, any length; a database password under 8 characters
-// is refused at start); everything else is withheld
-// and counted. Environment values are never printed. Exit status is the child's.
+// secrets, DOPPLER_TOKEN, SENDGRID_*) is dropped. Output is an ALLOW-LIST, not a scrubbed copy: a line passes only if it is JSON with a
+// known app event name, only that event's own fields, and every value an enum, a bounded whole number or a tight id/route shape
+// (APP_LOG_EVENTS; no free text), or one of the exact fixed config-error messages of app/server/config.ts (complete lines only).
+// Secret masking (plain, URL-encoded in any hex case, JSON-escaped) is a second layer; a database password under 8 characters is
+// refused at start. Everything else is withheld and counted. Environment values are never printed. Exit status is the child's.
 
 import { spawn } from 'node:child_process';
 import { existsSync } from 'node:fs';
 import { resolve } from 'node:path';
+import { StringDecoder } from 'node:string_decoder';
 import { fileURLToPath } from 'node:url';
 import { RECORDED_PROJECT_REFS, parseSupabaseDbTarget } from '../pipeline/src/target-guard.ts';
 import { scrub } from './run-with-secrets.mjs';
@@ -142,32 +143,89 @@ export const CONFIG_ERROR_MESSAGES = [
   'PORT: must be a port number',
 ];
 const CONFIG_ERROR_LINES = new Set([...CONFIG_ERROR_MESSAGES, ...CONFIG_ERROR_MESSAGES.map((m) => `ConfigError: ${m}`)]);
-const MAX_VALUE = 200;
+/**
+ * ALLOW-LIST of every structured log event the app server can print (enumerated from the log(...) calls under app/server:
+ * main.ts, app.ts, batch/routes.ts, http/node-adapter.ts; scripts/verify-app-staging-contract.mjs re-derives the list from the
+ * source and fails on any difference). A field spec is DATA, one of: { enum: [...] } fixed category strings, { int: max } a whole
+ * number 0..max, { pattern: <name in FIELD_PATTERNS> } a tight id/route shape. There is no free-text kind, by design.
+ */
+const UUID = /^[0-9a-f]{8}-[0-9a-f]{4}-[0-9a-f]{4}-[0-9a-f]{4}-[0-9a-f]{12}$/i;
+const ROUTE = /^(?:session|\/api(?:\/(?:[a-z]{1,20}(?:-[a-z]{1,20})?|:id)){0,5})$/;
+export const FIELD_PATTERNS = { uuid: UUID, route: ROUTE };
+const POOL = { enum: ['auth', 'data'] };
+export const APP_LOG_EVENTS = {
+  listening: { port: { int: 65535 } },
+  db_warmup: { pool: POOL, open: { int: 1000 }, ms: { int: 3_600_000 } },
+  operator_alert: {
+    category: { enum: ['db_pool_acquire_failed', 'db_unavailable_at_start', 'client_ip_unavailable', 'signin_admission_unavailable', 'signin_identity_work_failed', 'provider_rate_limited', 'provider_configuration', 'provider_unreachable'] },
+    pool: POOL,
+  },
+  server_error: { route: { pattern: 'route' } },
+  signin_admission_failed: {},
+  signin_identity_work_failed: {},
+  signout_revoke_failed: { outcome: { enum: ['unknown', 'failed'] } },
+  touch_failed: {},
+  unhandled_request_error: {},
+  shutdown_started: { accepted: { int: 1_000_000 }, continuations: { int: 1_000_000 }, budgetMs: { int: 3_600_000 } },
+  shutdown: { abandoned: { int: 1_000_000 } },
+  batch_renamed: { batch: { pattern: 'uuid' }, actor: { pattern: 'uuid' } },
+  batch_deleted: { batch: { pattern: 'uuid' }, actor: { pattern: 'uuid' } },
+};
+const AT = /^\d{4}-\d{2}-\d{2}T\d{2}:\d{2}:\d{2}\.\d{3}Z$/;
+const has = (o, k) => Object.prototype.hasOwnProperty.call(o, k);
+
+function fieldOk(spec, v) {
+  if (has(spec, 'enum')) return typeof v === 'string' && spec.enum.includes(v);
+  if (has(spec, 'int')) return typeof v === 'number' && Number.isInteger(v) && v >= 0 && v <= spec.int;
+  if (has(spec, 'pattern')) return typeof v === 'string' && v.length <= 80 && FIELD_PATTERNS[spec.pattern].test(v);
+  return false;
+}
+
+/** Masks each target, and also every URL-encoded target in any mix of upper/lower-case hex digits. A second layer; the allow-list is the gate. */
+export function maskLine(text, targets) {
+  let out = scrub(text, targets);
+  for (const t of targets) {
+    if (!/%[0-9A-Fa-f]{2}/.test(t)) continue;
+    const re = t.split(/(%[0-9A-Fa-f]{2})/).map((part, i) => (i % 2 === 1
+      ? part.replace(/[0-9A-Fa-f]/g, (c) => `[${c.toLowerCase()}${c.toUpperCase()}]`)
+      : part.replace(/[.*+?^${}()|[\]\\]/g, '\\$&'))).join('');
+    out = out.replace(new RegExp(re, 'g'), '<masked>');
+  }
+  return out;
+}
 
 /**
- * Returns the line to show or null (withheld). Accepts the app's structured log line: a flat JSON object with an ISO `at`,
- * an `event` of lowercase words, and primitive values only (strings capped); or one of the exact fixed config-error lines.
- * `targets` (launcherMaskTargets of every secret): masked in the RAW line before it is parsed, in every parsed string value,
- * and again in the final serialised line.
+ * Returns the line to show or null (withheld). A line is shown only if it is a JSON object whose `at` is a strict UTC timestamp,
+ * whose `event` is on APP_LOG_EVENTS, whose every field is on that event's list and whose every value fits that field's strict
+ * spec; it is then rebuilt from the checked values (fixed key order). Anything else, including any extra field, is withheld whole
+ * (`counter.fields` counts the offending fields). The only non-JSON lines are the exact fixed config-error messages.
+ * `targets` (launcherMaskTargets of every secret) are masked in the raw line before parsing and in the final line as a second layer.
  */
 export function appLogLine(raw, counter = { fields: 0 }, targets = []) {
   const line = raw.replace(/\r?\n$/, '');
   if (CONFIG_ERROR_LINES.has(line)) return line;
   let obj;
-  try { obj = JSON.parse(scrub(line, targets)); } catch { return null; }
+  try { obj = JSON.parse(maskLine(line, targets)); } catch { return null; }
   if (obj === null || typeof obj !== 'object' || Array.isArray(obj)) return null;
-  if (typeof obj.at !== 'string' || Number.isNaN(Date.parse(obj.at)) || typeof obj.event !== 'string' || !/^[a-z][a-z0-9_]{0,60}$/.test(obj.event)) return null;
-  const out = {};
-  for (const [k, v] of Object.entries(obj)) {
-    if (!/^[A-Za-z][A-Za-z0-9_]{0,40}$/.test(k)) { counter.fields += 1; continue; }
-    if (typeof v === 'string' ? v.length <= MAX_VALUE : (typeof v === 'number' || typeof v === 'boolean' || v === null)) out[k] = typeof v === 'string' ? scrub(v, targets) : v;
-    else { out[k] = '<withheld>'; counter.fields += 1; }
+  if (typeof obj.at !== 'string' || !AT.test(obj.at) || Number.isNaN(Date.parse(obj.at)) || typeof obj.event !== 'string' || !has(APP_LOG_EVENTS, obj.event)) return null;
+  const spec = APP_LOG_EVENTS[obj.event];
+  const out = { at: obj.at, event: obj.event };
+  let bad = 0;
+  for (const k of Object.keys(obj)) {
+    if (k === 'at' || k === 'event') continue;
+    if (!has(spec, k) || !fieldOk(spec[k], obj[k])) { bad += 1; continue; }
   }
-  return scrub(JSON.stringify(out), targets);
+  if (bad > 0) { counter.fields += bad; return null; }
+  for (const k of Object.keys(spec)) if (has(obj, k)) out[k] = obj[k];
+  return maskLine(JSON.stringify(out), targets);
 }
 
+const MAX_PENDING = 65_536;
+
 function sinkFor(sink, targets, counter) {
+  const decoder = new StringDecoder('utf8');
   let pending = '';
+  let overflow = false;
   const emit = (l) => {
     const shown = appLogLine(l, counter, targets);
     if (shown === null) { counter.lines += 1; return; }
@@ -175,11 +233,16 @@ function sinkFor(sink, targets, counter) {
   };
   return {
     write(chunk) {
-      pending += chunk.toString('utf8');
+      pending += decoder.write(chunk);
       let idx;
-      while ((idx = pending.indexOf('\n')) >= 0) { emit(pending.slice(0, idx)); pending = pending.slice(idx + 1); }
+      while ((idx = pending.indexOf('\n')) >= 0) {
+        const l = pending.slice(0, idx);
+        pending = pending.slice(idx + 1);
+        if (overflow) overflow = false; else emit(l);
+      }
+      if (pending.length > MAX_PENDING) { if (!overflow) counter.lines += 1; overflow = true; pending = ''; }
     },
-    end() { if (pending) emit(pending); pending = ''; },
+    end() { pending += decoder.end(); if (pending && !overflow) emit(pending); pending = ''; },
   };
 }
 

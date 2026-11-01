@@ -3,8 +3,9 @@
 // scripts/run-app-staging.mjs must stay in step with app/server/config.ts, pipeline/src/target-guard.ts and the doc.
 // Text-level; no dependencies, no network, no database.
 
-import { existsSync, readFileSync } from 'node:fs';
+import { existsSync, readFileSync, readdirSync, statSync } from 'node:fs';
 import { resolve } from 'node:path';
+import { pathToFileURL } from 'node:url';
 
 const root = resolve(import.meta.dirname, '..');
 const read = (rel) => (existsSync(resolve(root, rel)) ? readFileSync(resolve(root, rel), 'utf8').replace(/\r\n/g, '\n') : '');
@@ -38,7 +39,54 @@ need(/APP_ROLE = 'recruiter_app'/.test(src) && /APP_DB_PORT = 5432/.test(src), '
 need(/import \{ scrub \} from '\.\/run-with-secrets\.mjs'/.test(src) && !/maskTargets\(/.test(src), 'launcher must reuse the wrapper scrub but not its length-filtered maskTargets');
 need(/export function launcherMaskTargets/.test(src) && /launcherMaskTargets\(childEnv\[n\]\)/.test(src) && !/length >= \d/.test(/function launcherMaskTargets[\s\S]*?\n}\n/.exec(src)?.[0] ?? 'length >= 4'), 'launcher must mask every secret with launcherMaskTargets, which has no minimum-length filter');
 need(/MIN_MASKABLE_LENGTH = 8/.test(src) && /shorter than \$\{MIN_MASKABLE_LENGTH\} characters/.test(src), 'launcher must refuse a database password under 8 characters');
-need(/JSON\.parse\(scrub\(line, targets\)\)/.test(src) && /scrub\(v, targets\)/.test(src) && /return scrub\(JSON\.stringify\(out\), targets\)/.test(src) && /jsonEscaped/.test(src) && /encodeURIComponent/.test(src), 'launcher must mask the raw line before parsing, each parsed value and the final line, including JSON-escaped and URL-encoded forms');
+need(/JSON\.parse\(maskLine\(line, targets\)\)/.test(src) && /return maskLine\(JSON\.stringify\(out\), targets\)/.test(src) && /jsonEscaped/.test(src) && /encodeURIComponent/.test(src) && /\[\$\{c\.toLowerCase\(\)\}\$\{c\.toUpperCase\(\)\}\]/.test(src), 'launcher must keep masking as a second layer: the raw line before parsing and the final line, including JSON-escaped, URL-encoded (any hex case) forms');
+// Chunk boundaries: one StringDecoder per stream, never a per-chunk toString.
+need(/new StringDecoder\('utf8'\)/.test(src) && /decoder\.write\(chunk\)/.test(src) && !/chunk\.toString\(/.test(src), 'launcher must decode each stream with one StringDecoder (a multibyte character can be split across chunks)');
+// The output gate is an ALLOW-LIST of the app's own events (derived from the app source), with no free-text field.
+const launcher = await import(pathToFileURL(resolve(root, 'scripts/run-app-staging.mjs')).href);
+const events = launcher.APP_LOG_EVENTS;
+need(events !== undefined && launcher.FIELD_PATTERNS !== undefined, 'launcher must export APP_LOG_EVENTS and FIELD_PATTERNS');
+need(!/MAX_VALUE|typeof v === 'string' \?/.test(src), 'launcher must not accept arbitrary strings up to a length cap');
+need(/has\(APP_LOG_EVENTS, obj\.event\)/.test(src) && /bad > 0/.test(src) && /fieldOk\(spec\[k\], obj\[k\]\)/.test(src) && /AT = \/\^\\d\{4\}/.test(src), 'launcher must withhold any line whose event, field or value is not on the allow-list');
+const PATTERN_NAMES = new Set(['uuid', 'route']);
+for (const [event, fields] of Object.entries(events ?? {})) {
+  need(/^[a-z][a-z0-9_]{0,60}$/.test(event), 'allow-list event name is not a plain lowercase name: ' + event);
+  for (const [name, spec] of Object.entries(fields)) {
+    const kinds = Object.keys(spec);
+    const label = event + '.' + name;
+    need(kinds.length === 1 && ['enum', 'int', 'pattern'].includes(kinds[0]), 'allow-list field ' + label + ' is not an enum, a bounded integer or a named pattern (free text is not allowed)');
+    if (kinds[0] === 'enum') need(Array.isArray(spec.enum) && spec.enum.length > 0 && spec.enum.every((v) => /^[a-z_]{1,40}$/.test(v)), 'allow-list enum ' + label + ' must be fixed lowercase category words');
+    if (kinds[0] === 'int') need(Number.isInteger(spec.int) && spec.int <= 3_600_000, 'allow-list integer ' + label + ' must have a small maximum');
+    if (kinds[0] === 'pattern') {
+      need(PATTERN_NAMES.has(spec.pattern), 'allow-list pattern ' + label + ' is not a known tight pattern');
+      const re = launcher.FIELD_PATTERNS[spec.pattern];
+      need(re instanceof RegExp && re.source.startsWith('^') && re.source.endsWith('$') && !/\.\*|\.\+|\\S|\\w\+|\\w\*|\[\^/.test(re.source), 'allow-list pattern ' + spec.pattern + ' must be anchored and must not allow free text');
+      need(re instanceof RegExp && !re.test('a free text sentence with spaces') && !re.test('Zm9vYmFyYmF6'), 'allow-list pattern ' + spec.pattern + ' accepts free text');
+    }
+  }
+}
+// Re-derive the events and field names from the app's own log(...) calls; both directions must match.
+const serverFiles = [];
+const walk = (dir) => { for (const f of readdirSync(resolve(root, dir))) { const rel = dir + '/' + f; if (statSync(resolve(root, rel)).isDirectory()) { if (f !== 'testing') walk(rel); } else if (rel.endsWith('.ts') && !/\.test\.ts$/.test(rel)) serverFiles.push(rel); } };
+walk('app/server');
+const derived = new Map();
+const serverSource = serverFiles.map((f) => code(read(f))).join('\n');
+for (const m of serverSource.matchAll(/\b(?:log|consoleLogger)\(\s*'([a-z_]+)'(?:\s*,\s*\{([^}]*)\})?\s*\)/g)) {
+  const set = derived.get(m[1]) ?? new Set();
+  for (const part of (m[2] ?? '').split(',')) { const n = /^\s*([A-Za-z_]+)/.exec(part)?.[1]; if (n) set.add(n); }
+  derived.set(m[1], set);
+}
+need(derived.size >= 10, 'could not derive the app log events from app/server (found ' + derived.size + ')');
+for (const [event, fields] of derived) {
+  need(events !== undefined && Object.prototype.hasOwnProperty.call(events, event), 'the app logs event ' + event + ' but the launcher allow-list lacks it (it would be withheld)');
+  if (events && events[event]) need([...fields].sort().join() === Object.keys(events[event]).sort().join(), 'event ' + event + ': app fields (' + [...fields].sort().join() + ') differ from the allow-list (' + Object.keys(events[event]).sort().join() + ')');
+}
+for (const event of Object.keys(events ?? {})) need(derived.has(event), 'the allow-list names event ' + event + ' that the app never logs');
+// Category enums must equal the category literals found in the source.
+const categorySource = new Set([...serverSource.matchAll(/category: '([a-z_]+)'/g)].map((m) => m[1]));
+for (const m of read('app/server/mail/adapter.ts').matchAll(/operatorAlertFor\([^)]*\): ([^{]*)\{/g)) for (const lit of m[1].matchAll(/'([a-z_]+)'/g)) categorySource.add(lit[1]);
+const categoryEnum = new Set(events?.operator_alert?.category?.enum ?? []);
+need([...categorySource].sort().join() === [...categoryEnum].sort().join(), 'operator_alert categories in the app (' + [...categorySource].sort().join() + ') differ from the allow-list (' + [...categoryEnum].sort().join() + ')');
 // Non-JSON lines: only the exact ConfigError messages of app/server/config.ts.
 const configLiterals = [...config.matchAll(/new ConfigError\((?:'([A-Z_]+)'|name), ('[^']*'|"[^"]*")\)/g)].map((m) => [m[1], m[2].slice(1, -1)]);
 const listedMessages = src.slice(src.indexOf('CONFIG_ERROR_MESSAGES = ['), src.indexOf('const CONFIG_ERROR_LINES'));
