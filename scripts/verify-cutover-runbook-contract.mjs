@@ -7,8 +7,8 @@ import { readFileSync } from 'node:fs';
 import { resolve } from 'node:path';
 import { fileURLToPath } from 'node:url';
 
-/** The Route A runner tip that holds the item 28 "stop unless empty" L1 sweep (branch bb/stop-unless-empty-r3-flush-deferred-triggers-bef-thr_2h7fkxxygs; earlier reviewed tip 7111139); never merged here. */
-export const RUNNER_TIP = '47f4920';
+/** The Route A runner commit that holds the item 28 "stop unless empty" L1 sweep with its 30 second statement timeout (branch bb/stop-unless-empty-r4-bounded-statement-time-doc-thr_2unu5xpmv9, which contains the earlier runner tips 47f4920 and 7111139). The contract reads the runner with git show at this fixed commit. */
+export const RUNNER_TIP = '9248197';
 export const RUNNER_FILES = { prodSql: 'pipeline/src/prod-sql.ts', stagingRebuilt: 'pipeline/src/staging-rebuilt.ts', cli: 'pipeline/src/prod-sql-runner.ts', wrapper: 'scripts/run-with-secrets.mjs', classification: 'supabase/rollout/auth-table-classification.json' };
 /** The first-manager tool's reviewed commit ("fm-listener r2: ready"; branch bb/fix-first-manager-listener-output-commit-outcome-thr_q9ajbvqpa6, contained in signin/combined-reviewed-abc); never merged here. */
 export const FM_TIP = '7285a7e';
@@ -319,7 +319,7 @@ export function checkCutoverRunbook(runbook, yaml, runnerSources, fmSources) {
   need(open1, new RegExp(`tip \`${RUNNER_TIP}\``), `OPEN-1: runner tip ${RUNNER_TIP} not cited`);
   need(open1, /Route B[^\n]*reviewed paste box still owed/i, 'OPEN-1: Route B paste box owed missing');
   need(open1, /5101b81/, 'OPEN-1: review trail 5101b81 missing');
-  need(open1, /bb\/stop-unless-empty-r3-flush-deferred-triggers-bef-thr_2h7fkxxygs/, 'OPEN-1: runner branch not cited');
+  need(open1, /bb\/stop-unless-empty-r4-bounded-statement-time-doc-thr_2unu5xpmv9/, 'OPEN-1: runner branch not cited');
   if (/🔴 \*\*OPEN-1\b/.test(runbook)) failures.push('OPEN-1: still marked as a pending action');
   if (/production SQL route/i.test(runbook)) failures.push('placeholder "production SQL route" remains');
   if (/production SQL gets run \(no route/i.test(runbook)) failures.push('stale OPEN-1 "no route is recorded" text remains');
@@ -465,7 +465,7 @@ export function checkCutoverRunbook(runbook, yaml, runnerSources, fmSources) {
     const stopNames = (runnerSources.classification?.tables ?? []).filter((t) => t.classification === 'credential-bearing: STOP').map((t) => t.table);
     if (stopNames.length !== 13) failures.push('B13: expected 13 STOP tables in the classification at ' + RUNNER_TIP + ', found ' + stopNames.length);
     for (const name of stopNames) need(b13, new RegExp('`' + name + '`'), 'B13: STOP table ' + name + ' not named');
-    for (const id of ['prod_sql_l1_stop_table_populated', 'prod_sql_l1_stop_table_lock_failed']) {
+    for (const id of ['prod_sql_l1_stop_table_populated', 'prod_sql_l1_stop_table_lock_failed', 'prod_sql_l1_statement_timeout']) {
       if (!(runnerSources.wrapper ?? '').includes("'" + id + "'") || !(runnerSources.prodSql ?? '').includes("'" + id + "'")) failures.push('B13: refusal id ' + id + ' not found in the runner source at ' + RUNNER_TIP);
       need(b13, new RegExp(id), 'B13: refusal id ' + id + ' missing');
     }
@@ -473,6 +473,8 @@ export function checkCutoverRunbook(runbook, yaml, runnerSources, fmSources) {
     need(b13, /prod-sql\.stop_tables/, 'B13: prod-sql.stop_tables event missing');
     need(b13, /STOP rule, `prod_sql_l1_stop_table_populated`[^\n]*\*\*STOP\.\*\*[^\n]*Do not retry[^\n]*Do not clear[^\n]*decide together/, 'B13: STOP rule for a populated table (no retry, nothing cleared, decide together) missing');
     need(b13, /STOP rule, `prod_sql_l1_stop_table_lock_failed`[^\n]*\*\*STOP\.\*\*[^\n]*Do not loop the retry/, 'B13: lock_failed rule missing');
+    need(b13, /STOP rule, `prod_sql_l1_statement_timeout`[^\n]*30 second[^\n]*57014[^\n]*\*\*STOP\.\*\*[^\n]*Do not loop the retry[^\n]*do not raise the bound/, 'B13: statement-timeout STOP rule (30 second bound, 57014, no retry loop, do not raise the bound) missing');
+    if (!(runnerSources.prodSql ?? '').includes('STATEMENT_TIMEOUT_MS = 30000')) failures.push('B13: runner source at ' + RUNNER_TIP + ' does not contain the 30 second statement timeout');
     need(b13, /SET CONSTRAINTS ALL IMMEDIATE/, "B13: the deferred-constraint flush before the final re-count is not described");
     if (!(runnerSources.prodSql ?? "").includes("set constraints all immediate")) failures.push("B13: runner source at " + RUNNER_TIP + " does not contain set constraints all immediate");
     need(b13, /STOP rule, deferred foreign-key failure[^\n]*`server_or_driver_error`[^\n]*`23503`[^\n]*\*\*STOP\.\*\*[^\n]*Do not retry[^\n]*decide together/, 'B13: deferred foreign-key failure (server_or_driver_error, 23503) STOP rule (no retry, decide together) missing');
@@ -577,6 +579,8 @@ export const MUTATIONS = [
   ['b13-missing-populated-stop-rule', (t) => t.replace('Do not retry. Do not clear, delete or edit anything in those tables.', 'Look at it.')],
   ['b13-missing-lock-failed-rule', (t) => t.replace('Do not loop the retry.', 'Retry freely.')],
   ['b13-wrong-populated-refusal-id', (t) => t.replaceAll('prod_sql_l1_stop_table_populated', 'prod_sql_l1_stop_table_full')],
+  ['b13-missing-statement-timeout-rule', (t) => t.replaceAll('STOP rule, `prod_sql_l1_statement_timeout`', 'STOP rule, `prod_sql_l1_something_else`')],
+  ['b13-statement-timeout-bound-changed', (t) => t.replaceAll('longer than the 30 second bound', 'longer than the bound')],
   ['b13-wrong-lock-refusal-id', (t) => t.replaceAll('prod_sql_l1_stop_table_lock_failed', 'prod_sql_l1_lock_error')],
   ['b13-missing-empty-until-commit', (t) => t.replace('**"Empty" is true only up to COMMIT:**', '**Empty is permanent:**')],
   ['b13-drops-a-stop-table', (t) => { const [a, b] = blockRange(t, 'B13'); return t.slice(0, a) + t.slice(a, b).replaceAll('`scim_users`', '`scim_x`') + t.slice(b); }],
