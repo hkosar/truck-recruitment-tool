@@ -4,6 +4,7 @@ import { pathToFileURL } from 'node:url';
 import pg from 'pg';
 import { RunnerRefusal, asPlanRefusal, classifyRunnerFailure } from './refusals.js';
 import { OWNER_AUTH_CREATE_ACTION, planOwnerAuthCreate, runOwnerAuthCreate } from './owner-bootstrap.js';
+import { ROLE_PASSWORD_ACTIONS, executeRolePassword, planRolePassword, type RolePasswordAction } from './role-password.js';
 import { executeRebuiltSqlPlan, planRebuiltSqlRun, requireRecordedRebuiltRef } from './staging-rebuilt.js';
 import { RECORDED_PROJECT_REFS, parseSupabaseDbTarget, type SupabaseDbTarget } from './target-guard.js';
 
@@ -149,6 +150,19 @@ async function main(): Promise<void> {
     }
     await runOwnerAuthCreate(authPlan);
     console.log(JSON.stringify({ msg: 'staging-sql.done', action: OWNER_AUTH_CREATE_ACTION }));
+    return;
+  }
+  if (args.project === 'rebuilt' && Object.prototype.hasOwnProperty.call(ROLE_PASSWORD_ACTIONS, args.action)) {
+    // LOGIN password for one of the two application roles (role-password.ts): the password is read from its one fixed variable, only a
+    // locally computed SCRAM-SHA-256 verifier is sent, and nothing about either is printed.
+    const pwPlan = asPlanRefusal(() => planRolePassword({ action: args.action, dbUrl: process.env.STAGING_DB_URL, confirm: args.confirm, password: process.env[ROLE_PASSWORD_ACTIONS[args.action as RolePasswordAction].passwordVariable] }));
+    console.log(JSON.stringify({ msg: 'staging-sql.verified', action: pwPlan.action, steps: 1, target: 'recorded rebuilt staging project' }));
+    if (!args.execute) {
+      console.log(JSON.stringify({ msg: 'staging-sql.plan_only', hint: 'add --execute to run' }));
+      return;
+    }
+    await executeRolePassword(pwPlan);
+    console.log(JSON.stringify({ msg: 'staging-sql.done', action: pwPlan.action }));
     return;
   }
   if (args.project === 'rebuilt') {

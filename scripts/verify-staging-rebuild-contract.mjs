@@ -138,6 +138,32 @@ if (owner) {
     if (!owner.includes(required)) failures.push(`owner-bootstrap.ts is missing: ${required}`);
   }
 }
+// Role password setup (runbook 6b build, pipeline/src/role-password.ts): the plain password never reaches the server (only a locally computed
+// SCRAM-SHA-256 verifier is in the statement), the role and variable come from a fixed two-entry table, the module reads no environment, the
+// change is one timed transaction, and the wrapper allows exactly these two names and one fixed result event.
+const rolePw = read('pipeline/src/role-password.ts');
+if (!rolePw) failures.push('role-password.ts is missing');
+else {
+  for (const required of ["'recruiter_app'", "'recruiter_maintenance'", "'STAGING_APP_DB_PASSWORD'", "'STAGING_MAINT_DB_PASSWORD'", 'pbkdf2Sync', "'Client Key'", "'Server Key'", 'requireRecordedRebuiltRef', 'parseSupabaseDbTarget', 'target.port !== 5432',
+    'refuses the production', "set local statement_timeout = '30s'", "set local lock_timeout = '10s'", "alter role ${plan.role} login password '${plan.verifier}'", 'VERIFIER_SHAPE', 'rolsuper', "await client.query('commit')", 'rollback_not_confirmed']) {
+    if (!rolePw.includes(required)) failures.push(`role-password.ts is missing: ${required}`);
+  }
+  const code = rolePw.replace(/\/\*[\s\S]*?\*\/|\/\/.*$/gm, '');
+  for (const forbidden of [/process\.env/, /\bdrop\b/i, /delete\s+from/i, /truncate/i, /\bgrant\b/i, /\brevoke\b/i, /\b(createrole|superuser|createdb|bypassrls)\b/i, /password\s+'\$\{(?!plan\.verifier)/, /console\.(log|error)\([^)]*(password|verifier)/i]) {
+    if (forbidden.test(code)) failures.push(`role-password.ts must not contain ${forbidden}`);
+  }
+  if ((code.match(/alter role/gi) ?? []).length !== 1) failures.push('role-password.ts must contain exactly one ALTER ROLE statement');
+}
+const wrapperSrc = read('scripts/run-with-secrets.mjs');
+if (wrapperSrc) {
+  for (const required of ["'STAGING_APP_DB_PASSWORD', 'STAGING_MAINT_DB_PASSWORD'", "'set-app-password', 'set-maintenance-password'", "'staging-sql.role_password_result'", "'role_password_refused'"]) {
+    if (!wrapperSrc.includes(required)) failures.push(`run-with-secrets.mjs is missing: ${required}`);
+  }
+  if (/PROMPT_ONLY = \[[^\]]*(STAGING_APP_DB_PASSWORD|STAGING_MAINT_DB_PASSWORD)/.test(wrapperSrc)) failures.push('run-with-secrets.mjs: the two role passwords must be allowed through --from-env');
+}
+const runnerCli = read('pipeline/src/staging-sql-runner.ts');
+if (runnerCli && !runnerCli.includes('ROLE_PASSWORD_ACTIONS[args.action as RolePasswordAction].passwordVariable')) failures.push('staging-sql-runner.ts: the role-password action must read only its own fixed variable');
+
 const doc16 = read('docs/build-plan/16-staging-and-hosting-plan.md');
 for (const required of ['Data API must already be enabled with', 'never authorizes another create', 'rollback_not_confirmed']) {
   if (!doc16 || !doc16.replace(/\s+/g, ' ').includes(required)) failures.push('doc 16 is missing: ' + required);

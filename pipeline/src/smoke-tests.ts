@@ -22,6 +22,7 @@ import {
 import { parse as parsePgConnectionString } from 'pg-connection-string';
 import { STAGING_SQL_ACTIONS, planStagingSqlRun } from './staging-sql-runner.js';
 import { REBUILT_STAGING_SQL_ACTIONS, executeRebuiltSqlPlan, planRebuiltSqlRun, requireRecordedRebuiltRef, retargetSqlToRebuiltRef } from './staging-rebuilt.js';
+import { ROLE_PASSWORD_ACTION_IDS } from './role-password.js';
 import { OWNER_CHECK_IDS, APPROVED_OWNER_EMAIL, OWNER_AUTH_CREATE_CONFIRMATION, planOwnerAuthCreate, runOwnerAuthCreate, type OwnerFetch } from './owner-bootstrap.js';
 import { RECORDED_PROJECT_REFS, parseSupabaseDbTarget, verifyPipelineTarget } from './target-guard.js';
 import { readFileSync } from 'node:fs';
@@ -1193,7 +1194,7 @@ async function wrapperModule(): Promise<any> {
 test('output wrapper enumerations equal the runner sources, and real emitted events pass it with no field withheld (review r7 findings 3 and 5)', async () => {
   const w = await wrapperModule();
   const sorted = (a: readonly string[]) => [...a].sort();
-  assert.deepEqual(sorted(w.ACTIONS), sorted([...new Set([...Object.keys(STAGING_SQL_ACTIONS), ...Object.keys(REBUILT_STAGING_SQL_ACTIONS), 'owner-auth-create'])]));
+  assert.deepEqual(sorted(w.ACTIONS), sorted([...new Set([...Object.keys(STAGING_SQL_ACTIONS), ...Object.keys(REBUILT_STAGING_SQL_ACTIONS), 'owner-auth-create', ...ROLE_PASSWORD_ACTION_IDS])]));
   assert.deepEqual(sorted(w.DRIVER_CODES), sorted(DRIVER_CODES));
   assert.deepEqual(sorted(w.EVENT_TRIGGER_NAMES), sorted(REVIEWED_EVENT_TRIGGER_NAMES));
   assert.deepEqual(sorted(w.EVENT_TRIGGER_FUNCTIONS), sorted(REVIEWED_EVENT_TRIGGER_FUNCTIONS));
