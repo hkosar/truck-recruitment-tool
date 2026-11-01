@@ -410,6 +410,23 @@ const wrapper = await import(pathToFileURL(resolve(REPOSITORY_ROOT, 'scripts/run
     check('a STOP table that holds a row after the L1 statements (written inside the transaction): fixed refusal prod_sql_l1_stop_table_populated, no commit, rolled back', out.error instanceof RunnerRefusal && out.error.id === 'prod_sql_l1_stop_table_populated' && !c.sent.includes('commit') && resultsOf(out.events).join() === 'rolled_back' && c.sent.some((s) => /^delete from auth\.flow_state/.test(s)));
     check('the re-count before COMMIT adds no second stop_tables event and no new refusal id', stopEvent(out.events)?.passed === true && out.events.filter((e) => e.msg === 'prod-sql.stop_tables').length === 1);
   }
+  {
+    // The flush: SET CONSTRAINTS ALL IMMEDIATE is sent after the last L1 statement and immediately before the final 13 counts; nothing is sent between the last count and COMMIT.
+    const c = stopFake(allZero());
+    const out = await runPlan('l1-sweep', c);
+    const flush = c.sent.indexOf('set constraints all immediate');
+    const counts = c.sent.map((s, i) => (/^select count/.test(s) ? i : -1)).filter((i) => i >= 0);
+    const lastDelete = Math.max(...c.sent.map((s, i) => (/^delete from auth\.flow_state/.test(s) ? i : -1)));
+    check('SET CONSTRAINTS ALL IMMEDIATE is sent once, after the last L1 statement and immediately before the final 13 counts (the second lookup sits just before them); the commit follows the last count with nothing between', out.error === undefined && c.sent.filter((s) => s === 'set constraints all immediate').length === 1 && flush > lastDelete && counts.length === 26 && counts[13]! > flush && c.sent.slice(flush + 1, counts[13]!).every((s) => /^select c\.relname/.test(s)) && c.sent[counts[25]! + 1] === 'commit');
+  }
+  {
+    // A deferred check that fails at the flush: the error propagates (it is not a COMMIT failure), nothing is committed, and the run is rolled back.
+    const c = stopFake(allZero());
+    const inner = c.query.bind(c);
+    c.query = async (sql: string) => { if (sql.trim() === 'set constraints all immediate') { c.sent.push(sql.trim()); throw Object.assign(new Error('deferred check failed at host db.example.com'), { code: '23503' }); } return inner(sql); };
+    const out = await runPlan('l1-sweep', c);
+    check('a failure of the flush (a deferred foreign key, 23503) is not relabelled: the original error propagates, no commit is sent, the run is rolled_back, and the driver text is not printed', (out.error as { code?: string } | undefined)?.code === '23503' && !c.sent.includes('commit') && resultsOf(out.events).join() === 'rolled_back' && !JSON.stringify(out.events).includes('db.example.com'));
+  }
   for (const code of ['55P03', '40P01', '42809']) {
     const c = stopFake(allZero(), { code });
     const out = await runPlan('l1-sweep', c);
@@ -481,6 +498,8 @@ const wrapper = await import(pathToFileURL(resolve(REPOSITORY_ROOT, 'scripts/run
       ['drop the populated refusal', (t) => t.replace("if (stop.populated > 0) throw new RunnerRefusal('prod_sql_l1_stop_table_populated'", "if (stop.populated > 99) throw new RunnerRefusal('prod_sql_l1_stop_table_populated'")],
       ['count after the delete: move the check behind the first statement', (t) => t.replace("if (action.stopTables === 'must_be_empty') {\n      // Lock the STOP tables", "if (action.stopTables === 'never') {\n      // Lock the STOP tables")],
       ['no read committed before the lock', (t) => t.replace("if (action.stopTables === 'must_be_empty') await client.query(READ_COMMITTED_SQL);", '')],
+      ['remove SET CONSTRAINTS ALL IMMEDIATE before the final re-count (a deferred constraint trigger could write a STOP table inside COMMIT)', (t) => t.replace('await client.query(SET_CONSTRAINTS_IMMEDIATE_SQL);', '')],
+      ['change the flush to a statement that does not fire deferred triggers', (t) => t.replace("'set constraints all immediate'", "'set constraints all deferred'")],
       ['hard-code a STOP table in code', (t) => t.replace("export const STOP_LOCK_MODE", "const hardCoded = ['scim_users'];\nexport const STOP_LOCK_MODE")],
       ['a lock timeout is no longer a fixed refusal', (t) => t.replace("['55P03', '40P01', '42809']", "['40P01', '42809']")],
       ['select the rows, not a count', (t) => t.replace('select count(*)::bigint as n from', 'select * from')],

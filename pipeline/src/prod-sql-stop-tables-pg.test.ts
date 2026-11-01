@@ -369,6 +369,52 @@ async function main(): Promise<void> {
     await q('drop trigger synthetic_stop_writer on auth.flow_state');
   }
 
+  // ---- 13. A DEFERRED constraint trigger of the sweep's own transaction writes a STOP table (the independent reviewer's reproduction): without a flush it would fire inside COMMIT, after the last count.
+  // SET CONSTRAINTS ALL IMMEDIATE (sent right before the re-count) fires it first, so the re-count sees the row and the sweep refuses and rolls back.
+  {
+    await resetSchema(); await seedL1();
+    await q("create function auth.synthetic_deferred_stop_writer() returns trigger language plpgsql as $$ begin insert into auth.scim_users (data) values ('written at the end of the sweep'); return old; end $$");
+    await q('create constraint trigger synthetic_deferred_stop_writer after delete on auth.flow_state deferrable initially deferred for each row execute function auth.synthetic_deferred_stop_writer()');
+    const before = await l1Fingerprint();
+    const out = await run('l1-sweep');
+    const flushAt = out.sent.indexOf('set constraints all immediate');
+    const lastCount = out.sent.map((x, i) => (/^select count/.test(x) ? i : -1)).filter((i) => i >= 0).pop() ?? -1;
+    const lastDelete = out.sent.map((x, i) => (/^delete from auth.flow_state/.test(x) ? i : -1)).filter((i) => i >= 0).pop() ?? -1;
+    check('real PG, a DEFERRED constraint trigger on flow_state that inserts into scim_users: the sweep refuses with prod_sql_l1_stop_table_populated, the run is rolled_back, no COMMIT was sent, scim_users is empty again and every L1 row is as before', out.error instanceof RunnerRefusal && out.error.id === 'prod_sql_l1_stop_table_populated' && resultOf(out) === 'rolled_back' && !out.sent.includes('commit') && await stopRows() === 0 && await l1Fingerprint() === before && stopEvent(out)?.passed === true);
+    check('real PG, the flush ran after the last L1 statement and immediately before the second catalogue lookup and the final 13 counts, and nothing was sent after the last count except the rollback', lastDelete >= 0 && flushAt > lastDelete && /^select c.relname/.test(out.sent[flushAt + 1] ?? "") && out.sent.slice(flushAt + 2, flushAt + 15).every((x) => /^select count/.test(x)) && lastCount === flushAt + 14 && out.sent.slice(lastCount + 1).join() === 'rollback');
+    // Control: the same trigger without the flush really does survive the re-count and fires inside COMMIT (shows the test would catch a removed flush).
+    await resetSchema(); await seedL1();
+    await q("create function auth.synthetic_deferred_stop_writer() returns trigger language plpgsql as $$ begin insert into auth.scim_users (data) values ('written at the end of the sweep'); return old; end $$");
+    await q('create constraint trigger synthetic_deferred_stop_writer after delete on auth.flow_state deferrable initially deferred for each row execute function auth.synthetic_deferred_stop_writer()');
+    const bare = new pg.Client({ connectionString: URL_ENV }); bare.on('error', () => undefined); await bare.connect();
+    await bare.query('begin'); await bare.query("delete from auth.flow_state");
+    const seenBeforeCommit = Number((await bare.query('select count(*) as n from auth.scim_users')).rows[0].n);
+    await bare.query('commit'); await bare.end();
+    check('real PG control, without SET CONSTRAINTS ALL IMMEDIATE the deferred trigger writes the STOP row only inside COMMIT (0 rows seen before COMMIT, 2 after)', seenBeforeCommit === 0 && await stopRows() === 2);
+  }
+
+  // ---- 14. A chain of deferred triggers (the first one's write queues a second deferred trigger) is flushed completely, and a deferred foreign key that fails at the flush refuses cleanly and rolls back.
+  {
+    await resetSchema(); await seedL1();
+    await q("create function auth.synthetic_chain_a() returns trigger language plpgsql as $$ begin insert into auth.mfa_factors (data) values ('chain'); return old; end $$");
+    await q('create constraint trigger synthetic_chain_a after delete on auth.flow_state deferrable initially deferred for each row execute function auth.synthetic_chain_a()');
+    await q("create function auth.synthetic_chain_b() returns trigger language plpgsql as $$ begin insert into auth.scim_users (data) values ('chain end'); return new; end $$");
+    await q('create constraint trigger synthetic_chain_b after insert on auth.mfa_factors deferrable initially deferred for each row execute function auth.synthetic_chain_b()');
+    const before = await l1Fingerprint();
+    const out = await run('l1-sweep');
+    check('real PG, a chain of two deferred triggers (flow_state delete -> mfa_factors insert -> scim_users insert): the sweep refuses with prod_sql_l1_stop_table_populated, rolled_back, no COMMIT, every STOP table empty again, every L1 row as before', out.error instanceof RunnerRefusal && out.error.id === 'prod_sql_l1_stop_table_populated' && resultOf(out) === 'rolled_back' && !out.sent.includes('commit') && await stopRows() === 0 && await l1Fingerprint() === before);
+
+    await resetSchema(); await seedL1();
+    await q('alter table auth.audit_log_entries add column flow_state_id uuid references auth.flow_state(id) deferrable initially deferred');
+    await q("insert into auth.audit_log_entries (data, flow_state_id) select 'child', id from auth.flow_state limit 1");
+    const before2 = await l1Fingerprint();
+    const out2 = await run('l1-sweep');
+    const code = (out2.error as { code?: string } | undefined)?.code;
+    info('deferred foreign key failing at the flush', `error code ${code}, result ${resultOf(out2)}`);
+    check('real PG, a DEFERRED foreign key that the L1 flow_state delete violates: the flush raises 23503 (a clean server error, not a commit-time failure), the run is rolled_back, COMMIT was never sent, and every L1 row and the child row are as before', code === '23503' && resultOf(out2) === 'rolled_back' && !out2.sent.includes('commit') && out2.sent.includes('set constraints all immediate') && await l1Fingerprint() === before2 && Number((await q('select count(*) as n from auth.audit_log_entries')).rows[0].n) === 1);
+    check('real PG, that failure event set is only the fixed result event (no driver text), and the wrapper allow-list passes every event', (() => { const k = { fields: 0 }; return out2.events.every((e) => wrapper.allowListLine(JSON.stringify(e), k) !== null) && k.fields === 0 && !JSON.stringify(out2.events).includes('audit_log_entries'); })());
+  }
+
   await q('drop schema if exists auth cascade');
   await admin.end();
   console.log(`prod-sql STOP-table real-PG: ${n} checks passed`);
