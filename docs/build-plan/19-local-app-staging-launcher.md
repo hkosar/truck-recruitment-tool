@@ -26,7 +26,7 @@ Wrong Doppler project or config; any of the four names missing or empty; a `DATA
 
 ## Output
 
-Only the app's structured log lines (`{"at","event",...}`, flat, short values) and fixed configuration-error lines are shown, with the four values masked (same masking as `run-with-secrets.mjs`). Every other line (driver errors, stack traces) is withheld and counted in the final line. Environment values are never printed.
+Only the app's structured log lines (`{"at","event",...}`, flat, short values) and the exact fixed configuration-error messages listed from `app/server/config.ts` (an exact match only; any other text, even starting with `ConfigError:`, is withheld) are shown. The four values are masked with no minimum length, in the raw line before it is read, in every field and in the final line, in plain, URL-encoded and JSON-escaped forms (so a quote, backslash or accented character in a password cannot get past). A database password under 8 characters is refused at start, because masking a few characters cannot be done safely; rotate it to a longer one. Every other line (driver errors, stack traces) is withheld and counted in the final line. Environment values are never printed.
 
 ## Secrets owner, only after Hunter's direct OK in the secrets chat
 

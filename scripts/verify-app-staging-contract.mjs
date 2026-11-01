@@ -35,7 +35,21 @@ need(!/ejrfobddnojbijzrjbii|yhyoxhtguyturgdhwywc|ojqtsftfclhxauhjwott/.test(src)
 need(/export const RECORDED_PROJECT_REFS/.test(guard) && /stagingRebuilt: REBUILT_STAGING_PROJECT_REF/.test(guard), 'target-guard must still export RECORDED_PROJECT_REFS.stagingRebuilt');
 need(/APP_ROLE = 'recruiter_app'/.test(src) && /APP_DB_PORT = 5432/.test(src), 'launcher must require the recruiter_app login on port 5432');
 // Masking is shared with the wrapper; the child gets a built environment, never the parent's.
-need(/import \{ maskTargets, scrub \} from '\.\/run-with-secrets\.mjs'/.test(src), 'launcher must reuse the wrapper masking');
+need(/import \{ scrub \} from '\.\/run-with-secrets\.mjs'/.test(src) && !/maskTargets\(/.test(src), 'launcher must reuse the wrapper scrub but not its length-filtered maskTargets');
+need(/export function launcherMaskTargets/.test(src) && /launcherMaskTargets\(childEnv\[n\]\)/.test(src) && !/length >= \d/.test(/function launcherMaskTargets[\s\S]*?\n}\n/.exec(src)?.[0] ?? 'length >= 4'), 'launcher must mask every secret with launcherMaskTargets, which has no minimum-length filter');
+need(/MIN_MASKABLE_LENGTH = 8/.test(src) && /shorter than \$\{MIN_MASKABLE_LENGTH\} characters/.test(src), 'launcher must refuse a database password under 8 characters');
+need(/JSON\.parse\(scrub\(line, targets\)\)/.test(src) && /scrub\(v, targets\)/.test(src) && /return scrub\(JSON\.stringify\(out\), targets\)/.test(src) && /jsonEscaped/.test(src) && /encodeURIComponent/.test(src), 'launcher must mask the raw line before parsing, each parsed value and the final line, including JSON-escaped and URL-encoded forms');
+// Non-JSON lines: only the exact ConfigError messages of app/server/config.ts.
+const configLiterals = [...config.matchAll(/new ConfigError\((?:'([A-Z_]+)'|name), ('[^']*'|"[^"]*")\)/g)].map((m) => [m[1], m[2].slice(1, -1)]);
+const listedMessages = src.slice(src.indexOf('CONFIG_ERROR_MESSAGES = ['), src.indexOf('const CONFIG_ERROR_LINES'));
+need(configLiterals.length >= 10, 'could not read the ConfigError literals of app/server/config.ts');
+for (const [name, rule] of configLiterals) {
+  if (name === undefined) continue; // required(): the 'is required' rule is checked per name below
+  need(listedMessages.includes(rule), `launcher config-error list lacks the rule of ${name}: ${rule}`);
+}
+need(listedMessages.includes('is required') && /KEY_LINKS: the three keys must differ/.test(listedMessages), 'launcher config-error list lacks the is-required or the three-keys message');
+need(!/\[A-Z\]\[A-Z0-9_\]\{2,40\}/.test(src) && /CONFIG_ERROR_LINES\.has\(line\)/.test(src), 'launcher must accept config-error lines only by exact match, not by pattern');
+need(test.includes('finding 1') && test.includes('finding 2') && test.includes('finding 3'), 'tests must keep the regression cases for the three review findings');
 need(/env: childEnv/.test(src) && !/env: process\.env/.test(src) && !/\.\.\.env\b/.test(src) && /shell: false/.test(src) && /stdio: \['ignore'/.test(src), 'child must get only the built environment, no shell, no stdin');
 need(!/\bSENDGRID_[A-Z_]+'/.test(src.replace(/startsWith\('SENDGRID_'\)/, '')), 'launcher must not name or pass any SendGrid variable');
 need(!/console\.log\([^)]*env|stdout\.write\([^)]*env\b/.test(src), 'launcher must not print environment values');
