@@ -46,7 +46,14 @@ for (const phrase of ['only the staging Doppler scope', 'is missing or empty', '
   need(test.includes(phrase), `test file does not cover: ${phrase}`);
 }
 for (const n of listed) need(doc.includes(`\`${n}\``), `doc 19 does not name ${n}`);
-need(doc.includes('doppler run --project truck-recruitment-tool --config stg -- node scripts\\run-app-staging.mjs') && doc.includes('NOT RUN'), 'doc 19 must show the launch command marked NOT RUN');
+need(doc.includes('NOT RUN'), 'doc 19 must mark the launch command NOT RUN');
+// Every launch command in the doc must use the scoped staging token prefix, never the full login.
+const launchLines = doc.split('\n').filter((l) => l.includes('run-app-staging.mjs') && /\bdoppler\b/.test(l) && !l.startsWith('Launcher:'));
+need(launchLines.length > 0, 'doc 19 shows no launch command');
+for (const l of launchLines) {
+  need(l.includes('--config-dir') && l.includes('--scope') && l.includes('--no-fallback') && l.includes('--no-read-env') && l.includes('--project truck-recruitment-tool --config stg'), `doc 19 launch command lacks --config-dir/--scope/--no-fallback: ${l.trim().slice(0, 60)}`);
+}
+need(/Secrets owner, only after Hunter's direct OK in the secrets chat/.test(doc) && doc.indexOf('doppler secrets set KEY_LINKS') > doc.indexOf("Secrets owner, only after Hunter's direct OK"), 'doc 19 must keep the KEY_* creation commands under the secrets-owner heading');
 
 if (failures.length > 0) {
   for (const f of failures) console.error(`FAIL: ${f}`);

@@ -46,6 +46,14 @@ test('refuses a wrong or missing Doppler project or config (prd, dev, none)', ()
   }
 });
 
+test('accepts a token-scoped run that supplies only the project/config variables, and drops them from the child', () => {
+  const env = goodEnv();
+  const child = buildAppEnv(env, 8788);
+  assert.ok(!('DOPPLER_PROJECT' in child) && !('DOPPLER_CONFIG' in child) && !('DOPPLER_TOKEN' in child));
+  const { DOPPLER_PROJECT, DOPPLER_CONFIG, ...noScope } = env;
+  refused(noScope, /only the staging Doppler scope/);
+});
+
 test('refuses each missing or empty required name, naming only the variable', () => {
   for (const name of APP_SECRET_NAMES) {
     for (const v of [undefined, '', '  ']) {

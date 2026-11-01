@@ -5,22 +5,18 @@ It exists because `scripts/run-with-secrets.mjs` cannot start the app: its allow
 
 ## Future launch command (NOT RUN by the author of this change)
 
-From the repository root, after `npm run build:server` has produced `app/dist-server/main.js` (the launcher builds and installs nothing):
+From the staging worktree root (the launcher must run from that folder, because the Doppler token is scoped to it: `C:\Users\hunte\.bb\plugins\environment-git-worktree\host-data\worktrees\thr_dnq6nmqppt-1\truck-recruitment-tool`), in PowerShell, after `npm run build:server` has produced `app/dist-server/main.js` (the launcher builds and installs nothing):
 
-    doppler run --project truck-recruitment-tool --config stg -- node scripts\run-app-staging.mjs --port 8788
+    doppler --config-dir "$env:USERPROFILE\.doppler-truck-stg" --no-read-env --no-check-version --scope 'C:\Users\hunte\.bb\plugins\environment-git-worktree\host-data\worktrees\thr_dnq6nmqppt-1\truck-recruitment-tool' run --no-fallback --project truck-recruitment-tool --config stg -- node scripts\run-app-staging.mjs --port 8788
 
-Stop it with Ctrl+C in that window, or by stopping only the process that was started (by its PID).
+This uses only the manager's reviewed staging token (config folder `.doppler-truck-stg`). Never use Hunter's full Doppler login for this launch. Stop it with Ctrl+C in that window, or by stopping only the process that was started (by its PID).
 
 ## Doppler `stg` names the app needs (exactly four; none exist yet)
 
 | Name | What it is | Who creates it, and how |
 |---|---|---|
 | `DATABASE_URL` | the `recruiter_app` login on the shared pooler, session mode: `postgresql://recruiter_app.<staging-2 ref>:<password>@<pooler host>:5432/postgres` | After approval 6b gives `recruiter_app` a password (the password is the owner's step), the secrets owner assembles this URL in Doppler `stg`. It must not be the runner or maintenance login. |
-| `KEY_LINKS`, `KEY_SESSIONS`, `KEY_RATE` | three different random 256-bit keys, each at least 43 base64url characters (`app/server/config.ts`) | The secrets owner generates each one separately and writes it straight into Doppler `stg` without displaying it (command below). Values must never be reused from another environment, and production gets its own different set later. |
-
-Command for one key (repeat for the other two names; a different random value each time; nothing is printed):
-
-    node -e "process.stdout.write(require('crypto').randomBytes(32).toString('base64url'))" | doppler secrets set KEY_LINKS --project truck-recruitment-tool --config stg --silent
+| `KEY_LINKS`, `KEY_SESSIONS`, `KEY_RATE` | three different random 256-bit keys, each at least 43 base64url characters (`app/server/config.ts`) | The secrets owner generates each one separately and writes it straight into Doppler `stg` without displaying it (see the secrets-owner section below). Values must never be reused from another environment, and production gets its own different set later. |
 
 Not read from Doppler: `APP_ORIGIN`, `EMAIL_MODE`, `HOST`, `PORT`, `TRUSTED_PROXY_HOPS`, `STAGING_BANNER` (the launcher forces them: `http://localhost:<port>`, `test`, `127.0.0.1`, the port, `0`, `true`). No `SENDGRID_*` name is accepted.
 
@@ -31,3 +27,15 @@ Wrong Doppler project or config; any of the four names missing or empty; a `DATA
 ## Output
 
 Only the app's structured log lines (`{"at","event",...}`, flat, short values) and fixed configuration-error lines are shown, with the four values masked (same masking as `run-with-secrets.mjs`). Every other line (driver errors, stack traces) is withheld and counted in the final line. Environment values are never printed.
+
+## Secrets owner, only after Hunter's direct OK in the secrets chat
+
+The manager never runs these. Each command generates a value and writes it straight into Doppler without printing it.
+
+KEY_LINKS (KEY_SESSIONS and KEY_RATE follow, each a different random value; nothing is printed):
+
+    node -e "process.stdout.write(require('crypto').randomBytes(32).toString('base64url'))" | doppler secrets set KEY_LINKS --project truck-recruitment-tool --config stg --silent
+
+    node -e "process.stdout.write(require('crypto').randomBytes(32).toString('base64url'))" | doppler secrets set KEY_SESSIONS --project truck-recruitment-tool --config stg --silent
+
+    node -e "process.stdout.write(require('crypto').randomBytes(32).toString('base64url'))" | doppler secrets set KEY_RATE --project truck-recruitment-tool --config stg --silent

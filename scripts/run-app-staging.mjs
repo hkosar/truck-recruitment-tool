@@ -3,7 +3,7 @@
 // from Doppler `truck-recruitment-tool`/`stg`. It is a separate, small launcher (not part of scripts/run-with-secrets.mjs, whose
 // allow-list is for the short owner steps). Doc: docs/build-plan/19-local-app-staging-launcher.md.
 //
-//   doppler run --project truck-recruitment-tool --config stg -- node scripts/run-app-staging.mjs [--port N]
+//   (scoped staging token prefix; see docs/build-plan/19) ... run --no-fallback --project truck-recruitment-tool --config stg -- node scripts/run-app-staging.mjs [--port N]
 //
 // Refuses (fixed messages, no values) unless ALL of these hold:
 //  - DOPPLER_PROJECT is truck-recruitment-tool and DOPPLER_CONFIG is stg (a guard against a wrong command, not a security boundary;
@@ -44,7 +44,7 @@ export function parseAppArgs(argv) {
       const v = argv[++i];
       port = Number(v);
       if (!/^\d+$/.test(String(v)) || port < 1024 || port > 65535) throw new Error('refusing: --port must be a whole number from 1024 to 65535');
-    } else throw new Error('usage: node scripts/run-app-staging.mjs [--port N]  (run through: doppler run --project truck-recruitment-tool --config stg -- ...)');
+    } else throw new Error('usage: node scripts/run-app-staging.mjs [--port N]  (run through the scoped staging-token doppler prefix in docs/build-plan/19)');
   }
   return { port };
 }
