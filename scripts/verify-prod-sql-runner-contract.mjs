@@ -189,6 +189,8 @@ if (mod) {
       if (captured.length !== 27) failures.push(`${MIRROR}: expected the 27 captured tables, found ${captured.length}`);
       for (const t of captured) if (!seen.has(t)) failures.push(`${FILE}: the captured table ${t} is not classified`);
       for (const t of seen) if (!captured.includes(t)) failures.push(`${FILE}: ${t} is not in the staging-2 capture; add it only from reviewed evidence`);
+      // A SCIM user resource may carry a password (RFC 7643 section 4.1.1) and the table is unrestricted json that L1 does not clear: it stays STOP until a reviewed contract proves otherwise.
+      if (entries.find((e) => e.table === 'scim_users')?.classification !== 'credential-bearing: STOP') failures.push(`${FILE}: scim_users must be classified credential-bearing: STOP (unrestricted resource json; RFC 7643 section 4.1.1 defines a password attribute)`);
       for (const e of entries) {
         const secretCol = (mirror?.tables?.[e.table] ?? []).find((c) => /secret|token|code_hash|otp_code|code_verifier|authorization_code|credential|session_data|encrypted_password/i.test(c.column));
         if (secretCol && e.classification === 'not credential-bearing: reviewed') failures.push(`${FILE}: ${e.table} has the column ${secretCol.column} but is classified as not credential-bearing`);

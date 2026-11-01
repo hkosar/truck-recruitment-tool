@@ -282,13 +282,13 @@ async function main(): Promise<void> {
         for (const n of mirrorOnly.filter((x) => !stopSet.includes(x))) { await q(mirrorDdl(n)); created.push(n); }
         const reviewedOnly = track(await run('l1-shape'));
         const reviewedEvent = reviewedOnly.events.find((e) => e.msg === 'prod-sql.shape') as { passed?: boolean; auth_tables_unreviewed?: number } | undefined;
-        check('staging-2 mirror, reviewed tables only (10 of the 27 plus the 5 shim L1 tables): l1-shape passes with nothing unreviewed', reviewedOnly.error === undefined && reviewedEvent?.passed === true && reviewedEvent.auth_tables_unreviewed === 0 && created.length === 10);
+        check('staging-2 mirror, reviewed tables only (9 of the 27 plus the 5 shim L1 tables): l1-shape passes with nothing unreviewed', reviewedOnly.error === undefined && reviewedEvent?.passed === true && reviewedEvent.auth_tables_unreviewed === 0 && created.length === 9);
         for (const n of mirrorOnly.filter((x) => stopSet.includes(x))) { await q(mirrorDdl(n)); created.push(n); }
         const full = Number((await q("select count(*) as n from pg_catalog.pg_class c join pg_catalog.pg_namespace s on s.oid = c.relnamespace where s.nspname = 'auth' and c.relkind = 'r'")).rows[0].n);
         const mirrorShape = track(await run('l1-shape'));
         const mirrorSweep = track(await run('l1-sweep'));
         const mirrorEvent = mirrorShape.events.find((e) => e.msg === 'prod-sql.shape') as { passed?: boolean; auth_tables_unreviewed?: number; checks?: Record<string, boolean> } | undefined;
-        check('staging-2 mirror, all 27 captured auth tables present: the real gate refuses l1-shape, counting exactly the 12 STOP tables and naming none', full === 27 && stopSet.length === 12 && mirrorShape.error instanceof RunnerRefusal && mirrorShape.error.id === 'prod_sql_l1_shape_not_ok' && mirrorEvent?.passed === false && mirrorEvent.auth_tables_unreviewed === 12 && mirrorEvent.checks?.no_unreviewed_auth_tables === false && !stopSet.some((n) => JSON.stringify(mirrorShape.events).includes(n)));
+        check('staging-2 mirror, all 27 captured auth tables present: the real gate refuses l1-shape, counting exactly the 13 STOP tables and naming none', full === 27 && stopSet.length === 13 && mirrorShape.error instanceof RunnerRefusal && mirrorShape.error.id === 'prod_sql_l1_shape_not_ok' && mirrorEvent?.passed === false && mirrorEvent.auth_tables_unreviewed === 13 && mirrorEvent.checks?.no_unreviewed_auth_tables === false && !stopSet.some((n) => JSON.stringify(mirrorShape.events).includes(n)));
         check('staging-2 mirror, all 27 present: l1-sweep refuses in the same run before any delete or update, nothing committed, every seeded row survives', mirrorSweep.error instanceof RunnerRefusal && mirrorSweep.error.id === 'prod_sql_l1_shape_not_ok' && resultOf(mirrorSweep) === 'rolled_back' && !mirrorSweep.sent.some((s) => ctlOf(s) === 'commit') && !mirrorSweep.sent.some((s) => /^(delete|update)/i.test(s)) && (await authCounts()) === seeded);
       } finally {
         for (const n of created) await q(`drop table if exists auth.${n}`);

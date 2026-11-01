@@ -1,12 +1,12 @@
 {
   "schema": 1,
-  "description": "The reviewed list of auth tables for the production SQL runner's L1 shape gate (pipeline/src/prod-sql.ts). A table appears here ONLY with an explicit classification and a cited source. The gate stops on any auth table that is not listed, and on any table classified 'credential-bearing: STOP'. This file is pinned by SHA-256 in prod-sql.ts: a change needs a reviewed change to that pin. Evidence: the staging-2 auth schema capture of 2026-11-01 (27 tables, names and types only, no row data), classified in docs/build-plan/18-production-sql-route-options.md. That is staging-2 evidence and NOT proof of production parity. Auth release: (not verified). Twelve tables are classified STOP, so the gate refuses on a database with this schema until L1 is extended by a separately reviewed change or the owner accepts the risk.",
+  "description": "The reviewed list of auth tables for the production SQL runner's L1 shape gate (pipeline/src/prod-sql.ts). A table appears here ONLY with an explicit classification and a cited source. The gate stops on any auth table that is not listed, and on any table classified 'credential-bearing: STOP'. This file is pinned by SHA-256 in prod-sql.ts: a change needs a reviewed change to that pin. Evidence: the staging-2 auth schema capture of 2026-11-01 (27 tables, names and types only, no row data), classified in docs/build-plan/18-production-sql-route-options.md. That is staging-2 evidence and NOT proof of production parity. Auth release: (not verified). Thirteen tables are classified STOP, so the gate refuses on a database with this schema until L1 is extended by a separately reviewed change or the owner accepts the risk.",
   "tables": [
     {
       "table": "audit_log_entries",
       "classification": "not credential-bearing: reviewed",
       "source": "staging-2 auth schema capture of 2026-11-01 (kept outside the repository), columns payload (json), ip_address, created_at, instance_id, also recorded in supabase/tests/a3/harness/auth-staging2-mirror.json; event log; no token, secret, hash or code column; the json payload content cannot be proven by a names-and-types capture (assumption recorded in the note)",
-      "note": "Assumption: the json payload holds event metadata only (Supabase Auth audit log). Not provable from a names-and-types capture."
+      "note": "Assumption: the json payload holds event metadata only (Supabase Auth audit log). Not provable from a names-and-types capture; unlike SCIM, no standard defines a credential attribute for it. A separately approved content check would be needed to prove it."
     },
     {
       "table": "custom_oauth_providers",
@@ -22,7 +22,7 @@
       "table": "identities",
       "classification": "not credential-bearing: reviewed",
       "source": "staging-2 auth schema capture of 2026-11-01 (kept outside the repository), columns provider_id, identity_data (jsonb), provider, email, user_id, also recorded in supabase/tests/a3/harness/auth-staging2-mirror.json; links a user to an external provider identity; no token, secret, hash or code column; identity_data is provider profile claims per Supabase Auth docs, content not provable from the capture (assumption recorded in the note)",
-      "note": "Assumption: identity_data holds provider profile claims, not tokens. Not provable from the capture. Provider sign-in is closed at O2 before L1."
+      "note": "Assumption: identity_data holds provider profile claims, not tokens (Supabase identities docs). Not provable from the capture; unlike SCIM, no standard defines a credential attribute for it. Provider sign-in is closed at O2 before L1."
     },
     {
       "table": "instances",
@@ -107,9 +107,8 @@
     },
     {
       "table": "scim_users",
-      "classification": "not credential-bearing: reviewed",
-      "source": "staging-2 auth schema capture of 2026-11-01 (kept outside the repository), columns resource (jsonb), user_name, external_id, active, user_id, also recorded in supabase/tests/a3/harness/auth-staging2-mirror.json; provisioning mirror of a user record; no token, secret or hash column; resource is SCIM user JSON, content not provable (assumption recorded in the note)",
-      "note": "Assumption: resource holds SCIM user attributes without a password. Not provable from the capture."
+      "classification": "credential-bearing: STOP",
+      "source": "staging-2 auth schema capture of 2026-11-01 (kept outside the repository), columns resource (jsonb, NOT NULL, unrestricted), user_name, external_id, active, user_id, also recorded in supabase/tests/a3/harness/auth-staging2-mirror.json; a SCIM user resource may carry a password attribute (RFC 7643 section 4.1.1) and nothing in the capture or the public documentation read proves that this table strips it; L1 neither deletes this table nor clears the json, so L1 does not clear it"
     },
     {
       "table": "sessions",
