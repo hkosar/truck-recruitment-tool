@@ -282,7 +282,7 @@ export const L1_USERS_TOKEN_COLUMNS = ['confirmation_token', 'recovery_token', '
  * The file is pinned by SHA-256 and read through the same injectable reader as the SQL files, so a changed file is refused at plan time.
  */
 export const AUTH_CLASSIFICATION_FILE = 'supabase/rollout/auth-table-classification.json';
-export const AUTH_CLASSIFICATION_SHA256 = '35e2a483d09ce114d920b665a5af8717919f53f75bb6a53897fe4254db3d4093';
+export const AUTH_CLASSIFICATION_SHA256 = '866266ec0c9a6d5e2c2001a9c7d01946492d194e145f3785cf0d16219c7371af';
 export const AUTH_CLASSIFICATIONS = ['credential-bearing: handled by L1', 'credential-bearing: STOP', 'not credential-bearing: reviewed'] as const;
 export type AuthClassification = (typeof AUTH_CLASSIFICATIONS)[number];
 export interface AuthTableClassification { table: string; classification: AuthClassification; source: string; note?: string }

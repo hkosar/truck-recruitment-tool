@@ -181,9 +181,17 @@ if (mod) {
         const clears = t === 'users' ? /update\s+auth\.users\b/i.test(l1Sql) : new RegExp(`delete\\s+from\\s+auth\\.${t}\\b`, 'i').test(l1Sql);
         if (!clears) failures.push(`${FILE}: ${t} is classified "handled by L1" but the L1 file does not clear it`);
       }
-      // Nothing was added from a name alone: the standard names the re-review left PENDING are not on the list until a reviewed capture classifies them.
-      for (const pending of ['identities', 'mfa_factors', 'mfa_challenges', 'mfa_amr_claims', 'sso_providers', 'sso_domains', 'saml_providers', 'saml_relay_states', 'audit_log_entries', 'instances']) {
-        if (seen.has(pending)) failures.push(`${FILE}: ${pending} is listed; it may be added only by a reviewed change that cites the staging-2 schema capture`);
+      // Every listed table must be a table of the staging-2 capture (the mirror fixture), every captured table must be listed, and a table with a secret, hash, code or credential column must not be reviewed as harmless.
+      const MIRROR = 'supabase/tests/a3/harness/auth-staging2-mirror.json';
+      let mirror;
+      try { mirror = JSON.parse(readFileSync(resolve(root, MIRROR), 'utf8')); } catch { failures.push(`missing or invalid ${MIRROR}`); }
+      const captured = Object.keys(mirror?.tables ?? {});
+      if (captured.length !== 27) failures.push(`${MIRROR}: expected the 27 captured tables, found ${captured.length}`);
+      for (const t of captured) if (!seen.has(t)) failures.push(`${FILE}: the captured table ${t} is not classified`);
+      for (const t of seen) if (!captured.includes(t)) failures.push(`${FILE}: ${t} is not in the staging-2 capture; add it only from reviewed evidence`);
+      for (const e of entries) {
+        const secretCol = (mirror?.tables?.[e.table] ?? []).find((c) => /secret|token|code_hash|otp_code|code_verifier|authorization_code|credential|session_data|encrypted_password/i.test(c.column));
+        if (secretCol && e.classification === 'not credential-bearing: reviewed') failures.push(`${FILE}: ${e.table} has the column ${secretCol.column} but is classified as not credential-bearing`);
       }
     }
     need('prod-sql.ts', c, /const known = new Set<string>\(classification\.filter\(\(e\) => e\.classification !== 'credential-bearing: STOP'\)\.map\(\(e\) => e\.table\)\);/, 'the gate passes only a table the classification file lists as handled by L1 or reviewed as not credential-bearing (a STOP table and an unlisted table both stop it)');
@@ -442,7 +450,7 @@ if (runner) {
   const inventoryActions = wrapper ? /export const ACTIONS = \[([\s\S]*?)\];/.exec(wrapper)?.[1].match(/'([a-z0-9-]+)'/g) ?? [] : [];
   if (!inventoryActions.includes("'auth-schema-inventory'")) failures.push('run-with-secrets.mjs ACTIONS must list auth-schema-inventory');
   if (doc) {
-    for (const w of ['PENDING staging-2 capture and review', 'not proof of production parity', 'auth-schema-inventory', 'auth-table-classification.json', 'credential-bearing: handled by L1', 'credential-bearing: STOP', 'not credential-bearing: reviewed', 'separate approval']) {
+    for (const w of ['staging-2 capture classified', 'Auth release: (not verified)', 'Decision needed', 'not proof of production parity', 'auth-schema-inventory', 'auth-table-classification.json', 'credential-bearing: handled by L1', 'credential-bearing: STOP', 'not credential-bearing: reviewed', 'separate approval']) {
       if (!doc.includes(w)) failures.push(`doc 18 must keep the auth inventory section (missing: "${w}")`);
     }
     for (const t of ['identities', 'mfa_factors', 'mfa_challenges', 'mfa_amr_claims', 'sso_providers', 'sso_domains', 'saml_providers', 'saml_relay_states', 'audit_log_entries', 'instances']) {

@@ -437,10 +437,29 @@ const wrapper = await import(pathToFileURL(resolve(REPOSITORY_ROOT, 'scripts/run
   const handledBy = (c: readonly AuthTableClassification[]) => c.filter((e) => e.classification === 'credential-bearing: handled by L1').map((e) => e.table).sort().join();
   check('the classification file is pinned, every entry has an allowed classification and a cited source, and the handled-by-L1 tables are exactly the L1 tables', createHash('sha256').update(real(AUTH_CLASSIFICATION_FILE)).digest('hex') === AUTH_CLASSIFICATION_SHA256
     && classification.every((e) => (AUTH_CLASSIFICATIONS as readonly string[]).includes(e.classification) && e.source.trim() !== '') && handledBy(classification) === [...L1_AUTH_TABLES].sort().join() && new Set(classification.map((e) => e.table)).size === classification.length);
-  check('the file lists only what is evidenced: the five L1 tables and the carried-over schema_migrations; none of the standard names the re-review left PENDING is listed',
-    classification.map((e) => e.table).sort().join() === [...L1_AUTH_TABLES, 'schema_migrations'].sort().join()
-    && ['identities', 'mfa_factors', 'mfa_challenges', 'mfa_amr_claims', 'sso_providers', 'sso_domains', 'saml_providers', 'saml_relay_states', 'audit_log_entries', 'instances'].every((t) => !classification.some((e) => e.table === t)));
-  check('the carried-over schema_migrations entry says plainly that its only recorded review is the old code comment and must be confirmed', (() => { const e = classification.find((x) => x.table === 'schema_migrations'); return e?.classification === 'not credential-bearing: reviewed' && /only recorded review/.test(e.note ?? '') && /staging-2 capture/.test(e.note ?? ''); })());
+  // The staging-2 capture of 2026-11-01 (27 auth tables, names and types only): every table is classified; twelve are STOP, so the real gate refuses on that schema.
+  const mirror = JSON.parse(real('supabase/tests/a3/harness/auth-staging2-mirror.json').toString('utf8')) as { tables: Record<string, Array<{ column: string }>> };
+  const mirrorTables = Object.keys(mirror.tables).sort();
+  const stopTables = classification.filter((e) => e.classification === 'credential-bearing: STOP').map((e) => e.table).sort();
+  check('the classification lists exactly the 27 tables of the staging-2 capture (the mirror fixture), each once, and the L1 tables are among them', mirrorTables.length === 27 && classification.length === 27 && classification.map((e) => e.table).sort().join() === mirrorTables.join() && L1_AUTH_TABLES.every((t) => mirrorTables.includes(t)));
+  check('twelve tables are STOP, ten are reviewed as not credential-bearing, five are handled by L1; the STOP tables are exactly the recorded list',
+    stopTables.length === 12 && classification.filter((e) => e.classification === 'not credential-bearing: reviewed').length === 10 && classification.filter((e) => e.classification === 'credential-bearing: handled by L1').length === 5
+    && stopTables.join() === ['custom_oauth_providers', 'instances', 'mfa_challenges', 'mfa_factors', 'mfa_recovery_codes', 'oauth_authorizations', 'oauth_client_states', 'oauth_clients', 'saml_relay_states', 'scim_tokens', 'webauthn_challenges', 'webauthn_credentials'].join());
+  check('every table that has a secret, token, hash, code or credential column in the capture is STOP or handled by L1 (none is waved through by name)', [
+    ['custom_oauth_providers', 'client_secret'], ['mfa_challenges', 'otp_code'], ['mfa_factors', 'secret'], ['mfa_recovery_codes', 'code_hash'], ['oauth_authorizations', 'authorization_code'], ['oauth_client_states', 'code_verifier'], ['oauth_clients', 'client_secret_hash'],
+    ['scim_tokens', 'token_hash'], ['webauthn_credentials', 'credential_id'], ['webauthn_challenges', 'session_data'], ['mfa_factors', 'web_authn_credential'],
+  ].every(([t, c]) => mirror.tables[t!]?.some((x) => x.column === c) && classification.find((e) => e.table === t)?.classification === 'credential-bearing: STOP'));
+  check('the schema_migrations entry is confirmed by the capture (one column, version) and the three free-form-json assumptions are recorded as notes', (() => { const e = classification.find((x) => x.table === 'schema_migrations'); const cols = mirror.tables.schema_migrations ?? []; return e?.classification === 'not credential-bearing: reviewed' && cols.length === 1 && cols[0]?.column === 'version' && /Confirmed by the staging-2 capture/.test(e.note ?? '') && ['audit_log_entries', 'identities', 'scim_users'].every((t) => /Assumption/.test(classification.find((x) => x.table === t)?.note ?? '')); })());
+  check('the whole captured schema (every table and column of the mirror) is judged by the real gate: it refuses, counting exactly the twelve STOP tables as unreviewed', (() => {
+    const cols = Object.entries(mirror.tables).flatMap(([t, cs]) => cs.map((c) => ({ table_name: t, column_name: c.column })));
+    const r = evaluateL1Shape(cols, mirrorTables.map((t) => ({ table_name: t })), classification);
+    return r.passed === false && r.authTables === 27 && r.unreviewedAuthTables === 12 && Object.entries(r.checks).filter(([k]) => k !== 'no_unreviewed_auth_tables').every(([, v]) => v) && r.checks.no_unreviewed_auth_tables === false;
+  })());
+  check('removing the twelve STOP tables from the captured schema lets the gate pass (so the refusal is caused by exactly those tables)', (() => {
+    const keep = mirrorTables.filter((t) => !stopTables.includes(t));
+    const cols = keep.flatMap((t) => mirror.tables[t]!.map((c) => ({ table_name: t, column_name: c.column })));
+    return evaluateL1Shape(cols, keep.map((t) => ({ table_name: t })), classification).passed === true;
+  })());
   const sourceOf = (e: unknown): AuthTableClassification => ({ table: 'x', classification: 'not credential-bearing: reviewed', source: 'a cited source', ...(e as object) }) as AuthTableClassification;
   const l1Rows = [...L1_AUTH_TABLES].map((t) => ({ table: t, classification: 'credential-bearing: handled by L1', source: 'L1 file' }));
   const validates = (tables: unknown[]) => refusalOf(() => validateAuthClassification({ tables }));
@@ -459,15 +478,16 @@ const wrapper = await import(pathToFileURL(resolve(REPOSITORY_ROOT, 'scripts/run
   const standard = ['identities', 'mfa_factors', 'mfa_challenges', 'mfa_amr_claims', 'sso_providers', 'sso_domains', 'saml_providers', 'saml_relay_states', 'audit_log_entries', 'instances'];
   const tablesWith = (extra: string[]) => [...goodTables(), ...extra.map((t) => ({ table_name: t }))];
   const judged = (extra: string[], c = classification) => evaluateL1Shape(goodColumns(), tablesWith(extra), c);
-  check('an unclassified table stops the gate (counted, not named); so do all ten standard names the re-review reproduced, none of which is classified yet', (() => {
+  check('an unclassified table stops the gate (counted, not named); of the ten standard names, only the four classified STOP stop it (instances, mfa_factors, mfa_challenges, saml_relay_states); the six reviewed ones pass', (() => {
     const one = judged(['review_unclassified']);
     const many = judged(standard);
-    return one.passed === false && one.checks.no_unreviewed_auth_tables === false && one.unreviewedAuthTables === 1 && Object.entries(one.checks).filter(([k]) => k !== 'no_unreviewed_auth_tables').every(([, v]) => v) && many.passed === false && many.unreviewedAuthTables === 10 && judged([]).passed === true;
+    return one.passed === false && one.checks.no_unreviewed_auth_tables === false && one.unreviewedAuthTables === 1 && Object.entries(one.checks).filter(([k]) => k !== 'no_unreviewed_auth_tables').every(([, v]) => v) && many.passed === false && many.unreviewedAuthTables === 4 && judged([]).passed === true
+      && judged(standard.filter((t) => !['instances', 'mfa_factors', 'mfa_challenges', 'saml_relay_states'].includes(t))).passed === true;
   })());
   check('a table listed as credential-bearing: STOP stops the gate; a table classified not credential-bearing: reviewed (with a source) passes; the classification list is the only authority', (() => {
-    const stop = [...classification, sourceOf({ table: 'identities', classification: 'credential-bearing: STOP' })];
-    const reviewed = [...classification, sourceOf({ table: 'identities' })];
-    return judged(['identities'], stop).passed === false && judged(['identities'], stop).unreviewedAuthTables === 1 && judged(['identities'], reviewed).passed === true && judged(['identities'], classification).passed === false;
+    const stop = [...classification, sourceOf({ table: 'review_extra_table', classification: 'credential-bearing: STOP' })];
+    const reviewed = [...classification, sourceOf({ table: 'review_extra_table' })];
+    return judged(['review_extra_table'], stop).passed === false && judged(['review_extra_table'], stop).unreviewedAuthTables === 1 && judged(['review_extra_table'], reviewed).passed === true && judged(['review_extra_table'], classification).passed === false;
   })());
   check('with an empty classification every auth table is unreviewed, so the gate fails closed', evaluateL1Shape(goodColumns(), goodTables(), []).passed === false);
   const gated = async (id: string, tables: unknown, mutate: (p: ReturnType<typeof plan>) => ReturnType<typeof plan> = (p) => p) => {
@@ -478,11 +498,11 @@ const wrapper = await import(pathToFileURL(resolve(REPOSITORY_ROOT, 'scripts/run
   {
     const { c, out } = await gated('l1-sweep', tablesWith(['review_unclassified']));
     check('l1-sweep with an unclassified table: refused before any delete or update, nothing committed', out.error instanceof RunnerRefusal && out.error.id === 'prod_sql_l1_shape_not_ok' && !c.sent.some((s) => /^(delete|update)\b/.test(s)) && !c.sent.some((s) => ctlOf(s) === 'commit'));
-    const stopPlan = (p: ReturnType<typeof plan>) => ({ ...p, classification: [...p.classification!, sourceOf({ table: 'identities', classification: 'credential-bearing: STOP' })] });
-    const stopped = await gated('l1-sweep', tablesWith(['identities']), stopPlan);
+    const stopPlan = (p: ReturnType<typeof plan>) => ({ ...p, classification: [...p.classification!, sourceOf({ table: 'review_extra_table', classification: 'credential-bearing: STOP' })] });
+    const stopped = await gated('l1-sweep', tablesWith(['review_extra_table']), stopPlan);
     check('l1-sweep with a table classified credential-bearing: STOP: refused before any delete or update, nothing committed', stopped.out.error instanceof RunnerRefusal && stopped.out.error.id === 'prod_sql_l1_shape_not_ok' && !stopped.c.sent.some((s) => /^(delete|update)\b/.test(s)) && !stopped.c.sent.some((s) => ctlOf(s) === 'commit'));
-    const reviewedPlan = (p: ReturnType<typeof plan>) => ({ ...p, classification: [...p.classification!, sourceOf({ table: 'identities' })] });
-    const passedSweep = await gated('l1-sweep', tablesWith(['identities']), reviewedPlan);
+    const reviewedPlan = (p: ReturnType<typeof plan>) => ({ ...p, classification: [...p.classification!, sourceOf({ table: 'review_extra_table' })] });
+    const passedSweep = await gated('l1-sweep', tablesWith(['review_extra_table']), reviewedPlan);
     check('the same sweep passes the gate once that table is classified not credential-bearing: reviewed (the list, not the code, decides)', passedSweep.out.error === undefined && resultsOf(passedSweep.out.events).join() === 'committed');
     const noClass = await gated('l1-shape', goodTables(), (p) => { const { classification: _drop, ...rest } = p; return rest as typeof p; });
     check('a plan with no verified classification fails closed even on the reviewed shape', noClass.out.error instanceof RunnerRefusal && noClass.out.error.id === 'prod_sql_l1_shape_not_ok');

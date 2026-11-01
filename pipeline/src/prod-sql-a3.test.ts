@@ -269,6 +269,31 @@ async function main(): Promise<void> {
         await q('alter table auth.users rename column review_hidden_confirmation_token to confirmation_token');
       }
 
+      // Staging-2 capture mirror (2026-11-01): the other 22 of the 27 captured auth tables, created with the captured column names, types (enum types as text) and NOT NULL flags.
+      // The five L1 tables stay the reduced shim tables above (the seeded rows rely on them). Names and columns only; no row is inserted into a mirror table.
+      const mirror = JSON.parse(readFileSync(resolve(REPOSITORY_ROOT, 'supabase/tests/a3/harness/auth-staging2-mirror.json'), 'utf8')) as { tables: Record<string, Array<{ column: string; type: string; notNull: boolean }>> };
+      const L1_TABLES = ['users', 'sessions', 'refresh_tokens', 'one_time_tokens', 'flow_state'];
+      const classified = JSON.parse(readFileSync(resolve(REPOSITORY_ROOT, 'supabase/rollout/auth-table-classification.json'), 'utf8')) as { tables: Array<{ table: string; classification: string }> };
+      const stopSet = classified.tables.filter((e) => e.classification === 'credential-bearing: STOP').map((e) => e.table).sort();
+      const mirrorOnly = Object.keys(mirror.tables).filter((n) => !L1_TABLES.includes(n)).sort();
+      const mirrorDdl = (n: string) => `create table auth.${n} (${mirror.tables[n]!.map((c) => `${c.column} ${c.type.replace(/^auth.[a-z_]+$/, 'text')}${c.notNull ? ' not null' : ''}`).join(', ')})`;
+      const created: string[] = [];
+      try {
+        for (const n of mirrorOnly.filter((x) => !stopSet.includes(x))) { await q(mirrorDdl(n)); created.push(n); }
+        const reviewedOnly = track(await run('l1-shape'));
+        const reviewedEvent = reviewedOnly.events.find((e) => e.msg === 'prod-sql.shape') as { passed?: boolean; auth_tables_unreviewed?: number } | undefined;
+        check('staging-2 mirror, reviewed tables only (10 of the 27 plus the 5 shim L1 tables): l1-shape passes with nothing unreviewed', reviewedOnly.error === undefined && reviewedEvent?.passed === true && reviewedEvent.auth_tables_unreviewed === 0 && created.length === 10);
+        for (const n of mirrorOnly.filter((x) => stopSet.includes(x))) { await q(mirrorDdl(n)); created.push(n); }
+        const full = Number((await q("select count(*) as n from pg_catalog.pg_class c join pg_catalog.pg_namespace s on s.oid = c.relnamespace where s.nspname = 'auth' and c.relkind = 'r'")).rows[0].n);
+        const mirrorShape = track(await run('l1-shape'));
+        const mirrorSweep = track(await run('l1-sweep'));
+        const mirrorEvent = mirrorShape.events.find((e) => e.msg === 'prod-sql.shape') as { passed?: boolean; auth_tables_unreviewed?: number; checks?: Record<string, boolean> } | undefined;
+        check('staging-2 mirror, all 27 captured auth tables present: the real gate refuses l1-shape, counting exactly the 12 STOP tables and naming none', full === 27 && stopSet.length === 12 && mirrorShape.error instanceof RunnerRefusal && mirrorShape.error.id === 'prod_sql_l1_shape_not_ok' && mirrorEvent?.passed === false && mirrorEvent.auth_tables_unreviewed === 12 && mirrorEvent.checks?.no_unreviewed_auth_tables === false && !stopSet.some((n) => JSON.stringify(mirrorShape.events).includes(n)));
+        check('staging-2 mirror, all 27 present: l1-sweep refuses in the same run before any delete or update, nothing committed, every seeded row survives', mirrorSweep.error instanceof RunnerRefusal && mirrorSweep.error.id === 'prod_sql_l1_shape_not_ok' && resultOf(mirrorSweep) === 'rolled_back' && !mirrorSweep.sent.some((s) => ctlOf(s) === 'commit') && !mirrorSweep.sent.some((s) => /^(delete|update)/i.test(s)) && (await authCounts()) === seeded);
+      } finally {
+        for (const n of created) await q(`drop table if exists auth.${n}`);
+      }
+
       const counts = track(await run('l1-counts'));
       const sweep = track(await run('l1-sweep'));
       check('L1 stages run against the local auth stand-ins: counts (numbers), then the gated sweep passes its shape gate, runs as own begin/commit with rows, and clears the seeded rows', counts.error === undefined && sweep.error === undefined && resultOf(sweep) === 'committed' && sweep.events.some((e) => e.msg === 'prod-sql.shape' && e.passed === true) && Object.keys(counts.events.find((e) => e.msg === 'prod-sql.counts')!.counts as object).length === 5

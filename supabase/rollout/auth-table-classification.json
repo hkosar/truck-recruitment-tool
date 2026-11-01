@@ -1,37 +1,145 @@
 {
   "schema": 1,
-  "description": "The reviewed list of auth tables for the production SQL runner's L1 shape gate (pipeline/src/prod-sql.ts). A table appears here ONLY with an explicit classification and a cited source. The gate stops on any auth table that is not listed, and on any table classified 'credential-bearing: STOP'. This file is pinned by SHA-256 in prod-sql.ts: a change needs a reviewed change to that pin. Do not add a table from its name alone; the staging-2 schema capture (supabase/rollout/auth-schema-inventory.sql) is the evidence to review first, and a staging capture is not proof of production parity.",
+  "description": "The reviewed list of auth tables for the production SQL runner's L1 shape gate (pipeline/src/prod-sql.ts). A table appears here ONLY with an explicit classification and a cited source. The gate stops on any auth table that is not listed, and on any table classified 'credential-bearing: STOP'. This file is pinned by SHA-256 in prod-sql.ts: a change needs a reviewed change to that pin. Evidence: the staging-2 auth schema capture of 2026-11-01 (27 tables, names and types only, no row data), classified in docs/build-plan/18-production-sql-route-options.md. That is staging-2 evidence and NOT proof of production parity. Auth release: (not verified). Twelve tables are classified STOP, so the gate refuses on a database with this schema until L1 is extended by a separately reviewed change or the owner accepts the risk.",
   "tables": [
     {
-      "table": "users",
-      "classification": "credential-bearing: handled by L1",
-      "source": "supabase/rollout/L1-close-legacy-auth.sql (header; STEP 2 shape select; STEP 3 update of the six verification-token columns); docs/build-plan/14-same-origin-signin-design.md section 11.6 steps 2-3"
+      "table": "audit_log_entries",
+      "classification": "not credential-bearing: reviewed",
+      "source": "staging-2 auth schema capture of 2026-11-01 (kept outside the repository), columns payload (json), ip_address, created_at, instance_id, also recorded in supabase/tests/a3/harness/auth-staging2-mirror.json; event log; no token, secret, hash or code column; the json payload content cannot be proven by a names-and-types capture (assumption recorded in the note)",
+      "note": "Assumption: the json payload holds event metadata only (Supabase Auth audit log). Not provable from a names-and-types capture."
     },
     {
-      "table": "sessions",
-      "classification": "credential-bearing: handled by L1",
-      "source": "supabase/rollout/L1-close-legacy-auth.sql (STEP 3 delete, STEP 4 recount); docs/build-plan/14-same-origin-signin-design.md section 11.6"
-    },
-    {
-      "table": "refresh_tokens",
-      "classification": "credential-bearing: handled by L1",
-      "source": "supabase/rollout/L1-close-legacy-auth.sql (STEP 3 delete, STEP 4 recount); docs/build-plan/14-same-origin-signin-design.md section 11.6"
-    },
-    {
-      "table": "one_time_tokens",
-      "classification": "credential-bearing: handled by L1",
-      "source": "supabase/rollout/L1-close-legacy-auth.sql (STEP 3 delete, STEP 4 recount); docs/build-plan/14-same-origin-signin-design.md section 11.6"
+      "table": "custom_oauth_providers",
+      "classification": "credential-bearing: STOP",
+      "source": "staging-2 auth schema capture of 2026-11-01 (kept outside the repository), columns client_secret (text, NOT NULL), client_id, also recorded in supabase/tests/a3/harness/auth-staging2-mirror.json; holds an OAuth provider client secret; L1 does not clear it"
     },
     {
       "table": "flow_state",
       "classification": "credential-bearing: handled by L1",
-      "source": "supabase/rollout/L1-close-legacy-auth.sql (STEP 3 delete, STEP 4 recount); docs/build-plan/14-same-origin-signin-design.md section 11.6"
+      "source": "supabase/rollout/L1-close-legacy-auth.sql (STEP 3 delete, STEP 4 recount); docs/build-plan/14-same-origin-signin-design.md section 11.6; staging-2 auth schema capture of 2026-11-01 (kept outside the repository), columns auth_code, provider_access_token, provider_refresh_token, invite_token, also recorded in supabase/tests/a3/harness/auth-staging2-mirror.json"
+    },
+    {
+      "table": "identities",
+      "classification": "not credential-bearing: reviewed",
+      "source": "staging-2 auth schema capture of 2026-11-01 (kept outside the repository), columns provider_id, identity_data (jsonb), provider, email, user_id, also recorded in supabase/tests/a3/harness/auth-staging2-mirror.json; links a user to an external provider identity; no token, secret, hash or code column; identity_data is provider profile claims per Supabase Auth docs, content not provable from the capture (assumption recorded in the note)",
+      "note": "Assumption: identity_data holds provider profile claims, not tokens. Not provable from the capture. Provider sign-in is closed at O2 before L1."
+    },
+    {
+      "table": "instances",
+      "classification": "credential-bearing: STOP",
+      "source": "staging-2 auth schema capture of 2026-11-01 (kept outside the repository), columns raw_base_config (text), uuid, also recorded in supabase/tests/a3/harness/auth-staging2-mirror.json; a free-text base configuration blob (legacy GoTrue multi-instance config can include signing secrets); content not provable; L1 does not clear it"
+    },
+    {
+      "table": "mfa_amr_claims",
+      "classification": "not credential-bearing: reviewed",
+      "source": "staging-2 auth schema capture of 2026-11-01 (kept outside the repository), columns session_id, authentication_method, created_at, also recorded in supabase/tests/a3/harness/auth-staging2-mirror.json; session authentication-method labels only; rows are removed with their session by the ON DELETE CASCADE from sessions that L1 empties"
+    },
+    {
+      "table": "mfa_challenges",
+      "classification": "credential-bearing: STOP",
+      "source": "staging-2 auth schema capture of 2026-11-01 (kept outside the repository), columns otp_code (text), web_authn_session_data (jsonb), factor_id, also recorded in supabase/tests/a3/harness/auth-staging2-mirror.json; one-time code and WebAuthn challenge session data; L1 does not clear it (cascade comes from mfa_factors, which L1 leaves alone)"
+    },
+    {
+      "table": "mfa_factors",
+      "classification": "credential-bearing: STOP",
+      "source": "staging-2 auth schema capture of 2026-11-01 (kept outside the repository), columns secret (text), phone, web_authn_credential (jsonb), web_authn_aaguid, last_webauthn_challenge_data (jsonb), factor_type, also recorded in supabase/tests/a3/harness/auth-staging2-mirror.json; authenticator secret and WebAuthn credential material; lets a second factor be satisfied; L1 does not clear it"
+    },
+    {
+      "table": "mfa_recovery_code_sets",
+      "classification": "not credential-bearing: reviewed",
+      "source": "staging-2 auth schema capture of 2026-11-01 (kept outside the repository), columns mfa_factor_id, failed_verification_count, verification_locked_until, also recorded in supabase/tests/a3/harness/auth-staging2-mirror.json; counter and lock state only; the codes themselves are in mfa_recovery_codes (STOP)"
+    },
+    {
+      "table": "mfa_recovery_codes",
+      "classification": "credential-bearing: STOP",
+      "source": "staging-2 auth schema capture of 2026-11-01 (kept outside the repository), columns code_hash (text, NOT NULL), consumed_at, mfa_recovery_code_set_id, also recorded in supabase/tests/a3/harness/auth-staging2-mirror.json; recovery code hashes can satisfy a second factor; L1 does not clear it"
+    },
+    {
+      "table": "oauth_authorizations",
+      "classification": "credential-bearing: STOP",
+      "source": "staging-2 auth schema capture of 2026-11-01 (kept outside the repository), columns authorization_code (text), code_challenge, nonce, state, redirect_uri, user_id, also recorded in supabase/tests/a3/harness/auth-staging2-mirror.json; OAuth server authorization codes and PKCE challenge in flight; L1 does not clear it"
+    },
+    {
+      "table": "oauth_client_states",
+      "classification": "credential-bearing: STOP",
+      "source": "staging-2 auth schema capture of 2026-11-01 (kept outside the repository), columns code_verifier (text), provider_type, also recorded in supabase/tests/a3/harness/auth-staging2-mirror.json; PKCE code verifier for an in-flight OAuth login; L1 does not clear it (flow_state has no foreign key to it in the capture)"
+    },
+    {
+      "table": "oauth_clients",
+      "classification": "credential-bearing: STOP",
+      "source": "staging-2 auth schema capture of 2026-11-01 (kept outside the repository), columns client_secret_hash (text), token_endpoint_auth_method, client_type, also recorded in supabase/tests/a3/harness/auth-staging2-mirror.json; OAuth client secret hash; L1 does not clear it"
+    },
+    {
+      "table": "oauth_consents",
+      "classification": "not credential-bearing: reviewed",
+      "source": "staging-2 auth schema capture of 2026-11-01 (kept outside the repository), columns user_id, client_id, scopes, granted_at, revoked_at, also recorded in supabase/tests/a3/harness/auth-staging2-mirror.json; records which scopes a user granted a client; no secret, token, hash or code column"
+    },
+    {
+      "table": "one_time_tokens",
+      "classification": "credential-bearing: handled by L1",
+      "source": "supabase/rollout/L1-close-legacy-auth.sql (STEP 3 delete, STEP 4 recount); docs/build-plan/14-same-origin-signin-design.md section 11.6; staging-2 auth schema capture of 2026-11-01 (kept outside the repository), columns token_hash, token_type, also recorded in supabase/tests/a3/harness/auth-staging2-mirror.json"
+    },
+    {
+      "table": "refresh_tokens",
+      "classification": "credential-bearing: handled by L1",
+      "source": "supabase/rollout/L1-close-legacy-auth.sql (STEP 3 delete, STEP 4 recount); docs/build-plan/14-same-origin-signin-design.md section 11.6; staging-2 auth schema capture of 2026-11-01 (kept outside the repository), columns token, session_id, also recorded in supabase/tests/a3/harness/auth-staging2-mirror.json"
+    },
+    {
+      "table": "saml_providers",
+      "classification": "not credential-bearing: reviewed",
+      "source": "staging-2 auth schema capture of 2026-11-01 (kept outside the repository), columns sso_provider_id, entity_id, metadata_xml, metadata_url, attribute_mapping, name_id_format, also recorded in supabase/tests/a3/harness/auth-staging2-mirror.json; identity-provider public metadata and attribute mapping; no private key, secret, token or hash column"
+    },
+    {
+      "table": "saml_relay_states",
+      "classification": "credential-bearing: STOP",
+      "source": "staging-2 auth schema capture of 2026-11-01 (kept outside the repository), columns request_id (text, NOT NULL), for_email, redirect_to, flow_state_id, also recorded in supabase/tests/a3/harness/auth-staging2-mirror.json; in-flight SAML sign-in correlation handle; L1 clears only rows linked to flow_state by ON DELETE CASCADE, and flow_state_id can be null. Lowest risk of the STOP set; conservative call"
     },
     {
       "table": "schema_migrations",
       "classification": "not credential-bearing: reviewed",
-      "source": "pipeline/src/prod-sql.ts as of commit eafc55b (the comment on L1_REVIEWED_OTHER_AUTH_TABLES: a plain list of schema versions)",
-      "note": "Carried over unchanged from eafc55b so the gate behaves as before. That comment is the only recorded review. The re-review of eafc55b found no independent definition of auth.schema_migrations in the repository (it is not supabase_migrations.schema_migrations). Confirm it in the staging-2 capture and remove this entry if the capture shows anything other than a list of versions."
+      "source": "staging-2 auth schema capture of 2026-11-01 (kept outside the repository), columns version (character varying(255), NOT NULL; the only column), also recorded in supabase/tests/a3/harness/auth-staging2-mirror.json; a plain list of applied schema versions; confirms the carried-over review",
+      "note": "Confirmed by the staging-2 capture: one column, version. The earlier recorded review was only a code comment."
+    },
+    {
+      "table": "scim_tokens",
+      "classification": "credential-bearing: STOP",
+      "source": "staging-2 auth schema capture of 2026-11-01 (kept outside the repository), columns token_hash (text, NOT NULL), prefix, expires_at, revoked_at, also recorded in supabase/tests/a3/harness/auth-staging2-mirror.json; SCIM provisioning bearer token hashes; L1 does not clear it"
+    },
+    {
+      "table": "scim_users",
+      "classification": "not credential-bearing: reviewed",
+      "source": "staging-2 auth schema capture of 2026-11-01 (kept outside the repository), columns resource (jsonb), user_name, external_id, active, user_id, also recorded in supabase/tests/a3/harness/auth-staging2-mirror.json; provisioning mirror of a user record; no token, secret or hash column; resource is SCIM user JSON, content not provable (assumption recorded in the note)",
+      "note": "Assumption: resource holds SCIM user attributes without a password. Not provable from the capture."
+    },
+    {
+      "table": "sessions",
+      "classification": "credential-bearing: handled by L1",
+      "source": "supabase/rollout/L1-close-legacy-auth.sql (STEP 3 delete, STEP 4 recount); docs/build-plan/14-same-origin-signin-design.md section 11.6; staging-2 auth schema capture of 2026-11-01 (kept outside the repository), columns refresh_token_hmac_key, user_id, also recorded in supabase/tests/a3/harness/auth-staging2-mirror.json"
+    },
+    {
+      "table": "sso_domains",
+      "classification": "not credential-bearing: reviewed",
+      "source": "staging-2 auth schema capture of 2026-11-01 (kept outside the repository), columns sso_provider_id, domain, also recorded in supabase/tests/a3/harness/auth-staging2-mirror.json; domain-routing metadata only"
+    },
+    {
+      "table": "sso_providers",
+      "classification": "not credential-bearing: reviewed",
+      "source": "staging-2 auth schema capture of 2026-11-01 (kept outside the repository), columns resource_id, disabled, also recorded in supabase/tests/a3/harness/auth-staging2-mirror.json; provider identifier and disabled flag only"
+    },
+    {
+      "table": "users",
+      "classification": "credential-bearing: handled by L1",
+      "source": "supabase/rollout/L1-close-legacy-auth.sql (header; STEP 2 shape select; STEP 3 update of the six verification-token columns); docs/build-plan/14-same-origin-signin-design.md section 11.6; staging-2 auth schema capture of 2026-11-01 (kept outside the repository), columns encrypted_password (kept), confirmation_token, recovery_token, email_change_token_new, email_change_token_current, phone_change_token, reauthentication_token, also recorded in supabase/tests/a3/harness/auth-staging2-mirror.json"
+    },
+    {
+      "table": "webauthn_challenges",
+      "classification": "credential-bearing: STOP",
+      "source": "staging-2 auth schema capture of 2026-11-01 (kept outside the repository), columns session_data (jsonb, NOT NULL), challenge_type, expires_at, user_id, also recorded in supabase/tests/a3/harness/auth-staging2-mirror.json; in-flight WebAuthn challenge session data; L1 does not clear it"
+    },
+    {
+      "table": "webauthn_credentials",
+      "classification": "credential-bearing: STOP",
+      "source": "staging-2 auth schema capture of 2026-11-01 (kept outside the repository), columns credential_id (bytea), public_key (bytea), sign_count, aaguid, transports, user_id, also recorded in supabase/tests/a3/harness/auth-staging2-mirror.json; registered WebAuthn credentials (passkeys); each one lets its holder sign in; L1 does not clear it"
     }
   ]
 }

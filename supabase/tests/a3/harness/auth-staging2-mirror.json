@@ -1,0 +1,1537 @@
+{
+  "schema": 1,
+  "description": "Names, column types and NOT NULL flags of the 27 auth tables in the staging-2 auth schema capture of 2026-11-01 (names and types only; no row data). Evidence for a production review, NOT proof of production parity. Auth release: (not verified). Enum-typed columns (type name starts with \"auth.\") are recorded as written and created as text in the local fixture because the capture holds no enum labels. Foreign keys are recorded for reference only; the local fixture does not recreate them.",
+  "tables": {
+    "audit_log_entries": [
+      {
+        "column": "instance_id",
+        "type": "uuid",
+        "notNull": false
+      },
+      {
+        "column": "id",
+        "type": "uuid",
+        "notNull": true
+      },
+      {
+        "column": "payload",
+        "type": "json",
+        "notNull": false
+      },
+      {
+        "column": "created_at",
+        "type": "timestamp with time zone",
+        "notNull": false
+      },
+      {
+        "column": "ip_address",
+        "type": "character varying(64)",
+        "notNull": true
+      }
+    ],
+    "custom_oauth_providers": [
+      {
+        "column": "id",
+        "type": "uuid",
+        "notNull": true
+      },
+      {
+        "column": "provider_type",
+        "type": "text",
+        "notNull": true
+      },
+      {
+        "column": "identifier",
+        "type": "text",
+        "notNull": true
+      },
+      {
+        "column": "name",
+        "type": "text",
+        "notNull": true
+      },
+      {
+        "column": "client_id",
+        "type": "text",
+        "notNull": true
+      },
+      {
+        "column": "client_secret",
+        "type": "text",
+        "notNull": true
+      },
+      {
+        "column": "acceptable_client_ids",
+        "type": "text[]",
+        "notNull": true
+      },
+      {
+        "column": "scopes",
+        "type": "text[]",
+        "notNull": true
+      },
+      {
+        "column": "pkce_enabled",
+        "type": "boolean",
+        "notNull": true
+      },
+      {
+        "column": "attribute_mapping",
+        "type": "jsonb",
+        "notNull": true
+      },
+      {
+        "column": "authorization_params",
+        "type": "jsonb",
+        "notNull": true
+      },
+      {
+        "column": "enabled",
+        "type": "boolean",
+        "notNull": true
+      },
+      {
+        "column": "email_optional",
+        "type": "boolean",
+        "notNull": true
+      },
+      {
+        "column": "issuer",
+        "type": "text",
+        "notNull": false
+      },
+      {
+        "column": "discovery_url",
+        "type": "text",
+        "notNull": false
+      },
+      {
+        "column": "skip_nonce_check",
+        "type": "boolean",
+        "notNull": true
+      },
+      {
+        "column": "cached_discovery",
+        "type": "jsonb",
+        "notNull": false
+      },
+      {
+        "column": "discovery_cached_at",
+        "type": "timestamp with time zone",
+        "notNull": false
+      },
+      {
+        "column": "authorization_url",
+        "type": "text",
+        "notNull": false
+      },
+      {
+        "column": "token_url",
+        "type": "text",
+        "notNull": false
+      },
+      {
+        "column": "userinfo_url",
+        "type": "text",
+        "notNull": false
+      },
+      {
+        "column": "jwks_uri",
+        "type": "text",
+        "notNull": false
+      },
+      {
+        "column": "created_at",
+        "type": "timestamp with time zone",
+        "notNull": true
+      },
+      {
+        "column": "updated_at",
+        "type": "timestamp with time zone",
+        "notNull": true
+      },
+      {
+        "column": "custom_claims_allowlist",
+        "type": "text[]",
+        "notNull": true
+      }
+    ],
+    "flow_state": [
+      {
+        "column": "id",
+        "type": "uuid",
+        "notNull": true
+      },
+      {
+        "column": "user_id",
+        "type": "uuid",
+        "notNull": false
+      },
+      {
+        "column": "auth_code",
+        "type": "text",
+        "notNull": false
+      },
+      {
+        "column": "code_challenge_method",
+        "type": "auth.code_challenge_method",
+        "notNull": false
+      },
+      {
+        "column": "code_challenge",
+        "type": "text",
+        "notNull": false
+      },
+      {
+        "column": "provider_type",
+        "type": "text",
+        "notNull": true
+      },
+      {
+        "column": "provider_access_token",
+        "type": "text",
+        "notNull": false
+      },
+      {
+        "column": "provider_refresh_token",
+        "type": "text",
+        "notNull": false
+      },
+      {
+        "column": "created_at",
+        "type": "timestamp with time zone",
+        "notNull": false
+      },
+      {
+        "column": "updated_at",
+        "type": "timestamp with time zone",
+        "notNull": false
+      },
+      {
+        "column": "authentication_method",
+        "type": "text",
+        "notNull": true
+      },
+      {
+        "column": "auth_code_issued_at",
+        "type": "timestamp with time zone",
+        "notNull": false
+      },
+      {
+        "column": "invite_token",
+        "type": "text",
+        "notNull": false
+      },
+      {
+        "column": "referrer",
+        "type": "text",
+        "notNull": false
+      },
+      {
+        "column": "oauth_client_state_id",
+        "type": "uuid",
+        "notNull": false
+      },
+      {
+        "column": "linking_target_id",
+        "type": "uuid",
+        "notNull": false
+      },
+      {
+        "column": "email_optional",
+        "type": "boolean",
+        "notNull": true
+      }
+    ],
+    "identities": [
+      {
+        "column": "provider_id",
+        "type": "text",
+        "notNull": true
+      },
+      {
+        "column": "user_id",
+        "type": "uuid",
+        "notNull": true
+      },
+      {
+        "column": "identity_data",
+        "type": "jsonb",
+        "notNull": true
+      },
+      {
+        "column": "provider",
+        "type": "text",
+        "notNull": true
+      },
+      {
+        "column": "last_sign_in_at",
+        "type": "timestamp with time zone",
+        "notNull": false
+      },
+      {
+        "column": "created_at",
+        "type": "timestamp with time zone",
+        "notNull": false
+      },
+      {
+        "column": "updated_at",
+        "type": "timestamp with time zone",
+        "notNull": false
+      },
+      {
+        "column": "email",
+        "type": "text",
+        "notNull": false
+      },
+      {
+        "column": "id",
+        "type": "uuid",
+        "notNull": true
+      }
+    ],
+    "instances": [
+      {
+        "column": "id",
+        "type": "uuid",
+        "notNull": true
+      },
+      {
+        "column": "uuid",
+        "type": "uuid",
+        "notNull": false
+      },
+      {
+        "column": "raw_base_config",
+        "type": "text",
+        "notNull": false
+      },
+      {
+        "column": "created_at",
+        "type": "timestamp with time zone",
+        "notNull": false
+      },
+      {
+        "column": "updated_at",
+        "type": "timestamp with time zone",
+        "notNull": false
+      }
+    ],
+    "mfa_amr_claims": [
+      {
+        "column": "session_id",
+        "type": "uuid",
+        "notNull": true
+      },
+      {
+        "column": "created_at",
+        "type": "timestamp with time zone",
+        "notNull": true
+      },
+      {
+        "column": "updated_at",
+        "type": "timestamp with time zone",
+        "notNull": true
+      },
+      {
+        "column": "authentication_method",
+        "type": "text",
+        "notNull": true
+      },
+      {
+        "column": "id",
+        "type": "uuid",
+        "notNull": true
+      }
+    ],
+    "mfa_challenges": [
+      {
+        "column": "id",
+        "type": "uuid",
+        "notNull": true
+      },
+      {
+        "column": "factor_id",
+        "type": "uuid",
+        "notNull": true
+      },
+      {
+        "column": "created_at",
+        "type": "timestamp with time zone",
+        "notNull": true
+      },
+      {
+        "column": "verified_at",
+        "type": "timestamp with time zone",
+        "notNull": false
+      },
+      {
+        "column": "ip_address",
+        "type": "inet",
+        "notNull": true
+      },
+      {
+        "column": "otp_code",
+        "type": "text",
+        "notNull": false
+      },
+      {
+        "column": "web_authn_session_data",
+        "type": "jsonb",
+        "notNull": false
+      }
+    ],
+    "mfa_factors": [
+      {
+        "column": "id",
+        "type": "uuid",
+        "notNull": true
+      },
+      {
+        "column": "user_id",
+        "type": "uuid",
+        "notNull": true
+      },
+      {
+        "column": "friendly_name",
+        "type": "text",
+        "notNull": false
+      },
+      {
+        "column": "factor_type",
+        "type": "auth.factor_type",
+        "notNull": true
+      },
+      {
+        "column": "status",
+        "type": "auth.factor_status",
+        "notNull": true
+      },
+      {
+        "column": "created_at",
+        "type": "timestamp with time zone",
+        "notNull": true
+      },
+      {
+        "column": "updated_at",
+        "type": "timestamp with time zone",
+        "notNull": true
+      },
+      {
+        "column": "secret",
+        "type": "text",
+        "notNull": false
+      },
+      {
+        "column": "phone",
+        "type": "text",
+        "notNull": false
+      },
+      {
+        "column": "last_challenged_at",
+        "type": "timestamp with time zone",
+        "notNull": false
+      },
+      {
+        "column": "web_authn_credential",
+        "type": "jsonb",
+        "notNull": false
+      },
+      {
+        "column": "web_authn_aaguid",
+        "type": "uuid",
+        "notNull": false
+      },
+      {
+        "column": "last_webauthn_challenge_data",
+        "type": "jsonb",
+        "notNull": false
+      }
+    ],
+    "mfa_recovery_code_sets": [
+      {
+        "column": "id",
+        "type": "uuid",
+        "notNull": true
+      },
+      {
+        "column": "user_id",
+        "type": "uuid",
+        "notNull": true
+      },
+      {
+        "column": "mfa_factor_id",
+        "type": "uuid",
+        "notNull": true
+      },
+      {
+        "column": "failed_verification_count",
+        "type": "integer",
+        "notNull": true
+      },
+      {
+        "column": "verification_locked_until",
+        "type": "timestamp with time zone",
+        "notNull": false
+      },
+      {
+        "column": "created_at",
+        "type": "timestamp with time zone",
+        "notNull": true
+      },
+      {
+        "column": "updated_at",
+        "type": "timestamp with time zone",
+        "notNull": true
+      }
+    ],
+    "mfa_recovery_codes": [
+      {
+        "column": "id",
+        "type": "uuid",
+        "notNull": true
+      },
+      {
+        "column": "mfa_recovery_code_set_id",
+        "type": "uuid",
+        "notNull": true
+      },
+      {
+        "column": "code_hash",
+        "type": "text",
+        "notNull": true
+      },
+      {
+        "column": "consumed_at",
+        "type": "timestamp with time zone",
+        "notNull": false
+      },
+      {
+        "column": "created_at",
+        "type": "timestamp with time zone",
+        "notNull": true
+      }
+    ],
+    "oauth_authorizations": [
+      {
+        "column": "id",
+        "type": "uuid",
+        "notNull": true
+      },
+      {
+        "column": "authorization_id",
+        "type": "text",
+        "notNull": true
+      },
+      {
+        "column": "client_id",
+        "type": "uuid",
+        "notNull": true
+      },
+      {
+        "column": "user_id",
+        "type": "uuid",
+        "notNull": false
+      },
+      {
+        "column": "redirect_uri",
+        "type": "text",
+        "notNull": true
+      },
+      {
+        "column": "scope",
+        "type": "text",
+        "notNull": true
+      },
+      {
+        "column": "state",
+        "type": "text",
+        "notNull": false
+      },
+      {
+        "column": "resource",
+        "type": "text",
+        "notNull": false
+      },
+      {
+        "column": "code_challenge",
+        "type": "text",
+        "notNull": false
+      },
+      {
+        "column": "code_challenge_method",
+        "type": "auth.code_challenge_method",
+        "notNull": false
+      },
+      {
+        "column": "response_type",
+        "type": "auth.oauth_response_type",
+        "notNull": true
+      },
+      {
+        "column": "status",
+        "type": "auth.oauth_authorization_status",
+        "notNull": true
+      },
+      {
+        "column": "authorization_code",
+        "type": "text",
+        "notNull": false
+      },
+      {
+        "column": "created_at",
+        "type": "timestamp with time zone",
+        "notNull": true
+      },
+      {
+        "column": "expires_at",
+        "type": "timestamp with time zone",
+        "notNull": true
+      },
+      {
+        "column": "approved_at",
+        "type": "timestamp with time zone",
+        "notNull": false
+      },
+      {
+        "column": "nonce",
+        "type": "text",
+        "notNull": false
+      }
+    ],
+    "oauth_client_states": [
+      {
+        "column": "id",
+        "type": "uuid",
+        "notNull": true
+      },
+      {
+        "column": "provider_type",
+        "type": "text",
+        "notNull": true
+      },
+      {
+        "column": "code_verifier",
+        "type": "text",
+        "notNull": false
+      },
+      {
+        "column": "created_at",
+        "type": "timestamp with time zone",
+        "notNull": true
+      }
+    ],
+    "oauth_clients": [
+      {
+        "column": "id",
+        "type": "uuid",
+        "notNull": true
+      },
+      {
+        "column": "client_secret_hash",
+        "type": "text",
+        "notNull": false
+      },
+      {
+        "column": "registration_type",
+        "type": "auth.oauth_registration_type",
+        "notNull": true
+      },
+      {
+        "column": "redirect_uris",
+        "type": "text",
+        "notNull": true
+      },
+      {
+        "column": "grant_types",
+        "type": "text",
+        "notNull": true
+      },
+      {
+        "column": "client_name",
+        "type": "text",
+        "notNull": false
+      },
+      {
+        "column": "client_uri",
+        "type": "text",
+        "notNull": false
+      },
+      {
+        "column": "logo_uri",
+        "type": "text",
+        "notNull": false
+      },
+      {
+        "column": "created_at",
+        "type": "timestamp with time zone",
+        "notNull": true
+      },
+      {
+        "column": "updated_at",
+        "type": "timestamp with time zone",
+        "notNull": true
+      },
+      {
+        "column": "deleted_at",
+        "type": "timestamp with time zone",
+        "notNull": false
+      },
+      {
+        "column": "client_type",
+        "type": "auth.oauth_client_type",
+        "notNull": true
+      },
+      {
+        "column": "token_endpoint_auth_method",
+        "type": "text",
+        "notNull": true
+      }
+    ],
+    "oauth_consents": [
+      {
+        "column": "id",
+        "type": "uuid",
+        "notNull": true
+      },
+      {
+        "column": "user_id",
+        "type": "uuid",
+        "notNull": true
+      },
+      {
+        "column": "client_id",
+        "type": "uuid",
+        "notNull": true
+      },
+      {
+        "column": "scopes",
+        "type": "text",
+        "notNull": true
+      },
+      {
+        "column": "granted_at",
+        "type": "timestamp with time zone",
+        "notNull": true
+      },
+      {
+        "column": "revoked_at",
+        "type": "timestamp with time zone",
+        "notNull": false
+      }
+    ],
+    "one_time_tokens": [
+      {
+        "column": "id",
+        "type": "uuid",
+        "notNull": true
+      },
+      {
+        "column": "user_id",
+        "type": "uuid",
+        "notNull": true
+      },
+      {
+        "column": "token_type",
+        "type": "auth.one_time_token_type",
+        "notNull": true
+      },
+      {
+        "column": "token_hash",
+        "type": "text",
+        "notNull": true
+      },
+      {
+        "column": "relates_to",
+        "type": "text",
+        "notNull": true
+      },
+      {
+        "column": "created_at",
+        "type": "timestamp without time zone",
+        "notNull": true
+      },
+      {
+        "column": "updated_at",
+        "type": "timestamp without time zone",
+        "notNull": true
+      },
+      {
+        "column": "expires_at",
+        "type": "timestamp with time zone",
+        "notNull": false
+      }
+    ],
+    "refresh_tokens": [
+      {
+        "column": "instance_id",
+        "type": "uuid",
+        "notNull": false
+      },
+      {
+        "column": "id",
+        "type": "bigint",
+        "notNull": true
+      },
+      {
+        "column": "token",
+        "type": "character varying(255)",
+        "notNull": false
+      },
+      {
+        "column": "user_id",
+        "type": "character varying(255)",
+        "notNull": false
+      },
+      {
+        "column": "revoked",
+        "type": "boolean",
+        "notNull": false
+      },
+      {
+        "column": "created_at",
+        "type": "timestamp with time zone",
+        "notNull": false
+      },
+      {
+        "column": "updated_at",
+        "type": "timestamp with time zone",
+        "notNull": false
+      },
+      {
+        "column": "parent",
+        "type": "character varying(255)",
+        "notNull": false
+      },
+      {
+        "column": "session_id",
+        "type": "uuid",
+        "notNull": false
+      }
+    ],
+    "saml_providers": [
+      {
+        "column": "id",
+        "type": "uuid",
+        "notNull": true
+      },
+      {
+        "column": "sso_provider_id",
+        "type": "uuid",
+        "notNull": true
+      },
+      {
+        "column": "entity_id",
+        "type": "text",
+        "notNull": true
+      },
+      {
+        "column": "metadata_xml",
+        "type": "text",
+        "notNull": true
+      },
+      {
+        "column": "metadata_url",
+        "type": "text",
+        "notNull": false
+      },
+      {
+        "column": "attribute_mapping",
+        "type": "jsonb",
+        "notNull": false
+      },
+      {
+        "column": "created_at",
+        "type": "timestamp with time zone",
+        "notNull": false
+      },
+      {
+        "column": "updated_at",
+        "type": "timestamp with time zone",
+        "notNull": false
+      },
+      {
+        "column": "name_id_format",
+        "type": "text",
+        "notNull": false
+      }
+    ],
+    "saml_relay_states": [
+      {
+        "column": "id",
+        "type": "uuid",
+        "notNull": true
+      },
+      {
+        "column": "sso_provider_id",
+        "type": "uuid",
+        "notNull": true
+      },
+      {
+        "column": "request_id",
+        "type": "text",
+        "notNull": true
+      },
+      {
+        "column": "for_email",
+        "type": "text",
+        "notNull": false
+      },
+      {
+        "column": "redirect_to",
+        "type": "text",
+        "notNull": false
+      },
+      {
+        "column": "created_at",
+        "type": "timestamp with time zone",
+        "notNull": false
+      },
+      {
+        "column": "updated_at",
+        "type": "timestamp with time zone",
+        "notNull": false
+      },
+      {
+        "column": "flow_state_id",
+        "type": "uuid",
+        "notNull": false
+      }
+    ],
+    "schema_migrations": [
+      {
+        "column": "version",
+        "type": "character varying(255)",
+        "notNull": true
+      }
+    ],
+    "scim_tokens": [
+      {
+        "column": "id",
+        "type": "uuid",
+        "notNull": true
+      },
+      {
+        "column": "sso_provider_id",
+        "type": "uuid",
+        "notNull": true
+      },
+      {
+        "column": "token_hash",
+        "type": "text",
+        "notNull": true
+      },
+      {
+        "column": "prefix",
+        "type": "text",
+        "notNull": true
+      },
+      {
+        "column": "created_at",
+        "type": "timestamp with time zone",
+        "notNull": true
+      },
+      {
+        "column": "expires_at",
+        "type": "timestamp with time zone",
+        "notNull": false
+      },
+      {
+        "column": "revoked_at",
+        "type": "timestamp with time zone",
+        "notNull": false
+      },
+      {
+        "column": "last_used_at",
+        "type": "timestamp with time zone",
+        "notNull": false
+      }
+    ],
+    "scim_users": [
+      {
+        "column": "id",
+        "type": "uuid",
+        "notNull": true
+      },
+      {
+        "column": "sso_provider_id",
+        "type": "uuid",
+        "notNull": true
+      },
+      {
+        "column": "user_id",
+        "type": "uuid",
+        "notNull": false
+      },
+      {
+        "column": "resource",
+        "type": "jsonb",
+        "notNull": true
+      },
+      {
+        "column": "user_name",
+        "type": "text",
+        "notNull": true
+      },
+      {
+        "column": "external_id",
+        "type": "text",
+        "notNull": false
+      },
+      {
+        "column": "active",
+        "type": "boolean",
+        "notNull": true
+      },
+      {
+        "column": "created_at",
+        "type": "timestamp with time zone",
+        "notNull": true
+      },
+      {
+        "column": "updated_at",
+        "type": "timestamp with time zone",
+        "notNull": true
+      },
+      {
+        "column": "deleted_at",
+        "type": "timestamp with time zone",
+        "notNull": false
+      }
+    ],
+    "sessions": [
+      {
+        "column": "id",
+        "type": "uuid",
+        "notNull": true
+      },
+      {
+        "column": "user_id",
+        "type": "uuid",
+        "notNull": true
+      },
+      {
+        "column": "created_at",
+        "type": "timestamp with time zone",
+        "notNull": false
+      },
+      {
+        "column": "updated_at",
+        "type": "timestamp with time zone",
+        "notNull": false
+      },
+      {
+        "column": "factor_id",
+        "type": "uuid",
+        "notNull": false
+      },
+      {
+        "column": "aal",
+        "type": "auth.aal_level",
+        "notNull": false
+      },
+      {
+        "column": "not_after",
+        "type": "timestamp with time zone",
+        "notNull": false
+      },
+      {
+        "column": "refreshed_at",
+        "type": "timestamp without time zone",
+        "notNull": false
+      },
+      {
+        "column": "user_agent",
+        "type": "text",
+        "notNull": false
+      },
+      {
+        "column": "ip",
+        "type": "inet",
+        "notNull": false
+      },
+      {
+        "column": "tag",
+        "type": "text",
+        "notNull": false
+      },
+      {
+        "column": "oauth_client_id",
+        "type": "uuid",
+        "notNull": false
+      },
+      {
+        "column": "refresh_token_hmac_key",
+        "type": "text",
+        "notNull": false
+      },
+      {
+        "column": "refresh_token_counter",
+        "type": "bigint",
+        "notNull": false
+      },
+      {
+        "column": "scopes",
+        "type": "text",
+        "notNull": false
+      }
+    ],
+    "sso_domains": [
+      {
+        "column": "id",
+        "type": "uuid",
+        "notNull": true
+      },
+      {
+        "column": "sso_provider_id",
+        "type": "uuid",
+        "notNull": true
+      },
+      {
+        "column": "domain",
+        "type": "text",
+        "notNull": true
+      },
+      {
+        "column": "created_at",
+        "type": "timestamp with time zone",
+        "notNull": false
+      },
+      {
+        "column": "updated_at",
+        "type": "timestamp with time zone",
+        "notNull": false
+      }
+    ],
+    "sso_providers": [
+      {
+        "column": "id",
+        "type": "uuid",
+        "notNull": true
+      },
+      {
+        "column": "resource_id",
+        "type": "text",
+        "notNull": false
+      },
+      {
+        "column": "created_at",
+        "type": "timestamp with time zone",
+        "notNull": false
+      },
+      {
+        "column": "updated_at",
+        "type": "timestamp with time zone",
+        "notNull": false
+      },
+      {
+        "column": "disabled",
+        "type": "boolean",
+        "notNull": false
+      }
+    ],
+    "users": [
+      {
+        "column": "instance_id",
+        "type": "uuid",
+        "notNull": false
+      },
+      {
+        "column": "id",
+        "type": "uuid",
+        "notNull": true
+      },
+      {
+        "column": "aud",
+        "type": "character varying(255)",
+        "notNull": false
+      },
+      {
+        "column": "role",
+        "type": "character varying(255)",
+        "notNull": false
+      },
+      {
+        "column": "email",
+        "type": "character varying(255)",
+        "notNull": false
+      },
+      {
+        "column": "encrypted_password",
+        "type": "character varying(255)",
+        "notNull": false
+      },
+      {
+        "column": "email_confirmed_at",
+        "type": "timestamp with time zone",
+        "notNull": false
+      },
+      {
+        "column": "invited_at",
+        "type": "timestamp with time zone",
+        "notNull": false
+      },
+      {
+        "column": "confirmation_token",
+        "type": "character varying(255)",
+        "notNull": false
+      },
+      {
+        "column": "confirmation_sent_at",
+        "type": "timestamp with time zone",
+        "notNull": false
+      },
+      {
+        "column": "recovery_token",
+        "type": "character varying(255)",
+        "notNull": false
+      },
+      {
+        "column": "recovery_sent_at",
+        "type": "timestamp with time zone",
+        "notNull": false
+      },
+      {
+        "column": "email_change_token_new",
+        "type": "character varying(255)",
+        "notNull": false
+      },
+      {
+        "column": "email_change",
+        "type": "character varying(255)",
+        "notNull": false
+      },
+      {
+        "column": "email_change_sent_at",
+        "type": "timestamp with time zone",
+        "notNull": false
+      },
+      {
+        "column": "last_sign_in_at",
+        "type": "timestamp with time zone",
+        "notNull": false
+      },
+      {
+        "column": "raw_app_meta_data",
+        "type": "jsonb",
+        "notNull": false
+      },
+      {
+        "column": "raw_user_meta_data",
+        "type": "jsonb",
+        "notNull": false
+      },
+      {
+        "column": "is_super_admin",
+        "type": "boolean",
+        "notNull": false
+      },
+      {
+        "column": "created_at",
+        "type": "timestamp with time zone",
+        "notNull": false
+      },
+      {
+        "column": "updated_at",
+        "type": "timestamp with time zone",
+        "notNull": false
+      },
+      {
+        "column": "phone",
+        "type": "text",
+        "notNull": false
+      },
+      {
+        "column": "phone_confirmed_at",
+        "type": "timestamp with time zone",
+        "notNull": false
+      },
+      {
+        "column": "phone_change",
+        "type": "text",
+        "notNull": false
+      },
+      {
+        "column": "phone_change_token",
+        "type": "character varying(255)",
+        "notNull": false
+      },
+      {
+        "column": "phone_change_sent_at",
+        "type": "timestamp with time zone",
+        "notNull": false
+      },
+      {
+        "column": "confirmed_at",
+        "type": "timestamp with time zone",
+        "notNull": false
+      },
+      {
+        "column": "email_change_token_current",
+        "type": "character varying(255)",
+        "notNull": false
+      },
+      {
+        "column": "email_change_confirm_status",
+        "type": "smallint",
+        "notNull": false
+      },
+      {
+        "column": "banned_until",
+        "type": "timestamp with time zone",
+        "notNull": false
+      },
+      {
+        "column": "reauthentication_token",
+        "type": "character varying(255)",
+        "notNull": false
+      },
+      {
+        "column": "reauthentication_sent_at",
+        "type": "timestamp with time zone",
+        "notNull": false
+      },
+      {
+        "column": "is_sso_user",
+        "type": "boolean",
+        "notNull": true
+      },
+      {
+        "column": "deleted_at",
+        "type": "timestamp with time zone",
+        "notNull": false
+      },
+      {
+        "column": "is_anonymous",
+        "type": "boolean",
+        "notNull": true
+      }
+    ],
+    "webauthn_challenges": [
+      {
+        "column": "id",
+        "type": "uuid",
+        "notNull": true
+      },
+      {
+        "column": "user_id",
+        "type": "uuid",
+        "notNull": false
+      },
+      {
+        "column": "challenge_type",
+        "type": "text",
+        "notNull": true
+      },
+      {
+        "column": "session_data",
+        "type": "jsonb",
+        "notNull": true
+      },
+      {
+        "column": "created_at",
+        "type": "timestamp with time zone",
+        "notNull": true
+      },
+      {
+        "column": "expires_at",
+        "type": "timestamp with time zone",
+        "notNull": true
+      }
+    ],
+    "webauthn_credentials": [
+      {
+        "column": "id",
+        "type": "uuid",
+        "notNull": true
+      },
+      {
+        "column": "user_id",
+        "type": "uuid",
+        "notNull": true
+      },
+      {
+        "column": "credential_id",
+        "type": "bytea",
+        "notNull": true
+      },
+      {
+        "column": "public_key",
+        "type": "bytea",
+        "notNull": true
+      },
+      {
+        "column": "attestation_type",
+        "type": "text",
+        "notNull": true
+      },
+      {
+        "column": "aaguid",
+        "type": "uuid",
+        "notNull": false
+      },
+      {
+        "column": "sign_count",
+        "type": "bigint",
+        "notNull": true
+      },
+      {
+        "column": "transports",
+        "type": "jsonb",
+        "notNull": true
+      },
+      {
+        "column": "backup_eligible",
+        "type": "boolean",
+        "notNull": true
+      },
+      {
+        "column": "backed_up",
+        "type": "boolean",
+        "notNull": true
+      },
+      {
+        "column": "friendly_name",
+        "type": "text",
+        "notNull": true
+      },
+      {
+        "column": "created_at",
+        "type": "timestamp with time zone",
+        "notNull": true
+      },
+      {
+        "column": "updated_at",
+        "type": "timestamp with time zone",
+        "notNull": true
+      },
+      {
+        "column": "last_used_at",
+        "type": "timestamp with time zone",
+        "notNull": false
+      }
+    ]
+  },
+  "foreignKeys": [
+    {
+      "table": "identities",
+      "name": "identities_user_id_fkey",
+      "definition": "FOREIGN KEY (user_id) REFERENCES auth.users(id) ON DELETE CASCADE"
+    },
+    {
+      "table": "mfa_amr_claims",
+      "name": "mfa_amr_claims_session_id_fkey",
+      "definition": "FOREIGN KEY (session_id) REFERENCES auth.sessions(id) ON DELETE CASCADE"
+    },
+    {
+      "table": "mfa_challenges",
+      "name": "mfa_challenges_auth_factor_id_fkey",
+      "definition": "FOREIGN KEY (factor_id) REFERENCES auth.mfa_factors(id) ON DELETE CASCADE"
+    },
+    {
+      "table": "mfa_factors",
+      "name": "mfa_factors_user_id_fkey",
+      "definition": "FOREIGN KEY (user_id) REFERENCES auth.users(id) ON DELETE CASCADE"
+    },
+    {
+      "table": "mfa_recovery_code_sets",
+      "name": "mfa_recovery_code_sets_mfa_factor_id_fkey",
+      "definition": "FOREIGN KEY (mfa_factor_id) REFERENCES auth.mfa_factors(id) ON DELETE CASCADE"
+    },
+    {
+      "table": "mfa_recovery_code_sets",
+      "name": "mfa_recovery_code_sets_user_id_fkey",
+      "definition": "FOREIGN KEY (user_id) REFERENCES auth.users(id) ON DELETE CASCADE"
+    },
+    {
+      "table": "mfa_recovery_codes",
+      "name": "mfa_recovery_codes_mfa_recovery_code_set_id_fkey",
+      "definition": "FOREIGN KEY (mfa_recovery_code_set_id) REFERENCES auth.mfa_recovery_code_sets(id) ON DELETE CASCADE"
+    },
+    {
+      "table": "oauth_authorizations",
+      "name": "oauth_authorizations_client_id_fkey",
+      "definition": "FOREIGN KEY (client_id) REFERENCES auth.oauth_clients(id) ON DELETE CASCADE"
+    },
+    {
+      "table": "oauth_authorizations",
+      "name": "oauth_authorizations_user_id_fkey",
+      "definition": "FOREIGN KEY (user_id) REFERENCES auth.users(id) ON DELETE CASCADE"
+    },
+    {
+      "table": "oauth_consents",
+      "name": "oauth_consents_client_id_fkey",
+      "definition": "FOREIGN KEY (client_id) REFERENCES auth.oauth_clients(id) ON DELETE CASCADE"
+    },
+    {
+      "table": "oauth_consents",
+      "name": "oauth_consents_user_id_fkey",
+      "definition": "FOREIGN KEY (user_id) REFERENCES auth.users(id) ON DELETE CASCADE"
+    },
+    {
+      "table": "one_time_tokens",
+      "name": "one_time_tokens_user_id_fkey",
+      "definition": "FOREIGN KEY (user_id) REFERENCES auth.users(id) ON DELETE CASCADE"
+    },
+    {
+      "table": "refresh_tokens",
+      "name": "refresh_tokens_session_id_fkey",
+      "definition": "FOREIGN KEY (session_id) REFERENCES auth.sessions(id) ON DELETE CASCADE"
+    },
+    {
+      "table": "saml_providers",
+      "name": "saml_providers_sso_provider_id_fkey",
+      "definition": "FOREIGN KEY (sso_provider_id) REFERENCES auth.sso_providers(id) ON DELETE CASCADE"
+    },
+    {
+      "table": "saml_relay_states",
+      "name": "saml_relay_states_flow_state_id_fkey",
+      "definition": "FOREIGN KEY (flow_state_id) REFERENCES auth.flow_state(id) ON DELETE CASCADE"
+    },
+    {
+      "table": "saml_relay_states",
+      "name": "saml_relay_states_sso_provider_id_fkey",
+      "definition": "FOREIGN KEY (sso_provider_id) REFERENCES auth.sso_providers(id) ON DELETE CASCADE"
+    },
+    {
+      "table": "scim_tokens",
+      "name": "scim_tokens_sso_provider_id_fkey",
+      "definition": "FOREIGN KEY (sso_provider_id) REFERENCES auth.sso_providers(id) ON DELETE CASCADE"
+    },
+    {
+      "table": "scim_users",
+      "name": "scim_users_sso_provider_id_fkey",
+      "definition": "FOREIGN KEY (sso_provider_id) REFERENCES auth.sso_providers(id) ON DELETE CASCADE"
+    },
+    {
+      "table": "scim_users",
+      "name": "scim_users_user_id_fkey",
+      "definition": "FOREIGN KEY (user_id) REFERENCES auth.users(id) ON DELETE SET NULL"
+    },
+    {
+      "table": "sessions",
+      "name": "sessions_oauth_client_id_fkey",
+      "definition": "FOREIGN KEY (oauth_client_id) REFERENCES auth.oauth_clients(id) ON DELETE CASCADE"
+    },
+    {
+      "table": "sessions",
+      "name": "sessions_user_id_fkey",
+      "definition": "FOREIGN KEY (user_id) REFERENCES auth.users(id) ON DELETE CASCADE"
+    },
+    {
+      "table": "sso_domains",
+      "name": "sso_domains_sso_provider_id_fkey",
+      "definition": "FOREIGN KEY (sso_provider_id) REFERENCES auth.sso_providers(id) ON DELETE CASCADE"
+    },
+    {
+      "table": "webauthn_challenges",
+      "name": "webauthn_challenges_user_id_fkey",
+      "definition": "FOREIGN KEY (user_id) REFERENCES auth.users(id) ON DELETE CASCADE"
+    },
+    {
+      "table": "webauthn_credentials",
+      "name": "webauthn_credentials_user_id_fkey",
+      "definition": "FOREIGN KEY (user_id) REFERENCES auth.users(id) ON DELETE CASCADE"
+    }
+  ]
+}
