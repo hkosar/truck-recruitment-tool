@@ -160,10 +160,10 @@ export function parseCommandLine(line, wrapper, runner, runnerRelPath) {
   return out;
 }
 
-/** Keys of each 'first-manager.<event>' entry in the wrapper's output allow-list (the real field set). */
-export function parseFmOutputFields(wrapperSrc) {
+/** Keys of each '<prefix>.<event>' entry in the wrapper's output allow-list (the real field set). */
+export function parseOutputFields(wrapperSrc, prefix) {
   const events = new Map();
-  for (const m of wrapperSrc.matchAll(/'first-manager\.([a-z_]+)': \{/g)) {
+  for (const m of wrapperSrc.matchAll(new RegExp("'" + prefix + "\\.([a-z_]+)': \\{", 'g'))) {
     let depth = 1; let i = m.index + m[0].length; const start = i;
     for (; i < wrapperSrc.length && depth > 0; i += 1) { if (wrapperSrc[i] === '{') depth += 1; else if (wrapperSrc[i] === '}') depth -= 1; }
     const body = wrapperSrc.slice(start, i - 1);
@@ -178,6 +178,9 @@ export function parseFmOutputFields(wrapperSrc) {
   }
   return events;
 }
+
+/** Keys of each 'first-manager.<event>' entry in the wrapper's output allow-list (the real field set). */
+export const parseFmOutputFields = (wrapperSrc) => parseOutputFields(wrapperSrc, 'first-manager');
 
 /** The exact action order the runbook must show, in document order: each action as a plan-only line then its --execute line. */
 export const EXPECTED_STEPS = [
@@ -465,19 +468,66 @@ export function checkCutoverRunbook(runbook, yaml, runnerSources, fmSources) {
     const stopNames = (runnerSources.classification?.tables ?? []).filter((t) => t.classification === 'credential-bearing: STOP').map((t) => t.table);
     if (stopNames.length !== 13) failures.push('B13: expected 13 STOP tables in the classification at ' + RUNNER_TIP + ', found ' + stopNames.length);
     for (const name of stopNames) need(b13, new RegExp('`' + name + '`'), 'B13: STOP table ' + name + ' not named');
-    for (const id of ['prod_sql_l1_stop_table_populated', 'prod_sql_l1_stop_table_lock_failed', 'prod_sql_l1_statement_timeout']) {
-      if (!(runnerSources.wrapper ?? '').includes("'" + id + "'") || !(runnerSources.prodSql ?? '').includes("'" + id + "'")) failures.push('B13: refusal id ' + id + ' not found in the runner source at ' + RUNNER_TIP);
+    // Everything below is compared with the pinned sources at RUNNER_TIP (runner, wrapper, classification), not with words written into this contract.
+    const prodSql = runnerSources.prodSql ?? '';
+    const wrapperSrc = runnerSources.wrapper ?? '';
+    const docRefusals = new Set([...b13.matchAll(/\bprod_sql_l1_(?:stop_table|statement)_[a-z_]+/g)].map((m) => m[0]));
+    const runnerRefusals = new Set([...prodSql.matchAll(/RunnerRefusal\('(prod_sql_l1_(?:stop_table|statement)_[a-z_]+)'/g)].map((m) => m[1]));
+    if (runnerRefusals.size !== 3) failures.push('B13: expected three STOP-sweep refusal ids in the runner source at ' + RUNNER_TIP + ', found ' + runnerRefusals.size);
+    for (const id of runnerRefusals) {
+      if (!wrapperSrc.includes("'" + id + "'")) failures.push('B13: refusal id ' + id + ' is not in the wrapper allow-list at ' + RUNNER_TIP);
       need(b13, new RegExp(id), 'B13: refusal id ' + id + ' missing');
     }
-    for (const f of ['action', 'classification', 'locked', 'tables', 'tables_present', 'tables_populated', 'passed']) need(b13, new RegExp('`' + f + '`'), 'B13: prod-sql.stop_tables field ' + f + ' missing');
+    for (const id of docRefusals) if (!runnerRefusals.has(id)) failures.push('B13: documents refusal id ' + id + ' that the runner does not define');
+    // The documented event field set must EQUAL the wrapper's allow-list for prod-sql.stop_tables (no invented field, none missing).
+    const realStopFields = parseOutputFields(wrapperSrc, 'prod-sql').get('stop_tables');
+    const fieldSentence = b13.match(/with the fields ([\s\S]*?)\. Stage 1 \(/)?.[1];
+    if (!realStopFields?.length) failures.push('B13: prod-sql.stop_tables allow-list not found in the wrapper at ' + RUNNER_TIP);
+    else if (fieldSentence === undefined) failures.push('B13: the prod-sql.stop_tables field sentence was not found');
+    else {
+      const docFields = [...fieldSentence.replace(/\([^)]*\)/g, '').matchAll(/`([a-z_]+)`/g)].map((m) => m[1]).sort();
+      const invented = docFields.filter((f) => !realStopFields.includes(f));
+      const missing = realStopFields.filter((f) => !docFields.includes(f));
+      if (invented.length) failures.push('B13: prod-sql.stop_tables documents field(s) the wrapper does not define: ' + invented.join(', '));
+      if (missing.length) failures.push('B13: prod-sql.stop_tables omits real field(s): ' + missing.join(', '));
+    }
+    // Lock mode and both timeouts equal the runner's.
+    const lockMode = prodSql.match(/STOP_LOCK_MODE = '([a-z ]+)'/)?.[1]?.toUpperCase();
+    const lockSeconds = prodSql.match(/LOCK_TIMEOUT_SQL = "set local lock_timeout = '(\d+)s'"/)?.[1];
+    const statementMs = prodSql.match(/STATEMENT_TIMEOUT_MS = (\d+);/)?.[1];
+    if (!lockMode || !lockSeconds || !statementMs) failures.push('B13: lock mode or timeouts not found in the runner source at ' + RUNNER_TIP);
+    else {
+      const statementSeconds = String(Number(statementMs) / 1000);
+      if (b13.match(/\(`([A-Z ]+)`, one statement/)?.[1] !== lockMode) failures.push('B13: the documented lock mode is not the runner lock mode ' + lockMode);
+      if (b13.match(/(\d+) second lock timeout/)?.[1] !== lockSeconds) failures.push('B13: the documented lock timeout is not the runner value ' + lockSeconds + ' seconds');
+      if (b13.match(/a (\d+) second `statement_timeout`/)?.[1] !== statementSeconds) failures.push('B13: the documented statement timeout is not the runner value ' + statementSeconds + ' seconds');
+      if (b13.match(/longer than the (\d+) second bound/)?.[1] !== statementSeconds) failures.push('B13: the statement-timeout STOP rule does not state the runner bound ' + statementSeconds + ' seconds');
+    }
+    // Proceed condition: the runner refuses on any populated table and reports passed as "populated === N"; the document must say every count is N.
+    const passedAt = prodSql.match(/passed: r\.populated === (\d+)/)?.[1];
+    if (passedAt === undefined || !/if \(stop\.populated > 0\) throw new RunnerRefusal\('prod_sql_l1_stop_table_populated'/.test(prodSql)) failures.push('B13: the runner proceed condition (passed when populated === N, refuse above 0) was not found');
+    else if (b13.match(/goes on only if every count is (\d+)/)?.[1] !== passedAt) failures.push('B13: the documented proceed condition is not "every count is ' + passedAt + '"');
+    // Success values: passed is the proceed condition (true on success); locked is r.locked, which the sweep passes as true and stage 1 as false.
+    const emitsPassed = /passed: r\.populated === 0 \}\)/.test(prodSql) && /locked: r\.locked/.test(prodSql);
+    const sweepLocks = /readStopTables\(client, plan\.classification, true\);\s*reportStopTables\(action, stop\)/.test(prodSql);
+    const shapeNoLock = /reportStopTables\(action, await readStopTables\(client, plan\.classification, false\)\)/.test(prodSql);
+    if (!emitsPassed || !sweepLocks || !shapeNoLock) failures.push('B13: the runner source does not show passed true and locked true on a successful sweep (locked false at stage 1)');
+    else {
+      const m = b13.match(/`passed` must be (true|false), `locked` (true|false)/);
+      if (m?.[1] !== 'true' || m?.[2] !== 'true') failures.push('B13: stage 3 must require passed true and locked true, as the runner emits on success');
+      need(b13, /with `locked: false` \(read-only, no lock/, 'B13: stage 1 must say locked is false (read-only, no lock)');
+    }
     need(b13, /prod-sql\.stop_tables/, 'B13: prod-sql.stop_tables event missing');
     need(b13, /STOP rule, `prod_sql_l1_stop_table_populated`[^\n]*\*\*STOP\.\*\*[^\n]*Do not retry[^\n]*Do not clear[^\n]*decide together/, 'B13: STOP rule for a populated table (no retry, nothing cleared, decide together) missing');
     need(b13, /STOP rule, `prod_sql_l1_stop_table_lock_failed`[^\n]*\*\*STOP\.\*\*[^\n]*Do not loop the retry/, 'B13: lock_failed rule missing');
-    need(b13, /STOP rule, `prod_sql_l1_statement_timeout`[^\n]*30 second[^\n]*57014[^\n]*\*\*STOP\.\*\*[^\n]*Do not loop the retry[^\n]*do not raise the bound/, 'B13: statement-timeout STOP rule (30 second bound, 57014, no retry loop, do not raise the bound) missing');
-    if (!(runnerSources.prodSql ?? '').includes('STATEMENT_TIMEOUT_MS = 30000')) failures.push('B13: runner source at ' + RUNNER_TIP + ' does not contain the 30 second statement timeout');
+    need(b13, /STOP rule, `prod_sql_l1_statement_timeout`[^\n]*\d+ second[^\n]*57014[^\n]*\*\*STOP\.\*\*[^\n]*Do not loop the retry[^\n]*do not raise the bound/, 'B13: statement-timeout STOP rule (30 second bound, 57014, no retry loop, do not raise the bound) missing');
+    const timeoutCode = prodSql.match(/STATEMENT_TIMEOUT_CODE = '(\d{5})'/)?.[1];
+    if (!timeoutCode || b13.match(/prod_sql_l1_statement_timeout`:[^\n]*SQLSTATE (\d{5})/)?.[1] !== timeoutCode) failures.push('B13: the statement-timeout rule does not state the runner SQLSTATE ' + timeoutCode);
+    const fkCode = prodSql.match(/with its SQLSTATE, e\.g\. (\d{5}), and result rolled_back/)?.[1];
+    if (!fkCode || !/server_or_driver_error/.test(prodSql) || b13.match(/deferred foreign-key failure at the flush \(`server_or_driver_error`, SQLSTATE `(\d{5})`/)?.[1] !== fkCode || b13.match(/reports `server_or_driver_error` with SQLSTATE `(\d{5})`/)?.[1] !== fkCode) failures.push('B13: the deferred foreign-key rule does not state the runner SQLSTATE ' + fkCode);
     need(b13, /SET CONSTRAINTS ALL IMMEDIATE/, "B13: the deferred-constraint flush before the final re-count is not described");
     if (!(runnerSources.prodSql ?? "").includes("set constraints all immediate")) failures.push("B13: runner source at " + RUNNER_TIP + " does not contain set constraints all immediate");
-    need(b13, /STOP rule, deferred foreign-key failure[^\n]*`server_or_driver_error`[^\n]*`23503`[^\n]*\*\*STOP\.\*\*[^\n]*Do not retry[^\n]*decide together/, 'B13: deferred foreign-key failure (server_or_driver_error, 23503) STOP rule (no retry, decide together) missing');
+    need(b13, /STOP rule, deferred foreign-key failure[^\n]*`server_or_driver_error`[^\n]*`\d{5}`[^\n]*\*\*STOP\.\*\*[^\n]*Do not retry[^\n]*decide together/, 'B13: deferred foreign-key failure (server_or_driver_error, 23503) STOP rule (no retry, decide together) missing');
     need(b13, /"Empty" is true only up to COMMIT/, 'B13: "empty is true only up to COMMIT" limit missing');
     need(b13, /re-?count|counts again/i, 'B13: re-count before COMMIT missing');
     if (/stops on any[^\n]*STOP table|classified `credential-bearing: STOP`[^\n]*\*\*STOP\*\* for review/.test(runbook)) failures.push('old "L1 stops on any STOP table" wording remains');
@@ -589,6 +639,14 @@ export const MUTATIONS = [
   ['b13-missing-flush-description', (t) => t.replaceAll('SET CONSTRAINTS ALL IMMEDIATE', 'SET SOMETHING ELSE')],
   ['b13-fk-failure-rule-allows-retry', (t) => t.replace('Do not retry. Do not change any data to make the check pass.', 'Retry freely.')],
   ['b13-fk-failure-wrong-sqlstate', (t) => t.replaceAll('SQLSTATE `23503`', 'SQLSTATE `23505`')],
+  // review r4 (combined): the B13 event, lock, timeouts, proceed condition and success values must follow the pinned runner, not merely contain words
+  ['b13-invented-event-field', (t) => t.replace('with the fields `action`, `classification` (the words', 'with the fields `invented_field`, `action`, `classification` (the words')],
+  ['b13-wrong-lock-mode', (t) => t.replace('(`SHARE ROW EXCLUSIVE`, one statement', '(`ACCESS SHARE`, one statement')],
+  ['b13-wrong-lock-timeout', (t) => t.replace('one statement, 10 second lock timeout', 'one statement, 0 second lock timeout (unlimited)')],
+  ['b13-wrong-empty-condition', (t) => t.replace('goes on only if every count is 0', 'goes on only if every count is 1')],
+  ['b13-wrong-success-values', (t) => t.replace('`passed` must be true, `locked` true', '`passed` must be false, `locked` false')],
+  ['b13-wrong-timeout-sqlstate', (t) => t.replace('(SQLSTATE 57014, not printed)', '(SQLSTATE 23505, not printed)')],
+  ['b13-wrong-statement-timeout-seconds', (t) => { const [a, b] = blockRange(t, 'B13'); return t.slice(0, a) + t.slice(a, b).replaceAll('a 30 second `statement_timeout`', 'a 300 second `statement_timeout`') + t.slice(b); }],
   ['bo3-drops-approved-auth-email-null', (t) => { const [s, e] = blockRange(t, 'BO3'); return t.slice(0, s) + t.slice(s, e).replaceAll('approved_auth_email_null', 'approved_x') + t.slice(e); }],
   ['bo3-success-rule-only-drops-null', (t) => t.replace('; and `approved_auth_email_null` is 0. If', '. If')],
   ['bo3-after-bo4', (t) => { const [a0, a1] = blockRange(t, 'BO3'); const [b0, b1] = blockRange(t, 'BO4'); return t.slice(0, a0) + t.slice(b0, b1) + t.slice(a0, a1) + t.slice(b1); }],
