@@ -543,8 +543,18 @@ privileges) and no EXECUTE on the function (ACL and effective); `recruiter_api` 
 ownership or a default ACL). After the revoke the tool re-reads the effective privilege and reports
 success only if `service_role` has lost EXECUTE. It does not revoke PUBLIC or inherited grants to
 compensate. **Not checked, and therefore not certified by this tool:** the body of `public.batch_delete` (only its
-privileges are checked; a separate manual comparison of its definition with the reviewed file is a required step
-of the separately approved M1c run, not of approval 4), other objects in the schema, and grants on objects other
+privileges are checked; a separate comparison of its definition with the reviewed file is a required step
+of the separately approved M1c run, not of approval 4. That comparison is the read-only runner action
+`batch-delete-compare` (confirmation `COMPARE TNBS BATCH DELETE DEFINITION`, dry run first; `pipeline/src/batch-delete-compare.ts`):
+in one read-only transaction it fetches `pg_get_functiondef` of `public.batch_delete(uuid)`, normalises it and the function
+text of the pinned M1c file the same documented way (line ends; the header reduced to name and argument list, return type,
+language, volatility, SECURITY DEFINER/INVOKER and search_path, any other header clause being unrecognised; the body compared
+byte for byte; dollar-quote tags ignored), and prints only `staging-sql.batch_delete_compare` with `match` and two 12-character
+SHA-256 prefixes (never the definition). A difference, an absent function or an unrecognised live header is refused with
+`batch_delete_definition_mismatch`; owner and privileges are not part of it. Proved locally on a real PostgreSQL 16 catalogue by
+`pipeline/src/batch-delete-compare-a3.test.ts` (30 checks: fresh apply matches; ten altered definitions refused and restored)
+and offline by `pipeline/src/batch-delete-compare.test.ts`; the hosted catalogue is not proved, and a refusal there means a
+human inspects), other objects in the schema, and grants on objects other
 than those named. **Unsupported:** a database whose PostGIS extension lives outside schema `public` (M1 then pins
 a different `search_path`, including on the audit function); `reapply-m1c` refuses it at `trigger_function`, which
 is a safe stop, and a human handles it. The hosted catalogue may differ from the local one (for example extra

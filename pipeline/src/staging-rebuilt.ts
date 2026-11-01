@@ -5,6 +5,7 @@ import pg from 'pg';
 import { M1C_POSTCONDITION_SQL, M1C_STATE_PROBE_SQL, REAPPLY_POST_SQL, REAPPLY_PRECHECKS, classifyM1cState, idempotentReapplySql, type M1cStateFacts, type ReapplyTarget } from './reapply.js';
 import { reportEnvironmentPreflight, runEnvironmentPreflight } from './environment-preflight.js';
 import { OWNER_CHECK_CONFIRMATION, OWNER_PROMOTE_CONFIRMATION, runOwnerLoginCheck, runOwnerPromotion } from './owner-bootstrap.js';
+import { extractBatchDeleteFromFile, runBatchDeleteCompare } from './batch-delete-compare.js';
 import { reportLedgerPreflight, runLedgerPreflight } from './ledger-preflight.js';
 import { MAINTENANCE_ROLE, roleOf } from './retention-step.js';
 import { runRetentionDryRun, type DryRunReport } from './retention-dry-run.js';
@@ -26,7 +27,7 @@ import { RECORDED_PROJECT_REFS, parseSupabaseDbTarget, type SupabaseDbTarget } f
 export const REPOSITORY_ROOT = resolve(import.meta.dirname, '..', '..');
 const REBUILT_REF_PATTERN = /^[a-z]{20}$/;
 
-type RebuiltKind = 'file' | 'migrations' | 'inline' | 'snapshot' | 'retention' | 'ledger-preflight' | 'environment-preflight' | 'owner-check' | 'owner-promote';
+type RebuiltKind = 'file' | 'migrations' | 'inline' | 'snapshot' | 'retention' | 'ledger-preflight' | 'environment-preflight' | 'owner-check' | 'owner-promote' | 'batch-delete-compare';
 
 interface RebuiltActionSpec {
   kind: RebuiltKind;
@@ -52,6 +53,8 @@ export const REBUILT_STAGING_SQL_ACTIONS: Readonly<Record<string, RebuiltActionS
   'environment-preflight': { kind: 'environment-preflight', confirmation: 'RUN TNBS ENVIRONMENT PREFLIGHT', pinned: false },
   // Owner login bootstrap (doc 16 approval 4, owner-bootstrap.ts): a read-only report of the exact owner identity, and the single reviewed promotion transaction. The Auth Admin create call is owner-auth-create (no database login; staging-sql-runner.ts).
   'owner-login-check': { kind: 'owner-check', confirmation: OWNER_CHECK_CONFIRMATION, pinned: false },
+  // Read-only comparison of the live public.batch_delete(uuid) definition with the function text in the pinned M1c file (doc 16 section 3.3, required step of the M1c run); prints only match true/false and two short hashes (batch-delete-compare.ts).
+  'batch-delete-compare': { kind: 'batch-delete-compare', file: 'supabase/pending/M1c_batch_delete_audit.sql', sha256: '86cd3de2ab4f1b2283c344088e31d05fbc8e719ebaa17318987a7082c42dfb26', confirmation: 'COMPARE TNBS BATCH DELETE DEFINITION', pinned: false },
   'owner-promote': { kind: 'owner-promote', confirmation: OWNER_PROMOTE_CONFIRMATION, pinned: false },
   // Connects AS recruiter_maintenance (STAGING_DB_URL must be that login): counts, never deletes.
   'retention-dry-run': { kind: 'retention', confirmation: 'RUN TNBS RETENTION DRY RUN', pinned: false },
@@ -114,6 +117,8 @@ export interface RebuiltSqlPlan {
   steps: readonly RebuiltSqlStep[];
   /** Snapshot only: where the rows are written. Outside the repository. */
   outPath?: string;
+  /** batch-delete-compare only: the function text extracted from the pinned M1c file. */
+  expectedFunction?: string;
   /** reapply-m1c only: step index of the revoke that alone is sent when the interrupted-run state is detected. */
   m1cRecoveryStep?: number;
 }
@@ -212,10 +217,17 @@ export function planRebuiltSqlRun(input: {
   }
 
   let steps: RebuiltSqlStep[];
+  let expectedFunction: string | undefined;
   if (spec.kind === 'retention') {
     steps = [{ label: 'retention-dry-run', sql: '', transaction: false }];
   } else if (spec.kind === 'ledger-preflight' || spec.kind === 'environment-preflight' || spec.kind === 'owner-check' || spec.kind === 'owner-promote') {
     steps = [{ label: spec.kind, sql: '', transaction: false }];
+  } else if (spec.kind === 'batch-delete-compare') {
+    const bytes = readFileSync(resolve(REPOSITORY_ROOT, spec.file as string));
+    if (spec.sha256 !== undefined && createHash('sha256').update(bytes).digest('hex') !== spec.sha256) throw new Error(`${spec.file} does not match its pinned SHA-256; refusing`);
+    expectedFunction = extractBatchDeleteFromFile(bytes.toString('utf8')) ?? undefined;
+    if (expectedFunction === undefined) throw new Error('the pinned M1c file does not hold exactly one public.batch_delete definition; refusing');
+    steps = [{ label: 'batch-delete-compare', sql: '', transaction: false }];
   } else if (spec.kind === 'migrations') {
     steps = verifiedMigrationSteps();
   } else if (spec.kind === 'inline') {
@@ -238,7 +250,7 @@ export function planRebuiltSqlRun(input: {
     ['app.staging_project_ref', target.projectRef],
   ];
   if (spec.confirmationSetting) settings.push([spec.confirmationSetting, spec.confirmation]);
-  return { action: input.action, kind: spec.kind, target, settings, steps, ...(outPath ? { outPath } : {}), ...(spec.reapply === 'm1c' ? { m1cRecoveryStep: steps.length - 1 } : {}) };
+  return { action: input.action, kind: spec.kind, target, settings, steps, ...(outPath ? { outPath } : {}), ...(expectedFunction !== undefined ? { expectedFunction } : {}), ...(spec.reapply === 'm1c' ? { m1cRecoveryStep: steps.length - 1 } : {}) };
 }
 
 /** The part of pg.Client the executor uses; tests (and the local-database proof) inject their own. */
@@ -300,6 +312,16 @@ export async function executeRebuiltSqlPlan(plan: RebuiltSqlPlan, clientFactory:
       await client.query('begin read only');
       try {
         await runOwnerLoginCheck(client, plan.target.projectRef);
+      } finally {
+        await client.query('rollback');
+      }
+      return;
+    }
+    if (plan.kind === 'batch-delete-compare') {
+      await client.query('begin read only');
+      try {
+        const cmp = await runBatchDeleteCompare(client, plan.expectedFunction as string);
+        if (!cmp.match) throw new RunnerRefusal('batch_delete_definition_mismatch', 'the live public.batch_delete definition differs from the reviewed M1c text; inspect by hand');
       } finally {
         await client.query('rollback');
       }

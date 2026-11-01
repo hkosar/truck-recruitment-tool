@@ -111,6 +111,35 @@ if (runner) {
   }
 }
 
+// batch-delete-compare (doc 16 section 3.3): read-only, pinned file, fixed event, fixed refusal, never prints the definition.
+const compare = read('pipeline/src/batch-delete-compare.ts');
+if (!compare) failures.push('batch-delete-compare.ts is missing');
+else {
+  for (const required of ['pg_get_functiondef(to_regprocedure', 'staging-sql.batch_delete_compare', 'shortHash', 'slice(0, 12)', 'match: cmp.match', 'expected_hash: cmp.expected_hash', 'live_hash: cmp.live_hash']) {
+    if (!compare.includes(required)) failures.push(`batch-delete-compare.ts is missing: ${required}`);
+  }
+  const compareCode = compare.split('\n').filter((l) => !/^\s*\/\//.test(l)).join('\n');
+  for (const forbidden of [/process\.env/, /\binsert\s+into\b/i, /\bupdate\s+\w+\s+set\b/i, /\bdelete\s+from\b/i, /\bdrop\s+\w+/i, /\btruncate\b/i, /\balter\s+\w+/i]) {
+    if (forbidden.test(compareCode.replace(/^export const BATCH_DELETE_LIVE_SQL.*$/m, ''))) failures.push(`batch-delete-compare.ts must not contain ${forbidden}`);
+  }
+  // The only console output is the one fixed event.
+  const logs = compareCode.match(/console\.(log|error)\(.*\)/g) ?? [];
+  if (logs.length !== 1 || !logs[0].includes('msg: BATCH_DELETE_COMPARE_EVENT, match: cmp.match, expected_hash: cmp.expected_hash, live_hash: cmp.live_hash }')) failures.push('batch-delete-compare.ts must print exactly one fixed event (match and two short hashes)');
+}
+if (runner) {
+  const action = /'batch-delete-compare': \{([^}]*)\}/.exec(runner)?.[1] ?? '';
+  for (const required of ["kind: 'batch-delete-compare'", "file: 'supabase/pending/M1c_batch_delete_audit.sql'", "sha256: '86cd3de2ab4f1b2283c344088e31d05fbc8e719ebaa17318987a7082c42dfb26'", "confirmation: 'COMPARE TNBS BATCH DELETE DEFINITION'"]) {
+    if (!action.includes(required)) failures.push(`batch-delete-compare action is missing: ${required}`);
+  }
+  const block = /if \(plan\.kind === 'batch-delete-compare'\) \{([\s\S]*?)\n    \}\n/.exec(runner)?.[1] ?? '';
+  for (const required of ["'begin read only'", 'runBatchDeleteCompare', "'batch_delete_definition_mismatch'", "'rollback'"]) {
+    if (!block.includes(required)) failures.push(`batch-delete-compare executor is missing: ${required}`);
+  }
+  if (/query\('commit'\)/.test(block)) failures.push('batch-delete-compare executor must never commit');
+}
+const refusalList = read('pipeline/src/refusals.ts');
+if (!refusalList || !refusalList.includes("'batch_delete_definition_mismatch'")) failures.push('refusals.ts must list batch_delete_definition_mismatch');
+
 // The recorded rebuilt staging ref (doc 16 R1 step 2): exactly one 20-letter literal, not the production or old staging ref.
 const guard = read('pipeline/src/target-guard.ts');
 const recordedRef = guard && /const REBUILT_STAGING_PROJECT_REF: string \| null = '([a-z]{20})';/.exec(guard);

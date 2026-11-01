@@ -26,6 +26,7 @@ export const REFUSAL_IDS = [
   'm1c_state_unrecognised',
   'm1c_postcondition_failed',
   'retention_dry_run_failed',
+  'batch_delete_definition_mismatch',
   'reapply_m1_not_backed_out',
   'reapply_m1_still_applied',
   'reapply_m1b_not_backed_out',
