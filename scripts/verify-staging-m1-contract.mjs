@@ -38,6 +38,8 @@ if (matrix && cleanup) {
   if (!/^begin;$/m.test(m) || !/^rollback;\s*$/m.test(m.trimEnd().split('\n').slice(-1)[0] + '\n')) failures.push('role matrix: must begin and end with rollback');
   if (/^commit;$/m.test(m)) failures.push('role matrix: must never commit');
   if (!m.includes("'failures'")) failures.push('role matrix: must report a failure count');
+  // The runner (readRoleMatrixCounts) reads exactly this final row: column role_matrix with keys failures, passed, total.
+  for (const key of ["'passed'", "'total'", ') as role_matrix;']) if (!m.includes(key)) failures.push(`role matrix: the final result row must keep ${key} (the runner reads it)`);
   if (!m.includes('set local role recruiter_api')) failures.push('role matrix: must probe as recruiter_api');
   for (const role of ['anon', 'authenticated']) if (!m.includes(`set local role ${role}`)) failures.push(`role matrix: must prove ${role} is denied`);
   const requiredProbes = [
