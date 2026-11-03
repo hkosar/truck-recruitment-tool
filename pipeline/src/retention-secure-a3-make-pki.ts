@@ -4,14 +4,12 @@
 // Run: npx tsx src/retention-secure-a3-make-pki.ts <empty directory outside the repository>
 
 import { mkdirSync, readdirSync, writeFileSync } from 'node:fs';
-import { isAbsolute, join, relative, resolve } from 'node:path';
+import { join } from 'node:path';
+import { assertOutsideRepository } from './retention-secure-a3-pki-guard.js';
 import { REPOSITORY_ROOT } from './staging-rebuilt.js';
 import { makeTestPki } from './db-tls-testkit.js';
 
-const dir = process.argv[2];
-if (!dir || !isAbsolute(dir)) throw new Error('usage: make-pki <absolute, empty directory outside the repository>');
-const rel = relative(REPOSITORY_ROOT, resolve(dir));
-if (!rel.startsWith('..') && !isAbsolute(rel)) throw new Error('refusing: the key material must live outside the repository');
+const dir = assertOutsideRepository(process.argv[2], REPOSITORY_ROOT);
 mkdirSync(dir, { recursive: true });
 if (readdirSync(dir).length > 0) throw new Error('refusing: the directory is not empty');
 const pki = makeTestPki();

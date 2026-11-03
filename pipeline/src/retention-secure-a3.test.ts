@@ -25,7 +25,6 @@ import { TEST_HOST, redirectHosts } from './db-tls-testkit.js';
 import { RETENTION_RULES } from './retention.js';
 import { REBUILT_STAGING_SQL_ACTIONS, REPOSITORY_ROOT, executeRebuiltSqlPlan, planRebuiltSqlRun, retargetSqlToRebuiltRef } from './staging-rebuilt.js';
 
-const ENV = process.env;
 const REF = 'zzzzzzzzzzzzzzzzzzzz'; // a fake ref for the throwaway databases only
 const MARKER_ID = 'a8512f81-fe47-485d-95cd-092c46e4920b';
 const INSTALL = 'supabase/staging/rebuild/install-retention-fixtures.sql';
@@ -166,13 +165,13 @@ async function runScenario(s: Scenario): Promise<void> {
 }
 
 async function main(): Promise<void> {
-  if (!ENV.RETENTION_SECURE_A3_ADMIN_URL || !ENV.RETENTION_SECURE_A3_MAINT_URL) {
+  if (!process.env.RETENTION_SECURE_A3_ADMIN_URL || !process.env.RETENTION_SECURE_A3_MAINT_URL) {
     console.log('skip retention secure-client A3 test (set RETENTION_SECURE_A3_ADMIN_URL and RETENTION_SECURE_A3_MAINT_URL, loopback only)');
     return;
   }
-  await runScenario({ label: 'loopback cluster', adminUrl: ENV.RETENTION_SECURE_A3_ADMIN_URL, maintUrl: ENV.RETENTION_SECURE_A3_MAINT_URL });
-  if (ENV.RETENTION_SECURE_A3_TLS_ADMIN_URL && ENV.RETENTION_SECURE_A3_TLS_MAINT_URL && ENV.RETENTION_SECURE_A3_TLS_ROOT_CRT) {
-    await runScenario({ label: 'TLS cluster', adminUrl: ENV.RETENTION_SECURE_A3_TLS_ADMIN_URL, maintUrl: ENV.RETENTION_SECURE_A3_TLS_MAINT_URL, tls: { rootPem: readFileSync(ENV.RETENTION_SECURE_A3_TLS_ROOT_CRT, 'utf8') } });
+  await runScenario({ label: 'loopback cluster', adminUrl: process.env.RETENTION_SECURE_A3_ADMIN_URL, maintUrl: process.env.RETENTION_SECURE_A3_MAINT_URL });
+  if (process.env.RETENTION_SECURE_A3_TLS_ADMIN_URL && process.env.RETENTION_SECURE_A3_TLS_MAINT_URL && process.env.RETENTION_SECURE_A3_TLS_ROOT_CRT) {
+    await runScenario({ label: 'TLS cluster', adminUrl: process.env.RETENTION_SECURE_A3_TLS_ADMIN_URL, maintUrl: process.env.RETENTION_SECURE_A3_TLS_MAINT_URL, tls: { rootPem: readFileSync(process.env.RETENTION_SECURE_A3_TLS_ROOT_CRT, 'utf8') } });
   } else {
     console.log('skip TLS scenario (set RETENTION_SECURE_A3_TLS_ADMIN_URL, RETENTION_SECURE_A3_TLS_MAINT_URL and RETENTION_SECURE_A3_TLS_ROOT_CRT)');
   }
