@@ -5,7 +5,7 @@
 
 import { afterEach, describe, expect, it } from 'vitest';
 import { DbTlsRefusal } from '../../../pipeline/src/db-tls';
-import { OTHER_HOST, TEST_HOST, makeTestPki, redirectHosts, startFakePg, type FakeAuth, type TestCert } from '../../../pipeline/src/db-tls-testkit';
+import { OTHER_HOST, TEST_HOST, makeTestPki, redirectHosts, smuggledPin, startFakePg, withRepoPins, type FakeAuth, type TestCert } from '../../../pipeline/src/db-tls-testkit';
 import type { PinnedRootCa } from '../../../pipeline/src/supabase-root-ca';
 import { ConfigError, parseServerEnv } from '../config';
 import { UnavailableError } from '../core/types';
@@ -73,9 +73,22 @@ describe('Database: hosted connections are verify-full TLS and SCRAM-only', () =
     expect(wrongName.record.afterStartup).toHaveLength(0);
   });
 
-  it('missing CA (the repository pins none today): the pool is refused at construction, nothing dialled', () => {
-    expect(() => new Database({ connectionString: `postgresql://recruiter_app.testref:${PASSWORD}@aws-0-us-east-2.pooler.supabase.com:5432/postgres` }))
-      .toThrow(DbTlsRefusal);
+  for (const label of ['TRUSTED CERTIFICATE', 'X509 CERTIFICATE'] as const) {
+    it(`disguised second root (${label} block next to the pinned root): the app pool is refused at construction, nothing dialled`, async () => {
+      const server = await startFakePg({ tlsCert: pki.attackerServer, auth: 'trust' });
+      cleanups.push(() => server.close());
+      cleanups.push(redirectHosts([TEST_HOST, OTHER_HOST], server.port));
+      const bad = smuggledPin(pki.root, pki.otherRoot, label);
+      const url = `postgresql://recruiter_app.testref:${PASSWORD}@${TEST_HOST}:5432/postgres`;
+      expect(() => new Database({ connectionString: url, trustedRootCas: [bad] })).toThrow(DbTlsRefusal);
+      withRepoPins([bad], () => expect(() => new Database({ connectionString: url })).toThrow(DbTlsRefusal));
+      expect(server.record.connections).toBe(0);
+    });
+  }
+
+  it('missing CA (the repository pin list emptied for this check): the pool is refused at construction, nothing dialled', () => {
+    withRepoPins([], () => expect(() => new Database({ connectionString: `postgresql://recruiter_app.testref:${PASSWORD}@aws-0-us-east-2.pooler.supabase.com:5432/postgres` }))
+      .toThrow(DbTlsRefusal));
     expect(() => new Database({ connectionString: `postgresql://u:${PASSWORD}@${TEST_HOST}:5432/postgres`, trustedRootCas: [] })).toThrow(/no pinned database root certificate/);
   });
 
@@ -98,9 +111,11 @@ describe('parseServerEnv: the database policy is checked at boot with fixed mess
     }
   };
   it('a hosted database with no pinned root is refused; a loopback test database is accepted', () => {
-    expect(message(`postgresql://recruiter_app.x:${PASSWORD}@aws-0-us-east-2.pooler.supabase.com:5432/postgres`)).toBe(
+    expect(withRepoPins([], () => message(`postgresql://recruiter_app.x:${PASSWORD}@aws-0-us-east-2.pooler.supabase.com:5432/postgres`))).toBe(
       'DATABASE_URL: a hosted database needs verify-full TLS, and no root certificate is pinned (pipeline/src/supabase-root-ca.ts)',
     );
+    // With the real pinned root a hosted URL is accepted.
+    expect(message(`postgresql://recruiter_app.x:${PASSWORD}@aws-0-us-east-2.pooler.supabase.com:5432/postgres`)).toBe('accepted');
     expect(message(`postgresql://u:${PASSWORD}@127.0.0.1:5432/tr_x`)).toBe('accepted');
   });
   it('query parameters are refused, and the message never contains the URL', () => {

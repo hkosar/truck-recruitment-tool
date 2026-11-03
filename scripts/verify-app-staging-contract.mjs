@@ -112,6 +112,17 @@ need(!/\bSENDGRID_[A-Z_]+'/.test(src.replace(/startsWith\('SENDGRID_'\)/, '')), 
 need(!/console\.log\([^)]*env|stdout\.write\([^)]*env\b/.test(src), 'launcher must not print environment values');
 // No network or Doppler calls from the launcher itself.
 need(!/\bfetch\(|node:https?|node:net|node:dns|\bdoppler\b.*spawn/i.test(src.replace(/Doppler|doppler/g, 'D')), 'launcher must not use the network');
+// The Supabase root is pinned with its fingerprint, checked at use, and there is no way around it.
+const rootCa = read('pipeline/src/supabase-root-ca.ts');
+const dbTls = read('pipeline/src/db-tls.ts');
+const PIN_SHA = '80:70:25:AD:50:D4:ED:21:9D:2C:9C:7D:29:9C:00:4F:82:4E:B0:0C:F7:F6:5A:FE:F6:07:D0:7B:72:E6:CA:FA';
+const pinList = /export const SUPABASE_ROOT_CAS[^=]*= Object\.freeze\(\[([\s\S]*?)\n\]\);/.exec(rootCa)?.[1] ?? '';
+need(pinList.includes(`sha256: '${PIN_SHA}'`) && (pinList.match(/-----BEGIN CERTIFICATE-----/g) ?? []).length === 1 && pinList.includes('-----END CERTIFICATE-----'), 'supabase-root-ca.ts must pin exactly one certificate with the Supabase Root 2021 CA SHA-256');
+need(rootCa.includes('prod-ca-2021.crt') && rootCa.includes('2026-11-03') && /NOT checked: production/.test(rootCa), 'supabase-root-ca.ts must record the provenance and that production was not checked');
+need(/cert\.fingerprint256 !== pin\.sha256\.toUpperCase\(\)/.test(dbTls) && /throw invalid/.test(dbTls) && /rejectUnauthorized: true/.test(dbTls) && !/rejectUnauthorized: false/.test(code(dbTls)), 'db-tls.ts must check the pinned fingerprint (fail closed) and never set rejectUnauthorized false');
+need(/blocks\.length !== 1 \|\| blocks\[0\] !== '-----BEGIN CERTIFICATE-----'/.test(dbTls) && /const pem = cert\.toString\(\)/.test(dbTls) && /return pem;/.test(dbTls) && !/return pin\.pem/.test(dbTls), 'db-tls.ts must allow one plain CERTIFICATE block only and hand TLS the re-encoded checked certificate, not the raw text');
+need(/SUPABASE_ROOT_CAS[^=]*= Object\.freeze\(\[\s*Object\.freeze\(\{/.test(rootCa), 'supabase-root-ca.ts must freeze the pin list and its entries');
+need(doc.includes(PIN_SHA) && doc.includes('Production has NOT been checked') && doc.includes('prod-ca-2021.crt') && !doc.includes('No root is pinned yet'), 'doc 19 must record the pinned fingerprint, its provenance and that production is unchecked');
 // Tests cover every refusal; the doc carries the names and the command.
 for (const phrase of ['only the staging Doppler scope', 'is missing or empty', 'production project', 'does not target the recorded staging-2', 'recruiter_app login', 'session-mode port', 'EMAIL_MODE must be test', 'HOST must be 127', 'SendGrid', '<masked>']) {
   need(test.includes(phrase), `test file does not cover: ${phrase}`);

@@ -12,7 +12,7 @@ import { REPOSITORY_ROOT } from './staging-rebuilt.js';
 import { RECORDED_PROJECT_REFS } from './target-guard.js';
 import { FIRST_MANAGER_CREATE_CONFIRMATION } from './first-manager-bootstrap.js';
 import { makeTestPki } from './db-tls-testkit.js';
-import { SUPABASE_ROOT_CAS, type PinnedRootCa } from './supabase-root-ca.js';
+import { setDefaultPinsForTests } from './db-tls.js';
 
 const self = fileURLToPath(import.meta.url);
 const tsx = resolve(REPOSITORY_ROOT, 'pipeline/node_modules/tsx/dist/cli.mjs');
@@ -35,7 +35,7 @@ async function runFixture(scenario: string): Promise<void> {
   // The runner builds its client through pg-secure.ts (verify-full TLS, SCRAM-only): pin a throwaway test root for this child
   // process only, and give the fake the pg auth handlers the SCRAM-only subclass overrides (never called: nothing connects).
   const pki = makeTestPki();
-  (SUPABASE_ROOT_CAS as PinnedRootCa[]).push(pki.pin(pki.root));
+  setDefaultPinsForTests([pki.pin(pki.root)]);
   class FakeClient extends EventEmitter {
     _handleAuthCleartextPassword() { throw new Error('not used'); }
     _handleAuthMD5Password() { throw new Error('not used'); }

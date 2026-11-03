@@ -4,13 +4,14 @@
 //   npx tsx src/db-tls.test.ts
 
 import assert from 'node:assert/strict';
+import { X509Certificate, createHash } from 'node:crypto';
 import pg from 'pg';
 import { DbTlsRefusal, dbConnectionFieldsFromUrl, dbSecurityFields, dbTlsOptions, isDbSecurityFailure, isLoopbackHost, scramOnlyClient, verifiedRootCaPems } from './db-tls.js';
-import { OTHER_HOST, TEST_HOST, makeTestPki, redirectHosts, startFakePg, type FakeAuth, type FakePgRecord, type TestCert } from './db-tls-testkit.js';
+import { OTHER_HOST, TEST_HOST, makeTestPki, redirectHosts, smuggledPin, startFakePg, withRepoPins, type FakeAuth, type FakePgRecord, type TestCert } from './db-tls-testkit.js';
 import { newSecurePgClient, newSecurePgPool, securePgConfig } from './pg-secure.js';
 import { classifyRunnerFailure } from './refusals.js';
 import { retentionClientConfig } from './retention-step.js';
-import type { PinnedRootCa } from './supabase-root-ca.js';
+import { SUPABASE_ROOT_CAS, type PinnedRootCa } from './supabase-root-ca.js';
 
 const PASSWORD = 'Fake-Tls-Pw-0042-not-real';
 const failures: string[] = [];
@@ -75,11 +76,13 @@ await check('a loopback target gets no TLS; a hosted target gets verify-full aga
 
 await check('no pinned root: a hosted target is refused before anything is dialled (missing CA)', async () => {
   assert.throws(() => dbTlsOptions('aws-0-us-east-2.pooler.supabase.com', []), refusal('no_trusted_ca'));
-  // The repository pin list is empty today, so every hosted client the pipeline builds is refused the same way.
-  assert.throws(() => securePgConfig({ host: 'aws-0-us-east-2.pooler.supabase.com', port: 5432, user: 'u.x', password: PASSWORD, database: 'postgres' }), refusal('no_trusted_ca'));
-  assert.throws(() => newSecurePgClient({ host: 'aws-0-us-east-2.pooler.supabase.com', port: 5432, user: 'u.x', password: PASSWORD, database: 'postgres' }), refusal('no_trusted_ca'));
-  assert.throws(() => newSecurePgPool({ host: 'db.abcdefghijklmnopqrst.supabase.co', port: 5432, user: 'u', password: PASSWORD, database: 'postgres' }), refusal('no_trusted_ca'));
-  assert.throws(() => retentionClientConfig({ host: 'aws-0-us-east-2.pooler.supabase.com', port: 5432, user: 'recruiter_maintenance.x', password: PASSWORD, database: 'postgres' }), refusal('no_trusted_ca'));
+  // With the repository pin list emptied, every hosted client the pipeline builds is refused the same way.
+  withRepoPins([], () => {
+    assert.throws(() => securePgConfig({ host: 'aws-0-us-east-2.pooler.supabase.com', port: 5432, user: 'u.x', password: PASSWORD, database: 'postgres' }), refusal('no_trusted_ca'));
+    assert.throws(() => newSecurePgClient({ host: 'aws-0-us-east-2.pooler.supabase.com', port: 5432, user: 'u.x', password: PASSWORD, database: 'postgres' }), refusal('no_trusted_ca'));
+    assert.throws(() => newSecurePgPool({ host: 'db.abcdefghijklmnopqrst.supabase.co', port: 5432, user: 'u', password: PASSWORD, database: 'postgres' }), refusal('no_trusted_ca'));
+    assert.throws(() => retentionClientConfig({ host: 'aws-0-us-east-2.pooler.supabase.com', port: 5432, user: 'recruiter_maintenance.x', password: PASSWORD, database: 'postgres' }), refusal('no_trusted_ca'));
+  });
   const { error, record } = await attempt({ tlsCert: pki.server, auth: 'trust', pins: [] });
   assert.ok(refusal('no_trusted_ca')(error), String(error));
   assert.equal(record.connections, 0, 'nothing may be dialled');
@@ -92,6 +95,90 @@ await check('a pinned entry is refused unless it is exactly one CA certificate m
   assert.throws(() => verifiedRootCaPems([{ ...rootPin, pem: pki.root.certPem + pki.otherRoot.certPem }]), refusal('invalid_trusted_ca'), 'two certificates in one entry');
   assert.throws(() => verifiedRootCaPems([{ ...rootPin, pem: '-----BEGIN CERTIFICATE-----\nAAAA\n-----END CERTIFICATE-----\n' }]), refusal('invalid_trusted_ca'));
   assert.equal(verifiedRootCaPems([{ ...rootPin, sha256: rootPin.sha256.toLowerCase() }]).length, 1);
+});
+
+await check('the repository pin: Supabase Root 2021 CA, DER SHA-256 matches, self-signed CA, expected validity, passes the load check', () => {
+  const EXPECTED = '80:70:25:AD:50:D4:ED:21:9D:2C:9C:7D:29:9C:00:4F:82:4E:B0:0C:F7:F6:5A:FE:F6:07:D0:7B:72:E6:CA:FA';
+  assert.equal(SUPABASE_ROOT_CAS.length, 1);
+  const pin = SUPABASE_ROOT_CAS[0]!;
+  assert.equal(pin.sha256, EXPECTED);
+  const cert = new X509Certificate(pin.pem);
+  const independent = createHash('sha256').update(cert.raw).digest('hex').toUpperCase().match(/../g)!.join(':');
+  assert.equal(independent, EXPECTED, 'hash of the DER bytes computed here, not the fingerprint field');
+  assert.equal(cert.fingerprint256, EXPECTED);
+  assert.equal(cert.subject, cert.issuer);
+  assert.match(cert.subject, /CN=Supabase Root 2021 CA/);
+  assert.equal(cert.ca, true);
+  assert.equal(cert.checkIssued(cert), true);
+  assert.equal(new Date(cert.validFrom).toISOString().slice(0, 10), '2021-04-28');
+  assert.equal(new Date(cert.validTo).toISOString().slice(0, 10), '2031-04-26');
+  assert.deepEqual(verifiedRootCaPems(), [pin.pem], 'the default list passes its own check');
+  const hosted = dbTlsOptions('aws-0-us-east-2.pooler.supabase.com');
+  assert.ok(hosted);
+  assert.deepEqual(hosted.ca, [pin.pem]);
+  assert.equal(hosted.rejectUnauthorized, true);
+});
+
+await check('the repository pin fails closed if its certificate or fingerprint is altered', () => {
+  const pin = SUPABASE_ROOT_CAS[0]!;
+  const flipped = pin.sha256.replace(/^80/, '81');
+  assert.throws(() => verifiedRootCaPems([{ ...pin, sha256: flipped }]), refusal('invalid_trusted_ca'));
+  const lines = pin.pem.split('\n');
+  lines[3] = lines[3]!.replace(/^./, (ch) => (ch === 'A' ? 'B' : 'A'));
+  assert.throws(() => verifiedRootCaPems([{ ...pin, pem: lines.join('\n') }]), refusal('invalid_trusted_ca'));
+  withRepoPins([{ ...pin, sha256: flipped }], () => {
+    assert.throws(() => dbTlsOptions('aws-0-us-east-2.pooler.supabase.com'), refusal('invalid_trusted_ca'));
+    assert.throws(() => newSecurePgClient({ host: 'aws-0-us-east-2.pooler.supabase.com', port: 5432, user: 'u.x', password: PASSWORD, database: 'postgres' }), refusal('invalid_trusted_ca'));
+  });
+});
+
+await check('a fake server whose certificate chains to a different CA than the repository pin is refused before the password', async () => {
+  const { error, record } = await attempt({ tlsCert: pki.server, auth: 'trust', pins: SUPABASE_ROOT_CAS });
+  assert.ok(isDbSecurityFailure(error), String(error));
+  assert.equal(passwordSeen(record), false);
+});
+
+for (const label of ['TRUSTED CERTIFICATE', 'X509 CERTIFICATE'] as const) {
+  await check(`disguised second root (${label} block next to the pinned root): the entry is refused, and an attacker-signed server is never reached by the pipeline client or pool`, async () => {
+    const bad = smuggledPin(pki.root, pki.otherRoot, label);
+    assert.throws(() => verifiedRootCaPems([bad]), refusal('invalid_trusted_ca'));
+    assert.throws(() => dbTlsOptions('aws-0-us-east-2.pooler.supabase.com', [bad]), refusal('invalid_trusted_ca'));
+    const server = await startFakePg({ tlsCert: pki.attackerServer, auth: 'trust' });
+    const undo = redirectHosts([TEST_HOST, OTHER_HOST], server.port);
+    try {
+      withRepoPins([bad], () => {
+        const target = { host: TEST_HOST, port: 5432, user: 'recruiter_app.testref', password: PASSWORD, database: 'postgres' };
+        assert.throws(() => newSecurePgClient(target, { connectionTimeoutMillis: 3_000 }), refusal('invalid_trusted_ca'));
+        assert.throws(() => newSecurePgPool(target, { connectionTimeoutMillis: 3_000 }), refusal('invalid_trusted_ca'));
+      });
+      // Control: with only the real pinned root, the attacker-signed server is refused by TLS itself.
+      const { error, record } = await attempt({ tlsCert: pki.attackerServer, auth: 'trust', pins: [rootPin] });
+      assert.ok(isDbSecurityFailure(error), String(error));
+      assert.equal(passwordSeen(record), false);
+    } finally {
+      undo();
+      await server.close();
+    }
+    assert.equal(server.record.connections, 0, 'nothing may be dialled with an invalid pin');
+  });
+}
+
+await check('the CA handed to TLS is the re-encoded checked certificate only: one CERTIFICATE block; any other PEM block, key block or trailing text is refused', () => {
+  const good = verifiedRootCaPems([rootPin]);
+  assert.equal(good.length, 1);
+  assert.equal(good[0]!.match(/-----BEGIN /g)!.length, 1);
+  assert.equal(new X509Certificate(good[0]!).fingerprint256, new X509Certificate(pki.root.certPem).fingerprint256);
+  assert.equal(verifiedRootCaPems([{ ...rootPin, pem: rootPin.pem + '\n# a note\n' }]).length, 1, 'a comment after the block is not a PEM block, and is dropped');
+  assert.ok(!verifiedRootCaPems([{ ...rootPin, pem: rootPin.pem + '\n# a note\n' }])[0]!.includes('a note'));
+  assert.throws(() => verifiedRootCaPems([{ ...rootPin, pem: rootPin.pem + '-----BEGIN PRIVATE KEY-----\nAAAA\n-----END PRIVATE KEY-----\n' }]), refusal('invalid_trusted_ca'));
+  assert.throws(() => verifiedRootCaPems([{ ...rootPin, pem: rootPin.pem + pki.otherRoot.certPem }]), refusal('invalid_trusted_ca'));
+  assert.throws(() => verifiedRootCaPems([{ ...rootPin, pem: rootPin.pem.replace('BEGIN CERTIFICATE', 'BEGIN TRUSTED CERTIFICATE').replace('END CERTIFICATE', 'END TRUSTED CERTIFICATE') }]), refusal('invalid_trusted_ca'));
+});
+
+await check('the repository pin list and its entry are frozen', () => {
+  assert.equal(Object.isFrozen(SUPABASE_ROOT_CAS), true);
+  assert.equal(Object.isFrozen(SUPABASE_ROOT_CAS[0]), true);
+  assert.throws(() => (SUPABASE_ROOT_CAS as PinnedRootCa[]).push(rootPin), TypeError);
 });
 
 await check('database URLs: query parameters and fragments are refused (they could override host or TLS)', () => {

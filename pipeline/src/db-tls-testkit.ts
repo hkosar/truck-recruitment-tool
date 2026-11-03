@@ -5,6 +5,7 @@
 import { createPrivateKey, generateKeyPairSync, randomBytes, sign, type KeyObject } from 'node:crypto';
 import net from 'node:net';
 import tls from 'node:tls';
+import { setDefaultPinsForTests } from './db-tls.js';
 import type { PinnedRootCa } from './supabase-root-ca.js';
 import { X509Certificate } from 'node:crypto';
 
@@ -77,12 +78,13 @@ export const TEST_HOST = 'db.tls-test.invalid';
 export const OTHER_HOST = 'other.tls-test.invalid';
 
 /** A test root, a server certificate for TEST_HOST signed by it, and a second unrelated root (the "wrong CA"). */
-export function makeTestPki(): { root: TestCert; server: TestCert; otherRoot: TestCert; pin: (c: TestCert) => PinnedRootCa } {
+export function makeTestPki(): { root: TestCert; server: TestCert; attackerServer: TestCert; otherRoot: TestCert; pin: (c: TestCert) => PinnedRootCa } {
   const root = makeCert('db-tls test root', null, { ca: true });
   const otherRoot = makeCert('db-tls other root', null, { ca: true });
   const server = makeCert(TEST_HOST, root, { ca: false, dnsNames: [TEST_HOST] });
+  const attackerServer = makeCert(TEST_HOST, otherRoot, { ca: false, dnsNames: [TEST_HOST] });
   const pin = (c: TestCert): PinnedRootCa => ({ name: c.subject, sha256: new X509Certificate(c.certPem).fingerprint256, source: 'test', pem: c.certPem });
-  return { root, server, otherRoot, pin };
+  return { root, server, attackerServer, otherRoot, pin };
 }
 
 // --- fake PostgreSQL server ---------------------------------------------------------------------------------------------
@@ -198,4 +200,29 @@ export function redirectHosts(hosts: readonly string[], port: number): () => voi
     return Reflect.apply(original, this, args);
   } as typeof original;
   return () => { net.Socket.prototype.connect = original; };
+}
+
+/** TEST ONLY: runs `body` with the default pin list temporarily replaced by `pins`, and always restores it. */
+export function withRepoPins<T>(pins: PinnedRootCa[], body: () => T): T {
+  const restore = setDefaultPinsForTests(pins);
+  let result: T;
+  try {
+    result = body();
+  } catch (err) {
+    restore();
+    throw err;
+  }
+  if (result instanceof Promise) return result.finally(restore) as T;
+  restore();
+  return result;
+}
+
+/**
+ * TEST ONLY: a pin entry for `good` (its recorded SHA-256 is good's) whose text also carries `attacker` under another PEM label.
+ * OpenSSL loads TRUSTED CERTIFICATE and X509 CERTIFICATE blocks as roots as well.
+ */
+export function smuggledPin(good: TestCert, attacker: TestCert, label: 'TRUSTED CERTIFICATE' | 'X509 CERTIFICATE'): PinnedRootCa {
+  const relabelled = attacker.certPem.replace('BEGIN CERTIFICATE', `BEGIN ${label}`).replace('END CERTIFICATE', `END ${label}`);
+  const base = { name: good.subject, sha256: new X509Certificate(good.certPem).fingerprint256, source: 'test' };
+  return { ...base, pem: good.certPem + relabelled };
 }

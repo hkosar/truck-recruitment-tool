@@ -51,14 +51,35 @@ export function isLoopbackHost(host: string): boolean {
   return isIP(h) === 4 && h.startsWith('127.');
 }
 
-/** The pinned roots, each checked: exactly one certificate, a CA certificate, matching its recorded SHA-256. */
-export function verifiedRootCaPems(pins: readonly PinnedRootCa[] = SUPABASE_ROOT_CAS): string[] {
+/** The pin list the defaults use. Only the test hook below can change it; the exported list itself is frozen. */
+let defaultPins: readonly PinnedRootCa[] = SUPABASE_ROOT_CAS;
+
+/** TEST ONLY: replaces the default pin list; returns a function that restores the previous one. */
+export function setDefaultPinsForTests(pins: readonly PinnedRootCa[]): () => void {
+  const saved = defaultPins;
+  defaultPins = pins;
+  return () => {
+    defaultPins = saved;
+  };
+}
+
+/** Any PEM block label in the text (CERTIFICATE, TRUSTED CERTIFICATE, X509 CERTIFICATE, keys, ...). */
+const PEM_BEGIN = /-----BEGIN [^-\r\n]*-----/g;
+
+/**
+ * The pinned roots, each checked: the text holds exactly one PEM block and it is a plain CERTIFICATE block (OpenSSL also loads
+ * TRUSTED CERTIFICATE and X509 CERTIFICATE blocks, so a second root could hide under another label), it is a CA certificate,
+ * and its SHA-256 equals the recorded one. What is returned (and so what TLS trusts) is the checked certificate re-encoded
+ * from the parsed object, never the raw text.
+ */
+export function verifiedRootCaPems(pins: readonly PinnedRootCa[] = defaultPins): string[] {
   if (pins.length === 0) {
     throw new DbTlsRefusal('no_trusted_ca', 'refusing: no pinned database root certificate (pipeline/src/supabase-root-ca.ts); a hosted database needs verify-full TLS');
   }
   return pins.map((pin) => {
     const invalid = new DbTlsRefusal('invalid_trusted_ca', 'refusing: a pinned database root certificate is not one valid CA certificate matching its recorded SHA-256');
-    if ((pin.pem.match(/-----BEGIN CERTIFICATE-----/g) ?? []).length !== 1) throw invalid;
+    const blocks = pin.pem.match(PEM_BEGIN) ?? [];
+    if (blocks.length !== 1 || blocks[0] !== '-----BEGIN CERTIFICATE-----') throw invalid;
     let cert: X509Certificate;
     try {
       cert = new X509Certificate(pin.pem);
@@ -66,12 +87,14 @@ export function verifiedRootCaPems(pins: readonly PinnedRootCa[] = SUPABASE_ROOT
       throw invalid;
     }
     if (!cert.ca || cert.fingerprint256 !== pin.sha256.toUpperCase()) throw invalid;
-    return pin.pem;
+    const pem = cert.toString();
+    if ((pem.match(PEM_BEGIN) ?? []).length !== 1 || new X509Certificate(pem).fingerprint256 !== cert.fingerprint256) throw invalid;
+    return pem;
   });
 }
 
 /** pg `ssl` for a target: false for loopback; otherwise verify-full against the pinned roots only (throws if none). */
-export function dbTlsOptions(host: string, pins: readonly PinnedRootCa[] = SUPABASE_ROOT_CAS): false | ConnectionOptions {
+export function dbTlsOptions(host: string, pins: readonly PinnedRootCa[] = defaultPins): false | ConnectionOptions {
   if (isLoopbackHost(host)) return false;
   const ca = verifiedRootCaPems(pins);
   const name = host.toLowerCase();
@@ -86,7 +109,7 @@ export function dbTlsOptions(host: string, pins: readonly PinnedRootCa[] = SUPAB
 }
 
 /** The TLS and channel-binding fields to spread into a pg Client/Pool config for `host`. */
-export function dbSecurityFields(host: string, pins: readonly PinnedRootCa[] = SUPABASE_ROOT_CAS): { ssl: false | ConnectionOptions; enableChannelBinding: boolean } {
+export function dbSecurityFields(host: string, pins: readonly PinnedRootCa[] = defaultPins): { ssl: false | ConnectionOptions; enableChannelBinding: boolean } {
   const ssl = dbTlsOptions(host, pins);
   return { ssl, enableChannelBinding: ssl !== false };
 }
