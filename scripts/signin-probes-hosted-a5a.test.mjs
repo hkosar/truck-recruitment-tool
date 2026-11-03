@@ -18,7 +18,7 @@ const GOOD_ENV = { VITE_SUPABASE_ANON_KEY: KEY };
 
 /** mode: locked (denied/empty), denied (401 42501 + realtime errors), open (data + realtime event + buckets),
  *  badkey / badjwt / redirect (the key is rejected or redirected on every request, including the control). */
-async function fakeServer(mode) {
+async function fakeServer(mode, { buckets } = {}) {
   const seen = [];
   const sockets = new Set();
   const server = createServer((req, res) => {
@@ -37,7 +37,7 @@ async function fakeServer(mode) {
         if (q.includes('__schema')) return send(200, { data: { __schema: { queryType: { name: 'Query' }, types: mode === 'open' ? [{ name: 'carriers', kind: 'OBJECT' }, { name: 'Query', kind: 'OBJECT' }] : [{ name: 'Query', kind: 'OBJECT' }, { name: 'String', kind: 'SCALAR' }] } } });
         return send(200, mode === 'open' ? { data: { carriersCollection: { edges: [{ node: { dot_number: 1 } }] } } } : { errors: [{ message: 'unknown field' }] });
       }
-      if (req.url === '/storage/v1/bucket') return send(200, mode === 'open' ? [{ name: 'docs' }, { name: '../evil' }] : []);
+      if (req.url === '/storage/v1/bucket') return send(200, mode === 'open' ? (buckets || [{ name: 'docs' }, { name: '../evil' }]) : []);
       if (req.url.startsWith('/storage/v1/object/list/')) return send(200, mode === 'open' ? [{ name: 'a.pdf' }] : []);
       if (req.url.startsWith('/rest/v1/rpc/')) return mode === 'open' ? send(200, [{ n: 1 }]) : send(403, { code: '42501', message: 'permission denied for function' });
       if (req.url.startsWith('/rest/v1/')) return mode === 'open' ? send(200, [{ secret_row: 1 }]) : send(200, []);
@@ -307,6 +307,18 @@ test('request allow-list: reads only; every write verb, rpc outside the list and
   }
   assert.equal(isAllowedRequest('POST', '/rest/v1/rpc/search_carriers'), true);
   assert.equal(isAllowedRequest('POST', '/storage/v1/object/list/../x'), false);
+  // a path that URL normalisation would rewrite is refused, so the path checked is the path sent
+  for (const n of ['.', '..', 'a%2Fb', 'a\b']) assert.equal(isAllowedRequest('POST', `/storage/v1/object/list/${n}`), false, n);
+  assert.equal(isAllowedRequest('POST', '/storage/v1/object/list/docs'), true);
+});
+
+test('listed buckets named "." or ".." are never requested', async () => {
+  const srv = await fakeServer('open', { buckets: [{ name: '.' }, { name: '..' }, { name: 'a%2Fb' }, { name: 'docs' }] });
+  try {
+    await runCli(['--execute', '--realtime-seconds=1'], GOOD_ENV, { testBaseUrl: srv.url });
+    const lists = srv.seen.filter((s) => s.method === 'POST' && s.path.startsWith('/storage/'));
+    assert.deepEqual(lists.map((s) => s.path), ['/storage/v1/object/list/docs']);
+  } finally { await srv.close(); }
 });
 
 /**

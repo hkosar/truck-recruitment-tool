@@ -95,8 +95,17 @@ const ABSENT_ERROR_TEXT = /unknown (field|type)|cannot query field/i;
 export const REALTIME_CONNECT_TIMEOUT_MS = 15000;
 const BUCKET_NAME = /^[A-Za-z0-9._-]{1,100}$/;
 
+/** A path survives URL normalisation unchanged, so the path that was checked is the path that is sent. */
+function survivesNormalisation(path) {
+  try {
+    const u = new URL(path, 'https://placeholder.invalid');
+    return u.pathname + u.search === path;
+  } catch { return false; }
+}
+
 /** The only requests this tool may ever send. */
 export function isAllowedRequest(method, path) {
+  if (!survivesNormalisation(path)) return false;
   if (method === 'GET') return /^\/(rest\/v1\/[a-z_]+\?select=\*&limit=1|storage\/v1\/bucket|auth\/v1\/health)$/.test(path);
   if (method !== 'POST') return false;
   const rpc = /^\/rest\/v1\/rpc\/([a-z_]+)$/.exec(path);
@@ -264,7 +273,7 @@ export async function runProbes({ baseUrl, key, phase = 'after', realtimeSeconds
   if (buckets.status === 200) {
     try {
       const parsed = JSON.parse(buckets.text);
-      if (Array.isArray(parsed)) names = parsed.map((b) => b && b.name).filter((n) => typeof n === 'string' && BUCKET_NAME.test(n));
+      if (Array.isArray(parsed)) names = parsed.map((b) => b && b.name).filter((n) => typeof n === 'string' && BUCKET_NAME.test(n) && survivesNormalisation(`/storage/v1/object/list/${n}`));
     } catch { /* classified above */ }
   }
   if (names.length === 0) {
