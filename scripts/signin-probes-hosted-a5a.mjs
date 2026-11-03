@@ -16,6 +16,11 @@
 // Output: fixed event lines only (probe name, expected class, observed class, result). No response bodies,
 // headers, keys or key-carrying URLs are ever printed.
 //
+// TLS: a run with NODE_TLS_REJECT_UNAUTHORIZED=0 or TLS options in NODE_OPTIONS is refused (plan-only too).
+// GraphQL errors[] are "denied" only if the text says permission denied/unauthorized, "absent" for an unknown
+// field/type, "key-rejected" for a token complaint; any other GraphQL error is graphql-error (FAIL in --phase=after).
+// Realtime error replies follow the same rule; an error with no refusal text is channel-error (FAIL in after).
+//
 // Key control: the FIRST request is GET /auth/v1/health with the anon key. It must answer 200; otherwise the run
 // aborts (ABORTED reason=key_rejected) before any data probe is sent. Result classes:
 //   denied        = the database itself refused the anon role (PostgREST 42501, or a Storage/GraphQL permission error)
@@ -84,6 +89,9 @@ export const REALTIME_TABLES = ['batches', 'batch_zones', 'batch_carriers', 'bat
 const PASS_CLASSES = new Set(['denied', 'empty', 'absent']);
 const HARD_FAIL_CLASSES = new Set(['transport-error', 'server-error', 'key-rejected', 'unexpected']);
 const KEY_ERROR_TEXT = /invalid api key|jwt|token|signature|apikey|api key/i;
+// A GraphQL or Realtime error counts as "denied" only if its text says the role was refused.
+const DENIED_ERROR_TEXT = /permission denied|not authorized|unauthorized|forbidden|row-level security|insufficient privilege|42501/i;
+const ABSENT_ERROR_TEXT = /unknown (field|type)|cannot query field/i;
 export const REALTIME_CONNECT_TIMEOUT_MS = 15000;
 const BUCKET_NAME = /^[A-Za-z0-9._-]{1,100}$/;
 
@@ -189,7 +197,13 @@ function classifyGraphql(status, text, mode) {
   let body;
   try { body = JSON.parse(text); } catch { return 'data'; }
   if (!body || typeof body !== 'object') return 'empty';
-  if (Array.isArray(body.errors) && body.errors.length > 0 && !body.data) return 'denied';
+  if (Array.isArray(body.errors) && body.errors.length > 0 && !body.data) {
+    const text = body.errors.map((e) => (e && typeof e.message === 'string' ? e.message : '')).join(' ');
+    if (KEY_ERROR_TEXT.test(text)) return 'key-rejected';
+    if (DENIED_ERROR_TEXT.test(text)) return 'denied';
+    if (ABSENT_ERROR_TEXT.test(text)) return 'absent';
+    return 'graphql-error';
+  }
   const data = body.data;
   if (!data || typeof data !== 'object') return 'empty';
   if (mode === 'introspection') {
@@ -272,7 +286,8 @@ export async function runProbes({ baseUrl, key, phase = 'after', realtimeSeconds
 /** A Realtime error that complains about the token is a rejected key, not a refusal by the database. */
 function errorClass(payload) {
   const text = [payload?.response?.reason, payload?.message, payload?.response?.message].filter((x) => typeof x === 'string').join(' ');
-  return KEY_ERROR_TEXT.test(text) ? 'key-rejected' : 'denied';
+  if (KEY_ERROR_TEXT.test(text)) return 'key-rejected';
+  return DENIED_ERROR_TEXT.test(text) ? 'denied' : 'channel-error';
 }
 
 /** One socket, one channel per published table; reports denied / quiet / event per table. */

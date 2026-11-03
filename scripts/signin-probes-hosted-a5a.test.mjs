@@ -71,7 +71,7 @@ async function fakeServer(mode) {
         if (op !== 1) continue;
         const msg = JSON.parse(data.toString('utf8'));
         if (msg.event !== 'phx_join') continue;
-        frame({ topic: msg.topic, event: 'phx_reply', ref: msg.ref, payload: { status: mode === 'denied' ? 'error' : 'ok', response: {} } });
+        frame({ topic: msg.topic, event: 'phx_reply', ref: msg.ref, payload: { status: mode === 'denied' ? 'error' : 'ok', response: mode === 'denied' ? { reason: 'permission denied for table' } : {} } });
         if (mode === 'open' && msg.topic.endsWith('batches')) {
           setTimeout(() => frame({ topic: msg.topic, event: 'postgres_changes', payload: { data: { table: 'batches' } } }), 50);
         }
@@ -331,18 +331,29 @@ function parsePublicFunctions(sql) {
   return { defs, total: starts.length };
 }
 
+/**
+ * Independent expected count: every "create [or replace] function" whose name is not qualified with internal. A
+ * quoted "public"."x", an unqualified x, or any other schema is counted here but NOT by parsePublicFunctions, so a
+ * form the parser cannot see makes the two counts differ.
+ */
+function countNonInternalFunctions(sql) {
+  return [...sql.replace(/--[^\n]*/g, '').matchAll(/create\s+(?:or\s+replace\s+)?function\s+(?!"?internal"?\s*\.)/gi)].length;
+}
+
 function publicFunctions() {
   const all = new Map();
   let total = 0;
+  let expected = 0;
   for (const rel of ['../supabase/migrations/', '../supabase/pending/']) {
     const dir = new URL(rel, import.meta.url);
     for (const file of readdirSync(dir).filter((x) => x.endsWith('.sql'))) {
       const r = parsePublicFunctions(readFileSync(new URL(file, dir), 'utf8'));
       total += r.total;
+      expected += countNonInternalFunctions(readFileSync(new URL(file, dir), 'utf8'));
       for (const [name, defs] of r.defs) all.set(name, (all.get(name) ?? []).concat(defs));
     }
   }
-  return { all, total };
+  return { all, total, expected };
 }
 
 test('function parser (fixture SQL): digits in names, volatility after the body, same-line "as $$", counts every definition', () => {
@@ -359,8 +370,9 @@ test('function parser (fixture SQL): digits in names, volatility after the body,
 });
 
 test('read-only RPC list holds only STABLE functions; every read-only (STABLE) public RPC is probed; probe tables cover every public table and view', () => {
-  const { all: fns, total } = publicFunctions();
+  const { all: fns, total, expected } = publicFunctions();
   assert.equal([...fns.values()].reduce((n, d) => n + d.length, 0), total, 'a public function definition was not parsed');
+  assert.equal(total, expected, 'a non-internal function definition exists that the public.<name> parser did not see (quoted, unqualified or other schema)');
   const stable = (defs) => defs.every((d) => d.stable);
   for (const rpc of Object.keys(READ_ONLY_RPCS)) {
     assert.ok(fns.has(rpc), `${rpc} not found`);
@@ -438,4 +450,46 @@ test('refuses to run when certificate verification is disabled (NODE_TLS_REJECT_
       } finally { await srv.close(); }
     }
   }
+});
+
+test('independent function count differs from the parser for forms the parser cannot see', () => {
+  const quoted = 'create function "public"."new_reader"() returns int language sql stable as $$ select 1 $$;';
+  const unqualified = 'set search_path = public;\ncreate function new_reader() returns int language sql stable as $$ select 1 $$;';
+  const internalOnly = 'create function internal.helper() returns int language sql as $$ select 1 $$;\ncreate or replace function public.ok() returns int language sql stable as $$ select 1 $$;';
+  for (const sql of [quoted, unqualified]) {
+    assert.equal(parsePublicFunctions(sql).total, 0);
+    assert.equal(countNonInternalFunctions(sql), 1);
+  }
+  assert.equal(parsePublicFunctions(internalOnly).total, 1);
+  assert.equal(countNonInternalFunctions(internalOnly), 1);
+  assert.equal(countNonInternalFunctions('-- Idempotent: create or replace function + drop trigger'), 0);
+});
+
+test('GraphQL errors[] and Realtime error replies are denied only when the text says so', async () => {
+  const gql = (message) => async (url) => (url.endsWith('/auth/v1/health')
+    ? { status: 200, text: async () => '{}' }
+    : url.endsWith('/graphql/v1')
+      ? { status: 200, text: async () => JSON.stringify({ errors: [{ message }] }) }
+      : { status: 401, text: async () => JSON.stringify({ code: '42501', message: 'permission denied' }) });
+  const quiet = class { constructor() { setTimeout(() => this.onopen && this.onopen(), 5); } send(d) { const m = JSON.parse(d); if (m.event === 'phx_join') setTimeout(() => this.onmessage({ data: JSON.stringify({ topic: m.topic, event: 'phx_reply', ref: m.ref, payload: { status: 'ok', response: {} } }) }), 5); } close() {} };
+  const observed = async (message) => {
+    const lines = [];
+    await runProbes({ baseUrl: 'http://127.0.0.1:9', key: 'k', phase: 'after', realtimeSeconds: 1, emit: (l) => lines.push(l), fetchImpl: gql(message), WebSocketImpl: quiet });
+    return lines.find((l) => l.startsWith('EVENT probe=graphql:read-query'));
+  };
+  assert.match(await observed('something exploded'), /observed=graphql-error result=FAIL/);
+  assert.match(await observed('permission denied for table carriers'), /observed=denied result=PASS/);
+  assert.match(await observed('Unknown field "carriersCollection" on type Query'), /observed=absent result=PASS/);
+  assert.match(await observed('Invalid JWT'), /observed=key-rejected result=FAIL reason=key_rejected/);
+  const rt = async (payload, event = 'phx_reply') => {
+    const ws = class { constructor() { setTimeout(() => this.onopen && this.onopen(), 5); } send(d) { const m = JSON.parse(d); if (m.event === 'phx_join') setTimeout(() => this.onmessage({ data: JSON.stringify({ topic: m.topic, event, ref: m.ref, payload }) }), 5); } close() {} };
+    const lines = [];
+    await runProbes({ baseUrl: 'http://127.0.0.1:9', key: 'k', phase: 'after', realtimeSeconds: 1, emit: (l) => lines.push(l), fetchImpl: gql('permission denied'), WebSocketImpl: ws });
+    return lines.find((l) => l.startsWith('EVENT probe=realtime:batches '));
+  };
+  assert.match(await rt({ status: 'error', response: { reason: 'boom' } }), /observed=channel-error result=FAIL/);
+  assert.match(await rt({ status: 'error', response: {} }), /observed=channel-error result=FAIL/);
+  assert.match(await rt({ status: 'error', message: 'oops' }, 'system'), /observed=channel-error result=FAIL/);
+  assert.match(await rt({ status: 'error', response: { reason: 'permission denied' } }), /observed=denied result=PASS/);
+  assert.match(await rt({ status: 'error', response: { reason: 'Invalid token' } }), /observed=key-rejected result=FAIL/);
 });
