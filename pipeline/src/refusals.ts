@@ -28,6 +28,7 @@ export const REFUSAL_IDS = [
   'retention_dry_run_failed',
   'role_matrix_failed',
   'role_matrix_result_missing',
+  'batch_delete_definition_mismatch',
   'reapply_m1_not_backed_out',
   'reapply_m1_still_applied',
   'reapply_m1b_not_backed_out',
