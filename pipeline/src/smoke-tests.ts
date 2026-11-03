@@ -36,6 +36,10 @@ import { DRIVER_CODES, KNOWN_SERVER_REFUSALS, REFUSAL_IDS, RunnerRefusal, classi
 import { DENIED_STATEMENTS } from './retention-dry-run.js';
 import { runRetentionFixtureRun } from './retention-run.js';
 import { retentionClientConfig, runRetentionForCron, runRetentionStep, type RetentionClient } from './retention-step.js';
+import { DbTlsRefusal } from './db-tls.js';
+import { makeTestPki } from './db-tls-testkit.js';
+import { SUPABASE_ROOT_CAS, type PinnedRootCa } from './supabase-root-ca.js';
+import { withRepoPins } from './db-tls-testkit.js';
 import { EventEmitter } from 'node:events';
 import { Duplex } from 'node:stream';
 import pg from 'pg';
@@ -1301,11 +1305,40 @@ test('retention step: connects with explicit fields as recruiter_maintenance, ru
   assert.deepEqual(Object.keys(done.fields!).sort(), ['deleted', 'failed']);
 });
 
-test('retention step: the real client config sets TLS explicitly and uses only the verified fields', () => {
-  const cfg = retentionClientConfig({ host: 'h.pooler.supabase.com', port: 5432, user: 'recruiter_maintenance.x', password: 'pw', database: 'postgres' });
-  assert.deepEqual(cfg.ssl, { rejectUnauthorized: false });
-  assert.equal(cfg.port, 5432);
-  assert.equal(cfg.connectionString, undefined);
+/** Runs `body` with a throwaway test root pinned (replacing the repository's pinned root for the duration), and always removes it again. */
+function withTestPin<T>(body: (pin: PinnedRootCa) => T): T {
+  const pki = makeTestPki();
+  const pin = pki.pin(pki.root);
+  return withRepoPins([pin], () => body(pin));
+}
+
+test('retention step: the real client config sets verify-full TLS explicitly and uses only the verified fields', () => {
+  const fields = { host: 'h.pooler.supabase.com', port: 5432, user: 'recruiter_maintenance.x', password: 'pw', database: 'postgres' };
+  // No pinned root (the list emptied for this check): refused before any client exists.
+  withRepoPins([], () => assert.throws(() => retentionClientConfig(fields), (e: unknown) => e instanceof DbTlsRefusal && e.reason === 'no_trusted_ca'));
+  withTestPin((pin) => {
+    const cfg = retentionClientConfig(fields);
+    const ssl = cfg.ssl as { rejectUnauthorized?: boolean; ca?: string[]; servername?: string };
+    assert.equal(ssl.rejectUnauthorized, true);
+    assert.deepEqual(ssl.ca, [pin.pem]);
+    assert.equal(ssl.servername, 'h.pooler.supabase.com');
+    assert.equal((cfg as { enableChannelBinding?: boolean }).enableChannelBinding, true);
+    assert.equal(cfg.port, 5432);
+    assert.equal(cfg.connectionString, undefined);
+  });
+  assert.equal(SUPABASE_ROOT_CAS.length, 1, 'the repository pins exactly the Supabase Root 2021 CA');
+});
+
+test('retention step: with no pinned root the step refuses (db_tls_refused) and alerts; it never throws', async () => {
+  const alerts: string[] = [];
+  const events: string[] = [];
+  const outcome = await withRepoPins([], () => runRetentionStep({ MAINTENANCE_DATABASE_URL: maintUrl('recruiter_maintenance', PROD) }, PROD, {
+    log: { info: (e) => events.push(e), error: (e) => events.push(e) },
+    alert: async (m) => { alerts.push(m); },
+  }));
+  assert.deepEqual(outcome, { status: 'refused', reason: 'db_tls_refused' });
+  assert.deepEqual(alerts, ['Retention refused to run: db_tls_refused']);
+  assert.deepEqual(events, ['retention.refused']);
 });
 
 test('retention step: refuses if the session is not recruiter_maintenance; a DB error never throws', async () => {
@@ -1451,7 +1484,11 @@ test('db.ts withStagingConnection: an error with no query in flight still destro
 
 test('db.ts createPgPool: an idle client error is handled (fixed text, no driver message)', () => {
   const ref = RECORDED_PROJECT_REFS.production;
-  const pool = createPgPool({ SUPABASE_DB_URL: `postgresql://postgres.${ref}:redacted@aws-0-us-east-2.pooler.supabase.com:5432/postgres` } as never);
+  const url = `postgresql://postgres.${ref}:redacted@aws-0-us-east-2.pooler.supabase.com:5432/postgres`;
+  // No pinned root (the list emptied for this check): refused before a pool exists. With a (test) root pinned it is built.
+  withRepoPins([], () => assert.throws(() => createPgPool({ SUPABASE_DB_URL: url } as never), (e: unknown) => e instanceof DbTlsRefusal && e.reason === 'no_trusted_ca'));
+  const pool = withTestPin(() => createPgPool({ SUPABASE_DB_URL: url } as never));
+  assert.equal((pool as unknown as { options: { ssl: { rejectUnauthorized: boolean } } }).options.ssl.rejectUnauthorized, true);
   assert.ok(pool.listenerCount('error') > 0);
   const lines: string[] = []; const w = console.log;
   console.log = (...a: unknown[]) => { lines.push(String(a[0])); };

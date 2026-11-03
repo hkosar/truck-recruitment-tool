@@ -131,6 +131,7 @@ prompt-only) and that the tests are wired into verification, and CI runs it. The
 
 **Not proven (needs a hosted rehearsal):** the hosted runner login's privileges (the tool needs INSERT/UPDATE on
 `public.profiles` and `internal.auth_events`, FOR UPDATE on `internal.roster_lock`, LOCK TABLE on `public.profiles`);
-Supabase-specific event triggers or default privileges interfering; TLS behaviour of the pooler connection (copied from the
-other runners: `rejectUnauthorized: false`); what the production roster actually holds on the cutover day (doc 15 §32 says 0
+Supabase-specific event triggers or default privileges interfering; TLS behaviour of the pooler connection (since
+2026-11-03 all runners use `pipeline/src/db-tls.ts`: verify-full TLS against the pinned Supabase root, SCRAM-SHA-256 only;
+no root is pinned yet, so a hosted run is refused with `db_tls_refused` until the owner provides it); what the production roster actually holds on the cutover day (doc 15 §32 says 0
 profiles on 2026-10-22).

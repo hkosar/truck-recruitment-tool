@@ -64,7 +64,7 @@ const tick = (ms = 20) => new Promise((r) => setTimeout(r, ms));
 
 const open: Database[] = [];
 function makeDb(options: Partial<ConstructorParameters<typeof Database>[0]> = {}): Database {
-  const db = new Database({ connectionString: 'postgres://fake', max: 2, ...options });
+  const db = new Database({ connectionString: 'postgres://fake@127.0.0.1/fake', max: 2, ...options });
   // Swap in a real pg-pool that builds FakeClients; the Database code under test is unchanged.
   (db as unknown as { pool: pg.Pool }).pool = new pg.Pool({ Client: FakeClient as never, max: 2, idleTimeoutMillis: 0 });
   (db as unknown as { pool: pg.Pool }).pool.on('error', () => undefined);

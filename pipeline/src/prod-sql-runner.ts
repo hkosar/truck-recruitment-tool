@@ -1,5 +1,5 @@
 import { pathToFileURL } from 'node:url';
-import pg from 'pg';
+import { newSecurePgClient } from './pg-secure.js';
 import { RunnerRefusal, asPlanRefusal, classifyRunnerFailure } from './refusals.js';
 import { ProdSqlResultUnknown, emitIrreversibleWarning, executeProdSqlPlan, planProdSql, selectProdSqlDbUrl, type ProdSqlFiles } from './prod-sql.js';
 import type { RebuiltSqlClient } from './staging-rebuilt.js';
@@ -33,11 +33,8 @@ export function parseProdSqlArgs(argv: readonly string[]): { target: string | un
 }
 
 const defaultClientFactory = (db: SupabaseDbTarget): RebuiltSqlClient =>
-  new pg.Client({
-    host: db.host, port: db.port, user: db.user, password: db.password, database: db.database,
-    // Same relaxed pooler TLS setting as the other runners (see db.ts TODO(live-db)).
-    ssl: { rejectUnauthorized: false },
-  });
+  // TLS verify-full against the pinned root, SCRAM-only (pg-secure.ts / db-tls.ts).
+  newSecurePgClient(db);
 
 export async function main(argv: readonly string[], env: Readonly<Record<string, string | undefined>>, clientFactory = defaultClientFactory, files?: ProdSqlFiles): Promise<void> {
   const args = parseProdSqlArgs(argv);

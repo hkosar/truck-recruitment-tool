@@ -10,6 +10,8 @@ import pg from 'pg';
 import type { PoolClient, QueryResultRow } from 'pg';
 import { NotFoundError, NotPermittedError, OutcomeUnknownError, RefusedError, UnavailableError } from '../core/types';
 import { clientUsable, isDefiniteCommitRefusal, isRollbackTag } from './commit-outcome';
+import { dbConnectionFieldsFromUrl, dbSecurityFields, scramOnlyClient } from '../../../pipeline/src/db-tls';
+import type { PinnedRootCa } from '../../../pipeline/src/supabase-root-ca';
 
 export interface Tx {
   query<R extends QueryResultRow = Record<string, unknown>>(sql: string, params?: unknown[]): Promise<{ rows: R[]; rowCount: number }>;
@@ -49,6 +51,8 @@ export interface DatabaseOptions {
   label?: string;
   /** Called whenever obtaining a connection fails or exceeds its limit (an operator signal). */
   onAcquireFailure?: (label: string) => void;
+  /** Test hook only: the trusted roots for a hosted target (default: the pinned list, pipeline/src/supabase-root-ca.ts). */
+  trustedRootCas?: readonly PinnedRootCa[];
 }
 
 // Match PostgREST's JSON numbers (the SPA was written against it): int8 and numeric as numbers;
@@ -145,8 +149,19 @@ export class Database {
   private readonly clientStates = new WeakMap<object, ClientErrorState>();
 
   constructor(options: DatabaseOptions) {
+    // Explicit fields, never the raw string (query parameters could override the host or TLS; they are refused). A hosted
+    // target gets verify-full TLS against the pinned root only and the constructor throws if none is pinned; every target
+    // is SCRAM-SHA-256 only, so a server asking for a cleartext or MD5 password gets none (pipeline/src/db-tls.ts).
+    const target = dbConnectionFieldsFromUrl(options.connectionString);
+    const security = options.trustedRootCas ? dbSecurityFields(target.host, options.trustedRootCas) : dbSecurityFields(target.host);
     this.pool = new pg.Pool({
-      connectionString: options.connectionString,
+      host: target.host,
+      port: target.port,
+      user: target.user,
+      password: target.password,
+      database: target.database,
+      ...security,
+      Client: scramOnlyClient(pg.Client) as unknown as pg.PoolConfig['Client'],
       max: options.max ?? 10,
       connectionTimeoutMillis: options.connectionTimeoutMillis ?? 250,
       idleTimeoutMillis: options.idleTimeoutMillis ?? 30_000,

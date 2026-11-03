@@ -4,7 +4,7 @@ import { mapPgError } from './db/database';
 import { NotFoundError, NotPermittedError, RefusedError, UnavailableError } from './core/types';
 
 const k = (n: number) => Buffer.alloc(32, n).toString('base64url');
-const base = { APP_ORIGIN: 'https://recruiter.example.test', KEY_LINKS: k(1), KEY_SESSIONS: k(2), KEY_RATE: k(3), DATABASE_URL: 'postgres://u@h/d', EMAIL_MODE: 'test' };
+const base = { APP_ORIGIN: 'https://recruiter.example.test', KEY_LINKS: k(1), KEY_SESSIONS: k(2), KEY_RATE: k(3), DATABASE_URL: 'postgres://u@127.0.0.1/d', EMAIL_MODE: 'test' }; // loopback: a hosted URL needs a pinned root (database.tls.test.ts)
 
 describe('server env', () => {
   it('accepts a valid environment', () => {

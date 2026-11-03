@@ -11,6 +11,8 @@ import pg from 'pg';
 import { REPOSITORY_ROOT } from './staging-rebuilt.js';
 import { RECORDED_PROJECT_REFS } from './target-guard.js';
 import { FIRST_MANAGER_CREATE_CONFIRMATION } from './first-manager-bootstrap.js';
+import { makeTestPki } from './db-tls-testkit.js';
+import { setDefaultPinsForTests } from './db-tls.js';
 
 const self = fileURLToPath(import.meta.url);
 const tsx = resolve(REPOSITORY_ROOT, 'pipeline/node_modules/tsx/dist/cli.mjs');
@@ -30,7 +32,15 @@ async function runFixture(scenario: string): Promise<void> {
     assert.equal(lateEvent, scenario === 'localized-late', 'late client error event was observed');
   });
   const lost = Object.assign(new Error('synthetic localized connection failure'), { code: 'ZZ999', severity: 'FATALER FEHLER' });
+  // The runner builds its client through pg-secure.ts (verify-full TLS, SCRAM-only): pin a throwaway test root for this child
+  // process only, and give the fake the pg auth handlers the SCRAM-only subclass overrides (never called: nothing connects).
+  const pki = makeTestPki();
+  setDefaultPinsForTests([pki.pin(pki.root)]);
   class FakeClient extends EventEmitter {
+    _handleAuthCleartextPassword() { throw new Error('not used'); }
+    _handleAuthMD5Password() { throw new Error('not used'); }
+    _handleAuthSASL() { throw new Error('not used'); }
+    _handleReadyForQuery() { throw new Error('not used'); }
     async connect() { assert.equal(this.listenerCount('error'), 1); }
     async end() {
       // pg can emit the connection error after the query rejection has reached the runner.

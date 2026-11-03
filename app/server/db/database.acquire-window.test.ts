@@ -136,7 +136,7 @@ class FakeClient extends EventEmitter {
 
 const open: Database[] = [];
 function make(Client: unknown, options: Record<string, unknown> = {}) {
-  const db = new Database({ connectionString: 'postgres://fake', max: 1, ...options });
+  const db = new Database({ connectionString: 'postgres://fake@127.0.0.1/fake', max: 1, ...options });
   // Swap in a real pg-pool that builds the given client class; the Database code is unchanged.
   const pool = new pg.Pool({ Client: Client as never, max: 1, idleTimeoutMillis: 0 });
   pool.on('error', () => undefined);
