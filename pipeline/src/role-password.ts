@@ -21,9 +21,16 @@ import { RECORDED_PROJECT_REFS, parseSupabaseDbTarget, type SupabaseDbTarget } f
  * the server error log's STATEMENT line therefore hold only a placeholder or constant text. The DO block's exception handlers
  * (query_canceled separately, because `when others` does not catch it) re-raise with the same SQLSTATE and a fixed message, so the
  * CONTEXT line that would quote the dynamic ALTER is never written.
- * Residual exposure that a non-superuser session cannot switch off: log_statement='all' or pgaudit (they log bound parameters);
- * pg_stat_statements.track='all' (this module REFUSES to run then); a FATAL termination of the session while the ALTER runs (its
- * CONTEXT would quote the statement).
+ * The transaction READS the logging settings first and REFUSES (nothing changed) when the bound parameter could be written to the server
+ * log: unless log_parameter_max_length = 0, it refuses for log_statement = 'all', log_min_duration_statement other than -1, a
+ * log_min_duration_sample other than -1 together with a log_statement_sample_rate above 0, or a log_transaction_sample_rate above 0; it
+ * also refuses when log_parameter_max_length_on_error is not 0, when pgaudit.log is anything but none, and when
+ * auto_explain.log_min_duration is anything but -1. pg_stat_statements.track = 'all' (with track_utility on) is refused too.
+ * Residual exposure after all of that: only a FATAL termination of the session while the ALTER runs (an administrator command, a
+ * crash or a shutdown; PL/pgSQL cannot catch FATAL and ALTER ROLE accepts no bind parameter): the log's CONTEXT line would then quote the
+ * statement. The window is at most the 10 s lock wait plus the statement's run time; any rollback_not_confirmed or unknown result is
+ * a STOP. The node-postgres error then holds the text in its `where` field in memory; it is never printed (only the classifier's id and
+ * SQLSTATE are). Settings this module cannot see (an extension that is not named above) are not covered.
  *
  * One transaction with a statement and a lock timeout (a stricter timeout already in force is kept) and a client-side query timeout.
  * The role name comes from a fixed two-entry table, never from input. The verifier is itself sensitive: it is never printed, returned
@@ -56,7 +63,25 @@ export const LOCK_TIMEOUT_MS = 10_000;
 export const CLIENT_QUERY_TIMEOUT_MS = 45_000; // client side, above the server's statement timeout, so a silent network failure cannot wait forever
 export const STATEMENT_TIMEOUT_SQL = "set local statement_timeout = '30s'";
 export const LOCK_TIMEOUT_SQL = "set local lock_timeout = '10s'";
-export const SETTINGS_SQL = "select name, setting from pg_settings where name in ('statement_timeout', 'lock_timeout', 'pg_stat_statements.track', 'pg_stat_statements.track_utility')";
+export const SETTINGS_SQL = "select name, setting from pg_settings where name in ('statement_timeout', 'lock_timeout', 'pg_stat_statements.track', 'pg_stat_statements.track_utility', "
+  + "'log_statement', 'log_min_duration_statement', 'log_min_duration_sample', 'log_statement_sample_rate', 'log_transaction_sample_rate', 'log_parameter_max_length', 'log_parameter_max_length_on_error') "
+  + "union all select 'pgaudit.log', coalesce(current_setting('pgaudit.log', true), 'none') "
+  + "union all select 'auto_explain.log_min_duration', coalesce(current_setting('auto_explain.log_min_duration', true), '-1')";
+export const EXPIRY_MARGIN_HOURS = 24;
+/** Why the server settings let the verifier reach the log, or null when they do not. A setting that cannot be read counts as unsafe. */
+export function loggingProblem(settings: Map<string, string>): string | null {
+  const num = (name: string): number => { const v = settings.get(name); return v === undefined || v.trim() === '' ? Number.NaN : Number(v); };
+  if (num('log_parameter_max_length_on_error') !== 0) return 'log_parameter_max_length_on_error is not 0';
+  const audit = (settings.get('pgaudit.log') ?? '').trim().toLowerCase();
+  if (audit !== '' && audit !== 'none') return 'pgaudit.log is not none';
+  if (num('auto_explain.log_min_duration') !== -1) return 'auto_explain.log_min_duration is not -1';
+  if (num('log_parameter_max_length') === 0) return null;
+  if (settings.get('log_statement') === undefined || settings.get('log_statement') === 'all') return 'log_statement is all';
+  if (num('log_min_duration_statement') !== -1) return 'log_min_duration_statement is not -1';
+  if (!(num('log_min_duration_sample') === -1 || num('log_statement_sample_rate') === 0)) return 'statement sampling is on';
+  if (num('log_transaction_sample_rate') !== 0) return 'log_transaction_sample_rate is not 0';
+  return null;
+}
 export const VERIFIER_GUC = 'bb_rolepw.verifier';
 export const SET_VERIFIER_SQL = `select set_config('${VERIFIER_GUC}', $1, true)`;
 export const ROLE_PASSWORD_RESULTS = ['committed', 'rolled_back', 'rollback_not_confirmed', 'unknown'] as const;
@@ -136,7 +161,7 @@ export function planRolePassword(input: {
 
 /** Everything except LOGIN and the password that the statement must leave unchanged (pg_roles has no password column). */
 const ROLE_FACTS_SQL = `select rolcanlogin, rolsuper, rolinherit, rolcreaterole, rolcreatedb, rolreplication, rolbypassrls, rolconnlimit,
-  rolvaliduntil is not null as has_valid_until, coalesce(rolvaliduntil <= now(), false) as expired, coalesce(rolconfig::text, '') as config, (select count(*)::int from pg_roles where rolname = $1) as matches
+  rolvaliduntil is not null as has_valid_until, coalesce(rolvaliduntil <= now(), false) as expired, coalesce(rolvaliduntil <= now() + interval '${EXPIRY_MARGIN_HOURS} hours', false) as expires_soon, coalesce(rolconfig::text, '') as config, (select count(*)::int from pg_roles where rolname = $1) as matches
   from pg_roles where rolname = $1`;
 
 type RoleFacts = Record<string, unknown>;
@@ -174,10 +199,14 @@ export async function runRolePassword(client: RebuiltSqlClient, plan: RolePasswo
     if (settings.get('pg_stat_statements.track') === 'all' && settings.get('pg_stat_statements.track_utility') !== 'off') {
       throw new RunnerRefusal('role_password_refused', 'pg_stat_statements.track is "all" with track_utility on, which would record the nested role statement; refusing; nothing changed');
     }
+    if (loggingProblem(settings) !== null) {
+      throw new RunnerRefusal('role_password_logging_refused', 'a server logging setting would write the bound verifier to the server log; refusing; nothing changed');
+    }
     const before = (await client.query(ROLE_FACTS_SQL, [plan.role])).rows as RoleFacts[];
     if (before.length !== 1 || before[0]!.matches !== 1) throw new RunnerRefusal('role_password_refused', 'the role does not exist exactly once; nothing changed');
     if (before[0]!.rolsuper !== false) throw new RunnerRefusal('role_password_refused', 'the role is not an ordinary login role; refusing; nothing changed');
     if (before[0]!.expired === true) throw new RunnerRefusal('role_password_refused', 'the role has an expired VALID UNTIL, so it could not log in; refusing; nothing changed');
+    if (before[0]!.expires_soon === true) throw new RunnerRefusal('role_password_expiry_refused', `the role's VALID UNTIL is within ${EXPIRY_MARGIN_HOURS} hours; refusing; nothing changed`);
     // ALTER ROLE accepts no bind parameter: the verifier is bound to set_config and a constant DO block builds the statement server-side.
     await client.query(SET_VERIFIER_SQL, [plan.verifier]);
     await client.query(doAlterSql(plan.role));

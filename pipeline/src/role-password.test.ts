@@ -12,7 +12,7 @@ import { resolve } from 'node:path';
 import { pathToFileURL } from 'node:url';
 import pg from 'pg';
 import {
-  CLIENT_QUERY_TIMEOUT_MS, LOCK_TIMEOUT_SQL, ROLE_PASSWORD_RESULTS, ROLE_PASSWORD_ACTIONS, ROLE_PASSWORD_ROLES, ROLE_PASSWORD_VARIABLES, SET_VERIFIER_SQL, STATEMENT_TIMEOUT_SQL, doAlterSql, executeRolePassword, passwordProblem, planRolePassword, rolePasswordClientOptions, runRolePassword, scramSha256Verifier,
+  CLIENT_QUERY_TIMEOUT_MS, LOCK_TIMEOUT_SQL, ROLE_PASSWORD_RESULTS, ROLE_PASSWORD_ACTIONS, ROLE_PASSWORD_ROLES, ROLE_PASSWORD_VARIABLES, SETTINGS_SQL, SET_VERIFIER_SQL, STATEMENT_TIMEOUT_SQL, doAlterSql, executeRolePassword, loggingProblem, passwordProblem, planRolePassword, rolePasswordClientOptions, runRolePassword, scramSha256Verifier,
 } from './role-password.js';
 import { REFUSAL_IDS, RunnerRefusal, classifyRunnerFailure } from './refusals.js';
 import { REPOSITORY_ROOT, type RebuiltSqlClient } from './staging-rebuilt.js';
@@ -26,16 +26,25 @@ const MAINT = ROLE_PASSWORD_ACTIONS['set-maintenance-password'];
 let n = 0;
 const check = (name: string, ok: boolean) => { assert.ok(ok, name); console.log(`PASS ${name}`); n += 1; };
 const refusalOf = (fn: () => unknown): string | undefined => { try { fn(); return undefined; } catch (e) { return e instanceof RunnerRefusal ? e.id : `other:${(e as Error).message}`; } };
+const SAFE_LOGGING: Record<string, string> = { log_statement: 'none', log_min_duration_statement: '-1', log_min_duration_sample: '-1', log_statement_sample_rate: '1', log_transaction_sample_rate: '0', log_parameter_max_length: '-1', log_parameter_max_length_on_error: '0', 'pgaudit.log': 'none', 'auto_explain.log_min_duration': '-1' };
+const settingsMap = (o: Record<string, string>) => new Map(Object.entries({ ...SAFE_LOGGING, ...o }));
 const base = { action: 'set-app-password', dbUrl: pooler(REBUILT), confirm: APP.confirmation, password: PW };
 
 /** Every line any captured run printed (checked at the end: no verifier-shaped or password-shaped value). */
 const everyLine: string[] = [];
+/** Anything written straight to process.stdout / process.stderr while a captured run was active (must stay empty). */
+const rawWrites: string[] = [];
 /** Captures console.log lines while `fn` runs. */
 async function captured<T>(fn: () => Promise<T>): Promise<{ lines: string[]; value?: T; error?: unknown }> {
   const lines: string[] = [];
   const orig = console.log;
+  const out = process.stdout.write;
+  const errw = process.stderr.write;
   console.log = (...a: unknown[]) => { const l = a.map(String).join(' '); lines.push(l); everyLine.push(l); };
-  try { return { lines, value: await fn() }; } catch (error) { return { lines, error }; } finally { console.log = orig; }
+  // A direct stdout/stderr write by the module is a leak channel: record it (the tests assert rawWrites stays empty).
+  process.stdout.write = ((chunk: unknown) => { rawWrites.push(String(chunk)); return true; }) as typeof process.stdout.write;
+  process.stderr.write = ((chunk: unknown) => { rawWrites.push(String(chunk)); return true; }) as typeof process.stderr.write;
+  try { return { lines, value: await fn() }; } catch (error) { return { lines, error }; } finally { console.log = orig; process.stdout.write = out; process.stderr.write = errw; }
 }
 
 async function main(): Promise<void> {
@@ -87,7 +96,7 @@ async function main(): Promise<void> {
       query: async (sql: string, args?: unknown[]) => {
         sent.push(sql);
         if (args && /set_config/.test(sql)) bound.push([sql, args]);
-        if (/from pg_settings/.test(sql)) return { rows: Object.entries(over.settings ?? {}).map(([name, setting]) => ({ name, setting })) };
+        if (/from pg_settings/.test(sql)) return { rows: [...settingsMap(over.settings ?? {})].map(([name, setting]) => ({ name, setting })) };
         if (over.failOn?.test(sql)) throw Object.assign(new Error(`boom ${PW} ${plan.verifier}`), { code: '42501' });
         if (sql === 'commit' && over.failCommit) throw Object.assign(new Error('commit lost'), { code: '08006' });
         if (sql === 'rollback' && over.failRollback) throw new Error('no answer');
@@ -141,6 +150,37 @@ async function main(): Promise<void> {
   sent.length = 0;
   r = await captured(() => runRolePassword(fake({ expired: true }), plan));
   check('a role with an expired VALID UNTIL is refused before the verifier is bound (it could not log in); rolled back, never committed', r.error instanceof RunnerRefusal && !sent.some((x) => /set_config|^do |^commit/.test(x)) && JSON.parse(r.lines[0]!).result === 'rolled_back');
+  // ---- logging settings that would write the bound verifier to the server log are refused before it is bound
+  const unsafe: [string, Record<string, string>][] = [
+    ['log_statement=all', { log_statement: 'all' }], ['log_min_duration_statement=0', { log_min_duration_statement: '0' }], ['log_min_duration_statement=250', { log_min_duration_statement: '250' }],
+    ['log_min_duration_sample=0 with log_statement_sample_rate=1', { log_min_duration_sample: '0', log_statement_sample_rate: '1' }], ['log_transaction_sample_rate=1', { log_transaction_sample_rate: '1' }],
+    ['log_transaction_sample_rate=0.01', { log_transaction_sample_rate: '0.01' }], ['pgaudit.log=all', { 'pgaudit.log': 'all' }], ['pgaudit.log=role', { 'pgaudit.log': 'role' }], ['pgaudit.log=ddl, role', { 'pgaudit.log': 'ddl, role' }],
+    ['auto_explain.log_min_duration=0', { 'auto_explain.log_min_duration': '0' }], ['log_parameter_max_length_on_error=-1', { log_parameter_max_length_on_error: '-1' }], ['log_parameter_max_length_on_error=64', { log_parameter_max_length_on_error: '64' }],
+  ];
+  for (const [label, settings] of unsafe) {
+    sent.length = 0;
+    r = await captured(() => runRolePassword(fake({ settings }), plan));
+    check(`${label}: refused (role_password_logging_refused) before the verifier is bound; nothing changed; rolled back`, r.error instanceof RunnerRefusal && r.error.id === 'role_password_logging_refused' && !sent.some((x) => /set_config|^do |^commit/.test(x)) && sent.includes('rollback') && JSON.parse(r.lines[0]!).result === 'rolled_back');
+  }
+  sent.length = 0;
+  r = await captured(() => runRolePassword(fake({ settings: { log_parameter_max_length: '0', log_statement: 'all', log_min_duration_statement: '0', log_statement_sample_rate: '1', log_min_duration_sample: '0', log_transaction_sample_rate: '1' } }), plan));
+  check('with log_parameter_max_length = 0 the statement-logging settings are harmless and the run proceeds (log_statement=all, duration 0, both samplings on)', r.error === undefined && sent.includes('commit'));
+  check('log_parameter_max_length = 0 does NOT excuse log_parameter_max_length_on_error, pgaudit or auto_explain', loggingProblem(settingsMap({ log_parameter_max_length: '0', log_parameter_max_length_on_error: '5' })) !== null
+    && loggingProblem(settingsMap({ log_parameter_max_length: '0', 'pgaudit.log': 'all' })) !== null && loggingProblem(settingsMap({ log_parameter_max_length: '0', 'auto_explain.log_min_duration': '5' })) !== null);
+  check('safe combinations proceed: the defaults, log_statement=ddl and mod, sampling rate 0 with a duration, pgaudit.log empty or none', ([{},{ log_statement: 'ddl' }, { log_statement: 'mod' }, { log_min_duration_sample: '100', log_statement_sample_rate: '0' }, { 'pgaudit.log': '' }, { log_parameter_max_length: '0' }] as Record<string, string>[]).every((o) => loggingProblem(settingsMap(o)) === null));
+  check('a setting that cannot be read fails closed (nothing returned, on-error length or duration non-numeric)', loggingProblem(new Map()) !== null
+    && loggingProblem(settingsMap({ log_parameter_max_length_on_error: 'x' })) !== null && loggingProblem(settingsMap({ log_min_duration_statement: 'x' })) !== null);
+  check('the settings query reads every logging setting, uses current_setting(..., true) for pgaudit and auto_explain, and the two new refusal ids are registered', ['log_statement', 'log_min_duration_statement', 'log_min_duration_sample', 'log_statement_sample_rate', 'log_transaction_sample_rate', 'log_parameter_max_length', 'log_parameter_max_length_on_error', "current_setting('pgaudit.log', true)", "current_setting('auto_explain.log_min_duration', true)"].every((t) => SETTINGS_SQL.includes(t))
+    && ['role_password_logging_refused', 'role_password_expiry_refused'].every((id) => (REFUSAL_IDS as readonly string[]).includes(id)));
+  sent.length = 0;
+  r = await captured(() => runRolePassword(fake({ rows: (_s, call) => [{ rolcanlogin: call > 1, rolsuper: false, expired: false, expires_soon: true, matches: 1 }] }), plan));
+  check('a VALID UNTIL within 24 hours is refused (role_password_expiry_refused) before the verifier is bound; rolled back, never committed', r.error instanceof RunnerRefusal && r.error.id === 'role_password_expiry_refused' && !sent.some((x) => /set_config|^do |^commit/.test(x)) && JSON.parse(r.lines[0]!).result === 'rolled_back');
+  // The pg error's `where` field (on a FATAL it holds the ALTER text) must never be printed: only the classifier's id and SQLSTATE leave the process.
+  const whereErr = Object.assign(new Error('terminating connection due to administrator command'), { code: '57P01', severity: 'FATAL', where: `SQL statement "alter role recruiter_app login password '${plan.verifier}'"`, detail: plan.verifier, internalQuery: plan.verifier });
+  sent.length = 0;
+  const rWhere = await captured(() => runRolePassword({ ...fake(), query: async (q: string, a?: unknown[]) => { if (/^do \$\$/.test(q)) throw whereErr; return fake().query(q, a); } }, plan));
+  check('a pg error whose where/detail/internalQuery hold the verifier is never printed: only the fixed event, no raw stdout/stderr write, and the classifier gives id plus SQLSTATE', !rWhere.lines.join('\n').includes(plan.verifier) && rawWrites.length === 0
+    && JSON.stringify(classifyRunnerFailure(whereErr)) === JSON.stringify({ refusal: 'server_or_driver_error', err_code: '57P01' }) && JSON.parse(rWhere.lines[0]!).result === 'rolled_back');
   const opts = rolePasswordClientOptions(plan.target);
   check('the real client has a client-side query timeout above the 30s statement timeout, a connect timeout and TCP keep-alive', opts.query_timeout === CLIENT_QUERY_TIMEOUT_MS && CLIENT_QUERY_TIMEOUT_MS > 30_000 && opts.connectionTimeoutMillis === 10_000 && opts.keepAlive === true);
   const bad = { ...plan, role: 'postgres' };
@@ -173,6 +213,7 @@ async function main(): Promise<void> {
   check('every printed event goes through resultEvent(role, result): its arguments never mention verifier or password, console is used only inside it, and it allows only the fixed role and result lists',
     printed.length === 3 && printed.every((a) => !/verifier|password|err|message/i.test(a!)) && (code.match(/console\./g) ?? []).length === 1 && eventFn.includes('console.log(JSON.stringify({ msg:') && !/verifier|password/i.test(eventFn.replace(/ROLE_PASSWORD_[A-Z]+|role_password_(refused|result)/g, ''))
     && /ROLE_PASSWORD_ROLES\.includes\(role\)/.test(eventFn) && /ROLE_PASSWORD_RESULTS/.test(eventFn) && !/\bline\(/.test(code));
+  check('module never writes to process.stdout / process.stderr directly (console is used only in resultEvent), and no raw write happened in any captured run', !/process\.(stdout|stderr)/.test(code) && rawWrites.length === 0);
   check('module does not read process.env, never logs the password/verifier, has no drop/delete/grant/revoke SQL', !/process\.env/.test(src) && !/console\.(log|error)\([^)]*(password|verifier)/i.test(code.replace(/const resultEvent = [\s\S]*?\n\};/, '')) && !/\b(drop|delete from|truncate|grant|revoke)\b/i.test(src.replace(/\/\*[\s\S]*?\*\/|\/\/.*$/gm, '')));
 
   const eventsClean = (): boolean => everyLine.length > 0 && everyLine.every((l) => {
@@ -343,6 +384,75 @@ async function main(): Promise<void> {
       check('negative control: the old literal-in-ALTER form IS visible in pg_stat_statements and in the error log (so the clean results above are meaningful)', oldStats.some((q) => q.includes(oldSalt)) && readFileSync(LOG, 'utf8').slice(mark).includes(oldSalt));
     }
     await admin.query('drop role recruiter_app');
+  }
+  // ---- logging settings seen by a NON-superuser runner session (set per role by the superuser, as a hosted provider or admin could): refused or harmless, and never in the log.
+  {
+    const RUNNER_PW = randomBytes(18).toString('hex');
+    const dbName = decodeURIComponent(u.pathname.slice(1));
+    await admin.query('drop role if exists recruiter_app');
+    await admin.query('drop role if exists tr_runner');
+    await admin.query(`create role tr_runner login createrole password '${RUNNER_PW}'`);
+    await admin.query('create role recruiter_app nologin');
+    await admin.query('grant recruiter_app to tr_runner with admin option');
+    const sleep = (ms: number) => new Promise((r2) => setTimeout(r2, ms));
+    const LPW = randomBytes(36).toString('base64url');
+    const lplan = planRolePassword({ ...base, password: LPW });
+    const lm = /^SCRAM-SHA-256\$4096:([^$]+)\$([^:]+):(.+)$/.exec(lplan.verifier)!;
+    const lparts = [lplan.verifier, lm[1]!, lm[2]!, lm[3]!, LPW];
+    const runAsRunner = async (settings: string[], plan = lplan, direct = false) => {
+      for (const st of settings) await admin.query(`alter role tr_runner set ${st}`);
+      const c = new pg.Client({ host: u.hostname, port: Number(u.port), user: 'tr_runner', password: RUNNER_PW, database: dbName });
+      c.on('error', () => undefined);
+      await c.connect();
+      try {
+        // direct = negative control: the old shape (bind parameter to set_config) with no refusal, to prove the log setting WOULD write it.
+        if (direct) { await c.query('begin'); await c.query(SET_VERIFIER_SQL, [plan.verifier]); await c.query('rollback'); return undefined; }
+        return await captured(() => runRolePassword(c as unknown as RebuiltSqlClient, plan));
+      } finally {
+        await c.end().catch(() => undefined);
+        for (const st of settings) await admin.query(`alter role tr_runner reset ${st.split(/\s*=\s*/)[0]}`);
+      }
+    };
+    const logSince = async (mark: number): Promise<string> => { await sleep(1500); return readFileSync(LOG!, 'utf8').slice(mark); };
+    const visible = async () => { const c = new pg.Client({ host: u.hostname, port: Number(u.port), user: 'tr_runner', password: RUNNER_PW, database: dbName }); c.on('error', () => undefined); await c.connect(); try { return (await c.query(SETTINGS_SQL)).rows.length; } finally { await c.end(); } };
+    check('a non-superuser runner can read every setting the check needs (SETTINGS_SQL returns the 9 logging rows, 2 timeouts and 2 pg_stat_statements rows when present)', (await visible()) >= 11);
+    const refusedCases: [string, string[]][] = [
+      ['log_statement = all', ["log_statement = 'all'"]], ['log_min_duration_statement = 0', ['log_min_duration_statement = 0']], ['log_transaction_sample_rate = 1', ['log_transaction_sample_rate = 1']],
+      ['log_min_duration_sample = 0 with log_statement_sample_rate = 1', ['log_min_duration_sample = 0', 'log_statement_sample_rate = 1']],
+      ['log_parameter_max_length_on_error = -1', ['log_parameter_max_length_on_error = -1']], ["pgaudit.log = 'all'", ["pgaudit.log = 'all'"]], ["pgaudit.log = 'role'", ["pgaudit.log = 'role'"]], ['auto_explain.log_min_duration = 0', ['auto_explain.log_min_duration = 0']],
+    ];
+    for (const [label, settings] of refusedCases) {
+      const mark = LOG ? readFileSync(LOG, 'utf8').length : 0;
+      const res = await runAsRunner(settings);
+      check(`real server, runner session with ${label}: refused with role_password_logging_refused, rolled back, no password stored${LOG ? ', and no part of the verifier in the server log' : ''}`,
+        res!.error instanceof RunnerRefusal && res!.error.id === 'role_password_logging_refused' && JSON.parse(res!.lines[0]!).result === 'rolled_back' && (await rolePw('recruiter_app')) === null
+        && (!LOG || lparts.every((x) => !readFileSync(LOG, 'utf8').slice(mark).includes(x))));
+    }
+    if (LOG) {
+      const mark = readFileSync(LOG, 'utf8').length;
+      await runAsRunner(["log_statement = 'all'"], lplan, true);
+      const lg = await logSince(mark);
+      check('negative control: with log_statement = all a plain bound set_config of the verifier IS written to the server log (so the refusals above protect something real)', lg.includes(lm[2]!));
+      const mark2 = readFileSync(LOG, 'utf8').length;
+      const safe = await runAsRunner(["log_statement = 'all'", 'log_parameter_max_length = 0']);
+      const lg2 = await logSince(mark2);
+      check('log_statement = all with log_parameter_max_length = 0 is harmless: committed, the role logs in, and the log holds no part of the verifier', safe!.error === undefined && JSON.parse(safe!.lines[0]!).result === 'committed' && (await loginAs('recruiter_app', LPW)).ok && lparts.every((x) => !lg2.includes(x)));
+      const mark3 = readFileSync(LOG, 'utf8').length;
+      const dflt = await runAsRunner([], planRolePassword({ ...base, password: `${LPW}b` }));
+      check('with default logging settings a second run commits and the log holds no part of either verifier', dflt!.error === undefined && JSON.parse(dflt!.lines[0]!).result === 'committed' && lparts.every((x) => !readFileSync(LOG, 'utf8').slice(mark3).includes(x)));
+    } else {
+      const safe = await runAsRunner(["log_statement = 'all'", 'log_parameter_max_length = 0']);
+      check('log_statement = all with log_parameter_max_length = 0 is harmless: committed and the role logs in', safe!.error === undefined && (await loginAs('recruiter_app', LPW)).ok);
+    }
+    // VALID UNTIL within 24 hours is refused; further out is accepted.
+    await admin.query(`alter role recruiter_app valid until '${new Date(Date.now() + 2 * 3600_000).toISOString()}'`);
+    const soon = await runAsRunner([], planRolePassword({ ...base, password: `${LPW}c` }));
+    check('real server: a VALID UNTIL two hours away is refused (role_password_expiry_refused), rolled back, and the earlier password still works', soon!.error instanceof RunnerRefusal && soon!.error.id === 'role_password_expiry_refused' && JSON.parse(soon!.lines[0]!).result === 'rolled_back');
+    await admin.query(`alter role recruiter_app valid until '${new Date(Date.now() + 3 * 86400_000).toISOString()}'`);
+    const later = await runAsRunner([], planRolePassword({ ...base, password: `${LPW}d` }));
+    check('real server: a VALID UNTIL three days away is accepted', later!.error === undefined && (await loginAs('recruiter_app', `${LPW}d`)).ok);
+    await admin.query('drop role recruiter_app');
+    await admin.query('drop role tr_runner');
   }
   check('every event line printed during the real-PostgreSQL runs too is a fixed, verifier-free and password-free event', eventsClean());
   await admin.query('drop role if exists recruiter_maintenance');

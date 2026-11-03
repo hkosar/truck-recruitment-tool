@@ -38,6 +38,8 @@ export const REFUSAL_IDS = [
   'owner_auth_unknown_result',
   'owner_promotion_refused',
   'role_password_refused',
+  'role_password_logging_refused',
+  'role_password_expiry_refused',
   'owner_bootstrap_target_refused',
   'bootstrap_target_required',
   'target_not_recorded_production',

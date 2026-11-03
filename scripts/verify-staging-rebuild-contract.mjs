@@ -146,11 +146,12 @@ if (!rolePw) failures.push('role-password.ts is missing');
 else {
   for (const required of ["'recruiter_app'", "'recruiter_maintenance'", "'STAGING_APP_DB_PASSWORD'", "'STAGING_MAINT_DB_PASSWORD'", 'pbkdf2Sync', "'Client Key'", "'Server Key'", 'requireRecordedRebuiltRef', 'parseSupabaseDbTarget', 'target.port !== 5432',
     'refuses the production', "set local statement_timeout = '30s'", "set local lock_timeout = '10s'", "alter role ${role} login password %L", "current_setting('${VERIFIER_GUC}')", "select set_config('${VERIFIER_GUC}', $1, true)", 'exception when query_canceled then', 'when others then raise exception using errcode = sqlstate',
+    'role_password_logging_refused', 'role_password_expiry_refused', "current_setting('pgaudit.log', true)", "current_setting('auto_explain.log_min_duration', true)", "'log_statement'", "'log_min_duration_statement'", "'log_transaction_sample_rate'", "'log_parameter_max_length'", "'log_parameter_max_length_on_error'", 'loggingProblem(settings)', 'expires_soon',
     'query_timeout: CLIENT_QUERY_TIMEOUT_MS', 'keepAlive: true', 'expired === true', 'pg_stat_statements.track', '/^[A-Za-z0-9_-]+$/', 'ROLE_PASSWORD_MIN_LENGTH = 32', '--out is not supported', 'const resultEvent', 'VERIFIER_SHAPE', 'rolsuper', "await client.query('commit')", 'rollback_not_confirmed']) {
     if (!rolePw.includes(required)) failures.push(`role-password.ts is missing: ${required}`);
   }
   const code = rolePw.replace(/\/\*[\s\S]*?\*\/|\/\/.*$/gm, '');
-  for (const forbidden of [/process\.env/, /\bdrop\b/i, /delete\s+from/i, /truncate/i, /\bgrant\b/i, /\brevoke\b/i, /\b(createrole|superuser|createdb|bypassrls)\b/i, /password\s+'\$\{/, /\bline\(/]) {
+  for (const forbidden of [/process\.env/, /\bdrop\b/i, /delete\s+from/i, /truncate/i, /\bgrant\b/i, /\brevoke\b/i, /\b(createrole|superuser|createdb|bypassrls)\b/i, /password\s+'\$\{/, /\bline\(/, /process\.(stdout|stderr)/]) {
     if (forbidden.test(code)) failures.push(`role-password.ts must not contain ${forbidden}`);
   }
   if ((code.match(/alter role/gi) ?? []).length !== 1) failures.push('role-password.ts must contain exactly one ALTER ROLE statement');
@@ -163,7 +164,7 @@ else {
 }
 const wrapperSrc = read('scripts/run-with-secrets.mjs');
 if (wrapperSrc) {
-  for (const required of ["'STAGING_APP_DB_PASSWORD', 'STAGING_MAINT_DB_PASSWORD'", "'set-app-password', 'set-maintenance-password'", "'staging-sql.role_password_result'", "'role_password_refused'"]) {
+  for (const required of ["'STAGING_APP_DB_PASSWORD', 'STAGING_MAINT_DB_PASSWORD'", "'set-app-password', 'set-maintenance-password'", "'staging-sql.role_password_result'", "'role_password_refused'", "'role_password_logging_refused'", "'role_password_expiry_refused'"]) {
     if (!wrapperSrc.includes(required)) failures.push(`run-with-secrets.mjs is missing: ${required}`);
   }
   if (/PROMPT_ONLY = \[[^\]]*(STAGING_APP_DB_PASSWORD|STAGING_MAINT_DB_PASSWORD)/.test(wrapperSrc)) failures.push('run-with-secrets.mjs: the two role passwords must be allowed through --from-env');
