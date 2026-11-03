@@ -2,7 +2,7 @@
 // A5a driver: the stateless (class A) sign-in probes of doc 14 §8.1, aimed at the same-origin sign-in app on THIS computer.
 // Doc: docs/build-plan/20-signin-probe-driver-a5a.md. Usage:
 //
-//   node scripts/signin-probes-a5a.mjs --origin http://127.0.0.1:8788
+//   node scripts/signin-probes-a5a.mjs --origin http://127.0.0.1:8788 --app-origin <APP_ORIGIN of the app>
 //
 // What it does: sends 80 requests that can only be answered with a refusal, a redirect, a fixed page or an empty result:
 // no login, no cookie sent, no key, no mail (it never calls /auth/request, which is what could start a mail), no write
@@ -86,7 +86,8 @@ function send(target, { method = 'GET', path, headers = {}, body }, timeoutMs) {
     };
     const h = { host: target.hostHeader, connection: 'close', ...headers };
     if (body !== undefined) h['content-length'] = String(Buffer.byteLength(body));
-    req = request({ host: CONNECT_HOST, port: target.port, method, path, headers: h }, (res) => {
+    // agent: false = a private agent, never the global one of Node, so NODE_USE_ENV_PROXY / --use-env-proxy with HTTP_PROXY cannot route a probe elsewhere.
+    req = request({ host: CONNECT_HOST, port: target.port, method, path, headers: h, agent: false }, (res) => {
       const base = { ok: true, status: res.statusCode ?? 0, headers: res.headers, cookies: [].concat(res.headers['set-cookie'] ?? []) };
       const chunks = [];
       let size = 0;
@@ -136,6 +137,9 @@ function decodeAt(text) {
   }
   return t;
 }
+// The --app-origin text is the one host name a redirect may carry; a long host label (hyphens + a digit) must not trip the opaque-string rule.
+// Only that exact origin text is blanked out: anything after it (a path, a token) is still scanned.
+const withoutOrigin = (text, appOrigin) => (appOrigin === undefined ? text : text.split(appOrigin).join(' '));
 const leaks = (text) => LEAK_SHAPES.some((re) => re.test(text)) || LEAK_SHAPES.some((re) => re.test(decodeAt(text)));
 const headerText = (headers) => Object.entries(headers ?? {}).map(([k, v]) => `${k}: ${[].concat(v).join(', ')}`).join('\n');
 
@@ -150,8 +154,8 @@ function localPath(loc, appOrigin) {
 export function judge(res, exp, appOrigin) {
   if (!res.ok) return 'network';
   if (res.cookies.some((c) => !isClearing(c))) return 'cookie';
-  const scanBody = exp.allowPlaceholder ? res.body.replaceAll(PLACEHOLDER_ATTR, '') : res.body;
-  if (leaks(scanBody) || leaks(headerText(res.headers))) return 'leak';
+  const scanBody = withoutOrigin(exp.allowPlaceholder ? res.body.replaceAll(PLACEHOLDER_ATTR, '') : res.body, appOrigin);
+  if (leaks(scanBody) || leaks(withoutOrigin(headerText(res.headers), appOrigin))) return 'leak';
   if (res.tooBig) return 'body';
   if (!exp.status.includes(res.status)) return 'status';
   if (exp.location !== undefined) {

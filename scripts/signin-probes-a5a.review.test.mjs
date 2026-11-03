@@ -2,7 +2,7 @@
 // Local servers on 127.0.0.1 only.
 
 import assert from 'node:assert/strict';
-import { spawnSync } from 'node:child_process';
+import { spawn, spawnSync } from 'node:child_process';
 import { existsSync, mkdtempSync, rmSync, symlinkSync } from 'node:fs';
 import { createServer } from 'node:http';
 import { tmpdir } from 'node:os';
@@ -191,4 +191,52 @@ test('review note 2: percent-encoded and other encoded "@" forms in a body or he
   }
   assert.equal(judge(base, exp), null);
   assert.equal(judge({ ...base, body: '100%40 off, a&#64 b, 50%' }, exp), null, 'no false alarm without an address shape');
+});
+
+test('review blocking: env proxy settings never route a probe (fake proxy receives 0 requests)', async () => {
+  const seen = [];
+  const proxy = await listen((req, res) => { seen.push(req.url); res.writeHead(502); res.end(); });
+  const here = dirname(fileURLToPath(import.meta.url));
+  const driver = process.env.A5A_DRIVER_UNDER_TEST ?? join(here, 'signin-probes-a5a.mjs');
+  const proxyUrl = `http://127.0.0.1:${proxy.port}`;
+  const base = { ...process.env, HTTP_PROXY: proxyUrl, http_proxy: proxyUrl, HTTPS_PROXY: proxyUrl, https_proxy: proxyUrl, NO_PROXY: '', no_proxy: '' };
+  const settings = [{ NODE_USE_ENV_PROXY: '1', NODE_OPTIONS: '' }, { NODE_USE_ENV_PROXY: '0', NODE_OPTIONS: '--use-env-proxy' }];
+  try {
+    for (const extra of settings) {
+      // Port 9 (discard) has no listener: with a private connection every probe fails "network"; through the proxy it would be answered.
+      const r = await new Promise((resolve) => {
+        const c = spawn(process.execPath, [driver, '--origin', 'http://127.0.0.1:9'], { env: { ...base, ...extra }, stdio: ['ignore', 'pipe', 'pipe'] });
+        let out = '';
+        c.stdout.on('data', (d) => { out += d; });
+        c.on('close', (code) => resolve({ code, out }));
+      });
+      assert.equal(seen.length, 0, `proxy received requests with ${JSON.stringify(extra)}`);
+      assert.equal(r.code, 1);
+      assert.match(r.out, /"reason":"network"/);
+      assert.doesNotMatch(r.out, /"reason":"status"/);
+    }
+  } finally { await proxy.close(); }
+});
+
+test('review note 1: a long --app-origin host label with a digit is not a false leak, but a token after it still is', () => {
+  const app = 'https://twisted-nail-recruiter-app-staging-2.onrender.com';
+  const base = { ok: true, status: 303, headers: {}, cookies: [], body: '' };
+  const exp = { status: [303], location: /^\/signin$/ };
+  const at = (loc, appOrigin) => judge({ ...base, headers: { location: loc } }, exp, appOrigin);
+  assert.equal(at(`${app}/signin`, app), null);
+  assert.equal(at('/signin', app), null);
+  assert.equal(judge({ ...base, status: 200, body: `see ${app}/signin` }, { status: [200] }, app), null);
+  // Without --app-origin the same long label is still flagged (rule unchanged), and secrets next to the origin are still caught.
+  assert.equal(at(`${app}/signin`), 'leak', 'no app origin given: rule unchanged');
+  assert.equal(judge({ ...base, status: 200, body: `see ${app}/signin` }, { status: [200] }), 'leak');
+  assert.equal(judge({ ...base, status: 200, body: `${app}/x?k=${'a1'.repeat(20)}` }, { status: [200] }, app), 'leak');
+  assert.equal(at(`${app}/signin?token=${'A'.repeat(20)}`, app), 'leak');
+  assert.equal(judge({ ...base, status: 200, body: `${'a1'.repeat(20)}${app}` }, { status: [200] }, app), 'leak');
+  assert.equal(judge({ ...base, status: 200, body: `a@b.invalid ${app}` }, { status: [200] }, app), 'leak');
+});
+
+test('review note 2: the usage example in the script header names --app-origin', async () => {
+  const { readFileSync } = await import('node:fs');
+  const text = readFileSync(join(dirname(fileURLToPath(import.meta.url)), 'signin-probes-a5a.mjs'), 'utf8');
+  assert.match(text, /node scripts\/signin-probes-a5a\.mjs --origin http:\/\/127\.0\.0\.1:8788 --app-origin /);
 });

@@ -56,7 +56,7 @@ was executed (fixed error `error: no probes were executed`). Running the script 
 - Each request has a TOTAL 10 s limit (connect, headers and the whole body; a server that drips or streams
   forever fails the probe with `network`), and a response over 256 KB fails with `body`.
 - `--origin` with port 80 (`http://127.0.0.1:80`) is refused; use another port.
-- It reads no environment variable and no secret.
+- It reads no environment variable and no secret, and it ignores proxy settings (NODE_USE_ENV_PROXY, --use-env-proxy, HTTP_PROXY): every request uses its own private connection straight to 127.0.0.1.
 
 ## The future command (NOT RUN)
 
