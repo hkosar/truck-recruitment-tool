@@ -81,7 +81,7 @@ async function main(): Promise<void> {
     testObjects = true;
     loOid = String((await admin.query('select lo_create(0) as o')).rows[0].o);
     const lo = loOid;
-    assert.equal(dry.checks.length, 29, 'the dry run has 29 checks');
+    assert.equal(dry.checks.length, 32, 'the dry run has 32 checks');
     const OTHER = 'no ACL entry naming this role on any other object';
     const RM = 'recruiter_maintenance';
     for (const [grant, revoke, expected] of [
@@ -114,6 +114,13 @@ async function main(): Promise<void> {
       [`grant usage on language plpgsql to ${RM}`, `revoke usage on language plpgsql from ${RM}`, OTHER],
       [`grant usage on type public.ret_test_type to ${RM}`, `revoke usage on type public.ret_test_type from ${RM}`, OTHER],
       [`grant usage on schema ret_test_vault to ${RM}`, `revoke usage on schema ret_test_vault from ${RM}`, OTHER],
+      // Reviewer r3 note 3: the last permission gaps.
+      [`grant temporary on database ${dbName} to ${RM}`, `revoke temporary on database ${dbName} from ${RM}`, 'no privilege on any database except CONNECT'],
+      [`grant connect on database postgres to ${RM}`, `revoke connect on database postgres from ${RM}`, 'no privilege on any database except CONNECT'],
+      [`grant select on internal.signin_links to ${RM} with grant option`, `revoke grant option for select on internal.signin_links from ${RM}`, 'no grant option on any of the five ledgers'],
+      [`grant delete on internal.app_sessions to ${RM} with grant option`, `revoke grant option for delete on internal.app_sessions from ${RM}`, 'no grant option on any of the five ledgers'],
+      ['grant select on pg_catalog.pg_statistic to public', 'revoke select on pg_catalog.pg_statistic from public', 'no select on a catalogue that shows table values'],
+      ['grant select (subconninfo) on pg_catalog.pg_subscription to public', 'revoke select (subconninfo) on pg_catalog.pg_subscription from public', 'no select on a catalogue that shows table values'],
       [`alter table ret_test_vault.decrypted_secrets owner to ${RM}`, 'alter table ret_test_vault.decrypted_secrets owner to tr_test_admin', 'owns no object'],
     ] as const) {
       pendingRevokes.push(revoke);
@@ -196,7 +203,7 @@ async function main(): Promise<void> {
     const beforeGap = await counts();
     await admin.query('begin');
     await admin.query('lock table internal.signin_links in share row exclusive mode');
-    const gapRun = runRetentionFixtureRun(maint, 'recruiter_maintenance');
+    const gapRun = runRetentionFixtureRun(maint, 'recruiter_maintenance', undefined, { lockAttempts: 40, lockRetryDelayMs: 100 }); // patient: retries NOWAIT for ~4 s
     await sleep(1000);
     await admin.query('grant select on pg_catalog.pg_authid to recruiter_maintenance');
     await admin.query('commit');
@@ -237,6 +244,42 @@ async function main(): Promise<void> {
     assert.deepEqual(r.failed, ['commit_answered_rollback']);
     assert.deepEqual(await counts(), beforeTag, 'the server rolled back: nothing was deleted');
     assert.equal((await maint.query('select 1 as one')).rows[0].one, 1, 'the session is idle again');
+
+    // 6g. Deadlocks (reviewer r3 note 1). The app writes app_sessions and then signin_links (the revoke-on-identity-change order) while the
+    // run locks the ledgers in its own order. The old waiting lock let PostgreSQL cancel the APP's transaction (40P01 after the app's
+    // second write came more than deadlock_timeout later). NOWAIT never waits, so the app's transaction is never the one cancelled: the
+    // run gives up with lock_busy_nothing_deleted and the app's second write succeeds.
+    const beforeDl = await counts();
+    const app = new pg.Client({ connectionString: loopback(ADMIN) });
+    await app.connect();
+    try {
+      await app.query('begin');
+      await app.query('update internal.app_sessions set token_hash = token_hash where false'); // ROW EXCLUSIVE on app_sessions
+      const t0 = Date.now();
+      const busyRun = runRetentionFixtureRun(maint, 'recruiter_maintenance', undefined, { lockAttempts: 4, lockRetryDelayMs: 100 }); // gives up at ~0.3 s
+      await sleep(1500); // longer than the default deadlock_timeout of 1 s: the case that cancelled the app before
+      let appError: unknown = null;
+      try { await app.query('update internal.signin_links set token_hash = token_hash where false'); } catch (e) { appError = e; }
+      assert.equal(appError, null, 'the app transaction is never the one cancelled (no 40P01)');
+      await app.query('commit');
+      r = await busyRun;
+      assert.deepEqual([r.ok, r.committed, r.deletesSent, r.failed], [false, false, false, ['lock_busy_nothing_deleted']]);
+      assert.ok(Date.now() - t0 >= 1500, 'sanity: the app write really came after the deadlock timeout');
+      assert.deepEqual(await counts(), beforeDl, 'nothing deleted');
+      assert.equal((await maint.query('select 1 as one')).rows[0].one, 1, 'the maintenance session is idle again');
+      // The same interleave, app commits quickly: a patient run gets the lock on a later attempt.
+      await app.query('begin');
+      await app.query('update internal.app_sessions set token_hash = token_hash where false');
+      const patient = runRetentionFixtureRun(maint, 'recruiter_maintenance', async () => ({ deleted: { request_buckets: 0, recovery_failures: 0, email_events: 0, signin_links: 0, app_sessions: 0 }, failed: [] }), { lockAttempts: 20, lockRetryDelayMs: 100 });
+      await sleep(400);
+      await app.query('commit');
+      r = await patient;
+      assert.ok(!r.failed.includes('lock_busy_nothing_deleted') && r.deletesSent, 'a lock that frees up within the attempts lets the run proceed (the stub delete is then refused by the post-check)');
+      assert.deepEqual(await counts(), beforeDl, 'nothing deleted');
+    } finally {
+      await app.query('rollback').catch(() => undefined);
+      await app.end();
+    }
 
     // 7. A delete step that did not delete is reported as a failure and rolled back (post-run proof).
     r = await runRetentionFixtureRun(maint, 'recruiter_maintenance', async () => ({ deleted: { request_buckets: 0, recovery_failures: 0, email_events: 0, signin_links: 0, app_sessions: 0 }, failed: [] }));

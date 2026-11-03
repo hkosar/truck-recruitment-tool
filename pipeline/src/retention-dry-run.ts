@@ -47,6 +47,10 @@ export const DENIED_STATEMENTS: ReadonlyArray<{ name: string; sql: string }> = [
  *  - pg_shdepend (every ACL entry and ownership that names a role, in this database and the shared catalogues) is a net
  *    for the object kinds the lists above do not walk: foreign server, wrapper, tablespace, language, type, large
  *    object, parameter, any schema but public/internal, and anything this role owns.
+ *  - Three small direct checks close the last known gaps: WITH GRANT OPTION on a ledger, any database privilege but
+ *    CONNECT on the current database, and select on the catalogues that can show table values or connection strings.
+ *    Still outside (procedure caveat): a PUBLIC grant on some other application table, and PUBLIC-by-default
+ *    TEMPORARY/CONNECT on databases, which no role-specific check can see.
  */
 export const BOUNDARY_SQL = `
   with me as (select oid from pg_roles where rolname = current_user),
@@ -105,6 +109,16 @@ export const BOUNDARY_SQL = `
         and p.proname in ('pg_read_file', 'pg_read_binary_file', 'pg_ls_dir', 'pg_stat_file', 'pg_ls_logdir', 'pg_ls_waldir', 'pg_ls_tmpdir',
                           'pg_ls_archive_statusdir', 'pg_logdir_ls', 'pg_file_write', 'pg_file_read', 'pg_file_rename', 'pg_file_unlink', 'lo_import', 'lo_export')
         and has_function_privilege(current_user, p.oid, 'EXECUTE')) as file_functions,
+    (select count(*)::int from all_rels r, aclexplode(r.relacl) a
+      where a.grantee = (select oid from me) and a.is_grantable and r.name = any ($1::text[])) +
+    (select count(*)::int from pg_attribute at join all_rels r on r.oid = at.attrelid, aclexplode(at.attacl) a
+      where at.attacl is not null and a.grantee = (select oid from me) and a.is_grantable and r.name = any ($1::text[])) as ledger_grant_options,
+    (select count(*)::int from pg_database d, aclexplode(d.datacl) a
+      where a.grantee = (select oid from me) and not (d.datname = current_database() and a.privilege_type = 'CONNECT')) as database_acls,
+    (select count(*)::int from unnest(array['pg_statistic', 'pg_statistic_ext_data']) t(n)
+      where to_regclass('pg_catalog.' || t.n) is not null and has_any_column_privilege(current_user, to_regclass('pg_catalog.' || t.n)::oid, 'SELECT'))
+    + (case when to_regclass('pg_catalog.pg_subscription') is not null
+            and has_column_privilege(current_user, 'pg_catalog.pg_subscription'::regclass, 'subconninfo', 'SELECT') then 1 else 0 end) as value_leaking_catalogues,
     (select count(*)::int from unnest(array['pg_authid', 'pg_shadow', 'pg_user_mapping', 'pg_largeobject']) t(n)
       where to_regclass('pg_catalog.' || t.n) is not null and has_any_column_privilege(current_user, to_regclass('pg_catalog.' || t.n)::oid, 'SELECT')) as secret_catalogues`;
 
@@ -154,6 +168,9 @@ export async function runLeastPrivilegeChecks(client: DryRunClient, expectedRole
   check('owns no object', boundary.owned_objects === 0);
   check('no execute privilege on a server file function (pg_read_file, pg_ls_dir, lo_import ...)', boundary.file_functions === 0);
   check('no select on a password-hash or secret catalogue (pg_authid, pg_shadow, pg_user_mapping, pg_largeobject)', boundary.secret_catalogues === 0);
+  check('no grant option on any of the five ledgers (the role could not pass its rights on)', boundary.ledger_grant_options === 0);
+  check('no privilege on any database except CONNECT on the current one (TEMPORARY, CREATE, other databases)', boundary.database_acls === 0);
+  check('no select on a catalogue that shows table values or connection strings (pg_statistic, pg_statistic_ext_data, pg_subscription.subconninfo)', boundary.value_leaking_catalogues === 0);
   return currentUser;
 }
 
