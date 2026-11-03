@@ -1,5 +1,6 @@
 import { existsSync } from 'node:fs';
 import { createServer } from 'node:http';
+import { closeLoopbackAgent, loopbackFetch } from './loopback-fetch.js';
 import { tmpdir } from 'node:os';
 import { resolve } from 'node:path';
 import assert from 'node:assert/strict';
@@ -978,10 +979,12 @@ test('owner Auth create (G1 step 1): exact request to the recorded address, one 
   await new Promise<void>((done) => server.listen(0, '127.0.0.1', done));
   const port = (server.address() as import('node:net').AddressInfo).port;
   const requested: string[] = [];
+  const redirects: Array<string | undefined> = [];
   // Only a loopback address is ever contacted: the production address is asserted, then rewritten to the fake server.
   const toLocal = (timeoutMs?: number): OwnerFetch => (url, init) => {
     requested.push(url);
-    return fetch(url.replace(`https://${ref}.supabase.co`, `http://127.0.0.1:${port}`), timeoutMs ? { ...init, signal: AbortSignal.timeout(timeoutMs) } : init);
+    redirects.push(init.redirect);
+    return loopbackFetch(url.replace(`https://${ref}.supabase.co`, `http://127.0.0.1:${port}`), timeoutMs ? { ...init, signal: AbortSignal.timeout(timeoutMs) } : init);
   };
   const reply = (status: number, body: unknown) => (_q: unknown, res: import('node:http').ServerResponse) => { res.writeHead(status, { 'content-type': 'application/json' }); res.end(typeof body === 'string' ? body : JSON.stringify(body)); };
   const uuid = '3f2504e0-4f89-41d3-9a0c-0305e82c3301';
@@ -998,6 +1001,7 @@ test('owner Auth create (G1 step 1): exact request to the recorded address, one 
     assert.deepEqual({ method: seen[0]!.method, url: seen[0]!.url, apikey: seen[0]!.apikey, auth: seen[0]!.auth }, { method: 'POST', url: '/auth/v1/admin/users', apikey: key, auth: `Bearer ${key}` });
     assert.deepEqual(seen[0]!.body, { email: APPROVED_OWNER_EMAIL, password, email_confirm: true }, 'confirmed email, no invite, no other fields');
     assert.equal(requested.at(-1), `https://${ref}.supabase.co/auth/v1/admin/users`);
+    assert.equal(redirects.at(-1), 'error', 'the service-role key is only ever sent with redirect: error');
     assert.deepEqual(lines.map((x) => JSON.parse(x)), [{ msg: 'staging-sql.owner_auth_create', result: 'created', http_status: 200, email_matches: true, id_present: true }]);
     assert.ok(lines.every((x) => !x.includes(key) && !x.includes(password) && !x.includes(uuid)), 'the key, the password and the new id are never printed');
 
@@ -1032,6 +1036,7 @@ test('owner Auth create (G1 step 1): exact request to the recorded address, one 
     err = await attempt(toLocal(60));
     assert.ok(err instanceof RunnerRefusal && err.id === 'owner_auth_unknown_result' && seen.length === 1, 'a timeout is unknown');
   } finally {
+    closeLoopbackAgent();
     server.closeAllConnections();
     await new Promise<void>((done) => server.close(() => done()));
   }

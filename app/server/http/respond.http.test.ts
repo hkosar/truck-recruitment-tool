@@ -6,6 +6,7 @@ import { createServer, request, type Server } from 'node:http';
 import type { AddressInfo } from 'node:net';
 import { afterAll, beforeAll, describe, expect, it, vi } from 'vitest';
 import { BODY_LIMITS, readBodyLimited } from './body';
+import { closeLoopbackAgent, loopbackAgent } from '../testing/loopback-fetch';
 import { respondThenClose } from './respond';
 // Loaded machines (manager decision): only TEST timeouts are raised; product limits are unchanged.
 vi.setConfig({ testTimeout: 30_000, hookTimeout: 60_000 });
@@ -29,12 +30,13 @@ describe.skipIf(!enabled)('rejected bodies over real HTTP (A4)', () => {
     port = (server.address() as AddressInfo).port;
   });
   afterAll(async () => {
+    closeLoopbackAgent();
     await new Promise<void>((resolve) => server.close(() => resolve()));
   });
 
   function send(body: Buffer[], headers: Record<string, string>): Promise<{ status: number; text: string }> {
     return new Promise((resolve, reject) => {
-      const req = request({ host: '127.0.0.1', port, method: 'POST', path: '/auth/request', headers }, (res) => {
+      const req = request({ agent: loopbackAgent(), host: '127.0.0.1', port, method: 'POST', path: '/auth/request', headers }, (res) => {
         let text = '';
         res.setEncoding('utf8');
         res.on('data', (c) => (text += c));
