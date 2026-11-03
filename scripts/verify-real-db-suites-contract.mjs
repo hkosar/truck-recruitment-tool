@@ -5,7 +5,7 @@
 
 import { existsSync, readFileSync, readdirSync } from 'node:fs';
 import { resolve } from 'node:path';
-import { EXCLUDED_FILES, SUITE_FILES, SUITE_IDS, nonLoopbackConnectionVars, scrubbedEnv } from './run-real-db-suites.mjs';
+import { EXCLUDED_FILES, SUITE_FILES, SUITE_IDS, nonLoopbackConnectionVars, pgServerOptions, scrubbedEnv } from './run-real-db-suites.mjs';
 
 const root = resolve(import.meta.dirname, '..');
 const src = readFileSync(resolve(root, 'scripts/run-real-db-suites.mjs'), 'utf8').replace(/\r\n/g, '\n');
@@ -32,7 +32,11 @@ check('no spawn call is given process.env as env', !/env:\s*process\.env|\.\.\.p
 // ---- Cleanup.
 const fin = code.match(/\}\s*finally\s*\{([\s\S]*?)\n  \}\n\}/);
 check('a finally block exists and calls cleanup()', Boolean(fin) && /\bcleanup\(\)/.test(fin[1]));
-check('cleanup stops only its own data folder (pg_ctl -D <dataDir> stop)', /\['-D', dataDir, 'stop', '-m', 'fast', '-w'\]/.test(code));
+check('cleanup stops only its own data folders (pg_ctl -D <dataDir> stop, for every cluster this run started)', /\['-D', dataDir, 'stop', '-m', 'fast', '-w'\]/.test(code) && /for \(const dataDir of dataDirs\) \{/.test(code) && /clusterTouched = true;\n\s*dataDirs\.push\(clusterDir\);\n\s*const start = sh\(/.test(code));
+check('both clusters are made inside the temp folder and started through pgServerOptions (loopback only)', /const dataDir = join\(dir, 'data'\);/.test(code) && /const rpDataDir = join\(dir, 'rp-data'\);/.test(code) && /const rpLog = join\(dir, 'rp-server\.log'\);/.test(code)
+  && /'-o', pgServerOptions\(p, opts\)/.test(code) && (code.match(/'-o',/g) ?? []).length === 1 && /startCluster\(dataDir, join\(dir, 'server\.log'\), \{\}, 'main'\)/.test(code) && /startCluster\(rpDataDir, rpLog, \{ rolePassword: true \}, 'role-password'\)/.test(code));
+check('role-password runs on its own cluster with its owned database, its server log and pg_stat_statements', /id: 'role-password', \.\.\.tsx\('src\/role-password\.test\.ts', \{ ROLE_PASSWORD_PG_URL: url\(ADMIN_USER, adminPw, 'tr_role_password', rpPort\), ROLE_PASSWORD_PG_LOG: rpLog \}\) \}/.test(code)
+  && /comment on database tr_role_password is 'role-password-owned:\$\{ownerToken\}'/.test(code) && /c\.query\('create extension pg_stat_statements'\), \{ onPort: rpPort, database: 'tr_role_password' \}/.test(code));
 check('cleanup is idempotent and also runs on exit', /if \(cleaned\) return;/.test(code) && /process\.on\('exit', cleanup\)/.test(code));
 check('signals are caught (SIGINT, SIGTERM, SIGBREAK, SIGHUP) and only set a flag', /\['SIGINT', 'SIGTERM', 'SIGBREAK', 'SIGHUP'\]/.test(code) && /const onSignal = \(\) => \{ interrupted = true; \};/.test(code));
 check('deletes only a folder it made (isSafeToDelete guard, made by mkdtempSync in the temp folder)', /if \(isSafeToDelete\(dir, tmpdir\(\)\)\)/.test(code) && /mkdtempSync\(join\(tmpdir\(\), 'rdb-suites-'\)\)/.test(code));
@@ -96,9 +100,11 @@ check('loopback URLs and PGHOST are accepted', nonLoopbackConnectionVars({ DATAB
 check('unrelated variables are ignored', nonLoopbackConnectionVars({ PATH: 'x', HOME: 'y' }).length === 0);
 const scrubbed = scrubbedEnv({ PATH: 'x', DATABASE_URL: 'a', STAGING_DB_URL: 'b', PGDATA: 'c', PGPASSWORD: 'd', SUPABASE_ORG_TOKEN: 'e', DOPPLER_TOKEN: 'f', LEDGER_A3_ADMIN_URL: 'g', POSTGRES_URL: 'h' });
 check('scrubbed environment keeps PATH and drops every connection and secret variable', Object.keys(scrubbed).join() === 'PATH');
+check('server options: loopback only; only the role-password cluster preloads pg_stat_statements', pgServerOptions(5999) === '-p 5999 -c listen_addresses=127.0.0.1'
+  && pgServerOptions(5999, { rolePassword: true }).startsWith('-p 5999 -c listen_addresses=127.0.0.1 ') && /shared_preload_libraries=pg_stat_statements/.test(pgServerOptions(5999, { rolePassword: true })) && !/\*|0\.0\.0\.0/.test(pgServerOptions(5999, { rolePassword: true })));
 
 if (failures.length) {
   console.error(`FAIL real-database suite runner contract: ${failures.length} check(s) failed:\n- ${failures.join('\n- ')}`);
   process.exit(1);
 }
-console.log(`PASS real-database suite runner contract: loopback-only, refuses non-loopback connection variables, no network or secret store, no process killed, cleanup in finally (cluster stopped by its own folder, temp folder and app/dist removed), allow-listed child environment, failures, skips and timeouts give a non-zero exit, suite list matches the ${gated.length} env-gated real-PostgreSQL test files on disk (${EXCLUDED_FILES.length} excluded with a reason)`);
+console.log(`PASS real-database suite runner contract: loopback-only, refuses non-loopback connection variables, no network or secret store, no process killed, cleanup in finally (each cluster stopped by its own folder, temp folder and app/dist removed), allow-listed child environment, failures, skips and timeouts give a non-zero exit, suite list matches the ${gated.length} env-gated real-PostgreSQL test files on disk (${EXCLUDED_FILES.length} excluded with a reason)`);

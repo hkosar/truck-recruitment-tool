@@ -1,7 +1,8 @@
 #!/usr/bin/env node
-// LOCAL ONLY: runs the real-PostgreSQL suites listed in SUITE_FILES (13 suites, see the "Not covered" list below) against ONE throwaway
-// PostgreSQL 16 cluster that this script creates and always removes. It contacts no hosted or staging database, reads no secret store and
-// uses no network except 127.0.0.1.
+// LOCAL ONLY: runs the real-PostgreSQL suites listed in SUITE_FILES (14 suites, see the "Not covered" list below) against throwaway
+// PostgreSQL 16 clusters that this script creates and always removes: one shared by 13 suites, and a second one only for role-password
+// (it drops and recreates recruiter_app / recruiter_maintenance, which are cluster-wide, and needs pg_stat_statements preloaded and a
+// server log it can read). It contacts no hosted or staging database, reads no secret store and uses no network except 127.0.0.1.
 //
 // How to run (from the repository root; app/node_modules and pipeline/node_modules must already exist, nothing is installed):
 //   node scripts/run-real-db-suites.mjs
@@ -25,22 +26,24 @@
 //      only the short allow-list in ENV_ALLOW (PATH, Windows system folders, ...) plus NO_COLOR=1 / FORCE_COLOR=0 and the loopback
 //      settings this script gives that child; the only spawn call is inside makeSh, which always sets that environment;
 //   2. creates a fresh temp folder, runs initdb (scram-sha-256, random passwords kept only in files inside that folder) and starts the
-//      cluster on 127.0.0.1 at a random free port;
+//      cluster on 127.0.0.1 at a random free port; then the same for the role-password cluster (folder rp-data, pg_stat_statements
+//      preloaded, server log rp-server.log, one database tr_role_password with the "role-password-owned:" comment and the extension);
 //   3. builds the test databases with scripts/a3-build-test-db.mjs, creates three empty owned databases for the suites that need one,
 //      and gives recruiter_maintenance / recruiter_app throwaway logins inside that cluster only;
 //   4. runs each suite with its own database and environment (a time limit per suite), and (for the app suite) one vite build into
 //      app/dist. vite and vitest write their caches under the temp folder, not under node_modules;
-//   5. ALWAYS (success, failure, Ctrl+C, unexpected error): pg_ctl -D <its own folder> stop, deletes the folder (passwords included)
-//      and removes app/dist if this run built it. It never signals or stops any other process.
+//   5. ALWAYS (success, failure, Ctrl+C, unexpected error): pg_ctl -D <its own folder> stop for each of its two clusters, deletes the
+//      folder (passwords included) and removes app/dist if this run built it. It never signals or stops any other process.
 // If this run is killed so hard that no handler runs (Task Manager, power loss), the folder rdb-suites-* in the temp directory and
-// the postgres process of its data folder remain: stop it with pg_ctl -D <that folder>\data stop, then delete the folder.
+// the postgres processes of its data folders remain: stop them with pg_ctl -D <that folder>\data stop and pg_ctl -D <that folder>\rp-data
+// stop, then delete the folder.
 //
 // Test isolation: PostgreSQL roles belong to the whole cluster, not to one database. The prod-sql suites run production back-out steps
 // that take two things away from recruiter_app: supabase/backout/retire-app-credentials.sql:13 ("alter role recruiter_app nologin
 // password null": no login, no password) and, through prod-sql-a3.test.ts section 8, supabase/backout/M1-backout.sql:482 ("revoke
 // recruiter_api from recruiter_app": the role through which recruiter_app gets all its rights). So the script (a) puts the prod-sql
 // suites last and (b) after EVERY suite re-applies LOGIN, the password and the recruiter_api membership (restoreStatements), so no suite
-// depends on the order of the others; RDB_SUITES_FIRST=prod-sql proves it (13 of 13). Other cluster-wide changes (authenticator
+// depends on the order of the others; RDB_SUITES_FIRST=prod-sql proves it (14 of 14). Other cluster-wide changes (authenticator
 // settings, zz_ roles, recruiter_maintenance grants) are made and undone by the suites themselves; a suite that crashes half way can leave
 // them behind, which makes later suites FAIL (never a false PASS).
 
@@ -191,6 +194,13 @@ export function restoreStatements({ maintPw, appPw }) {
   ];
 }
 
+/** The server options (pg_ctl -o) of a throwaway cluster: its port, loopback only. `rolePassword` adds what role-password.test.ts needs:
+ *  pg_stat_statements preloaded, and statements of failed commands written to the stderr log that pg_ctl -l captures (no collector). Pure. */
+export function pgServerOptions(port, { rolePassword = false } = {}) {
+  const base = `-p ${Number(port)} -c listen_addresses=127.0.0.1`;
+  return rolePassword ? `${base} -c shared_preload_libraries=pg_stat_statements -c log_min_error_statement=error -c logging_collector=off` : base;
+}
+
 /** Moves the suite named `first` (if any) to the front; everything else keeps its order. Pure. */
 export function orderSuites(suites, first) {
   if (!first) return suites;
@@ -252,6 +262,7 @@ export const SUITE_FILES = [
   { id: 'owner-bootstrap', kind: 'tsx', file: 'pipeline/src/owner-bootstrap-a3.test.ts' },
   { id: 'environment-preflight', kind: 'tsx', file: 'pipeline/src/environment-preflight-a3.test.ts' },
   { id: 'ledger-preflight', kind: 'tsx', file: 'pipeline/src/ledger-preflight-a3.test.ts' },
+  { id: 'role-password', kind: 'tsx', file: 'pipeline/src/role-password.test.ts' },
   { id: 'prod-sql-stop-tables', kind: 'tsx', file: 'pipeline/src/prod-sql-stop-tables-pg.test.ts' },
   { id: 'prod-sql-a2-backouts', kind: 'tsx', file: 'pipeline/src/prod-sql-a2-backouts-a3.test.ts' },
   { id: 'prod-sql', kind: 'tsx', file: 'pipeline/src/prod-sql-a3.test.ts' },
@@ -291,7 +302,7 @@ function main() {
 async function run() {
   const results = []; // { id, status: 'PASS' | 'FAIL' | 'TIMEOUT' | 'SKIP', reason }
   let dir;
-  let dataDir;
+  const dataDirs = []; // the clusters this run made (main, then role-password), each stopped by its own folder
   let pgBin;
   let clusterTouched = false;
   let builtDist = false;
@@ -308,10 +319,11 @@ async function run() {
     if (cleaned) return;
     cleaned = true;
     const problems = [];
-    // 1. Stop only the cluster in our own folder.
-    if (dataDir && pgBin && existsSync(join(dataDir, 'postmaster.pid'))) {
+    // 1. Stop only the clusters in our own folder.
+    for (const dataDir of dataDirs) {
+      if (!pgBin || !existsSync(join(dataDir, 'postmaster.pid'))) continue;
       const r = sh(exe(pgBin, 'pg_ctl'), ['-D', dataDir, 'stop', '-m', 'fast', '-w'], { stdio: 'ignore' });
-      if (r.status !== 0) problems.push('pg_ctl stop did not report success');
+      if (r.status !== 0) problems.push(`pg_ctl stop did not report success (${basename(dataDir)})`);
     }
     // 2. Delete our own folder (passwords included), after checking it is the folder we made.
     if (dir) {
@@ -327,7 +339,7 @@ async function run() {
       try { rmSync(distDir, { recursive: true, force: true, maxRetries: 5, retryDelay: 300 }); } catch { problems.push('could not delete app/dist'); }
       if (existsSync(distDir)) problems.push('app/dist still exists');
     }
-    if (clusterTouched || dir) console.log(problems.length ? `CLEANUP INCOMPLETE: ${problems.join('; ')}` : 'CLEANUP OK: cluster stopped, temp folder and passwords deleted' + (builtDist ? ', app/dist removed' : ''));
+    if (clusterTouched || dir) console.log(problems.length ? `CLEANUP INCOMPLETE: ${problems.join('; ')}` : 'CLEANUP OK: clusters stopped, temp folder and passwords deleted' + (builtDist ? ', app/dist removed' : ''));
     if (problems.length) process.exitCode = 1;
   }
 
@@ -376,7 +388,9 @@ async function run() {
 
     // ---- Throwaway cluster.
     dir = mkdtempSync(join(tmpdir(), 'rdb-suites-'));
-    dataDir = join(dir, 'data');
+    const dataDir = join(dir, 'data');
+    const rpDataDir = join(dir, 'rp-data');
+    const rpLog = join(dir, 'rp-server.log');
     const cacheDir = join(dir, 'caches');
     mkdirSync(cacheDir);
     const adminPw = token();
@@ -389,22 +403,29 @@ async function run() {
     writeFileSync(join(dir, 'apppw.txt'), appPw);
     writeFileSync(join(dir, 'A3_TASK_OWNED'), ownerToken);
 
-    const init = sh(exe(pgBin, 'initdb'), ['-D', dataDir, '-U', ADMIN_USER, '-A', 'scram-sha-256', `--pwfile=${join(dir, 'pw.txt')}`, '-E', 'UTF8']);
-    if (init.status !== 0) throw new Error('initdb failed: ' + mask(`${init.stdout}${init.stderr}`).split('\n').slice(-6).join(' | '));
-    let port = await freePort();
-    while (port === 5432 || port === 6543) port = await freePort();
-    clusterTouched = true;
-    const start = sh(exe(pgBin, 'pg_ctl'), ['-D', dataDir, '-l', join(dir, 'server.log'), '-o', `-p ${port} -c listen_addresses=127.0.0.1`, '-w', 'start'], { stdio: 'ignore' }); // not pipes: the server would inherit them and spawnSync would wait for it forever
-    if (start.status !== 0) {
-      let tail = '';
-      try { tail = readFileSync(join(dir, 'server.log'), 'utf8').split('\n').filter(Boolean).slice(-4).join(' | '); } catch { /* no log */ }
-      throw new Error('pg_ctl start failed: ' + mask(tail));
-    }
-    let pid = '?';
-    try { pid = readFileSync(join(dataDir, 'postmaster.pid'), 'utf8').split('\n')[0]; } catch { /* reported as ? */ }
-    console.log(`cluster: PostgreSQL 16 on 127.0.0.1:${port}, postmaster pid ${pid}, folder ${dir}`);
+    // Both clusters: same admin login and password (masked), own folder, own random free port, own server log.
+    const startCluster = async (clusterDir, logFile, opts, label) => {
+      const init = sh(exe(pgBin, 'initdb'), ['-D', clusterDir, '-U', ADMIN_USER, '-A', 'scram-sha-256', `--pwfile=${join(dir, 'pw.txt')}`, '-E', 'UTF8']);
+      if (init.status !== 0) throw new Error(`initdb (${label}) failed: ` + mask(`${init.stdout}${init.stderr}`).split('\n').slice(-6).join(' | '));
+      let p = await freePort();
+      while (p === 5432 || p === 6543) p = await freePort();
+      clusterTouched = true;
+      dataDirs.push(clusterDir);
+      const start = sh(exe(pgBin, 'pg_ctl'), ['-D', clusterDir, '-l', logFile, '-o', pgServerOptions(p, opts), '-w', 'start'], { stdio: 'ignore' }); // not pipes: the server would inherit them and spawnSync would wait for it forever
+      if (start.status !== 0) {
+        let tail = '';
+        try { tail = readFileSync(logFile, 'utf8').split('\n').filter(Boolean).slice(-4).join(' | '); } catch { /* no log */ }
+        throw new Error(`pg_ctl start (${label}) failed: ` + mask(tail));
+      }
+      let pid = '?';
+      try { pid = readFileSync(join(clusterDir, 'postmaster.pid'), 'utf8').split('\n')[0]; } catch { /* reported as ? */ }
+      console.log(`cluster (${label}): PostgreSQL 16 on 127.0.0.1:${p}, postmaster pid ${pid}, folder ${clusterDir}`);
+      return p;
+    };
+    const port = await startCluster(dataDir, join(dir, 'server.log'), {}, 'main');
+    const rpPort = await startCluster(rpDataDir, rpLog, { rolePassword: true }, 'role-password');
 
-    const url = (user, pw, db) => `postgresql://${user}:${encodeURIComponent(pw)}@127.0.0.1:${port}/${db}`;
+    const url = (user, pw, db, onPort = port) => `postgresql://${user}:${encodeURIComponent(pw)}@127.0.0.1:${onPort}/${db}`;
     const admin = (db) => url(ADMIN_USER, adminPw, db);
     const maint = (db) => url('recruiter_maintenance', maintPw, db);
     const app = (db) => url('recruiter_app', appPw, db);
@@ -427,8 +448,8 @@ async function run() {
     // Roles are cluster-wide: give two of them throwaway logins now, and again after every suite (see "Test isolation" above).
     const require = createRequire(join(root, 'app', 'package.json'));
     const pg = require('pg');
-    const withAdmin = async (fn) => {
-      const c = new pg.Client({ host: '127.0.0.1', port, user: ADMIN_USER, password: adminPw, database: 'postgres' });
+    const withAdmin = async (fn, { onPort = port, database = 'postgres' } = {}) => {
+      const c = new pg.Client({ host: '127.0.0.1', port: onPort, user: ADMIN_USER, password: adminPw, database });
       await c.connect();
       try { await fn(c); } finally { await c.end(); }
     };
@@ -443,6 +464,12 @@ async function run() {
         await c.query(`comment on database ${db} is '${prefix}:${ownerToken}'`);
       }
     });
+    // role-password runs on its own cluster: an empty owned tr_ database with pg_stat_statements (preloaded at start) created in it.
+    await withAdmin(async (c) => {
+      await c.query('create database tr_role_password');
+      await c.query(`comment on database tr_role_password is 'role-password-owned:${ownerToken}'`);
+    }, { onPort: rpPort });
+    await withAdmin((c) => c.query('create extension pg_stat_statements'), { onPort: rpPort, database: 'tr_role_password' });
 
     // ---- Suites. The prod-sql suites change cluster-wide roles, so they come last.
     const tsx = (file, env, extra = {}) => ({ cmd: process.execPath, args: [join(root, 'pipeline', 'node_modules', 'tsx', 'dist', 'cli.mjs'), file], cwd: join(root, 'pipeline'), env, kind: 'tsx', ...extra });
@@ -467,6 +494,7 @@ async function run() {
       { id: 'owner-bootstrap', ...tsx('src/owner-bootstrap-a3.test.ts', { OWNER_A3_ADMIN_URL: admin('tr_owner') }) },
       { id: 'environment-preflight', ...tsx('src/environment-preflight-a3.test.ts', { ENVPRE_A3_ADMIN_URL: admin('tr_envpre') }) },
       { id: 'ledger-preflight', ...tsx('src/ledger-preflight-a3.test.ts', { LEDGER_A3_ADMIN_URL: admin('tr_ledger') }) },
+      { id: 'role-password', ...tsx('src/role-password.test.ts', { ROLE_PASSWORD_PG_URL: url(ADMIN_USER, adminPw, 'tr_role_password', rpPort), ROLE_PASSWORD_PG_LOG: rpLog }) },
       { id: 'prod-sql-stop-tables', ...tsx('src/prod-sql-stop-tables-pg.test.ts', { PROD_SQL_STOP_PG_URL: admin('tr_stop') }) },
       { id: 'prod-sql-a2-backouts', ...tsx('src/prod-sql-a2-backouts-a3.test.ts', { PROD_SQL_A3_ADMIN_URL: admin('tr_psql_a2') }) },
       { id: 'prod-sql', ...tsx('src/prod-sql-a3.test.ts', { PROD_SQL_A3_ADMIN_URL: admin('tr_psql') }) },

@@ -258,7 +258,7 @@ describe.skipIf(!enabled)('A4 real HTTP: sign-in end to end, timing, bodies, shu
         res.end('[{"batch":"x"}]');
         return;
       }
-      const up = request({ host: '127.0.0.1', port: PORT, method: req.method, path: req.url, headers: req.headers }, (r) => {
+      const up = request({ agent: loopbackAgent(), host: '127.0.0.1', port: PORT, method: req.method, path: req.url, headers: req.headers }, (r) => {
         res.writeHead(r.statusCode ?? 502, r.headers);
         r.pipe(res);
       });

@@ -5,7 +5,7 @@ import { join, parse } from 'node:path';
 import { test } from 'node:test';
 import {
   CHILD_COLOR_OFF, DEFAULT_TIMEOUT_MS, ENV_ALLOW, SUITE_IDS, classifyOutcome, executeSuite, findSkipLines, isSafeToDelete, makeSh, maskSecrets,
-  nonLoopbackConnectionVars, orderSuites, resolveTimeoutMs, restoreStatements, runSuites, scrubbedEnv, stripAnsi, summarize, vitestArgs,
+  nonLoopbackConnectionVars, orderSuites, pgServerOptions, resolveTimeoutMs, restoreStatements, runSuites, scrubbedEnv, stripAnsi, summarize, vitestArgs,
 } from './run-real-db-suites.mjs';
 
 const ok = { status: 0 };
@@ -108,7 +108,17 @@ test('summary and exit code: skipped, missing and timed-out suites are failures;
   assert.equal(summarize([pass('a'), pass('b'), pass('c')], { expectedIds: ids, priorExitCode: 1 }).exitCode, 1);
   assert.equal(summarize([pass('a'), pass('b'), { id: 'c', status: 'FAIL' }], { expectedIds: ids, priorExitCode: 2 }).exitCode, 2);
   assert.deepEqual(summarize([], { expectedIds: [], priorExitCode: 2 }), { line: '', exitCode: 2, failed: [] });
-  assert.ok(SUITE_IDS.length >= 13);
+  assert.ok(SUITE_IDS.length >= 14);
+  assert.ok(SUITE_IDS.includes('role-password'));
+});
+
+test('server options: loopback only, own port; only the role-password cluster preloads pg_stat_statements and logs failed statements', () => {
+  assert.equal(pgServerOptions(5999), '-p 5999 -c listen_addresses=127.0.0.1');
+  assert.equal(pgServerOptions('6001', { rolePassword: false }), '-p 6001 -c listen_addresses=127.0.0.1');
+  const rp = pgServerOptions(5999, { rolePassword: true });
+  assert.equal(rp, '-p 5999 -c listen_addresses=127.0.0.1 -c shared_preload_libraries=pg_stat_statements -c log_min_error_statement=error -c logging_collector=off');
+  // A port that is not a number cannot smuggle in another option.
+  assert.equal(pgServerOptions('1 -c listen_addresses=*'), '-p NaN -c listen_addresses=127.0.0.1');
 });
 
 test('folder-deletion guard: only a direct rdb-suites-* child of the temp folder', () => {
