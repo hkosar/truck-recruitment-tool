@@ -11,7 +11,7 @@ import { parseServerEnv } from './config';
 import { FakeMailAdapter } from './mail/fake';
 import { startServer, type RunningServer } from './main';
 import { claimSuiteDatabase, suiteDatabase } from './testing/test-db';
-import { loopbackFetch } from './testing/loopback-fetch';
+import { closeLoopbackAgent, loopbackAgent, loopbackFetch } from './testing/loopback-fetch';
 // Loaded machines (manager decision): only TEST timeouts are raised; product limits are unchanged.
 vi.setConfig({ testTimeout: 30_000, hookTimeout: 60_000 });
 
@@ -66,6 +66,7 @@ describe.skipIf(!enabled)('A4 real HTTP: sign-in end to end, timing, bodies, shu
   afterAll(async () => {
     if (running?.lifecycle.isAccepting) await running.shutdown(5_000);
     await releaseClaim?.();
+    closeLoopbackAgent();
     // Optional evidence for intermittent failures: event names and categories only, no values.
     if (process.env.E2E_EVENT_LOG) {
       const names = logs.map((l) => { const e = JSON.parse(l) as { event: string; category?: string }; return e.category ? `${e.event}:${e.category}` : e.event; });
@@ -210,7 +211,7 @@ describe.skipIf(!enabled)('A4 real HTTP: sign-in end to end, timing, bodies, shu
 
   it('an oversized chunked body still gets the generic response, then the connection closes', async () => {
     const result = await new Promise<{ status: number; location: string | undefined; connection: string | undefined }>((resolve, reject) => {
-      const r = request({ agent: false, host: '127.0.0.1', port: PORT, method: 'POST', path: '/auth/request', headers: { 'content-type': 'application/x-www-form-urlencoded', 'transfer-encoding': 'chunked', origin: ORIGIN } }, (res) => {
+      const r = request({ agent: loopbackAgent(), host: '127.0.0.1', port: PORT, method: 'POST', path: '/auth/request', headers: { 'content-type': 'application/x-www-form-urlencoded', 'transfer-encoding': 'chunked', origin: ORIGIN } }, (res) => {
         res.resume();
         res.on('end', () => resolve({ status: res.statusCode ?? 0, location: res.headers.location, connection: res.headers.connection }));
       });

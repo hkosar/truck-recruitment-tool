@@ -1,10 +1,14 @@
-﻿// Proves loopbackFetch is not redirected by Node env-proxy settings. A fake proxy and a fake target
+// Proves loopbackFetch is not redirected by Node env-proxy settings. A fake proxy and a fake target
 // both listen on loopback; a child node process (env proxy is read at startup) requests the target.
 // Run: tsx src/loopback-fetch.test.ts
 
 import assert from 'node:assert/strict';
 import { spawn } from 'node:child_process';
-import { createServer } from 'node:http';
+import { readdirSync, readFileSync } from 'node:fs';
+import { createServer, request } from 'node:http';
+import type { IncomingMessage, ServerResponse } from 'node:http';
+import { join } from 'node:path';
+import { closeLoopbackAgent, loopbackAgent, loopbackFetch } from './loopback-fetch.js';
 import { createServer as createTcpServer } from 'node:net';
 import type { AddressInfo } from 'node:net';
 import { fileURLToPath } from 'node:url';
@@ -65,11 +69,98 @@ try {
     assert.equal(targetHits, 1, `${label}: the target gets exactly one request`);
   }
 
-  // Non-loopback addresses are refused before any socket is opened.
-  const { loopbackFetch } = await import('./loopback-fetch.js');
-  for (const bad of ['http://example.com/', 'https://127.0.0.1/', 'http://10.0.0.5/']) {
+  // Non-loopback addresses are refused before any socket is opened, as a rejected promise.
+  for (const bad of ['http://example.com/', 'https://127.0.0.1/', 'http://10.0.0.5/', 'http://127.0.0.2/']) {
     await assert.rejects(loopbackFetch(bad), /refuses non-loopback/, bad);
   }
+  await assert.rejects(loopbackFetch('not a url'), /Invalid URL/);
+
+  // Keep-alive: two requests share one socket and the client never asks the server to close
+  // (agent: false would send "Connection: close" and hide whether the server closes).
+  {
+    let connections = 0; const asked: Array<string | undefined> = [];
+    const server = createServer((req, res) => { asked.push(req.headers.connection); res.writeHead(200); res.end('ok'); });
+    server.on('connection', () => { connections++; });
+    await new Promise<void>((done) => server.listen(0, '127.0.0.1', done));
+    const port = (server.address() as AddressInfo).port;
+    try {
+      await (await loopbackFetch(`http://127.0.0.1:${port}/`)).text();
+      await (await loopbackFetch(`http://127.0.0.1:${port}/`)).text();
+      assert.equal(connections, 1, 'the second request reuses the connection');
+      assert.deepEqual(asked, ['keep-alive', 'keep-alive']);
+      await new Promise<void>((resolve, reject) => { request({ agent: loopbackAgent(), host: '127.0.0.1', port }, (res) => { res.resume(); res.on('end', resolve); }).on('error', reject).end(); });
+      assert.equal(connections, 1, 'request() through the shared agent reuses it too');
+    } finally { closeLoopbackAgent(); server.close(); }
+  }
+
+  // redirect option, as in fetch.
+  {
+    const seen: Array<{ port: number; method: string; url: string; body: string; authorization?: string }> = [];
+    let aPort = 0; let bPort = 0;
+    const handler = (port: () => number) => (req: IncomingMessage, res: ServerResponse) => {
+      let body = '';
+      req.on('data', (c) => { body += String(c); });
+      req.on('end', () => {
+        seen.push({ port: port(), method: req.method ?? '', url: req.url ?? '', body, authorization: req.headers.authorization });
+        const to = (status: number, location: string) => { res.writeHead(status, { location }); res.end(); };
+        const u = req.url ?? '';
+        if (u === '/r301') to(301, '/final'); else if (u === '/r303') to(303, '/final'); else if (u === '/r307') to(307, '/final');
+        else if (u === '/loop') to(302, '/loop');
+        else if (u === '/offsite') to(302, 'http://redirect-target.invalid/x');
+        else if (u === '/cross') to(307, `http://127.0.0.1:${bPort}/final`);
+        else if (u === '/no-location') { res.writeHead(302); res.end('plain'); }
+        else { res.writeHead(200); res.end('FINAL'); }
+      });
+    };
+    const a = createServer(handler(() => aPort)); const b = createServer(handler(() => bPort));
+    await new Promise<void>((done) => a.listen(0, '127.0.0.1', done));
+    await new Promise<void>((done) => b.listen(0, '127.0.0.1', done));
+    aPort = (a.address() as AddressInfo).port; bPort = (b.address() as AddressInfo).port;
+    const at = (path: string) => `http://127.0.0.1:${aPort}${path}`;
+    try {
+      for (const path of ['/r301', '/r303', '/r307']) await assert.rejects(loopbackFetch(at(path), { redirect: 'error' }), /redirect/, `error ${path}`);
+      assert.deepEqual(seen.map((s) => s.url), ['/r301', '/r303', '/r307'], "'error' never makes the second request");
+
+      seen.length = 0;
+      const manual = await loopbackFetch(at('/r303'), { redirect: 'manual' });
+      assert.deepEqual([manual.status, manual.headers.get('location'), seen.length], [303, '/final', 1]);
+
+      const init = { method: 'POST', body: 'payload', headers: { 'content-type': 'text/plain' } };
+      for (const [path, method, body] of [['/r301', 'GET', ''], ['/r303', 'GET', ''], ['/r307', 'POST', 'payload']] as const) {
+        seen.length = 0;
+        const r = await loopbackFetch(at(path), init);
+        assert.deepEqual([r.status, await r.text()], [200, 'FINAL']);
+        assert.deepEqual(seen.map((s) => [s.method, s.url, s.body]), [['POST', path, 'payload'], [method, '/final', body]], `follow ${path}`);
+      }
+
+      await assert.rejects(loopbackFetch(at('/offsite')), /refuses non-loopback/, 'every hop is re-checked');
+      await assert.rejects(loopbackFetch(at('/loop')), /too many redirects/);
+      seen.length = 0;
+      await (await loopbackFetch(at('/cross'), { headers: { authorization: 'Bearer fake' } })).text();
+      assert.deepEqual(seen.map((s) => [s.port === bPort ? 'b' : 'a', s.url, s.authorization]), [['a', '/cross', 'Bearer fake'], ['b', '/final', undefined]], 'credentials do not cross origins');
+
+      const plain = await loopbackFetch(at('/no-location'), { redirect: 'error' });
+      assert.deepEqual([plain.status, await plain.text()], [302, 'plain']);
+      await assert.rejects(loopbackFetch(at('/'), { redirect: 'sideways' }), TypeError);
+    } finally { closeLoopbackAgent(); a.close(); b.close(); }
+  }
+
+  // Source guard: smoke-tests.ts and every *.test.ts here may reach the network only through loopbackFetch/loopbackAgent.
+  // (The two helper copies being byte-identical is checked by scripts/verify-loopback-fetch-contract.mjs.)
+  const { findLoopbackViolations } = await import('./loopback-guard.js');
+  const here = fileURLToPath(new URL('.', import.meta.url));
+  const files = readdirSync(here).filter((f) => f === 'smoke-tests.ts' || f.endsWith('.test.ts'));
+  assert.ok(files.includes('smoke-tests.ts') && files.includes('loopback-fetch.test.ts'), 'the scan finds the test files');
+  const found = files.flatMap((f) => findLoopbackViolations(f, readFileSync(join(here, f), 'utf8')));
+  assert.deepEqual(found, []);
+  const prefix = "import { request } from 'node:http';\nimport { loopbackAgent } from './loopback-fetch.js';\n";
+  const bypasses = [
+    'request(\n  { host: "127.0.0.1" }, () => {});', 'const o = { agent: loopbackAgent() }; request(o, () => {});', 'globalThis.fetch("http://x/");', 'fetch ("http://x/");',
+    'const f = fetch; f("http://x/");', 'request({ host: "127.0.0.1" }, () => {}); // agent: false', 'const falseAgent = 1; request({ agent: falseAgent }, () => {});',
+    'request({ agent: false }, () => {});', 'const r = request; r({ agent: loopbackAgent() }, () => {});', 'globalThis["fetch"]("http://x/");',
+  ];
+  for (const code of bypasses) assert.notDeepEqual(findLoopbackViolations('sample.ts', prefix + code), [], code);
+  assert.deepEqual(findLoopbackViolations('sample.ts', `${prefix}request({ agent: loopbackAgent(), host: "127.0.0.1" }, () => {}); const s = "fetch(x)"; type T = typeof fetch;`), []);
   console.log('loopback-fetch.test: ok');
 } finally {
   proxy.server.close(); target.server.close();
