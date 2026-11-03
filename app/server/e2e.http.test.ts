@@ -222,7 +222,7 @@ describe.skipIf(!enabled)('A4 real HTTP: sign-in end to end, timing, bodies, shu
 
   it('A5a class-A probe driver: every probe passes on the real app, no mail is sent, no session is created; a deliberately broken endpoint fails (scripts/signin-probes-a5a.mjs)', async () => {
     // @ts-expect-error plain .mjs script with no type declarations
-    const { runClassA, PROBE_COUNT } = (await import('../../scripts/signin-probes-a5a.mjs')) as { runClassA: (origin: string, emit: (e: { event: string; id?: string; result?: string; reason?: string }) => void) => Promise<{ pass: number; fail: number; expected: number }>; PROBE_COUNT: number };
+    const { runClassA, PROBE_COUNT } = (await import('../../scripts/signin-probes-a5a.mjs')) as { runClassA: (origin: string, emit: (e: { event: string; id?: string; result?: string; reason?: string }) => void, opts?: { appOrigin?: string; timeoutMs?: number }) => Promise<{ pass: number; fail: number; expected: number }>; PROBE_COUNT: number };
     // Row counts of the sign-in ledgers (sessions, links, rate buckets), read as the test-database admin: a stateless probe run changes none.
     const ledgerCounts = async () => {
       const admin = new pg.Client({ connectionString: SUITE_DB!.adminUrl });
@@ -237,11 +237,16 @@ describe.skipIf(!enabled)('A4 real HTTP: sign-in end to end, timing, bodies, shu
     const ledgerBefore = await ledgerCounts();
     const mailBefore = mail.count;
     const events: Array<{ event: string; id?: string; result?: string; reason?: string }> = [];
-    const result = await runClassA(`http://127.0.0.1:${PORT}`, (e) => events.push(e));
+    const result = await runClassA(`http://127.0.0.1:${PORT}`, (e) => events.push(e), { appOrigin: ORIGIN });
     expect(events.filter((e) => e.result === 'fail')).toEqual([]);
     expect(result).toEqual({ pass: PROBE_COUNT, fail: 0, expected: PROBE_COUNT });
     expect(mail.count).toBe(mailBefore);
     expect(await ledgerCounts()).toEqual(ledgerBefore);
+
+    // Redirects must stay on the app's own origin: the app redirects to its absolute APP_ORIGIN, so with a different --app-origin every redirect probe fails on "location".
+    const wrongOrigin: Array<{ id?: string; result?: string; reason?: string }> = [];
+    await runClassA(`http://127.0.0.1:${PORT}`, (e) => { if (e.result === 'fail') wrongOrigin.push(e); }, { appOrigin: 'https://not-this-app.example.invalid' });
+    expect(wrongOrigin.map((e) => `${e.id}:${e.reason}`).sort()).toEqual(['legacy/forgot', 'legacy/login', 'legacy/pending', 'legacy/register', 'legacy/reset', 'spa-deep-navigate', 'spa-root-navigate', 'verify-junk-long', 'verify-junk-short', 'verify-missing'].map((id) => `${id}:location`));
 
     // A deliberately broken endpoint: a front that forwards everything to the real app except /api/dashboard,
     // which it answers 200 with data and a session cookie. Exactly that probe must fail.
@@ -261,7 +266,7 @@ describe.skipIf(!enabled)('A4 real HTTP: sign-in end to end, timing, bodies, shu
     await new Promise<void>((r) => broken.listen(0, '127.0.0.1', r));
     try {
       const bad: Array<{ id?: string; result?: string; reason?: string }> = [];
-      const r2 = await runClassA(`http://127.0.0.1:${(broken.address() as { port: number }).port}`, (e) => { if (e.result === 'fail') bad.push(e); });
+      const r2 = await runClassA(`http://127.0.0.1:${(broken.address() as { port: number }).port}`, (e) => { if (e.result === 'fail') bad.push(e); }, { appOrigin: ORIGIN });
       expect(r2.fail).toBe(1);
       expect(bad).toEqual([{ event: 'probe', id: 'api-get/api/dashboard', result: 'fail', reason: 'cookie' }]);
     } finally {

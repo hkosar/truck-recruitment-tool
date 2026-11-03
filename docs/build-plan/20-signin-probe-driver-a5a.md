@@ -23,9 +23,11 @@ mail route. Every state-changing request is refused before the app reaches the d
 | No Supabase-style routes | `GET`/`POST` of `/rest/v1/…`, `/graphql/v1`, `/storage/v1/…`, `/realtime/v1/…`, `/auth/v1/…` | 404 on `GET`, 405 on `POST`, never JSON |
 | Webhook | unsigned `POST /webhooks/sendgrid` | 401 or 404 |
 
-Every response is also checked for two rules: any `Set-Cookie` must be a clearing cookie (empty value,
-`Max-Age=0`), and nothing may contain `token=` followed by 16 or more token characters or a session or
-confirm cookie value.
+Every response is also checked for these rules: any `Set-Cookie` must be a clearing cookie (empty value,
+`Max-Age=0`); and nothing in any header name, header value or body may contain `token=` followed by 16 or
+more token characters, a session or confirm cookie value, an email address, a UUID, a JWT, a bearer
+credential, or a 32+ character opaque string with a digit (the sign-in page's placeholder `you@example.com`
+is the one address allowed, in the body only). A hit fails the probe with `leak`; only the word is printed.
 
 ## Output
 
@@ -36,7 +38,9 @@ Only fixed JSON lines. Never a URL, cookie, token, link, body, header value or e
     {"event":"summary","pass":N,"fail":M,"expected":N}
 
 Reasons: `status`, `location`, `body`, `header`, `cookie`, `leak`, `network`. Exit 0 only if every probe
-passed and the expected number ran; 1 if any failed; 2 for a refused origin or bad arguments.
+passed and the expected number ran; 1 if any failed; 2 for a refused origin or bad arguments; 3 if nothing
+was executed (fixed error `error: no probes were executed`). Running the script through a linked folder
+(junction or symlink) works the same as the direct path.
 
 ## Safety limits (enforced in code, covered by tests)
 
@@ -45,7 +49,13 @@ passed and the expected number ran; 1 if any failed; 2 for a refused origin or b
 - It always connects to `127.0.0.1` (the name `localhost` is never looked up).
 - It never requests `/auth/request` (the only route that can start a mail). A test checks the probe table.
   The app launcher forces `EMAIL_MODE=test`, so even a mistake could not send real mail.
-- It never follows a redirect, caps each response at 256 KB, and times out each request after 10 s.
+- It never follows a redirect. A redirect `Location` must be a path on the app (one leading `/`) or start with
+  exactly `--app-origin` (optional; `http(s)://host[:port]`, lower case, no path; compared as text and never
+  connected to). Any other host fails the probe with `location`. The real app redirects to its absolute
+  `APP_ORIGIN`, so pass that value as `--app-origin` (the local test does).
+- Each request has a TOTAL 10 s limit (connect, headers and the whole body; a server that drips or streams
+  forever fails the probe with `network`), and a response over 256 KB fails with `body`.
+- `--origin` with port 80 (`http://127.0.0.1:80`) is refused; use another port.
 - It reads no environment variable and no secret.
 
 ## The future command (NOT RUN)
@@ -60,7 +70,7 @@ use the scoped staging Doppler token.
 
 2. In a second terminal, run the probes:
 
-       node scripts/signin-probes-a5a.mjs --origin http://127.0.0.1:8788
+       node scripts/signin-probes-a5a.mjs --origin http://127.0.0.1:8788 --app-origin <the app's APP_ORIGIN>
 
    Pass = exit code 0 and `{"event":"summary","pass":<N>,"fail":0,"expected":<N>}`. Run it once before
    and once after cutover (doc 14 §8.1), keep only the event lines.

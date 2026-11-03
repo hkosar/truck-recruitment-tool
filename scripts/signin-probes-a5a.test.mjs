@@ -44,10 +44,13 @@ test('the probe table never sends mail, uses no cookie or key, and has unique id
   const ids = PROBES.map((p) => p.id);
   assert.equal(new Set(ids).size, ids.length);
   for (const p of PROBES) {
-    assert.notEqual(p.req.path, '/auth/request', p.id);
+    const pathname = new URL(p.req.path, 'http://127.0.0.1').pathname.replace(/\/+$/, '').toLowerCase();
+    assert.notEqual(pathname, '/auth/request', p.id);
+    assert.ok(!decodeURIComponent(p.req.path).toLowerCase().includes('/auth/request'), p.id);
     assert.equal(p.req.headers?.cookie, undefined, p.id);
     assert.equal(p.req.headers?.authorization, undefined, p.id);
-    assert.ok(!/^\/auth\/v1\//.test(p.req.path) || p.req.method === 'POST' || p.req.method === undefined, p.id);
+    assert.ok(['GET', 'POST', 'PUT', 'DELETE', 'PATCH', 'OPTIONS'].includes(p.req.method ?? 'GET'), p.id);
+    if (/^\/(auth|rest|graphql|storage|realtime)\/v1/.test(p.req.path)) assert.ok(p.req.body === undefined || p.req.body === '{}', p.id);
   }
   assert.ok(PROBES.length >= 80);
 });

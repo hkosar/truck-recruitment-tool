@@ -6,7 +6,10 @@
 //
 // What it does: sends 80 requests that can only be answered with a refusal, a redirect, a fixed page or an empty result:
 // no login, no cookie sent, no key, no mail (it never calls /auth/request, which is what could start a mail), no write
-// (every state-changing request is refused before the app reaches the database). It prints ONLY fixed JSON events:
+// (every state-changing request is refused before the app reaches the database). Redirects: a Location must be a path on
+// the app (one leading "/") or start with exactly --app-origin (optional, text comparison only, never connected to);
+// any other host fails the probe with "location". Each request has a TOTAL time limit (10 s, body included) and a 256 KB body
+// cap; a breach fails the probe ("network" / "body"). A run that executes nothing exits 3. It prints ONLY fixed JSON events:
 //   {"event":"probe","id":"<fixed id>","result":"pass"}
 //   {"event":"probe","id":"<fixed id>","result":"fail","reason":"status|location|body|header|cookie|leak|network"}
 //   {"event":"summary","pass":N,"fail":M,"expected":N}
@@ -22,6 +25,8 @@
 // serve any Supabase-style route itself.
 
 import { request } from 'node:http';
+import { realpathSync } from 'node:fs';
+import { basename } from 'node:path';
 import { fileURLToPath } from 'node:url';
 
 export const LOCAL_HOSTS = ['localhost', '127.0.0.1'];
@@ -43,47 +48,98 @@ export function parseLocalOrigin(raw) {
   return { hostHeader: `${u.hostname}:${port}`, port };
 }
 
-export function parseArgs(argv) {
-  let origin;
-  for (let i = 0; i < argv.length; i += 1) {
-    if (argv[i] === '--origin') origin = argv[++i];
-    else throw new Error('usage: node scripts/signin-probes-a5a.mjs --origin http://127.0.0.1:<port>');
-  }
-  if (origin === undefined) throw new Error('usage: node scripts/signin-probes-a5a.mjs --origin http://127.0.0.1:<port>');
-  return { origin };
+/** Throws a fixed message unless `raw` is exactly scheme://host[:port] (lower case, no path, query, user or fragment). Only compared as text, never connected to. */
+export function parseAppOrigin(raw) {
+  const refuse = () => { throw new Error('refusing: --app-origin must be exactly http(s)://<host>[:<port>] with no path, query or user'); };
+  if (typeof raw !== 'string' || !/^https?:\/\/[a-z0-9.-]+(:\d{1,5})?$/.test(raw)) refuse();
+  let u;
+  try { u = new URL(raw); } catch { return refuse(); }
+  if (u.origin !== raw) refuse();
+  return raw;
 }
 
-function send(target, { method = 'GET', path, headers = {}, body }) {
+const USAGE = 'usage: node scripts/signin-probes-a5a.mjs --origin http://127.0.0.1:<port> [--app-origin <origin>]';
+export function parseArgs(argv) {
+  let origin;
+  let appOrigin;
+  for (let i = 0; i < argv.length; i += 1) {
+    if (argv[i] === '--origin' && origin === undefined) origin = argv[++i];
+    else if (argv[i] === '--app-origin' && appOrigin === undefined) appOrigin = argv[++i];
+    else throw new Error(USAGE);
+  }
+  if (origin === undefined) throw new Error(USAGE);
+  return appOrigin === undefined ? { origin } : { origin, appOrigin };
+}
+
+// One request with a TOTAL time limit (connect, headers and the whole body) and a body cap; either breach ends the exchange at once.
+function send(target, { method = 'GET', path, headers = {}, body }, timeoutMs) {
   return new Promise((resolve) => {
+    let done = false;
+    let req;
+    const timer = setTimeout(() => finish({ ok: false }), timeoutMs);
+    const finish = (result) => {
+      if (done) return;
+      done = true;
+      clearTimeout(timer);
+      resolve(result);
+      req?.destroy();
+    };
     const h = { host: target.hostHeader, connection: 'close', ...headers };
     if (body !== undefined) h['content-length'] = String(Buffer.byteLength(body));
-    const req = request({ host: CONNECT_HOST, port: target.port, method, path, headers: h, timeout: REQUEST_TIMEOUT_MS }, (res) => {
+    req = request({ host: CONNECT_HOST, port: target.port, method, path, headers: h }, (res) => {
+      const base = { ok: true, status: res.statusCode ?? 0, headers: res.headers, cookies: [].concat(res.headers['set-cookie'] ?? []) };
       const chunks = [];
       let size = 0;
-      res.on('data', (c) => { size += c.length; if (size <= MAX_BODY) chunks.push(c); });
-      res.on('end', () => resolve({ ok: true, status: res.statusCode ?? 0, headers: res.headers, cookies: [].concat(res.headers['set-cookie'] ?? []), body: Buffer.concat(chunks).toString('utf8') }));
-      res.on('error', () => resolve({ ok: false }));
+      res.on('data', (c) => {
+        size += c.length;
+        if (size > MAX_BODY) finish({ ...base, tooBig: true, body: '' });
+        else chunks.push(c);
+      });
+      res.on('end', () => finish({ ...base, body: Buffer.concat(chunks).toString('utf8') }));
+      res.on('error', () => finish({ ok: false }));
+      res.on('aborted', () => finish({ ok: false }));
     });
-    req.on('timeout', () => req.destroy());
-    req.on('error', () => resolve({ ok: false }));
+    req.on('error', () => finish({ ok: false }));
     req.end(body);
   });
 }
 
 // A cookie the app may set on a signed-out request: only one that clears (empty value, Max-Age=0).
 const isClearing = (c) => /^[^=]+=;/.test(c) && /;\s*Max-Age=0(;|$)/i.test(c);
-// Things that must never appear in any response here: a link token, a session/confirm cookie value.
-const LEAK = /token=[A-Za-z0-9_-]{16,}|__Host-tr_[a-z_]+=[A-Za-z0-9_-]{16,}/;
+// Things that must never appear in any response here (header names, header values or body): a link token, a session/confirm
+// cookie value, an email address, a UUID, a JWT, a bearer credential, or a long opaque string (32+ token characters with a digit).
+const LEAK_SHAPES = [
+  /token=[A-Za-z0-9_-]{16,}/,
+  /__Host-tr_[a-z_]+=[A-Za-z0-9_-]{16,}/,
+  /[A-Za-z0-9._%+'-]+@[A-Za-z0-9-]+(\.[A-Za-z0-9-]+)*\.[A-Za-z]{2,}/,
+  /\b[0-9a-f]{8}-[0-9a-f]{4}-[0-9a-f]{4}-[0-9a-f]{4}-[0-9a-f]{12}\b/i,
+  /\beyJ[A-Za-z0-9_-]{8,}\.[A-Za-z0-9_-]{8,}\.[A-Za-z0-9_-]*/,
+  /\bbearer\s+[A-Za-z0-9._~+/=-]{8,}/i,
+  /(?=[A-Za-z0-9_-]*[0-9])(?=[A-Za-z0-9_-]*[A-Za-z])[A-Za-z0-9_-]{32,}/,
+];
+// The sign-in page shows this fixed example address as the input placeholder; it is the one email allowed in a body.
+const PLACEHOLDER_EMAIL = 'you@example.com';
+const leaks = (text) => LEAK_SHAPES.some((re) => re.test(text));
+const headerText = (headers) => Object.entries(headers ?? {}).map(([k, v]) => `${k}: ${[].concat(v).join(', ')}`).join('\n');
 
-/** Returns null when the response meets the expectation, else a fixed reason word. */
-export function judge(res, exp) {
+/** The path of a redirect target if it stays on the app (one leading "/", or exactly `appOrigin` + path), else null. */
+function localPath(loc, appOrigin) {
+  if (/^\/(?![/\\])/.test(loc)) return loc;
+  if (appOrigin !== undefined && loc.startsWith(`${appOrigin}/`) && !/^\/[/\\]/.test(loc.slice(appOrigin.length))) return loc.slice(appOrigin.length);
+  return null;
+}
+
+/** Returns null when the response meets the expectation, else a fixed reason word. `appOrigin` (optional) is the one origin a redirect may name. */
+export function judge(res, exp, appOrigin) {
   if (!res.ok) return 'network';
   if (res.cookies.some((c) => !isClearing(c))) return 'cookie';
-  if (LEAK.test(res.body) || LEAK.test(JSON.stringify(res.headers))) return 'leak';
+  if (leaks(res.body.replaceAll(PLACEHOLDER_EMAIL, '')) || leaks(headerText(res.headers))) return 'leak';
+  if (res.tooBig) return 'body';
   if (!exp.status.includes(res.status)) return 'status';
   if (exp.location !== undefined) {
     const loc = res.headers.location;
-    if (typeof loc !== 'string' || !exp.location.test(loc)) return 'location';
+    const path = typeof loc === 'string' ? localPath(loc, appOrigin) : null;
+    if (path === null || !exp.location.test(path)) return 'location';
   }
   if (exp.json !== undefined) {
     let parsed;
@@ -103,8 +159,8 @@ export function judge(res, exp) {
 
 const JSON_POST = { 'content-type': 'application/json', origin: FOREIGN_ORIGIN };
 const NAV = { accept: 'text/html', 'sec-fetch-mode': 'navigate' };
-const toSignin = /^(https?:\/\/[^/]+)?\/signin$/;
-const toConfirm = /^(https?:\/\/[^/]+)?\/auth\/confirm\?x=[A-Za-z0-9_-]+$/;
+const toSignin = /^\/signin$/;
+const toConfirm = /^\/auth\/confirm\?x=[A-Za-z0-9_-]+$/;
 const PAGE_HEADERS = { 'x-content-type-options': 'nosniff', 'cache-control': 'no-store', 'content-security-policy': /frame-ancestors 'none'/ };
 const staleExp = { status: [200], bodyHas: ['/signin'], bodyLacks: ['name="csrf_token"', 'name="nonce"'], headers: PAGE_HEADERS };
 
@@ -149,13 +205,14 @@ export const PROBES = buildProbes();
 export const PROBE_COUNT = PROBES.length;
 
 /** Runs every probe in order. `emit` receives each fixed event object. Returns { pass, fail, expected }. */
-export async function runClassA(origin, emit = () => {}) {
+export async function runClassA(origin, emit = () => {}, { appOrigin, timeoutMs = REQUEST_TIMEOUT_MS } = {}) {
   const target = parseLocalOrigin(origin);
+  if (appOrigin !== undefined) parseAppOrigin(appOrigin);
   let pass = 0;
   let fail = 0;
   for (const probe of PROBES) {
-    const res = await send(target, probe.req);
-    const reason = judge(res, probe.exp);
+    const res = await send(target, probe.req, timeoutMs);
+    const reason = judge(res, probe.exp, appOrigin);
     if (reason === null) { pass += 1; emit({ event: 'probe', id: probe.id, result: 'pass' }); }
     else { fail += 1; emit({ event: 'probe', id: probe.id, result: 'fail', reason }); }
   }
@@ -163,13 +220,34 @@ export async function runClassA(origin, emit = () => {}) {
   return { pass, fail, expected: PROBES.length };
 }
 
-async function main() {
-  let origin;
-  try { ({ origin } = parseArgs(process.argv.slice(2))); parseLocalOrigin(origin); } catch (err) { process.stderr.write(`${err.message}\n`); return 2; }
-  const { fail, pass, expected } = await runClassA(origin, (e) => process.stdout.write(`${JSON.stringify(e)}\n`));
+/** 0 only when every expected probe ran and passed; 3 when nothing ran (never a silent success); 1 otherwise. */
+export function exitCodeFor({ pass, fail, expected }) {
+  if (pass + fail === 0) return 3;
   return fail === 0 && pass === expected ? 0 : 1;
 }
 
-if (process.argv[1] && fileURLToPath(import.meta.url) === process.argv[1]) {
-  main().then((code) => { process.exitCode = code; });
+async function main() {
+  let origin;
+  let appOrigin;
+  try {
+    ({ origin, appOrigin } = parseArgs(process.argv.slice(2)));
+    parseLocalOrigin(origin);
+    if (appOrigin !== undefined) parseAppOrigin(appOrigin);
+  } catch (err) { process.stderr.write(`${err.message}\n`); return 2; }
+  const code = exitCodeFor(await runClassA(origin, (e) => process.stdout.write(`${JSON.stringify(e)}\n`), { appOrigin }));
+  if (code === 3) process.stderr.write('error: no probes were executed\n');
+  return code;
+}
+
+// True when this file is the script node was started with, also through a linked folder (junction or symlink) or another path spelling.
+function isEntryPoint() {
+  const entry = process.argv[1];
+  if (!entry) return false;
+  const self = fileURLToPath(import.meta.url);
+  try { if (realpathSync(entry).toLowerCase() === realpathSync(self).toLowerCase()) return true; } catch { /* fall back to the name */ }
+  return basename(entry).toLowerCase() === basename(self).toLowerCase();
+}
+
+if (isEntryPoint()) {
+  main().then((code) => { process.exitCode = code; }, () => { process.stderr.write('error: probe run failed\n'); process.exitCode = 3; });
 }
