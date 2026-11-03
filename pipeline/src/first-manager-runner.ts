@@ -1,5 +1,5 @@
 import { pathToFileURL } from 'node:url';
-import pg from 'pg';
+import { newSecurePgClient } from './pg-secure.js';
 import { RunnerRefusal, asPlanRefusal, classifyRunnerFailure } from './refusals.js';
 import { FirstManagerResultUnknown, executeFirstManagerPlan, planFirstManager, selectFirstManagerDbUrl } from './first-manager-bootstrap.js';
 import type { RebuiltSqlClient } from './staging-rebuilt.js';
@@ -32,11 +32,8 @@ export function parseFirstManagerArgs(argv: readonly string[]): { target: string
 }
 
 const defaultClientFactory = (db: SupabaseDbTarget): RebuiltSqlClient =>
-  new pg.Client({
-    host: db.host, port: db.port, user: db.user, password: db.password, database: db.database,
-    // Same relaxed pooler TLS setting as the other runners (see db.ts TODO(live-db)).
-    ssl: { rejectUnauthorized: false },
-  });
+  // TLS verify-full against the pinned root, SCRAM-only (pg-secure.ts / db-tls.ts).
+  newSecurePgClient(db);
 
 export async function main(argv: readonly string[], env: Readonly<Record<string, string | undefined>>, clientFactory = defaultClientFactory): Promise<void> {
   const args = parseFirstManagerArgs(argv);

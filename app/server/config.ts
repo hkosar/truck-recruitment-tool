@@ -1,6 +1,8 @@
 // Environment configuration, validated at boot (Quote-Queue lib/env.ts pattern). Error messages
 // name the variable and the rule only; values are never echoed (QQ gap D3).
 
+import { DbTlsRefusal, dbConnectionFieldsFromUrl, dbTlsOptions } from '../../pipeline/src/db-tls';
+
 export interface ServerEnv {
   appOrigin: string;
   keys: { links: string; sessions: string; rate: string };
@@ -57,6 +59,16 @@ export function parseServerEnv(env: Record<string, string | undefined>): ServerE
   if (new Set(Object.values(keys)).size !== 3) throw new ConfigError('KEY_LINKS', 'the three keys must differ');
   const databaseUrl = required(env, 'DATABASE_URL');
   if (!/^postgres(ql)?:\/\//.test(databaseUrl)) throw new ConfigError('DATABASE_URL', 'must be a postgres:// URL');
+  // The database connection policy (pipeline/src/db-tls.ts), checked at boot so a refusal names its rule: no query
+  // parameters (they could override the host or TLS), and a hosted database needs a valid pinned root certificate.
+  try {
+    dbTlsOptions(dbConnectionFieldsFromUrl(databaseUrl).host);
+  } catch (err) {
+    if (!(err instanceof DbTlsRefusal)) throw err;
+    if (err.reason === 'invalid_url') throw new ConfigError('DATABASE_URL', 'must be a postgres:// URL with a host and no query parameters or fragment');
+    if (err.reason === 'no_trusted_ca') throw new ConfigError('DATABASE_URL', 'a hosted database needs verify-full TLS, and no root certificate is pinned (pipeline/src/supabase-root-ca.ts)');
+    throw new ConfigError('DATABASE_URL', 'the pinned root certificate is not a valid CA certificate matching its SHA-256 (pipeline/src/supabase-root-ca.ts)');
+  }
   const emailMode = env.EMAIL_MODE === 'production' ? 'production' : env.EMAIL_MODE === 'test' ? 'test' : undefined;
   if (!emailMode) throw new ConfigError('EMAIL_MODE', "must be 'test' or 'production'");
   const sendgrid = emailMode === 'production'

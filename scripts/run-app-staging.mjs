@@ -20,6 +20,8 @@
 // (APP_LOG_EVENTS; no free text), or one of the exact fixed config-error messages of app/server/config.ts (complete lines only).
 // Secret masking (plain, URL-encoded in any hex case, JSON-escaped) is a second layer; a database password under 8 characters is
 // refused at start. Everything else is withheld and counted. Environment values are never printed. Exit status is the child's.
+// The app itself connects with verify-full TLS against the pinned Supabase root and SCRAM-SHA-256 only (pipeline/src/db-tls.ts);
+// with no root pinned it stops at start with a fixed DATABASE_URL config-error line, which is shown here.
 
 import { spawn } from 'node:child_process';
 import { existsSync } from 'node:fs';
@@ -141,6 +143,10 @@ export const CONFIG_ERROR_MESSAGES = [
   'TRUSTED_PROXY_HOPS: must be an integer 0-5',
   'DB_ACQUIRE_TIMEOUT_MS: must be an integer number of milliseconds, 500-30000',
   'PORT: must be a port number',
+  // The database connection policy (pipeline/src/db-tls.ts), checked by config.ts at boot.
+  'DATABASE_URL: must be a postgres:// URL with a host and no query parameters or fragment',
+  'DATABASE_URL: a hosted database needs verify-full TLS, and no root certificate is pinned (pipeline/src/supabase-root-ca.ts)',
+  'DATABASE_URL: the pinned root certificate is not a valid CA certificate matching its SHA-256 (pipeline/src/supabase-root-ca.ts)',
 ];
 const CONFIG_ERROR_LINES = new Set([...CONFIG_ERROR_MESSAGES, ...CONFIG_ERROR_MESSAGES.map((m) => `ConfigError: ${m}`)]);
 /**
@@ -202,7 +208,8 @@ export function maskLine(text, targets) {
  * `targets` (launcherMaskTargets of every secret) are masked in the raw line before parsing and in the final line as a second layer.
  */
 export function appLogLine(raw, counter = { fields: 0 }, targets = []) {
-  const line = raw.replace(/\r?\n$/, '');
+  // The stream splitter cuts at \n only; on Windows Node's crash printer ends lines with \r\n, so one trailing \r goes too.
+  const line = raw.replace(/\r?\n$/, '').replace(/\r$/, '');
   if (CONFIG_ERROR_LINES.has(line)) return line;
   let obj;
   try { obj = JSON.parse(maskLine(line, targets)); } catch { return null; }
@@ -251,6 +258,8 @@ export async function main({ argv, env = process.env, stdout = process.stdout, s
   const { port } = parseAppArgs(argv);
   const childEnv = buildAppEnv(env, port);
   if (!existsSync(resolve(appDir, entry))) throw new Error('refusing: app/dist-server/main.js is not built (run `npm run build:server` in app first; this launcher builds and installs nothing)');
+  // The server reads the web pages from app/dist at start (STATIC_DIR default) and crashes without them.
+  if (!existsSync(resolve(appDir, 'dist', 'index.html'))) throw new Error('refusing: app/dist/index.html is not built (run `npm run build` in app first; this launcher builds and installs nothing)');
   const targets = [...new Set(APP_SECRET_NAMES.flatMap((n) => launcherMaskTargets(childEnv[n])))].sort((a, b) => b.length - a.length);
   const counter = { lines: 0, fields: 0 };
   return new Promise((done, fail) => {
@@ -270,10 +279,20 @@ export async function main({ argv, env = process.env, stdout = process.stdout, s
   });
 }
 
+/**
+ * What the launcher does when it gets a signal. On Windows, Ctrl+C reaches every process on the console, so the app gets it
+ * itself and runs its orderly shutdown (stop admission, drain, close the pools); forwarding with child.kill would end the
+ * app at once (Windows has no signal delivery; kill is TerminateProcess). Elsewhere the signal is forwarded. Either way the
+ * launcher stays until the app exits and reports its exit code.
+ */
+export function signalAction(platform, signal) {
+  return platform === 'win32' && signal === 'SIGINT' ? 'wait' : 'forward';
+}
+
 if (process.argv[1] && resolve(process.argv[1]) === fileURLToPath(import.meta.url)) {
   let child;
-  const forward = (sig) => () => { if (child) child.kill(sig); };
-  process.on('SIGINT', forward('SIGINT'));
-  process.on('SIGTERM', forward('SIGTERM'));
+  const onSignal = (sig) => () => { if (child && signalAction(process.platform, sig) === 'forward') child.kill(sig); };
+  process.on('SIGINT', onSignal('SIGINT'));
+  process.on('SIGTERM', onSignal('SIGTERM'));
   main({ argv: process.argv.slice(2), onChild: (c) => { child = c; } }).then((code) => { process.exitCode = code; }, (e) => { console.error(e.message); process.exitCode = 2; });
 }

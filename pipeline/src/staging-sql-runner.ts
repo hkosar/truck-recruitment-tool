@@ -1,7 +1,7 @@
 import { readFileSync } from 'node:fs';
 import { resolve } from 'node:path';
 import { pathToFileURL } from 'node:url';
-import pg from 'pg';
+import { newSecurePgClient } from './pg-secure.js';
 import { RunnerRefusal, asPlanRefusal, classifyRunnerFailure } from './refusals.js';
 import { OWNER_AUTH_CREATE_ACTION, planOwnerAuthCreate, runOwnerAuthCreate } from './owner-bootstrap.js';
 import { executeRebuiltSqlPlan, planRebuiltSqlRun, requireRecordedRebuiltRef } from './staging-rebuilt.js';
@@ -91,15 +91,8 @@ export function planStagingSqlRun(input: { action: string; dbUrl: string | undef
 
 export async function executeStagingSqlPlan(plan: StagingSqlPlan): Promise<void> {
   const sql = readFileSync(plan.file, 'utf8');
-  const client = new pg.Client({
-    host: plan.target.host,
-    port: plan.target.port,
-    user: plan.target.user,
-    password: plan.target.password,
-    database: plan.target.database,
-    // Same relaxed pooler TLS setting as the pipeline (see db.ts TODO(live-db)).
-    ssl: { rejectUnauthorized: false },
-  });
+  // TLS verify-full against the pinned root, SCRAM-only (pg-secure.ts / db-tls.ts).
+  const client = newSecurePgClient(plan.target);
   // A dropped connection emits 'error' on the client; with no listener Node throws it as an uncaught
   // exception. The query in flight (or the next one) rejects, which main() reports as server_or_driver_error.
   client.on('error', () => undefined);

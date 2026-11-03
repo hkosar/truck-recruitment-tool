@@ -1,3 +1,5 @@
+import { isDbSecurityFailure } from './db-tls.js';
+
 /**
  * Fixed identifiers for everything the staging SQL runner itself refuses, and the only way a failure reaches the
  * owner's screen (via scripts/run-with-secrets.mjs, which keeps its own copy of REFUSAL_IDS; a contract test keeps the
@@ -53,6 +55,7 @@ export const REFUSAL_IDS = [
   'prod_sql_l1_stop_table_populated',
   'prod_sql_l1_stop_table_lock_failed',
   'prod_sql_l1_statement_timeout',
+  'db_tls_refused',
   'server_or_driver_error',
 ] as const;
 export type RefusalId = (typeof REFUSAL_IDS)[number];
@@ -83,6 +86,8 @@ const isForwardableCode = (code: string): boolean => SQLSTATE.test(code) || (DRI
 /** What may be printed about any failure: an identifier and, for a database/driver failure, a validated code. */
 export function classifyRunnerFailure(err: unknown): { refusal: RefusalId; err_code?: string } {
   if (err instanceof RunnerRefusal) return { refusal: err.id };
+  // No pinned root, a TLS verification failure, or a cleartext/MD5/unfinished-SCRAM request (db-tls.ts): one fixed reason.
+  if (isDbSecurityFailure(err)) return { refusal: 'db_tls_refused' };
   const known = err instanceof Error && Object.prototype.hasOwnProperty.call(KNOWN_SERVER_REFUSALS, err.message) ? KNOWN_SERVER_REFUSALS[err.message] : undefined;
   if (known) return { refusal: known };
   const code = typeof err === 'object' && err !== null ? (err as { code?: unknown }).code : undefined;

@@ -1,7 +1,7 @@
 import { createHash } from 'node:crypto';
 import { existsSync, readFileSync, readdirSync, writeFileSync } from 'node:fs';
 import { isAbsolute, relative, resolve } from 'node:path';
-import pg from 'pg';
+import { newSecurePgClient } from './pg-secure.js';
 import { M1C_POSTCONDITION_SQL, M1C_STATE_PROBE_SQL, REAPPLY_POST_SQL, REAPPLY_PRECHECKS, classifyM1cState, idempotentReapplySql, type M1cStateFacts, type ReapplyTarget } from './reapply.js';
 import { reportEnvironmentPreflight, runEnvironmentPreflight } from './environment-preflight.js';
 import { OWNER_CHECK_CONFIRMATION, OWNER_PROMOTE_CONFIRMATION, runOwnerLoginCheck, runOwnerPromotion } from './owner-bootstrap.js';
@@ -251,15 +251,8 @@ export interface RebuiltSqlClient {
 }
 
 const defaultClientFactory = (target: SupabaseDbTarget): RebuiltSqlClient =>
-  new pg.Client({
-    host: target.host,
-    port: target.port,
-    user: target.user,
-    password: target.password,
-    database: target.database,
-    // Same relaxed pooler TLS setting as the pipeline (see db.ts TODO(live-db)).
-    ssl: { rejectUnauthorized: false },
-  });
+  // TLS verify-full against the pinned root, SCRAM-only (pg-secure.ts / db-tls.ts).
+  newSecurePgClient(target);
 
 export async function executeRebuiltSqlPlan(plan: RebuiltSqlPlan, clientFactory: (target: SupabaseDbTarget) => RebuiltSqlClient = defaultClientFactory): Promise<void> {
   const client = clientFactory(plan.target);

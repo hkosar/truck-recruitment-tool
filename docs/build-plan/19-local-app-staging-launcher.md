@@ -5,11 +5,11 @@ It exists because `scripts/run-with-secrets.mjs` cannot start the app: its allow
 
 ## Future launch command (NOT RUN by the author of this change)
 
-From the staging worktree root (the launcher must run from that folder, because the Doppler token is scoped to it: `C:\Users\hunte\.bb\plugins\environment-git-worktree\host-data\worktrees\thr_dnq6nmqppt-1\truck-recruitment-tool`), in PowerShell, after `npm run build:server` has produced `app/dist-server/main.js` (the launcher builds and installs nothing):
+From the staging worktree root (the launcher must run from that folder, because the Doppler token is scoped to it: `C:\Users\hunte\.bb\plugins\environment-git-worktree\host-data\worktrees\thr_dnq6nmqppt-1\truck-recruitment-tool`), in PowerShell, after `npm run build` has produced `app/dist` (the web pages) and `npm run build:server` has produced `app/dist-server/main.js` (the launcher builds and installs nothing, and refuses if either is missing). It also cannot connect until a Supabase root certificate is pinned (see "Database connection security" below); until then the app stops at start with a fixed `DATABASE_URL:` configuration line:
 
     doppler --config-dir "$env:USERPROFILE\.doppler-truck-stg" --no-read-env --no-check-version --scope 'C:\Users\hunte\.bb\plugins\environment-git-worktree\host-data\worktrees\thr_dnq6nmqppt-1\truck-recruitment-tool' run --no-fallback --project truck-recruitment-tool --config stg -- node scripts\run-app-staging.mjs --port 8788
 
-This uses only the manager's reviewed staging token (config folder `.doppler-truck-stg`). Never use Hunter's full Doppler login for this launch. Stop it with Ctrl+C in that window, or by stopping only the process that was started (by its PID).
+This uses only the manager's reviewed staging token (config folder `.doppler-truck-stg`). Never use Hunter's full Doppler login for this launch. Stop it with Ctrl+C in that window (on Windows the app receives Ctrl+C itself and shuts down in order; the launcher waits for it and reports its exit code), or by stopping only the process that was started (by its PID).
 
 ## Doppler `stg` names the app needs (exactly four; none exist yet)
 
@@ -22,7 +22,13 @@ Not read from Doppler: `APP_ORIGIN`, `EMAIL_MODE`, `HOST`, `PORT`, `TRUSTED_PROX
 
 ## What the launcher refuses
 
-Wrong Doppler project or config; any of the four names missing or empty; a `DATABASE_URL` that is not the recorded staging-2 project (checked with `parseSupabaseDbTarget` and `RECORDED_PROJECT_REFS` from `pipeline/src/target-guard.ts`; production and the old staging project are named refusals), is not the `recruiter_app` login, or is not on port 5432; `EMAIL_MODE` set to anything but `test`; `HOST` set to anything but `127.0.0.1`; any `SENDGRID_*` name; a port outside 1024-65535; an unbuilt app.
+Wrong Doppler project or config; any of the four names missing or empty; a `DATABASE_URL` that is not the recorded staging-2 project (checked with `parseSupabaseDbTarget` and `RECORDED_PROJECT_REFS` from `pipeline/src/target-guard.ts`; production and the old staging project are named refusals), is not the `recruiter_app` login, or is not on port 5432; `EMAIL_MODE` set to anything but `test`; `HOST` set to anything but `127.0.0.1`; any `SENDGRID_*` name; a port outside 1024-65535; an unbuilt app (`app/dist-server/main.js` or `app/dist/index.html` missing).
+
+## Database connection security (pipeline/src/db-tls.ts)
+
+The app server and every pipeline runner use one policy. A hosted database (anything but localhost, 127.0.0.0/8 or ::1) is reached only over TLS with the server certificate checked against the pinned Supabase root in `pipeline/src/supabase-root-ca.ts` (Node's own certificate list is not used) and the host name checked against the certificate. There is no setting that turns the check off. Only SCRAM-SHA-256 sign-in is allowed: a server asking for a cleartext or MD5 password gets no password. SCRAM channel binding is on and used when the server offers it. A `DATABASE_URL` with query parameters (for example `?sslmode=`) is refused.
+
+No root is pinned yet. Supabase's documentation says the certificate is downloaded per project from the dashboard (Database Settings, SSL Configuration); it links no public file. Until the owner downloads it and a reviewed commit pins it (with its SHA-256), every hosted connection is refused before anything is sent: the app shows `DATABASE_URL: a hosted database needs verify-full TLS, and no root certificate is pinned (pipeline/src/supabase-root-ca.ts)` and the runners report `db_tls_refused`. Local test databases on 127.0.0.1 are unaffected (no TLS, still SCRAM-only).
 
 ## Output
 

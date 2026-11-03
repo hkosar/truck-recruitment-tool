@@ -7,7 +7,7 @@ import { tmpdir } from 'node:os';
 import { join } from 'node:path';
 import { PassThrough } from 'node:stream';
 import { test } from 'node:test';
-import { APP_BASE_NAMES, APP_LOG_EVENTS, APP_SECRET_NAMES, CONFIG_ERROR_MESSAGES, MIN_MASKABLE_LENGTH, appLogLine, buildAppEnv, launcherMaskTargets, main, maskLine, parseAppArgs } from './run-app-staging.mjs';
+import { APP_BASE_NAMES, APP_LOG_EVENTS, APP_SECRET_NAMES, CONFIG_ERROR_MESSAGES, MIN_MASKABLE_LENGTH, appLogLine, buildAppEnv, launcherMaskTargets, main, maskLine, parseAppArgs, signalAction } from './run-app-staging.mjs';
 
 const STG2 = 'ojqtsftfclhxauhjwott';
 const OLD_STG = 'yhyoxhtguyturgdhwywc';
@@ -28,6 +28,12 @@ const goodEnv = () => ({
   STAGING_DB_URL: dbUrl('postgres', STG2),
 });
 const refused = (env, re) => assert.throws(() => buildAppEnv(env, 8788), re);
+/** A fake built app folder: dist-server/ for the entry the test writes, and dist/index.html (the web pages the server needs). */
+const builtApp = (dir) => {
+  mkdirSync(join(dir, 'dist-server'));
+  mkdirSync(join(dir, 'dist'));
+  writeFileSync(join(dir, 'dist', 'index.html'), '<!doctype html>');
+};
 
 test('accepts the exact staging scope; the child gets only base names, the four secrets and forced values', () => {
   const child = buildAppEnv(goodEnv(), 8788);
@@ -214,7 +220,7 @@ function leakForms(pw) {
 test('finding 1 and review round 3: JSON-escaped, unicode, URL (any hex case), base64, split lines/fields and byte-chunked forms never reach the output (through main)', async () => {
   const dir = mkdtempSync(join(tmpdir(), 'run-app-staging-test-'));
   try {
-    mkdirSync(join(dir, 'dist-server'));
+    builtApp(dir);
     writeFileSync(join(dir, 'dist-server', 'main.js'), [
       'const e = process.env;',
       'const pw = decodeURIComponent(new URL(e.DATABASE_URL).password);',
@@ -280,7 +286,7 @@ test('second layer: URL-encoded targets are masked in any mix of upper/lower-cas
 test('finding 3 through main: a fabricated config line is withheld and counted, an exact one is shown', async () => {
   const dir = mkdtempSync(join(tmpdir(), 'run-app-staging-test-'));
   try {
-    mkdirSync(join(dir, 'dist-server'));
+    builtApp(dir);
     writeFileSync(join(dir, 'dist-server', 'main.js'), [
       "console.error('ConfigError: KEY_LINKS: must include whatever diagnostic prose the app wrote');",
       "console.error('ConfigError: PORT: must be a port number');",
@@ -308,7 +314,7 @@ function sink() {
 test('a fake app runs on a localhost-only environment; only allow-listed lines pass, nothing else leaks', async () => {
   const dir = mkdtempSync(join(tmpdir(), 'run-app-staging-test-'));
   try {
-    mkdirSync(join(dir, 'dist-server'));
+    builtApp(dir);
     writeFileSync(join(dir, 'dist-server', 'main.js'), [
       'const e = process.env;',
       "const log = (event, f) => process.stdout.write(JSON.stringify({ at: new Date().toISOString(), event, ...f }) + '\\n');",
@@ -346,9 +352,62 @@ test('refuses to start (before any child) when the app is not built or a guard f
   try {
     await assert.rejects(main({ argv: [], env: goodEnv(), stdout: sink().stream, stderr: sink().stream, appDir: dir }), /not built/);
     await assert.rejects(main({ argv: [], env: { ...goodEnv(), EMAIL_MODE: 'production' }, stdout: sink().stream, stderr: sink().stream, appDir: dir }), /EMAIL_MODE must be test/);
+    // The server bundle alone is not enough: without app/dist the real app crashes at start, so the launcher refuses first.
+    mkdirSync(join(dir, 'dist-server'));
+    writeFileSync(join(dir, 'dist-server', 'main.js'), "process.stdout.write('started\\n');");
+    let started = false;
+    await assert.rejects(main({ argv: [], env: goodEnv(), stdout: sink().stream, stderr: sink().stream, appDir: dir, onChild: () => { started = true; } }), /^Error: refusing: app\/dist\/index\.html is not built \(run `npm run build` in app first; this launcher builds and installs nothing\)$/);
+    assert.equal(started, false);
   } finally {
     rmSync(dir, { recursive: true, force: true });
   }
+});
+
+test('review r3 finding 2: Windows line endings (CRLF) do not hide the exact config-error lines', async () => {
+  for (const m of ['KEY_LINKS: must be at least 43 base64url characters (256-bit key)', 'KEY_LINKS: the three keys must differ']) {
+    assert.equal(appLogLine(`ConfigError: ${m}\r`), `ConfigError: ${m}`);
+    assert.equal(appLogLine(`ConfigError: ${m}\r\n`), `ConfigError: ${m}`);
+  }
+  assert.equal(appLogLine('ConfigError: PORT: must be a port number\r\r'), null, 'only one trailing CR is removed');
+  assert.equal(appLogLine('ConfigError: PORT: must\r be a port number'), null);
+  const dir = mkdtempSync(join(tmpdir(), 'run-app-staging-test-'));
+  try {
+    builtApp(dir);
+    // The real failure mode: an uncaught ConfigError printed by Node's crash printer, plus explicit CRLF lines on any platform.
+    writeFileSync(join(dir, 'dist-server', 'main.js'), [
+      "process.stderr.write('ConfigError: KEY_LINKS: the three keys must differ\\r\\n');",
+      "process.stderr.write('ConfigError: KEY_LINKS: must include made-up prose\\r\\n');",
+      'class ConfigError extends Error { constructor(v, r) { super(`${v}: ${r}`); this.name = "ConfigError"; } }',
+      "throw new ConfigError('KEY_LINKS', 'must be at least 43 base64url characters (256-bit key)');",
+    ].join('\n'));
+    const out = sink();
+    const err = sink();
+    const code = await main({ argv: [], env: goodEnv(), stdout: out.stream, stderr: err.stream, appDir: dir });
+    assert.equal(code, 1);
+    const shown = err.text().split('\n').filter(Boolean);
+    assert.deepEqual(shown, ['ConfigError: KEY_LINKS: the three keys must differ', 'ConfigError: KEY_LINKS: must be at least 43 base64url characters (256-bit key)']);
+    assert.ok(!err.text().includes('\r') && !err.text().includes('made-up prose'));
+  } finally {
+    rmSync(dir, { recursive: true, force: true });
+  }
+});
+
+test('the database policy refusals of app/server/config.ts are on the exact config-error list', () => {
+  for (const m of [
+    'DATABASE_URL: must be a postgres:// URL with a host and no query parameters or fragment',
+    'DATABASE_URL: a hosted database needs verify-full TLS, and no root certificate is pinned (pipeline/src/supabase-root-ca.ts)',
+    'DATABASE_URL: the pinned root certificate is not a valid CA certificate matching its SHA-256 (pipeline/src/supabase-root-ca.ts)',
+  ]) {
+    assert.ok(CONFIG_ERROR_MESSAGES.includes(m), m);
+    assert.equal(appLogLine(`ConfigError: ${m}\r`), `ConfigError: ${m}`);
+  }
+});
+
+test('Ctrl+C on Windows is left to the app (orderly shutdown); other signals and platforms are forwarded', () => {
+  assert.equal(signalAction('win32', 'SIGINT'), 'wait');
+  assert.equal(signalAction('win32', 'SIGTERM'), 'forward');
+  assert.equal(signalAction('linux', 'SIGINT'), 'forward');
+  assert.equal(signalAction('darwin', 'SIGTERM'), 'forward');
 });
 
 test('the allow-list holds on its own: with NO masking targets every review reproduction is still withheld', () => {
@@ -365,7 +424,7 @@ test('the allow-list holds on its own: with NO masking targets every review repr
 test('config-error lines are buffered by complete lines: a split or partial line never passes, a whole one does', async () => {
   const dir = mkdtempSync(join(tmpdir(), 'run-app-staging-test-'));
   try {
-    mkdirSync(join(dir, 'dist-server'));
+    builtApp(dir);
     writeFileSync(join(dir, 'dist-server', 'main.js'), [
       "const w = (s) => new Promise((r) => setTimeout(() => { process.stderr.write(s); r(); }, 5));",
       '(async () => {',

@@ -76,7 +76,16 @@ for (const m of serverSource.matchAll(/\b(?:log|consoleLogger)\(\s*'([a-z_]+)'(?
   for (const part of (m[2] ?? '').split(',')) { const n = /^\s*([A-Za-z_]+)/.exec(part)?.[1]; if (n) set.add(n); }
   derived.set(m[1], set);
 }
-need(derived.size >= 10, 'could not derive the app log events from app/server (found ' + derived.size + ')');
+// A spread (`...extra`) or a non-literal field object hides field names from this check: refuse it instead of skipping it.
+for (const m of serverSource.matchAll(/\b(?:log|consoleLogger)\(\s*'([a-z_]+)'\s*,\s*\{([^}]*)\}/g)) {
+  need(!m[2].includes('...'), 'app log call for event ' + m[1] + ' spreads fields (...); list every field by name so the allow-list can be checked');
+}
+for (const m of serverSource.matchAll(/\b(?:log|consoleLogger)\(\s*'([a-z_]+)'\s*,\s*(?![\s{])/g)) {
+  need(false, 'app log call for event ' + m[1] + ' passes fields that are not an object literal; list every field by name so the allow-list can be checked');
+}
+need(/\.replace\(\/\\r\$\/, ''\)/.test(src), 'launcher must strip a trailing CR before matching a config-error line (Windows CRLF)');
+need(/existsSync\(resolve\(appDir, 'dist', 'index\.html'\)\)/.test(src), 'launcher must refuse when app/dist/index.html is not built');
+need(derived.size >= 10,'could not derive the app log events from app/server (found ' + derived.size + ')');
 for (const [event, fields] of derived) {
   need(events !== undefined && Object.prototype.hasOwnProperty.call(events, event), 'the app logs event ' + event + ' but the launcher allow-list lacks it (it would be withheld)');
   if (events && events[event]) need([...fields].sort().join() === Object.keys(events[event]).sort().join(), 'event ' + event + ': app fields (' + [...fields].sort().join() + ') differ from the allow-list (' + Object.keys(events[event]).sort().join() + ')');

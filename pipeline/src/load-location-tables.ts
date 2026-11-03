@@ -3,6 +3,7 @@ import pg from 'pg';
 import { parseSupabaseDbTarget, verifyPipelineTarget } from './target-guard.js';
 import { clientUsable, isDefiniteCommitRefusal, isRollbackTag } from './commit-outcome.js';
 import { guardClient, watchPoolClients } from './db.js';
+import { newSecurePgPool } from './pg-secure.js';
 
 /**
  * Standalone, one-off loader for the geocode fallback reference tables `zip_centroids` and
@@ -328,10 +329,8 @@ async function main(): Promise<void> {
     allowedDevRefs: (env.PIPELINE_ALLOWED_DEV_REFS ?? '').split(',').map((s) => s.trim()).filter(Boolean),
     allowStagingWrites: env.PIPELINE_ALLOW_STAGING_WRITES === 'true',
   });
-  const pool = new pg.Pool({
-    host: target.host, port: target.port, user: target.user, password: target.password, database: target.database,
-    max: 1, ssl: { rejectUnauthorized: false },
-  });
+  // TLS verify-full against the pinned root, SCRAM-only (pg-secure.ts / db-tls.ts).
+  const pool = newSecurePgPool(target, { max: 1 });
   // An idle client's dropped connection must not crash the tool (fixed text: a driver message can carry an address).
   pool.on('error', () => console.error('The database connection dropped while idle.'));
   try {

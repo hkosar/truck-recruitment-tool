@@ -9,6 +9,7 @@ import pg from 'pg';
 import type { PoolClient } from 'pg';
 import type { Config } from './config.js';
 import { clientUsable, isDefiniteCommitRefusal, isRollbackTag } from './commit-outcome.js';
+import { newSecurePgPool } from './pg-secure.js';
 import { parseSupabaseDbTarget } from './target-guard.js';
 
 const { Pool } = pg;
@@ -73,23 +74,12 @@ export function createPgPool(config: Config): PgPool {
   // Build from the guard's explicit fields, never from the raw string: pg would let query
   // parameters in a connection string override host/user/port (see target-guard.ts).
   const target = parseSupabaseDbTarget(config.SUPABASE_DB_URL);
-  const pool = new Pool({
-    host: target.host,
-    port: target.port,
-    user: target.user,
-    password: target.password,
-    database: target.database,
+  // TLS verify-full against the pinned root, SCRAM-only (pg-secure.ts / db-tls.ts); refused before dialling if no root is pinned.
+  const pool = newSecurePgPool(target, {
     // Render Cron Jobs are short-lived, one-shot processes handling one chain at a time:
     // a small pool + explicit `closePipelineContext()` on exit beats tuning idle timeouts.
     max: 5,
     idleTimeoutMillis: 30_000,
-    // TODO(live-db): Supabase's pooler cert chain commonly needs this relaxed setting with
-    // node-postgres depending on Node/OpenSSL trust-store versions (a very common pattern in
-    // production Supabase+pg setups). Tighten to a pinned CA bundle
-    // (`ssl: { ca: fs.readFileSync(...), rejectUnauthorized: true }`) once real credentials
-    // exist and this has been verified against the actual pooler endpoint -- don't leave
-    // this relaxed by default forever, just for the skeleton.
-    ssl: { rejectUnauthorized: false },
   });
   // An IDLE client whose connection drops emits 'error' on the pool; with no listener Node throws
   // it as an uncaught exception. The pool drops that client itself. Fixed text only: a driver

@@ -14,11 +14,13 @@
 import pg from 'pg';
 import type { Config } from './config.js';
 import { runRetention, type Queryable, type RetentionResult } from './retention.js';
+import { isDbSecurityFailure, scramOnlyClient } from './db-tls.js';
+import { securePgConfig } from './pg-secure.js';
 import { parseSupabaseDbTarget } from './target-guard.js';
 
 export const MAINTENANCE_ROLE = 'recruiter_maintenance';
 
-export type RefusalReason = 'unparseable' | 'other_project' | 'wrong_port' | 'wrong_role' | 'connected_as_other_role';
+export type RefusalReason = 'unparseable' | 'other_project' | 'wrong_port' | 'wrong_role' | 'connected_as_other_role' | 'db_tls_refused';
 
 export type RetentionOutcome =
   | { status: 'skipped'; reason: 'not_configured' }
@@ -43,15 +45,18 @@ export interface RetentionStepDeps {
 }
 
 /**
- * The driver default is NO TLS, and query-string SSL settings are refused by the target guard, so
- * TLS is set explicitly here. Same relaxed pooler certificate setting as db.ts (TODO(live-db)).
+ * The driver default is NO TLS, and query-string SSL settings are refused by the target guard, so TLS is set explicitly
+ * here: verify-full against the pinned root, SCRAM-only (pg-secure.ts / db-tls.ts). Throws (nothing dialled) if no root is pinned.
  */
 export function retentionClientConfig(fields: { host: string; port: number; user: string; password: string; database: string }): pg.ClientConfig {
-  return { ...fields, ssl: { rejectUnauthorized: false }, application_name: 'tnbs-retention', connectionTimeoutMillis: 10_000 };
+  return { ...securePgConfig(fields), application_name: 'tnbs-retention', connectionTimeoutMillis: 10_000 };
 }
 
-const defaultClient: NonNullable<RetentionStepDeps['createClient']> = (fields) =>
-  new pg.Client(retentionClientConfig(fields)) as unknown as RetentionClient;
+const defaultClient: NonNullable<RetentionStepDeps['createClient']> = (fields) => {
+  const config = retentionClientConfig(fields);
+  const Client = scramOnlyClient(pg.Client);
+  return new Client(config) as unknown as RetentionClient;
+};
 
 /** The role part of a Supabase user name: `<role>.<ref>` on the shared pooler, `<role>` otherwise. */
 export function roleOf(user: string): string {
@@ -86,9 +91,16 @@ export async function runRetentionStep(
   if (target.port !== 5432) return refuse('wrong_port');
   if (roleOf(target.user) !== MAINTENANCE_ROLE) return refuse('wrong_role');
 
-  const client = (deps.createClient ?? defaultClient)({
-    host: target.host, port: target.port, user: target.user, password: target.password, database: target.database,
-  });
+  let client: RetentionClient;
+  try {
+    client = (deps.createClient ?? defaultClient)({
+      host: target.host, port: target.port, user: target.user, password: target.password, database: target.database,
+    });
+  } catch (err) {
+    // No pinned root certificate (or an invalid one): nothing was dialled.
+    if (isDbSecurityFailure(err)) return refuse('db_tls_refused');
+    throw err;
+  }
   let connected = false;
   // The query in flight (or the next one) rejects; the catch below reports it as the existing 'failed' outcome.
   client.on?.('error', () => undefined);
@@ -101,7 +113,9 @@ export async function runRetentionStep(
     deps.log.info('retention.done', { deleted: result.deleted, failed: result.failed });
     if (result.failed.length > 0) await deps.alert(`Retention: ${result.failed.length} rule(s) failed: ${result.failed.join(', ')}`);
     return { status: 'done', result };
-  } catch {
+  } catch (err) {
+    // A TLS verification failure or a refused auth method (no password was sent) is reported as such.
+    if (!connected && isDbSecurityFailure(err)) return refuse('db_tls_refused');
     deps.log.error('retention.failed', { reason: 'connect_or_query_error' });
     await deps.alert('Retention failed: connect or query error');
     return { status: 'failed', reason: 'connect_or_query_error' };
