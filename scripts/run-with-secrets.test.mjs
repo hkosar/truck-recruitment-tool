@@ -53,7 +53,7 @@ test('arguments: only allowed secret names, only a `node` child, no duplicates, 
     ['--', 'node', 'x'],
     ['--secret', 'STAGING_DB_URL'],
   ]) assert.throws(() => parseArgs(bad), `${bad.join(' ')} must be refused`);
-  assert.deepEqual(ALLOWED, ['STAGING_DB_URL', 'SUPABASE_SERVICE_ROLE_KEY', 'TEST_USER_PASSWORD', 'OWNER_STAGING_PASSWORD', 'PRODUCTION_DB_URL']);
+  assert.deepEqual(ALLOWED, ['STAGING_DB_URL', 'SUPABASE_SERVICE_ROLE_KEY', 'TEST_USER_PASSWORD', 'OWNER_STAGING_PASSWORD', 'PRODUCTION_DB_URL', 'STAGING_APP_DB_PASSWORD', 'STAGING_MAINT_DB_PASSWORD']);
 });
 
 test('PRODUCTION_DB_URL is prompt-only: --from-env refuses it before anything runs, while the hidden-prompt path accepts the name', () => {
@@ -324,4 +324,15 @@ test('allow-list: the prod-sql events pass with exactly their own keys; a free-t
   assert.equal(run({ msg: 'prod-sql.refused', refusal: 'prod_sql_hash_mismatch' }).fields, 0);
   assert.equal(run({ msg: 'prod-sql.result', action: 'm1', result: 'committed', statements: 1, sql: 'select 1' }).fields, 1, 'an unknown key is dropped and counted');
   assert.equal(allowListLine('{"msg":"prod-sql.sql_text","sql":"select 1"}'), null);
+});
+
+test('role_password_result: shown only with one of the two fixed roles and a fixed result; a verifier or password field is dropped and counted', () => {
+  const counter = { fields: 0 };
+  const shown = allowListLine(JSON.stringify({ msg: 'staging-sql.role_password_result', role: 'recruiter_app', result: 'committed', verifier: 'SCRAM-SHA-256$4096:x$y:z' }), counter);
+  assert.equal(shown, '{"msg":"staging-sql.role_password_result","role":"recruiter_app","result":"committed"}');
+  assert.equal(counter.fields, 1);
+  const odd = allowListLine(JSON.stringify({ msg: 'staging-sql.role_password_result', role: 'postgres', result: 'SCRAM-SHA-256$4096:x$y:z' }), counter);
+  assert.equal(odd, '{"msg":"staging-sql.role_password_result","role":"<withheld>","result":"<withheld>"}');
+  assert.equal(parseArgs(['--from-env', '--secret', 'STAGING_DB_URL', '--secret', 'STAGING_APP_DB_PASSWORD', '--', 'node', 'x']).secrets.join(), 'STAGING_DB_URL,STAGING_APP_DB_PASSWORD');
+  assert.equal(parseArgs(['--from-env', '--secret', 'STAGING_DB_URL', '--secret', 'STAGING_MAINT_DB_PASSWORD', '--', 'node', 'x']).fromEnv, true);
 });

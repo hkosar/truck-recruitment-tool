@@ -192,6 +192,45 @@ if (owner) {
     if (!owner.includes(required)) failures.push(`owner-bootstrap.ts is missing: ${required}`);
   }
 }
+// Role password setup (runbook 6b build, pipeline/src/role-password.ts): the plain password never reaches the server (only a locally computed
+// SCRAM-SHA-256 verifier is in the statement), the role and variable come from a fixed two-entry table, the module reads no environment, the
+// change is one timed transaction, and the wrapper allows exactly these two names and one fixed result event.
+const rolePw = read('pipeline/src/role-password.ts');
+if (!rolePw) failures.push('role-password.ts is missing');
+else {
+  for (const required of ["'recruiter_app'", "'recruiter_maintenance'", "'STAGING_APP_DB_PASSWORD'", "'STAGING_MAINT_DB_PASSWORD'", 'pbkdf2Sync', "'Client Key'", "'Server Key'", 'requireRecordedRebuiltRef', 'parseSupabaseDbTarget', 'target.port !== 5432',
+    'refuses the production', "set local statement_timeout = '30s'", "set local lock_timeout = '10s'", "alter role ${role} login password %L", "current_setting('${VERIFIER_GUC}')", "select pg_catalog.set_config('${VERIFIER_GUC}', $1, true)", "pg_catalog.format('alter role ${role} login password %L', pg_catalog.current_setting('${VERIFIER_GUC}')", "from pg_catalog.pg_settings", "from pg_catalog.pg_roles", "set local search_path = pg_catalog, pg_temp", "set local debug_print_parse = off", "set local debug_print_rewritten = off", "set local debug_print_plan = off", "set local exit_on_error = off", "set local jit = off", "'log_parser_stats'", "'log_planner_stats'", "'log_executor_stats'", "'log_statement_stats'", "set local client_connection_check_interval = 0", 'SENTINEL_SETTINGS', 'OTHER_KNOWN_SETTINGS', 'serverVersionProblem(settings)', 'AUDITED_SERVER_MAJOR = 16', 'role_password_server_version_unverified', 'is not classified', 'was not returned', 'MUST_BE_OFF_SETTINGS', 'HARMLESS_LOGGING_SETTINGS', "'log_lock_waits'", "'deadlock_timeout'", "await client.query(SEARCH_PATH_SQL)", "MIN_DEADLOCK_TIMEOUT_MS", 'exception when query_canceled then', 'when others then raise exception using errcode = sqlstate',
+    'role_password_logging_refused', 'role_password_expiry_refused', "current_setting('pgaudit.log', true)", "current_setting('auto_explain.log_min_duration', true)", "'log_statement'", "'log_min_duration_statement'", "'log_transaction_sample_rate'", "'log_parameter_max_length'", "'log_parameter_max_length_on_error'", 'loggingProblem(settings)', 'expires_soon',
+    'query_timeout: CLIENT_QUERY_TIMEOUT_MS', 'keepAlive: true', 'expired === true', 'pg_stat_statements.track', '/^[A-Za-z0-9_-]+$/', 'ROLE_PASSWORD_MIN_LENGTH = 32', '--out is not supported', 'const resultEvent', 'VERIFIER_SHAPE', 'rolsuper', "await client.query('commit')", 'rollback_not_confirmed']) {
+    if (!rolePw.includes(required)) failures.push(`role-password.ts is missing: ${required}`);
+  }
+  const code = rolePw.replace(/\/\*[\s\S]*?\*\/|\/\/.*$/gm, '');
+  {
+    const at = (t) => code.indexOf(t);
+    const order = ['await client.query(SEARCH_PATH_SQL)', 'for (const sql of SESSION_SAFETY_SQL)', 'await client.query(SETTINGS_SQL)', 'await client.query(SET_VERIFIER_SQL, [plan.verifier])'].map(at);
+    if (order.some((i) => i < 0) || order.some((i, k) => k > 0 && i < order[k - 1])) failures.push('role-password.ts: search_path and the session safety settings (debug_print_*, exit_on_error, jit) must be set before the settings read, and the settings read before the verifier is bound');
+  }
+  for (const forbidden of [/process\.env/, /\bdrop\b/i, /delete\s+from/i, /\btruncate\b/i, /\bgrant\b/i, /\brevoke\b/i, /\b(createrole|superuser|createdb|bypassrls)\b/i, /password\s+'\$\{/, /\bline\(/, /process\.(stdout|stderr)/]) {
+    if (forbidden.test(code)) failures.push(`role-password.ts must not contain ${forbidden}`);
+  }
+  if ((code.match(/alter role/gi) ?? []).length !== 1) failures.push('role-password.ts must contain exactly one ALTER ROLE statement');
+  // The verifier is only ever a bind parameter, and no printed event can carry it: every event goes through resultEvent(role, result).
+  const eventFn = /const resultEvent = [\s\S]*?\n\};/.exec(code)?.[0] ?? '';
+  const printedArgs = [...code.matchAll(/resultEvent\(([^)]*)\)/g)].map((m) => m[1]);
+  if (printedArgs.length < 3 || printedArgs.some((a) => /verifier|password|err|message/i.test(a))) failures.push('role-password.ts: resultEvent( arguments must never mention verifier, password or an error');
+  if ((code.match(/console\./g) ?? []).length !== 1 || !eventFn.includes('console.log(JSON.stringify({ msg:') || /verifier|password/i.test(eventFn.replace(/ROLE_PASSWORD_[A-Z]+|role_password_(refused|result)/g, ''))) failures.push('role-password.ts: console may be used only inside resultEvent, which may print only msg, role and result');
+  if (/\$\{[^}]*verifier[^}]*\}/.test(code)) failures.push('role-password.ts: the verifier must never be interpolated into a template string or SQL text');
+}
+const wrapperSrc = read('scripts/run-with-secrets.mjs');
+if (wrapperSrc) {
+  for (const required of ["'STAGING_APP_DB_PASSWORD', 'STAGING_MAINT_DB_PASSWORD'", "'set-app-password', 'set-maintenance-password'", "'staging-sql.role_password_result'", "'role_password_refused'", "'role_password_logging_refused'", "'role_password_expiry_refused'"]) {
+    if (!wrapperSrc.includes(required)) failures.push(`run-with-secrets.mjs is missing: ${required}`);
+  }
+  if (/PROMPT_ONLY = \[[^\]]*(STAGING_APP_DB_PASSWORD|STAGING_MAINT_DB_PASSWORD)/.test(wrapperSrc)) failures.push('run-with-secrets.mjs: the two role passwords must be allowed through --from-env');
+}
+const runnerCli = read('pipeline/src/staging-sql-runner.ts');
+if (runnerCli && !runnerCli.includes('ROLE_PASSWORD_ACTIONS[args.action as RolePasswordAction].passwordVariable')) failures.push('staging-sql-runner.ts: the role-password action must read only its own fixed variable');
+
 const doc16 = read('docs/build-plan/16-staging-and-hosting-plan.md');
 for (const required of ['Data API must already be enabled with', 'never authorizes another create', 'rollback_not_confirmed']) {
   if (!doc16 || !doc16.replace(/\s+/g, ' ').includes(required)) failures.push('doc 16 is missing: ' + required);

@@ -10,7 +10,7 @@
   "scripts": {
     "build": "npm test && tsc -p tsconfig.json",
     "typecheck": "tsc --noEmit",
-    "test": "tsx src/smoke-tests.ts && tsx src/first-manager-bootstrap.test.ts && tsx src/prod-sql.test.ts && tsx src/role-matrix-a3.test.ts && tsx src/batch-delete-compare.test.ts && tsx src/db-tls.test.ts && tsx src/loopback-fetch.test.ts",
+    "test": "tsx src/smoke-tests.ts && tsx src/first-manager-bootstrap.test.ts && tsx src/prod-sql.test.ts && tsx src/role-matrix-a3.test.ts && tsx src/batch-delete-compare.test.ts && tsx src/db-tls.test.ts && tsx src/loopback-fetch.test.ts && tsx src/role-password.test.ts",
     "test:db-tls": "tsx src/db-tls.test.ts",
     "verify": "npm run typecheck && npm run build",
     "start": "tsx src/run.ts nightly",
@@ -25,6 +25,7 @@
     "prod-sql": "tsx src/prod-sql-runner.ts",
     "test:prod-sql": "tsx src/prod-sql.test.ts",
     "test:first-manager": "tsx src/first-manager-bootstrap.test.ts",
+    "test:role-password": "tsx src/role-password.test.ts",
     "load:location-tables": "tsx src/load-location-tables.ts",
     "test:location-tables": "tsx src/load-location-tables.test.ts"
   },

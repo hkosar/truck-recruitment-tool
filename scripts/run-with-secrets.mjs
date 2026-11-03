@@ -49,7 +49,7 @@ export const FROM_ENV_CONFIG = 'stg';
 /** --from-env only: the only non-secret parent variables the child receives (compared in upper case, so Windows `Path` works). */
 export const FROM_ENV_BASE_NAMES = ['PATH', 'PATHEXT', 'SYSTEMROOT', 'SYSTEMDRIVE', 'WINDIR', 'COMSPEC', 'TEMP', 'TMP', 'HOME', 'USERPROFILE', 'APPDATA', 'LOCALAPPDATA'];
 
-export const ALLOWED = ['STAGING_DB_URL', 'SUPABASE_SERVICE_ROLE_KEY', 'TEST_USER_PASSWORD', 'OWNER_STAGING_PASSWORD', 'PRODUCTION_DB_URL'];
+export const ALLOWED = ['STAGING_DB_URL', 'SUPABASE_SERVICE_ROLE_KEY', 'TEST_USER_PASSWORD', 'OWNER_STAGING_PASSWORD', 'PRODUCTION_DB_URL', 'STAGING_APP_DB_PASSWORD', 'STAGING_MAINT_DB_PASSWORD'];
 /** Names that only the hidden prompt may supply: --from-env (the staging Doppler scope) refuses them, so production never comes from the environment. */
 export const PROMPT_ONLY = ['PRODUCTION_DB_URL'];
 /** The prompt path also hands the child a proof that a PROMPT_ONLY value was typed here (pipeline/src/first-manager-bootstrap.ts refuses a production URL without it). Keep equal to promptProof there (a test compares them). */
@@ -133,14 +133,14 @@ export const REFUSAL_IDS = [
   'retention_dry_run_failed', 'role_matrix_failed', 'role_matrix_result_missing', 'batch_delete_definition_mismatch', 'retention_run_refused', 'reapply_m1_not_backed_out', 'reapply_m1_still_applied', 'reapply_m1b_not_backed_out',
   'reapply_m1b_still_applied', 'reapply_m1c_not_backed_out', 'reapply_m1c_still_applied', 'owner_email_invalid',
   'owner_password_too_short', 'owner_auth_not_created', 'owner_auth_unknown_result', 'owner_promotion_refused',
-  'owner_bootstrap_target_refused', 'bootstrap_target_required', 'target_not_recorded_production', 'first_manager_refused',
+  'role_password_refused', 'role_password_logging_refused', 'role_password_expiry_refused', 'role_password_server_version_unverified', 'owner_bootstrap_target_refused', 'bootstrap_target_required', 'target_not_recorded_production', 'first_manager_refused',
   'prod_sql_target_refused', 'prod_sql_action_not_built', 'prod_sql_action_do_not_use', 'prod_sql_file_unreadable', 'prod_sql_hash_mismatch', 'prod_sql_shape_refused', 'prod_sql_commit_rolled_back', 'prod_sql_l1_shape_not_ok', 'prod_sql_flag_not_expected', 'prod_sql_l1_stop_table_populated', 'prod_sql_l1_stop_table_lock_failed', 'prod_sql_l1_statement_timeout', 'db_tls_refused', 'server_or_driver_error',
 ];
 
 /** Keep equal to pipeline/src/refusals.ts DRIVER_CODES (a test compares them). */
 export const DRIVER_CODES = ['ECONNREFUSED', 'ECONNRESET', 'ECONNABORTED', 'ETIMEDOUT', 'ENOTFOUND', 'EAI_AGAIN', 'EPIPE', 'EHOSTUNREACH', 'ENETUNREACH', 'ENETDOWN', 'EADDRNOTAVAIL'];
 /** Keep equal to the action tables in pipeline/src/staging-sql-runner.ts and staging-rebuilt.ts plus owner-auth-create (a test compares them). */
-export const ACTIONS = ['install-marker', 'reset', 'cleanup', 'apply-migrations', 'ledger-preflight', 'environment-preflight', 'batch-delete-compare', 'owner-login-check', 'owner-promote', 'retention-dry-run', 'retention-run', 'install-retention-fixtures', 'remove-retention-fixtures', 'profile-fixtures', 'install-shutdown-fixtures', 'remove-shutdown-fixtures', 'cleanup-ledgers-m1', 'apply-m1', 'apply-m1b', 'apply-m1c', 'reapply-m1', 'reapply-m1b', 'reapply-m1c', 'role-matrix-m1', 'snapshot', 'auth-schema-inventory', 'window-on', 'window-off', 'backout-m1c', 'backout-m1b', 'backout-m1', 'owner-auth-create'];
+export const ACTIONS = ['install-marker', 'reset', 'cleanup', 'apply-migrations', 'ledger-preflight', 'environment-preflight', 'batch-delete-compare', 'owner-login-check', 'owner-promote', 'retention-dry-run', 'retention-run', 'install-retention-fixtures', 'remove-retention-fixtures', 'profile-fixtures', 'install-shutdown-fixtures', 'remove-shutdown-fixtures', 'cleanup-ledgers-m1', 'apply-m1', 'apply-m1b', 'apply-m1c', 'reapply-m1', 'reapply-m1b', 'reapply-m1c', 'role-matrix-m1', 'snapshot', 'auth-schema-inventory', 'window-on', 'window-off', 'backout-m1c', 'backout-m1b', 'backout-m1', 'owner-auth-create', 'set-app-password', 'set-maintenance-password'];
 /** Keep equal to pipeline/src/environment-preflight.ts REVIEWED_EVENT_TRIGGER_* (a test compares them). */
 export const EVENT_TRIGGER_NAMES = ['issue_graphql_placeholder', 'issue_pg_cron_access', 'issue_pg_graphql_access', 'issue_pg_net_access', 'pgrst_ddl_watch', 'pgrst_drop_watch', 'ensure_rls'];
 export const EVENT_TRIGGER_FUNCTIONS = ['set_graphql_placeholder', 'grant_pg_cron_access', 'grant_pg_graphql_access', 'grant_pg_net_access', 'pgrst_ddl_watch', 'pgrst_drop_watch', 'rls_auto_enable'];
@@ -241,6 +241,8 @@ const EVENTS = {
   },
   'staging-sql.owner_check': { phase, check: ownerCheck, ok: bool },
   'staging-sql.owner_checks': { phase, ok: bool, checks: int, failed: int },
+  // Role password setup (pipeline/src/role-password.ts): the role is one of two fixed names; the verifier and the password are never an event field.
+  'staging-sql.role_password_result': { role: oneOf(['recruiter_app', 'recruiter_maintenance']), result: oneOf(['committed', 'rolled_back', 'rollback_not_confirmed', 'unknown']) },
   'staging-sql.owner_promote_result': { result: oneOf(['committed', 'rolled_back', 'rollback_not_confirmed', 'unknown']) },
   // First-manager bootstrap (pipeline/src/first-manager-bootstrap.ts): counts and enumerated words only, never the address, name or an id.
   'first-manager.verified': { action: oneOf(FIRST_MANAGER_ACTIONS), target: oneOf(['staging', 'production']) },
