@@ -18,7 +18,7 @@ import { isIP } from 'node:net';
 import { checkServerIdentity, type ConnectionOptions } from 'node:tls';
 import { SUPABASE_ROOT_CAS, type PinnedRootCa } from './supabase-root-ca.js';
 
-export type DbTlsRefusalReason = 'no_trusted_ca' | 'invalid_trusted_ca' | 'auth_method_refused' | 'scram_incomplete' | 'unsupported_driver' | 'invalid_url';
+export type DbTlsRefusalReason = 'no_trusted_ca' | 'invalid_trusted_ca' | 'auth_method_refused' | 'scram_incomplete' | 'unsupported_driver' | 'invalid_url' | 'connection_override';
 
 /** A fixed-text refusal (never carries a host, user or password). Deliberately has no `code` property. */
 export class DbTlsRefusal extends Error {

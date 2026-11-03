@@ -1,5 +1,5 @@
 import pg from 'pg';
-import { dbSecurityFields, scramOnlyClient } from './db-tls.js';
+import { DbTlsRefusal, dbSecurityFields, scramOnlyClient } from './db-tls.js';
 
 /**
  * pg clients and pools for the pipeline and its runners, with the hosted-database policy of db-tls.ts: a hosted target
@@ -15,18 +15,37 @@ export interface PgTargetFields {
   database: string;
 }
 
+/**
+ * The only tuning options a caller may add. Anything else is refused before dialling: pg lets `connectionString` replace
+ * host, port and ssl (so `?sslmode=disable` would switch TLS off), and `ssl`, `host`, `port`, `stream`, `Client` and the like
+ * replace the target or the checked transport. An allow-list, so an option pg adds later is refused until reviewed.
+ */
+const ALLOWED_EXTRA_OPTIONS: ReadonlySet<string> = new Set(['max', 'idleTimeoutMillis', 'connectionTimeoutMillis', 'allowExitOnIdle', 'statement_timeout', 'query_timeout', 'application_name']);
+
+function checkedExtra<T extends object>(extra: T): T {
+  for (const key of Object.keys(extra)) {
+    if (!ALLOWED_EXTRA_OPTIONS.has(key)) throw new DbTlsRefusal('connection_override', 'refusing: a caller option may not replace the database target or its TLS settings');
+  }
+  if (Object.getOwnPropertySymbols(extra).length > 0 || Object.getPrototypeOf(extra) !== Object.prototype) {
+    throw new DbTlsRefusal('connection_override', 'refusing: a caller option may not replace the database target or its TLS settings');
+  }
+  return extra;
+}
+
 export function securePgConfig(target: PgTargetFields): pg.ClientConfig {
   const { ssl, enableChannelBinding } = dbSecurityFields(target.host);
   return { host: target.host, port: target.port, user: target.user, password: target.password, database: target.database, ssl, enableChannelBinding } as pg.ClientConfig;
 }
 
 export function newSecurePgClient(target: PgTargetFields, extra: pg.ClientConfig = {}): pg.Client {
+  const checked = checkedExtra(extra);
   const config = securePgConfig(target);
   const Client = scramOnlyClient(pg.Client);
-  return new Client({ ...extra, ...config });
+  return new Client({ ...checked, ...config });
 }
 
 export function newSecurePgPool(target: PgTargetFields, extra: pg.PoolConfig = {}): pg.Pool {
+  const checked = checkedExtra(extra);
   const config = securePgConfig(target);
-  return new pg.Pool({ ...extra, ...config, Client: scramOnlyClient(pg.Client) as unknown as pg.PoolConfig['Client'] });
+  return new pg.Pool({ ...checked, ...config, Client: scramOnlyClient(pg.Client) as unknown as pg.PoolConfig['Client'] });
 }

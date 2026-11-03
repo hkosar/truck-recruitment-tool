@@ -252,6 +252,43 @@ await check('SCRAM the server does not finish (no server signature): refused; th
   assert.equal(passwordSeen(record), false);
 });
 
+await check('a caller option that can replace the connection target or TLS settings is refused before anything is dialled', async () => {
+  const target = { host: TEST_HOST, port: 5432, user: 'recruiter_app.testref', password: PASSWORD, database: 'postgres' };
+  const server = await startFakePg({ tlsCert: pki.server, auth: 'trust' });
+  const undo = redirectHosts([TEST_HOST, OTHER_HOST], server.port);
+  try {
+    withRepoPins([rootPin], () => {
+      const overrides: Record<string, unknown>[] = [
+        { connectionString: `postgres://u:p@${OTHER_HOST}/db?sslmode=disable` },
+        { connectionString: 'postgres://u:p@127.0.0.1/db' },
+        { ssl: false }, { ssl: { rejectUnauthorized: false } }, { host: OTHER_HOST }, { port: 1 }, { user: 'x' }, { password: 'x' }, { database: 'x' },
+        { stream: () => null }, { Client: class {} }, { enableChannelBinding: false }, { lookup: () => null },
+        { max: 1, ssl: false },
+      ];
+      for (const extra of overrides) {
+        assert.throws(() => newSecurePgClient(target, extra as never), refusal('connection_override'), Object.keys(extra).join());
+        assert.throws(() => newSecurePgPool(target, extra as never), refusal('connection_override'), Object.keys(extra).join());
+      }
+      assert.throws(() => newSecurePgClient(target, { [Symbol('x')]: 1 } as never), refusal('connection_override'));
+      assert.throws(() => newSecurePgClient(target, Object.create({ ssl: false }) as never), refusal('connection_override'));
+      // The refusal is the one fixed runner id and carries no host, user or password.
+      try { newSecurePgClient(target, { connectionString: `postgres://u:${PASSWORD}@${OTHER_HOST}/db` } as never); assert.fail('must refuse'); } catch (err) {
+        assert.deepEqual(classifyRunnerFailure(err), { refusal: 'db_tls_refused' });
+        assert.ok(!String((err as Error).message).includes(PASSWORD) && !String((err as Error).message).includes(OTHER_HOST));
+      }
+      // Control: the permitted tuning options still work, and the checked fields win.
+      const ok = newSecurePgClient(target, { connectionTimeoutMillis: 3_000 });
+      assert.equal((ok as unknown as { connectionParameters: { host: string; ssl: unknown } }).connectionParameters.host, TEST_HOST);
+      assert.ok((ok as unknown as { connectionParameters: { ssl: unknown } }).connectionParameters.ssl);
+      void newSecurePgPool(target, { max: 1, idleTimeoutMillis: 1_000 }).end();
+    });
+  } finally {
+    undo();
+    await server.close();
+  }
+  assert.equal(server.record.connections, 0, 'nothing may be dialled');
+});
+
 await check('runner reports: every refusal and TLS verification failure maps to the one fixed id db_tls_refused', () => {
   assert.deepEqual(classifyRunnerFailure(new DbTlsRefusal('no_trusted_ca', 'x')), { refusal: 'db_tls_refused' });
   assert.deepEqual(classifyRunnerFailure(Object.assign(new Error('Hostname/IP does not match'), { code: 'ERR_TLS_CERT_ALTNAME_INVALID' })), { refusal: 'db_tls_refused' });
