@@ -38,9 +38,13 @@ import { RECORDED_PROJECT_REFS, parseSupabaseDbTarget, type SupabaseDbTarget } f
  * auto_explain.log_min_duration is anything but -1, and when log_parser_stats, log_planner_stats, log_executor_stats or
  * log_statement_stats is not off (superuser-only; log_parser_stats writes the statement in CONTEXT). pg_stat_statements.track = 'all' is
  * refused when track_utility is also on (with track_utility off no utility statement is recorded).
- * Every visible setting in the pg_settings groups Reporting and Logging, Statistics, Developer Options and Error Handling is read as
- * well; one that is neither checked by name nor in HARMLESS_LOGGING_SETTINGS (PostgreSQL 16, each probed on a real server) is refused,
- * so a newer server's new logging setting fails closed until it is classified.
+ * Every visible row of pg_settings is read and compared BY NAME (never by category: the category text is translated by lc_messages, which
+ * a role or database can set to a non-English value). A name without a dot that is not in CHECKED_SETTINGS, HARMLESS_LOGGING_SETTINGS (of
+ * its 68 entries, 43 were probed on a real server and 25 were judged harmless by kind, by reading, and not tested) or OTHER_KNOWN_SETTINGS
+ * (the other PostgreSQL 16.15 settings) is refused, and a set of sentinel names must come back or the read is not trusted. Any server major
+ * version other than 16 is refused first (role_password_server_version_unverified) until it has been audited: for 17 that audit must cover
+ * transaction_timeout (a FATAL like exit_on_error) and every other new setting. client_connection_check_interval is set to 0 (a dropped
+ * client would otherwise end the session with a FATAL whose CONTEXT quotes the statement; Linux only, accepted everywhere).
  * What remains (exactly): (1) a FATAL termination of the session while the ALTER runs (an administrator command, a crash or a
  * shutdown; PL/pgSQL cannot catch FATAL and ALTER ROLE accepts no bind parameter): the log's CONTEXT line then quotes the statement;
  * (2) any other LOG or WARNING raised inside the ALTER by code this module does not name (an extension, a preloaded library or a host
@@ -86,16 +90,14 @@ export const LOCK_WAIT_LOG_MARGIN_MS = 100;
 export const MIN_DEADLOCK_TIMEOUT_MS = 200;
 /** The first statements after begin: only pg_catalog (then pg_temp) on the search path, then the user-settable settings that could write the statement, with the verifier, to the log are switched off. */
 export const SEARCH_PATH_SQL = 'set local search_path = pg_catalog, pg_temp';
-/** debug_print_* log the parse tree; exit_on_error turns an error inside the ALTER into a FATAL, whose CONTEXT the DO block cannot replace; jit = off keeps JIT (and jit_dump_bitcode) out of the transaction. */
-export const SESSION_SAFETY_SQL: readonly string[] = ['set local debug_print_parse = off', 'set local debug_print_rewritten = off', 'set local debug_print_plan = off', 'set local exit_on_error = off', 'set local jit = off'];
+/** debug_print_* log the parse tree; exit_on_error turns an error inside the ALTER into a FATAL, whose CONTEXT the DO block cannot replace; jit = off keeps JIT (and jit_dump_bitcode) out of the transaction; client_connection_check_interval = 0 (Linux; accepted on every platform) stops a client that drops during the lock wait from becoming a FATAL connection to client lost whose CONTEXT quotes the statement. PostgreSQL 17's transaction_timeout is not handled: that major version is refused until audited. */
+export const SESSION_SAFETY_SQL: readonly string[] = ['set local debug_print_parse = off', 'set local debug_print_rewritten = off', 'set local debug_print_plan = off', 'set local exit_on_error = off', 'set local jit = off', 'set local client_connection_check_interval = 0'];
 export const lockTimeoutSql = (ms: number): string => `set local lock_timeout = '${Math.floor(ms)}ms'`;
 /** Must read off after SESSION_SAFETY_SQL; the four *_stats settings are superuser-only (cannot be switched off here), and log_parser_stats writes the statement in CONTEXT. Missing counts as on. */
 export const MUST_BE_OFF_SETTINGS: readonly string[] = ['debug_print_parse', 'debug_print_rewritten', 'debug_print_plan', 'exit_on_error', 'jit', 'log_parser_stats', 'log_planner_stats', 'log_executor_stats', 'log_statement_stats'];
 /** Every setting read by name. */
 export const CHECKED_SETTINGS: readonly string[] = ['statement_timeout', 'lock_timeout', 'deadlock_timeout', 'log_lock_waits', 'pg_stat_statements.track', 'pg_stat_statements.track_utility',
-  'log_statement', 'log_min_duration_statement', 'log_min_duration_sample', 'log_statement_sample_rate', 'log_transaction_sample_rate', 'log_parameter_max_length', 'log_parameter_max_length_on_error', ...MUST_BE_OFF_SETTINGS];
-/** Every visible setting in these pg_settings groups is also read; one that is neither checked above nor listed as harmless is refused (fail closed). */
-export const LOGGING_CATEGORIES_PATTERN = '^(Reporting and Logging|Statistics|Developer Options|Error Handling)';
+  'log_statement', 'log_min_duration_statement', 'log_min_duration_sample', 'log_statement_sample_rate', 'log_transaction_sample_rate', 'log_parameter_max_length', 'log_parameter_max_length_on_error', 'client_connection_check_interval', ...MUST_BE_OFF_SETTINGS];
 /**
  * The rest of PostgreSQL 16's settings in those groups: a real-server probe as a non-superuser runner (each at its loudest value, then all at
  * once on the success, error and lock-wait paths) found no part of the verifier in the server log, pg_stat_statements or pg_stat_activity,
@@ -109,14 +111,35 @@ export const HARMLESS_LOGGING_SETTINGS: readonly string[] = ['allow_in_place_tab
   'recovery_init_sync_method', 'remove_temp_files_after_crash', 'restart_after_crash', 'send_abort_for_crash', 'send_abort_for_kill', 'stats_fetch_consistency', 'syslog_facility', 'syslog_ident', 'syslog_sequence_numbers',
   'syslog_split_messages', 'trace_notify', 'trace_recovery_messages', 'trace_sort', 'track_activities', 'track_activity_query_size', 'track_counts', 'track_functions', 'track_io_timing', 'track_wal_io_timing',
   'update_process_title', 'wal_consistency_checking', 'zero_damaged_pages'];
-export const SETTINGS_SQL = `select name, setting from pg_catalog.pg_settings where name in (${CHECKED_SETTINGS.map((s) => `'${s}'`).join(', ')}) or category ~ '${LOGGING_CATEGORIES_PATTERN}' `
+/**
+ * The remaining PostgreSQL 16.15 settings (every other name in pg_settings without a dot, taken from a full 368-row listing), none of which
+ * is about logging. Together with CHECKED_SETTINGS and HARMLESS_LOGGING_SETTINGS this is the full list of names the tool knows; a name outside
+ * it (a setting of a newer server, a build-only setting, a renamed one) is refused. Names are compared, never categories, because pg_settings.category
+ * is translated by lc_messages (superuser-only to set, so a role or database can carry a translated one).
+ */
+export const OTHER_KNOWN_SETTINGS: readonly string[] = `archive_cleanup_command archive_command archive_library archive_mode archive_timeout array_nulls authentication_timeout autovacuum autovacuum_analyze_scale_factor autovacuum_analyze_threshold autovacuum_freeze_max_age autovacuum_max_workers autovacuum_multixact_freeze_max_age autovacuum_naptime autovacuum_vacuum_cost_delay autovacuum_vacuum_cost_limit autovacuum_vacuum_insert_scale_factor autovacuum_vacuum_insert_threshold autovacuum_vacuum_scale_factor autovacuum_vacuum_threshold autovacuum_work_mem backend_flush_after backslash_quote bgwriter_delay bgwriter_flush_after bgwriter_lru_maxpages bgwriter_lru_multiplier block_size bonjour bonjour_name bytea_output check_function_bodies checkpoint_completion_target checkpoint_flush_after checkpoint_timeout checkpoint_warning client_encoding client_min_messages commit_delay commit_siblings config_file constraint_exclusion cpu_index_tuple_cost cpu_operator_cost cpu_tuple_cost createrole_self_grant cursor_tuple_fraction data_checksums data_directory data_directory_mode DateStyle db_user_namespace debug_assertions default_statistics_target default_table_access_method default_tablespace default_text_search_config default_toast_compression default_transaction_deferrable default_transaction_isolation default_transaction_read_only dynamic_library_path dynamic_shared_memory_type effective_cache_size effective_io_concurrency enable_async_append enable_bitmapscan enable_gathermerge enable_hashagg enable_hashjoin enable_incremental_sort enable_indexonlyscan enable_indexscan enable_material enable_memoize enable_mergejoin enable_nestloop enable_parallel_append enable_parallel_hash enable_partition_pruning enable_partitionwise_aggregate enable_partitionwise_join enable_presorted_aggregate enable_seqscan enable_sort enable_tidscan escape_string_warning external_pid_file extra_float_digits file_extend_method from_collapse_limit fsync full_page_writes geqo geqo_effort geqo_generations geqo_pool_size geqo_seed geqo_selection_bias geqo_threshold gin_fuzzy_search_limit gin_pending_list_limit gss_accept_delegation hash_mem_multiplier hba_file hot_standby hot_standby_feedback huge_page_size huge_pages icu_validation_level ident_file idle_in_transaction_session_timeout idle_session_timeout in_hot_standby integer_datetimes IntervalStyle jit_above_cost jit_inline_above_cost jit_optimize_above_cost jit_provider join_collapse_limit krb_caseins_users krb_server_keyfile lc_messages lc_monetary lc_numeric lc_time listen_addresses lo_compat_privileges local_preload_libraries logical_decoding_work_mem maintenance_io_concurrency maintenance_work_mem max_connections max_files_per_process max_function_args max_identifier_length max_index_keys max_locks_per_transaction max_logical_replication_workers max_parallel_apply_workers_per_subscription max_parallel_maintenance_workers max_parallel_workers max_parallel_workers_per_gather max_pred_locks_per_page max_pred_locks_per_relation max_pred_locks_per_transaction max_prepared_transactions max_replication_slots max_slot_wal_keep_size max_stack_depth max_standby_archive_delay max_standby_streaming_delay max_sync_workers_per_subscription max_wal_senders max_wal_size max_worker_processes min_dynamic_shared_memory min_parallel_index_scan_size min_parallel_table_scan_size min_wal_size old_snapshot_threshold output_plugin_libraries parallel_leader_participation parallel_setup_cost parallel_tuple_cost password_encryption plan_cache_mode port primary_conninfo primary_slot_name quote_all_identifiers random_page_cost recovery_end_command recovery_min_apply_delay recovery_prefetch recovery_target recovery_target_action recovery_target_inclusive recovery_target_lsn recovery_target_name recovery_target_time recovery_target_timeline recovery_target_xid recursive_worktable_factor reserved_connections restore_command restrict_nonsystem_relation_kind row_security scram_iterations search_path segment_size seq_page_cost server_encoding server_version server_version_num session_preload_libraries session_replication_role shared_buffers shared_memory_size shared_memory_size_in_huge_pages shared_memory_type shared_preload_libraries ssl ssl_ca_file ssl_cert_file ssl_ciphers ssl_crl_dir ssl_crl_file ssl_dh_params_file ssl_ecdh_curve ssl_key_file ssl_library ssl_max_protocol_version ssl_min_protocol_version ssl_passphrase_command ssl_passphrase_command_supports_reload ssl_prefer_server_ciphers standard_conforming_strings superuser_reserved_connections synchronize_seqscans synchronous_commit synchronous_standby_names tcp_keepalives_count tcp_keepalives_idle tcp_keepalives_interval tcp_user_timeout temp_buffers temp_file_limit temp_tablespaces TimeZone timezone_abbreviations track_commit_timestamp transaction_deferrable transaction_isolation transaction_read_only transform_null_equals unix_socket_directories unix_socket_group unix_socket_permissions vacuum_buffer_usage_limit vacuum_cost_delay vacuum_cost_limit vacuum_cost_page_dirty vacuum_cost_page_hit vacuum_cost_page_miss vacuum_failsafe_age vacuum_freeze_min_age vacuum_freeze_table_age vacuum_multixact_failsafe_age vacuum_multixact_freeze_min_age vacuum_multixact_freeze_table_age wal_block_size wal_buffers wal_compression wal_decode_buffer_size wal_init_zero wal_keep_size wal_level wal_log_hints wal_receiver_create_temp_slot wal_receiver_status_interval wal_receiver_timeout wal_recycle wal_retrieve_retry_interval wal_segment_size wal_sender_timeout wal_skip_threshold wal_sync_method wal_writer_delay wal_writer_flush_after work_mem xmlbinary xmloption`.split(' ');
+/** Supported server: only this major version has been audited (any other is refused until it is). */
+export const AUDITED_SERVER_MAJOR = 16;
+/** Must come back from the settings read, or the read is not trusted (a locale or a rename must not make it silently empty). */
+export const SENTINEL_SETTINGS: readonly string[] = ['server_version_num', 'log_statement', 'log_min_duration_statement', 'log_min_messages', 'debug_print_parse', 'track_activities', 'client_connection_check_interval'];
+/** All of pg_settings (visible rows), compared by name only. */
+export const SETTINGS_SQL = 'select name, setting from pg_catalog.pg_settings '
   + "union all select 'pgaudit.log', coalesce(pg_catalog.current_setting('pgaudit.log', true), 'none') "
   + "union all select 'auto_explain.log_min_duration', coalesce(pg_catalog.current_setting('auto_explain.log_min_duration', true), '-1')";
-const CLASSIFIED_SETTINGS: ReadonlySet<string> = new Set([...CHECKED_SETTINGS, ...HARMLESS_LOGGING_SETTINGS, 'pgaudit.log', 'auto_explain.log_min_duration']);
+const CLASSIFIED_SETTINGS: ReadonlySet<string> = new Set([...CHECKED_SETTINGS, ...HARMLESS_LOGGING_SETTINGS, ...OTHER_KNOWN_SETTINGS, 'pgaudit.log', 'auto_explain.log_min_duration']);
+/** Customized options of extensions always contain a dot; they are not covered (see the header) except the two read by name. */
+const isExtensionSetting = (name: string): boolean => name.includes('.');
+/** Null when the server is the audited major version; a reason word otherwise (a missing or unreadable number counts as not audited). */
+export function serverVersionProblem(settings: Map<string, string>): string | null {
+  const v = Number(settings.get('server_version_num'));
+  return Number.isInteger(v) && Math.floor(v / 10000) === AUDITED_SERVER_MAJOR ? null : 'server_version_num is not an audited major version';
+}
 export const EXPIRY_MARGIN_HOURS = 24;
 /** Why the server settings let the verifier reach the log, or null when they do not. A setting that cannot be read or is not classified counts as unsafe. */
 export function loggingProblem(settings: Map<string, string>): string | null {
-  for (const name of settings.keys()) if (!CLASSIFIED_SETTINGS.has(name)) return `${name} is not classified`;
+  for (const name of SENTINEL_SETTINGS) if (!settings.has(name)) return `${name} was not returned`;
+  for (const name of settings.keys()) if (!CLASSIFIED_SETTINGS.has(name) && !isExtensionSetting(name)) return `${name} is not classified`;
+  if (Number(settings.get('client_connection_check_interval')) !== 0) return 'client_connection_check_interval is not 0';
   for (const name of MUST_BE_OFF_SETTINGS) if ((settings.get(name) ?? 'missing').trim().toLowerCase() !== 'off') return `${name} is not off`;
   const num = (name: string): number => { const v = settings.get(name); return v === undefined || v.trim() === '' ? Number.NaN : Number(v); };
   if (num('log_parameter_max_length_on_error') !== 0) return 'log_parameter_max_length_on_error is not 0';
@@ -259,6 +282,9 @@ export async function runRolePassword(client: RebuiltSqlClient, plan: RolePasswo
     if (needsOurs('lock_timeout', lockLimitMs)) await client.query(lockLimitMs === LOCK_TIMEOUT_MS ? LOCK_TIMEOUT_SQL : lockTimeoutSql(lockLimitMs));
     if (settings.get('pg_stat_statements.track') === 'all' && settings.get('pg_stat_statements.track_utility') !== 'off') {
       throw new RunnerRefusal('role_password_refused', 'pg_stat_statements.track is "all" with track_utility on, which would record the nested role statement; refusing; nothing changed');
+    }
+    if (serverVersionProblem(settings) !== null) {
+      throw new RunnerRefusal('role_password_server_version_unverified', 'the server is not PostgreSQL 16, the only major version whose settings have been audited for this action; refusing; nothing changed');
     }
     if (loggingProblem(settings) !== null) {
       throw new RunnerRefusal('role_password_logging_refused', 'a server logging setting would write the bound verifier to the server log, or is not one this tool has classified; refusing; nothing changed');
