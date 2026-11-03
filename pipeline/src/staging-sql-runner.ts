@@ -155,7 +155,7 @@ async function main(): Promise<void> {
   if (args.project === 'rebuilt' && Object.prototype.hasOwnProperty.call(ROLE_PASSWORD_ACTIONS, args.action)) {
     // LOGIN password for one of the two application roles (role-password.ts): the password is read from its one fixed variable, only a
     // locally computed SCRAM-SHA-256 verifier is sent, and nothing about either is printed.
-    const pwPlan = asPlanRefusal(() => planRolePassword({ action: args.action, dbUrl: process.env.STAGING_DB_URL, confirm: args.confirm, password: process.env[ROLE_PASSWORD_ACTIONS[args.action as RolePasswordAction].passwordVariable] }));
+    const pwPlan = asPlanRefusal(() => planRolePassword({ action: args.action, dbUrl: process.env.STAGING_DB_URL, confirm: args.confirm, out: args.out, password: process.env[ROLE_PASSWORD_ACTIONS[args.action as RolePasswordAction].passwordVariable] }));
     console.log(JSON.stringify({ msg: 'staging-sql.verified', action: pwPlan.action, steps: 1, target: 'recorded rebuilt staging project' }));
     if (!args.execute) {
       console.log(JSON.stringify({ msg: 'staging-sql.plan_only', hint: 'add --execute to run' }));

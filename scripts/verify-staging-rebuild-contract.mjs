@@ -145,14 +145,21 @@ const rolePw = read('pipeline/src/role-password.ts');
 if (!rolePw) failures.push('role-password.ts is missing');
 else {
   for (const required of ["'recruiter_app'", "'recruiter_maintenance'", "'STAGING_APP_DB_PASSWORD'", "'STAGING_MAINT_DB_PASSWORD'", 'pbkdf2Sync', "'Client Key'", "'Server Key'", 'requireRecordedRebuiltRef', 'parseSupabaseDbTarget', 'target.port !== 5432',
-    'refuses the production', "set local statement_timeout = '30s'", "set local lock_timeout = '10s'", "alter role ${plan.role} login password '${plan.verifier}'", 'VERIFIER_SHAPE', 'rolsuper', "await client.query('commit')", 'rollback_not_confirmed']) {
+    'refuses the production', "set local statement_timeout = '30s'", "set local lock_timeout = '10s'", "alter role ${role} login password %L", "current_setting('${VERIFIER_GUC}')", "select set_config('${VERIFIER_GUC}', $1, true)", 'exception when query_canceled then', 'when others then raise exception using errcode = sqlstate',
+    'query_timeout: CLIENT_QUERY_TIMEOUT_MS', 'keepAlive: true', 'expired === true', 'pg_stat_statements.track', '/^[A-Za-z0-9_-]+$/', 'ROLE_PASSWORD_MIN_LENGTH = 32', '--out is not supported', 'const resultEvent', 'VERIFIER_SHAPE', 'rolsuper', "await client.query('commit')", 'rollback_not_confirmed']) {
     if (!rolePw.includes(required)) failures.push(`role-password.ts is missing: ${required}`);
   }
   const code = rolePw.replace(/\/\*[\s\S]*?\*\/|\/\/.*$/gm, '');
-  for (const forbidden of [/process\.env/, /\bdrop\b/i, /delete\s+from/i, /truncate/i, /\bgrant\b/i, /\brevoke\b/i, /\b(createrole|superuser|createdb|bypassrls)\b/i, /password\s+'\$\{(?!plan\.verifier)/, /console\.(log|error)\([^)]*(password|verifier)/i]) {
+  for (const forbidden of [/process\.env/, /\bdrop\b/i, /delete\s+from/i, /truncate/i, /\bgrant\b/i, /\brevoke\b/i, /\b(createrole|superuser|createdb|bypassrls)\b/i, /password\s+'\$\{/, /\bline\(/]) {
     if (forbidden.test(code)) failures.push(`role-password.ts must not contain ${forbidden}`);
   }
   if ((code.match(/alter role/gi) ?? []).length !== 1) failures.push('role-password.ts must contain exactly one ALTER ROLE statement');
+  // The verifier is only ever a bind parameter, and no printed event can carry it: every event goes through resultEvent(role, result).
+  const eventFn = /const resultEvent = [\s\S]*?\n\};/.exec(code)?.[0] ?? '';
+  const printedArgs = [...code.matchAll(/resultEvent\(([^)]*)\)/g)].map((m) => m[1]);
+  if (printedArgs.length < 3 || printedArgs.some((a) => /verifier|password|err|message/i.test(a))) failures.push('role-password.ts: resultEvent( arguments must never mention verifier, password or an error');
+  if ((code.match(/console\./g) ?? []).length !== 1 || !eventFn.includes('console.log(JSON.stringify({ msg:') || /verifier|password/i.test(eventFn.replace(/ROLE_PASSWORD_[A-Z]+|role_password_(refused|result)/g, ''))) failures.push('role-password.ts: console may be used only inside resultEvent, which may print only msg, role and result');
+  if (/\$\{[^}]*verifier[^}]*\}/.test(code)) failures.push('role-password.ts: the verifier must never be interpolated into a template string or SQL text');
 }
 const wrapperSrc = read('scripts/run-with-secrets.mjs');
 if (wrapperSrc) {
