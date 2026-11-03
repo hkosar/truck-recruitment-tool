@@ -271,6 +271,15 @@ await check('a caller option that can replace the connection target or TLS setti
       }
       assert.throws(() => newSecurePgClient(target, { [Symbol('x')]: 1 } as never), refusal('connection_override'));
       assert.throws(() => newSecurePgClient(target, Object.create({ ssl: false }) as never), refusal('connection_override'));
+      // application_name: a plain short label passes; anything that could inject startup parameters is refused.
+      for (const bad of ['x\0database\0other_db', 'a b', 'a;b', '', 'a'.repeat(64), 'é', 'x\nname', 5, null]) {
+        assert.throws(() => newSecurePgClient(target, { application_name: bad } as never), refusal('connection_override'), String(bad));
+        assert.throws(() => newSecurePgPool(target, { application_name: bad } as never), refusal('connection_override'), String(bad));
+      }
+      for (const good of ['pipeline', 'a.b_c-D9', 'a'.repeat(63)]) {
+        void newSecurePgClient(target, { application_name: good });
+        void newSecurePgPool(target, { application_name: good }).end();
+      }
       // The refusal is the one fixed runner id and carries no host, user or password.
       try { newSecurePgClient(target, { connectionString: `postgres://u:${PASSWORD}@${OTHER_HOST}/db` } as never); assert.fail('must refuse'); } catch (err) {
         assert.deepEqual(classifyRunnerFailure(err), { refusal: 'db_tls_refused' });
