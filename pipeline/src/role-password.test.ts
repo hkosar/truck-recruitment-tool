@@ -12,7 +12,7 @@ import { resolve } from 'node:path';
 import { pathToFileURL } from 'node:url';
 import pg from 'pg';
 import {
-  CLIENT_QUERY_TIMEOUT_MS, DEBUG_PRINT_OFF_SQL, LOCK_TIMEOUT_SQL, SEARCH_PATH_SQL, lockTimeoutSql, ROLE_PASSWORD_RESULTS, ROLE_PASSWORD_ACTIONS, ROLE_PASSWORD_ROLES, ROLE_PASSWORD_VARIABLES, SETTINGS_SQL, SET_VERIFIER_SQL, STATEMENT_TIMEOUT_SQL, doAlterSql, executeRolePassword, loggingProblem, passwordProblem, planRolePassword, rolePasswordClientOptions, runRolePassword, scramSha256Verifier,
+  CHECKED_SETTINGS, CLIENT_QUERY_TIMEOUT_MS, HARMLESS_LOGGING_SETTINGS, MUST_BE_OFF_SETTINGS, SESSION_SAFETY_SQL, LOCK_TIMEOUT_SQL, SEARCH_PATH_SQL, lockTimeoutSql, ROLE_PASSWORD_RESULTS, ROLE_PASSWORD_ACTIONS, ROLE_PASSWORD_ROLES, ROLE_PASSWORD_VARIABLES, SETTINGS_SQL, SET_VERIFIER_SQL, STATEMENT_TIMEOUT_SQL, doAlterSql, executeRolePassword, loggingProblem, passwordProblem, planRolePassword, rolePasswordClientOptions, runRolePassword, scramSha256Verifier,
 } from './role-password.js';
 import { REFUSAL_IDS, RunnerRefusal, classifyRunnerFailure } from './refusals.js';
 import { REPOSITORY_ROOT, type RebuiltSqlClient } from './staging-rebuilt.js';
@@ -26,7 +26,8 @@ const MAINT = ROLE_PASSWORD_ACTIONS['set-maintenance-password'];
 let n = 0;
 const check = (name: string, ok: boolean) => { assert.ok(ok, name); console.log(`PASS ${name}`); n += 1; };
 const refusalOf = (fn: () => unknown): string | undefined => { try { fn(); return undefined; } catch (e) { return e instanceof RunnerRefusal ? e.id : `other:${(e as Error).message}`; } };
-const SAFE_LOGGING: Record<string, string> = { log_statement: 'none', log_min_duration_statement: '-1', log_min_duration_sample: '-1', log_statement_sample_rate: '1', log_transaction_sample_rate: '0', log_parameter_max_length: '-1', log_parameter_max_length_on_error: '0', 'pgaudit.log': 'none', 'auto_explain.log_min_duration': '-1', log_lock_waits: 'off', deadlock_timeout: '1000' };
+const SAFE_LOGGING: Record<string, string> = { log_statement: 'none', log_min_duration_statement: '-1', log_min_duration_sample: '-1', log_statement_sample_rate: '1', log_transaction_sample_rate: '0', log_parameter_max_length: '-1', log_parameter_max_length_on_error: '0', 'pgaudit.log': 'none', 'auto_explain.log_min_duration': '-1', log_lock_waits: 'off', deadlock_timeout: '1000',
+  ...Object.fromEntries(MUST_BE_OFF_SETTINGS.map((s) => [s, 'off'])), log_min_messages: 'warning', track_activities: 'on' };
 const settingsMap = (o: Record<string, string>) => new Map(Object.entries({ ...SAFE_LOGGING, ...o }));
 const base = { action: 'set-app-password', dbUrl: pooler(REBUILT), confirm: APP.confirmation, password: PW };
 
@@ -107,7 +108,8 @@ async function main(): Promise<void> {
   };
   let r = await captured(() => runRolePassword(fake(), plan));
   const alter = sent.filter((s) => /^do \$\$/.test(s));
-  check('success: begin, search_path = pg_catalog, debug_print_* off, settings read, statement_timeout, lock_timeout, verifier bound to set_config, one constant DO block, commit; one committed event', r.error === undefined && sent[0] === 'begin' && sent[1] === SEARCH_PATH_SQL && sent.slice(2, 5).join() === DEBUG_PRINT_OFF_SQL.join() && /pg_settings/.test(sent[5]!) && sent[6] === STATEMENT_TIMEOUT_SQL && sent[7] === LOCK_TIMEOUT_SQL
+  const k = SESSION_SAFETY_SQL.length;
+  check('success: begin, search_path = pg_catalog, debug_print_* / exit_on_error / jit off, settings read, statement_timeout, lock_timeout, verifier bound to set_config, one constant DO block, commit; one committed event', r.error === undefined && sent[0] === 'begin' && sent[1] === SEARCH_PATH_SQL && sent.slice(2, 2 + k).join() === SESSION_SAFETY_SQL.join() && k === 5 && /pg_settings/.test(sent[2 + k]!) && sent[3 + k] === STATEMENT_TIMEOUT_SQL && sent[4 + k] === LOCK_TIMEOUT_SQL
     && sent.includes(SET_VERIFIER_SQL) && alter.length === 1 && alter[0] === doAlterSql('recruiter_app') && sent[sent.length - 1] === 'commit' && r.lines.length === 1 && JSON.parse(r.lines[0]!).result === 'committed');
   check('the verifier and the plain password are in NO statement text sent to the server (the verifier is only a bind parameter); the DO text has both handlers', !sent.some((s) => s.includes(PW) || s.includes(plan.verifier) || /SCRAM-SHA-256/.test(s))
     && /exception when query_canceled then raise exception using errcode = 'query_canceled', message = 'role password statement failed'; when others then raise exception using errcode = sqlstate, message = 'role password statement failed'/.test(alter[0]!)
@@ -152,12 +154,16 @@ async function main(): Promise<void> {
   check('a role with an expired VALID UNTIL is refused before the verifier is bound (it could not log in); rolled back, never committed', r.error instanceof RunnerRefusal && !sent.some((x) => /set_config|^do |^commit/.test(x)) && JSON.parse(r.lines[0]!).result === 'rolled_back');
   sent.length = 0;
   r = await captured(() => runRolePassword(fake(), plan));
-  check('every statement names its pg_catalog objects: no unqualified pg_settings, pg_roles, set_config, current_setting or format in anything sent', sent.length > 0 && !sent.some((x) => /(?<!pg_catalog.)(pg_settings|pg_roles|set_config|current_setting|format|now|count)(?=s*[(,]|s+(where|as))/.test(x)) && !/(?<!pg_catalog.)pg_settings/.test(SETTINGS_SQL));
+  const unqualified = /(?<!pg_catalog\.)\b(pg_settings|pg_roles|set_config|current_setting|format|now|count)(?=\s*[(,)]|\s+(where|as)\b|\s*$)/;
+  check('the unqualified-name pattern itself catches unqualified relations and functions and passes qualified ones', ['select 1 from pg_roles where rolname = $1', 'select x from pg_settings where name', 'select * from pg_settings', 'select format(1)', 'select now()']
+    .every((x) => unqualified.test(x)) && !['select 1 from pg_catalog.pg_roles where rolname = $1', 'select pg_catalog.format(1)', 'select pg_catalog.now()'].some((x) => unqualified.test(x)));
+  check('every statement names its pg_catalog objects: no unqualified pg_settings, pg_roles, set_config, current_setting or format in anything sent', sent.length > 0 && !sent.some((x) => unqualified.test(x)) && !/(?<!pg_catalog\.)pg_settings/.test(SETTINGS_SQL));
   sent.length = 0;
   r = await captured(() => runRolePassword(fake(), plan));
   const before = (re: RegExp, other: RegExp): boolean => sent.findIndex((x) => re.test(x)) >= 0 && sent.findIndex((x) => re.test(x)) < sent.findIndex((x) => other.test(x));
-  check('search_path and the three debug_print_* settings are set before the settings read, and both before the verifier is bound', before(/^set local search_path = pg_catalog, pg_temp$/, /pg_settings/) && before(/^set local debug_print_plan = off$/, /pg_settings/) && before(/^set local debug_print_parse = off$/, /set_config/) && before(/^set local debug_print_rewritten = off$/, /set_config/));
-  for (const re of [/debug_print_parse/, /debug_print_rewritten/, /debug_print_plan/, /search_path/]) {
+  check('search_path and the session safety settings (debug_print_*, exit_on_error, jit) are set before the settings read, and all before the verifier is bound', before(/^set local search_path = pg_catalog, pg_temp$/, /pg_settings/) && before(/^set local debug_print_plan = off$/, /pg_settings/) && before(/^set local debug_print_parse = off$/, /set_config/) && before(/^set local debug_print_rewritten = off$/, /set_config/)
+    && before(/^set local exit_on_error = off$/, /pg_settings/) && before(/^set local exit_on_error = off$/, /set_config/) && before(/^set local jit = off$/, /set_config/));
+  for (const re of [/debug_print_parse/, /debug_print_rewritten/, /debug_print_plan/, /exit_on_error/, /jit/, /search_path/]) {
     sent.length = 0;
     r = await captured(() => runRolePassword(fake({ failOn: new RegExp(`^set local ${re.source}`) }), plan));
     check(`a refused SET LOCAL ${re.source} fails closed: rolled back, verifier never bound, no ALTER sent, no commit`, r.error !== undefined && !sent.some((x) => /set_config|^do |^commit/.test(x)) && sent.includes('rollback') && JSON.parse(r.lines[0]!).result === 'rolled_back');
@@ -189,6 +195,10 @@ async function main(): Promise<void> {
     ['log_min_duration_sample=0 with log_statement_sample_rate=1', { log_min_duration_sample: '0', log_statement_sample_rate: '1' }], ['log_transaction_sample_rate=1', { log_transaction_sample_rate: '1' }],
     ['log_transaction_sample_rate=0.01', { log_transaction_sample_rate: '0.01' }], ['pgaudit.log=all', { 'pgaudit.log': 'all' }], ['pgaudit.log=role', { 'pgaudit.log': 'role' }], ['pgaudit.log=ddl, role', { 'pgaudit.log': 'ddl, role' }],
     ['auto_explain.log_min_duration=0', { 'auto_explain.log_min_duration': '0' }], ['log_parameter_max_length_on_error=-1', { log_parameter_max_length_on_error: '-1' }], ['log_parameter_max_length_on_error=64', { log_parameter_max_length_on_error: '64' }],
+    ['log_parser_stats=on', { log_parser_stats: 'on' }], ['log_planner_stats=on', { log_planner_stats: 'on' }], ['log_executor_stats=on', { log_executor_stats: 'on' }], ['log_statement_stats=on', { log_statement_stats: 'on' }],
+    ['exit_on_error still on after SET LOCAL', { exit_on_error: 'on' }], ['jit still on after SET LOCAL', { jit: 'on' }], ['debug_print_plan still on after SET LOCAL', { debug_print_plan: 'on' }],
+    ['log_parser_stats unreadable value', { log_parser_stats: 'maybe' }],
+    ['an unclassified setting in the logging groups (a newer server: log_lock_failures)', { log_lock_failures: 'off' }], ['an unclassified build-only debug setting (wal_debug)', { wal_debug: 'off' }],
   ];
   for (const [label, settings] of unsafe) {
     sent.length = 0;
@@ -198,12 +208,18 @@ async function main(): Promise<void> {
   sent.length = 0;
   r = await captured(() => runRolePassword(fake({ settings: { log_parameter_max_length: '0', log_statement: 'all', log_min_duration_statement: '0', log_statement_sample_rate: '1', log_min_duration_sample: '0', log_transaction_sample_rate: '1' } }), plan));
   check('with log_parameter_max_length = 0 the statement-logging settings are harmless and the run proceeds (log_statement=all, duration 0, both samplings on)', r.error === undefined && sent.includes('commit'));
+  check('a missing row for any must-be-off setting (log_parser_stats, exit_on_error, jit, ...) counts as on and is refused', MUST_BE_OFF_SETTINGS.length === 9 && MUST_BE_OFF_SETTINGS.every((s) => { const m = settingsMap({}); m.delete(s); return loggingProblem(m) !== null; }));
+  check('log_parameter_max_length = 0 does NOT excuse the *_stats settings, exit_on_error or an unclassified setting', ['log_parser_stats', 'log_planner_stats', 'log_executor_stats', 'log_statement_stats', 'exit_on_error'].every((s) => loggingProblem(settingsMap({ log_parameter_max_length: '0', [s]: 'on' })) !== null)
+    && loggingProblem(settingsMap({ log_parameter_max_length: '0', trace_connection_negotiation: 'off' })) !== null);
+  check('every harmless setting at any value is accepted, and the classified lists do not overlap', HARMLESS_LOGGING_SETTINGS.length === 68 && loggingProblem(settingsMap(Object.fromEntries(HARMLESS_LOGGING_SETTINGS.map((s) => [s, 'on'])))) === null
+    && !HARMLESS_LOGGING_SETTINGS.some((s) => MUST_BE_OFF_SETTINGS.includes(s) || ['log_statement', 'log_lock_waits', 'log_parameter_max_length', 'log_parameter_max_length_on_error', 'log_min_duration_statement', 'log_min_duration_sample', 'log_statement_sample_rate', 'log_transaction_sample_rate'].includes(s)));
   check('log_parameter_max_length = 0 does NOT excuse log_parameter_max_length_on_error, pgaudit or auto_explain', loggingProblem(settingsMap({ log_parameter_max_length: '0', log_parameter_max_length_on_error: '5' })) !== null
     && loggingProblem(settingsMap({ log_parameter_max_length: '0', 'pgaudit.log': 'all' })) !== null && loggingProblem(settingsMap({ log_parameter_max_length: '0', 'auto_explain.log_min_duration': '5' })) !== null);
   check('safe combinations proceed: the defaults, log_statement=ddl and mod, sampling rate 0 with a duration, pgaudit.log empty or none', ([{},{ log_statement: 'ddl' }, { log_statement: 'mod' }, { log_min_duration_sample: '100', log_statement_sample_rate: '0' }, { 'pgaudit.log': '' }, { log_parameter_max_length: '0' }] as Record<string, string>[]).every((o) => loggingProblem(settingsMap(o)) === null));
   check('a setting that cannot be read fails closed (nothing returned, on-error length or duration non-numeric)', loggingProblem(new Map()) !== null
     && loggingProblem(settingsMap({ log_parameter_max_length_on_error: 'x' })) !== null && loggingProblem(settingsMap({ log_min_duration_statement: 'x' })) !== null);
-  check('the settings query reads every logging setting, uses current_setting(..., true) for pgaudit and auto_explain, and the two new refusal ids are registered', ['log_statement', 'log_min_duration_statement', 'log_min_duration_sample', 'log_statement_sample_rate', 'log_transaction_sample_rate', 'log_parameter_max_length', 'log_parameter_max_length_on_error', "current_setting('pgaudit.log', true)", "current_setting('auto_explain.log_min_duration', true)"].every((t) => SETTINGS_SQL.includes(t))
+  check('the settings query reads every logging setting, uses current_setting(..., true) for pgaudit and auto_explain, and the two new refusal ids are registered', ['log_statement', 'log_min_duration_statement', 'log_min_duration_sample', 'log_statement_sample_rate', 'log_transaction_sample_rate', 'log_parameter_max_length', 'log_parameter_max_length_on_error', "current_setting('pgaudit.log', true)", "current_setting('auto_explain.log_min_duration', true)",
+    "'log_parser_stats'", "'log_planner_stats'", "'log_executor_stats'", "'log_statement_stats'", "'exit_on_error'", "'jit'", "'debug_print_plan'", "or category ~ '^(Reporting and Logging|Statistics|Developer Options|Error Handling)'"].every((t) => SETTINGS_SQL.includes(t))
     && ['role_password_logging_refused', 'role_password_expiry_refused'].every((id) => (REFUSAL_IDS as readonly string[]).includes(id)));
   sent.length = 0;
   r = await captured(() => runRolePassword(fake({ rows: (_s, call) => [{ rolcanlogin: call > 1, rolsuper: false, expired: false, expires_soon: true, matches: 1 }] }), plan));
@@ -449,8 +465,11 @@ async function main(): Promise<void> {
       }
     };
     const logSince = async (mark: number): Promise<string> => { await sleep(1500); return readFileSync(LOG!, 'utf8').slice(mark); };
-    const visible = async () => { const c = new pg.Client({ host: u.hostname, port: Number(u.port), user: 'tr_runner', password: RUNNER_PW, database: dbName }); c.on('error', () => undefined); await c.connect(); try { return (await c.query(SETTINGS_SQL)).rows.length; } finally { await c.end(); } };
-    check('a non-superuser runner can read every setting the check needs (SETTINGS_SQL returns the 9 logging rows, 2 timeouts, deadlock_timeout, log_lock_waits and 2 pg_stat_statements rows when present)', (await visible()) >= 13);
+    const visible = async () => { const c = new pg.Client({ host: u.hostname, port: Number(u.port), user: 'tr_runner', password: RUNNER_PW, database: dbName }); c.on('error', () => undefined); await c.connect(); try { return (await c.query(SETTINGS_SQL)).rows as { name: string; setting: string }[]; } finally { await c.end(); } };
+    const seenRows = await visible();
+    // jit is on by default outside the module's transaction (the module switches it off before it reads).
+    check('a non-superuser runner can read every setting checked by name (pg_stat_statements rows when present), and every setting it sees in the logging, statistics, developer and error-handling groups is classified', CHECKED_SETTINGS.filter((s) => hasPss || !s.startsWith('pg_stat_statements.')).every((s) => seenRows.some((x) => x.name === s))
+      && loggingProblem(new Map([...seenRows.map((x) => [x.name, x.setting] as [string, string]), ['jit', 'off']])) === null);
     const refusedCases: [string, string[]][] = [
       ['log_statement = all', ["log_statement = 'all'"]], ['log_min_duration_statement = 0', ['log_min_duration_statement = 0']], ['log_transaction_sample_rate = 1', ['log_transaction_sample_rate = 1']],
       ['log_min_duration_sample = 0 with log_statement_sample_rate = 1', ['log_min_duration_sample = 0', 'log_statement_sample_rate = 1']],
@@ -490,6 +509,41 @@ async function main(): Promise<void> {
     {
       const res = await runAsRunner(['log_lock_waits = on'], lplan);
       check('control: with log_lock_waits = on and no lock held the run commits', res!.error === undefined);
+    }
+    // B1 (r4 review): exit_on_error turned an error inside the ALTER into a FATAL whose CONTEXT quoted the statement; log_parser_stats logged it on every run.
+    for (const [label, settings, options] of [['exit_on_error = on and default_transaction_read_only = on (per role)', ['exit_on_error = on', 'default_transaction_read_only = on'], undefined],
+      ['exit_on_error = on and default_transaction_read_only = on as a client startup option', [], '-c exit_on_error=on -c default_transaction_read_only=on']] as [string, string[], string | undefined][]) {
+      const mark = logMark();
+      await admin.query('alter role recruiter_app nologin password null'); const res = await runAsRunner(settings, lplan, false, options);
+      check(`real server, runner session with ${label}: the module switches exit_on_error off, so the read-only error (25006) is caught and re-raised with the fixed message; rolled back (not a FATAL), no password stored, and the log holds no part of the verifier${LOG ? '' : ' (log not checked)'}`,
+        JSON.stringify(classifyRunnerFailure(res!.error)) === JSON.stringify({ refusal: 'server_or_driver_error', err_code: '25006' }) && (res!.error as Error).message === 'role password statement failed' && JSON.parse(res!.lines[0]!).result === 'rolled_back'
+        && (await rolePw('recruiter_app')) === null && (await logClean(mark)));
+    }
+    {
+      const mark = logMark();
+      await admin.query('alter role recruiter_app nologin password null'); const held = await holdRole();
+      const res = await runAsRunner(['exit_on_error = on', 'log_lock_waits = on'], lplan, false, undefined, async () => { await sleep(3000); await held.query('rollback'); });
+      await held.end();
+      check(`real server, exit_on_error = on with log_lock_waits = on and the role row locked for 3 s: the module's own 900 ms lock timeout (55P03) is caught, rolled back (not a FATAL), and the log holds no part of the verifier${LOG ? '' : ' (log not checked)'}`,
+        JSON.stringify(classifyRunnerFailure(res!.error)) === JSON.stringify({ refusal: 'server_or_driver_error', err_code: '55P03' }) && JSON.parse(res!.lines[0]!).result === 'rolled_back' && (await rolePw('recruiter_app')) === null && (await logClean(mark)));
+    }
+    for (const st of ['log_parser_stats', 'log_planner_stats', 'log_executor_stats', 'log_statement_stats']) {
+      const mark = logMark();
+      await admin.query('alter role recruiter_app nologin password null'); const res = await runAsRunner([`${st} = on`]);
+      check(`real server, runner session with ${st} = on (superuser-only, cannot be switched off here): refused with role_password_logging_refused before the verifier is bound, no password stored, and the log holds no part of the verifier${LOG ? '' : ' (log not checked)'}`,
+        res!.error instanceof RunnerRefusal && res!.error.id === 'role_password_logging_refused' && JSON.parse(res!.lines[0]!).result === 'rolled_back' && (await rolePw('recruiter_app')) === null && (await logClean(mark)));
+    }
+    {
+      // Settings classified harmless, at their loudest, all at once (plus exit_on_error and debug_print_*, which the module switches off).
+      const loud = ['log_min_messages = debug5', 'log_error_verbosity = verbose', 'log_min_error_statement = debug5', "backtrace_functions = 'AlterRole,PreventCommandIfReadOnly'", "track_functions = 'all'", 'client_min_messages = debug5',
+        'debug_parallel_query = on', 'trace_sort = on', 'jit_above_cost = 0', 'log_duration = on', 'log_temp_files = 0', "log_statement = 'mod'", 'exit_on_error = on', 'debug_print_parse = on', 'debug_print_plan = on'];
+      const mark = logMark();
+      const ok = await runAsRunner(loud);
+      check(`real server, the harmless settings at their loudest all at once: committed, the role logs in, and the log holds no part of the verifier${LOG ? '' : ' (log not checked)'}`, ok!.error === undefined && JSON.parse(ok!.lines[0]!).result === 'committed' && (await loginAs('recruiter_app', LPW)).ok && (await logClean(mark)));
+      await admin.query('alter role recruiter_app nologin password null');
+      const mark2 = logMark();
+      const ro = await runAsRunner([...loud, 'default_transaction_read_only = on']);
+      check(`real server, the same loud settings with a read-only error inside the ALTER: rolled back with the fixed message, and the log holds no part of the verifier${LOG ? '' : ' (log not checked)'}`, JSON.parse(ro!.lines[0]!).result === 'rolled_back' && (ro!.error as Error).message === 'role password statement failed' && (await logClean(mark2)));
     }
     // B2 (r3 review): look-alike objects earlier on the runner's search_path.
     {

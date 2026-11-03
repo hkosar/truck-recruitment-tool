@@ -24,22 +24,32 @@ import { RECORDED_PROJECT_REFS, parseSupabaseDbTarget, type SupabaseDbTarget } f
  * Before anything else the transaction sets search_path = pg_catalog, pg_temp (SET LOCAL) and every statement names its pg_catalog objects
  * explicitly, so a look-alike pg_settings, pg_roles, set_config, current_setting or format earlier on the runner's search_path cannot hide
  * a logging setting or receive the verifier. It then sets debug_print_parse, debug_print_rewritten and debug_print_plan to off (SET LOCAL;
- * they are user-settable and would log the parse tree, with the verifier, on every run); a SET LOCAL that is not permitted is an error,
- * so the run rolls back before the verifier is bound. log_lock_waits (superuser-only to change) cannot be switched off: when it is not
+ * they are user-settable and would log the parse tree, with the verifier, on every run), exit_on_error to off (user-settable; when on, any
+ * error inside the ALTER, including this module's own lock and statement timeouts, becomes a FATAL whose CONTEXT quotes the statement) and
+ * jit to off; a SET LOCAL that is not permitted is an error, so the run rolls back before the verifier is bound, and each of them must
+ * then read off. log_lock_waits (superuser-only to change) cannot be switched off: when it is not
  * off, the lock_timeout is set to deadlock_timeout minus 100 ms (a stricter one already in force is kept), so a lock wait is cancelled
  * before the "still waiting" line, whose CONTEXT quotes the statement, can be written; a deadlock_timeout under 200 ms or unreadable is
  * refused.
  * The transaction READS the logging settings and REFUSES (nothing changed) when the bound parameter could be written to the server
  * log: unless log_parameter_max_length = 0, it refuses for log_statement = 'all', log_min_duration_statement other than -1, a
  * log_min_duration_sample other than -1 together with a log_statement_sample_rate above 0, or a log_transaction_sample_rate above 0; it
- * also refuses when log_parameter_max_length_on_error is not 0, when pgaudit.log is anything but none, and when
- * auto_explain.log_min_duration is anything but -1. pg_stat_statements.track = 'all' (with track_utility on) is refused too.
+ * also refuses when log_parameter_max_length_on_error is not 0, when pgaudit.log is anything but none, when
+ * auto_explain.log_min_duration is anything but -1, and when log_parser_stats, log_planner_stats, log_executor_stats or
+ * log_statement_stats is not off (superuser-only; log_parser_stats writes the statement in CONTEXT). pg_stat_statements.track = 'all' is
+ * refused when track_utility is also on (with track_utility off no utility statement is recorded).
+ * Every visible setting in the pg_settings groups Reporting and Logging, Statistics, Developer Options and Error Handling is read as
+ * well; one that is neither checked by name nor in HARMLESS_LOGGING_SETTINGS (PostgreSQL 16, each probed on a real server) is refused,
+ * so a newer server's new logging setting fails closed until it is classified.
  * What remains (exactly): (1) a FATAL termination of the session while the ALTER runs (an administrator command, a crash or a
  * shutdown; PL/pgSQL cannot catch FATAL and ALTER ROLE accepts no bind parameter): the log's CONTEXT line then quotes the statement;
- * (2) any other LOG or WARNING raised inside the ALTER by something this module does not name (an extension or a host hook): it carries
- * the same CONTEXT at the default log_min_messages = warning. The window for both is at most the lock wait (10 s, or less as above) plus
- * the statement's run time; any rollback_not_confirmed or unknown result is a STOP. The node-postgres error then holds the text in its `where` field in memory; it is never printed (only the classifier's id and
- * SQLSTATE are). Settings this module cannot see (an extension that is not named above) are not covered.
+ * (2) any other LOG or WARNING raised inside the ALTER by code this module does not name (an extension, a preloaded library or a host
+ * hook, e.g. Supabase supautils, not verified): it carries the same CONTEXT at the default log_min_messages = warning; (3) a setting
+ * in those groups that a role without pg_read_all_settings cannot see (in PostgreSQL 16 only log_directory and log_filename, both
+ * destination-only) is not read. The window for (1) and (2) is at most the lock wait (10 s, or less as above) plus the statement's run
+ * time; any rollback_not_confirmed or unknown result is a STOP. The node-postgres error then holds the text in its `where` field in
+ * memory; it is never printed (only the classifier's id and SQLSTATE are). Extension settings other than pgaudit.log and
+ * auto_explain.log_min_duration are not covered.
  *
  * One transaction with a statement and a lock timeout (a stricter timeout already in force is kept) and a client-side query timeout.
  * The role name comes from a fixed two-entry table, never from input. The verifier is itself sensitive: it is never printed, returned
@@ -74,17 +84,40 @@ export const STATEMENT_TIMEOUT_SQL = "set local statement_timeout = '30s'";
 export const LOCK_TIMEOUT_SQL = "set local lock_timeout = '10s'";
 export const LOCK_WAIT_LOG_MARGIN_MS = 100;
 export const MIN_DEADLOCK_TIMEOUT_MS = 200;
-/** The first statements after begin: only pg_catalog (then pg_temp) on the search path, and the settings that would log the parse tree off. */
+/** The first statements after begin: only pg_catalog (then pg_temp) on the search path, then the user-settable settings that could write the statement, with the verifier, to the log are switched off. */
 export const SEARCH_PATH_SQL = 'set local search_path = pg_catalog, pg_temp';
-export const DEBUG_PRINT_OFF_SQL: readonly string[] = ['set local debug_print_parse = off', 'set local debug_print_rewritten = off', 'set local debug_print_plan = off'];
+/** debug_print_* log the parse tree; exit_on_error turns an error inside the ALTER into a FATAL, whose CONTEXT the DO block cannot replace; jit = off keeps JIT (and jit_dump_bitcode) out of the transaction. */
+export const SESSION_SAFETY_SQL: readonly string[] = ['set local debug_print_parse = off', 'set local debug_print_rewritten = off', 'set local debug_print_plan = off', 'set local exit_on_error = off', 'set local jit = off'];
 export const lockTimeoutSql = (ms: number): string => `set local lock_timeout = '${Math.floor(ms)}ms'`;
-export const SETTINGS_SQL = "select name, setting from pg_catalog.pg_settings where name in ('statement_timeout', 'lock_timeout', 'deadlock_timeout', 'log_lock_waits', 'pg_stat_statements.track', 'pg_stat_statements.track_utility', "
-  + "'log_statement', 'log_min_duration_statement', 'log_min_duration_sample', 'log_statement_sample_rate', 'log_transaction_sample_rate', 'log_parameter_max_length', 'log_parameter_max_length_on_error') "
+/** Must read off after SESSION_SAFETY_SQL; the four *_stats settings are superuser-only (cannot be switched off here), and log_parser_stats writes the statement in CONTEXT. Missing counts as on. */
+export const MUST_BE_OFF_SETTINGS: readonly string[] = ['debug_print_parse', 'debug_print_rewritten', 'debug_print_plan', 'exit_on_error', 'jit', 'log_parser_stats', 'log_planner_stats', 'log_executor_stats', 'log_statement_stats'];
+/** Every setting read by name. */
+export const CHECKED_SETTINGS: readonly string[] = ['statement_timeout', 'lock_timeout', 'deadlock_timeout', 'log_lock_waits', 'pg_stat_statements.track', 'pg_stat_statements.track_utility',
+  'log_statement', 'log_min_duration_statement', 'log_min_duration_sample', 'log_statement_sample_rate', 'log_transaction_sample_rate', 'log_parameter_max_length', 'log_parameter_max_length_on_error', ...MUST_BE_OFF_SETTINGS];
+/** Every visible setting in these pg_settings groups is also read; one that is neither checked above nor listed as harmless is refused (fail closed). */
+export const LOGGING_CATEGORIES_PATTERN = '^(Reporting and Logging|Statistics|Developer Options|Error Handling)';
+/**
+ * The rest of PostgreSQL 16's settings in those groups: a real-server probe as a non-superuser runner (each at its loudest value, then all at
+ * once on the success, error and lock-wait paths) found no part of the verifier in the server log, pg_stat_statements or pg_stat_activity,
+ * or the setting cannot change what one session writes (server-wide or destination only). Evidence: scram-6b r5 settings audit.
+ */
+export const HARMLESS_LOGGING_SETTINGS: readonly string[] = ['allow_in_place_tablespaces', 'allow_system_table_mods', 'application_name', 'backtrace_functions', 'cluster_name', 'compute_query_id', 'data_sync_retry',
+  'debug_discard_caches', 'debug_io_direct', 'debug_logical_replication_streaming', 'debug_parallel_query', 'debug_pretty_print', 'event_source', 'ignore_checksum_failure', 'ignore_invalid_pages', 'ignore_system_indexes',
+  'jit_debugging_support', 'jit_dump_bitcode', 'jit_expressions', 'jit_profiling_support', 'jit_tuple_deforming', 'log_autovacuum_min_duration', 'log_checkpoints', 'log_connections', 'log_destination', 'log_directory',
+  'log_disconnections', 'log_duration', 'log_error_verbosity', 'log_file_mode', 'log_filename', 'log_hostname', 'log_line_prefix', 'log_min_error_statement', 'log_min_messages', 'log_recovery_conflict_waits',
+  'log_replication_commands', 'log_rotation_age', 'log_rotation_size', 'log_startup_progress_interval', 'log_temp_files', 'log_timezone', 'log_truncate_on_rotation', 'logging_collector', 'post_auth_delay', 'pre_auth_delay',
+  'recovery_init_sync_method', 'remove_temp_files_after_crash', 'restart_after_crash', 'send_abort_for_crash', 'send_abort_for_kill', 'stats_fetch_consistency', 'syslog_facility', 'syslog_ident', 'syslog_sequence_numbers',
+  'syslog_split_messages', 'trace_notify', 'trace_recovery_messages', 'trace_sort', 'track_activities', 'track_activity_query_size', 'track_counts', 'track_functions', 'track_io_timing', 'track_wal_io_timing',
+  'update_process_title', 'wal_consistency_checking', 'zero_damaged_pages'];
+export const SETTINGS_SQL = `select name, setting from pg_catalog.pg_settings where name in (${CHECKED_SETTINGS.map((s) => `'${s}'`).join(', ')}) or category ~ '${LOGGING_CATEGORIES_PATTERN}' `
   + "union all select 'pgaudit.log', coalesce(pg_catalog.current_setting('pgaudit.log', true), 'none') "
   + "union all select 'auto_explain.log_min_duration', coalesce(pg_catalog.current_setting('auto_explain.log_min_duration', true), '-1')";
+const CLASSIFIED_SETTINGS: ReadonlySet<string> = new Set([...CHECKED_SETTINGS, ...HARMLESS_LOGGING_SETTINGS, 'pgaudit.log', 'auto_explain.log_min_duration']);
 export const EXPIRY_MARGIN_HOURS = 24;
-/** Why the server settings let the verifier reach the log, or null when they do not. A setting that cannot be read counts as unsafe. */
+/** Why the server settings let the verifier reach the log, or null when they do not. A setting that cannot be read or is not classified counts as unsafe. */
 export function loggingProblem(settings: Map<string, string>): string | null {
+  for (const name of settings.keys()) if (!CLASSIFIED_SETTINGS.has(name)) return `${name} is not classified`;
+  for (const name of MUST_BE_OFF_SETTINGS) if ((settings.get(name) ?? 'missing').trim().toLowerCase() !== 'off') return `${name} is not off`;
   const num = (name: string): number => { const v = settings.get(name); return v === undefined || v.trim() === '' ? Number.NaN : Number(v); };
   if (num('log_parameter_max_length_on_error') !== 0) return 'log_parameter_max_length_on_error is not 0';
   const audit = (settings.get('pgaudit.log') ?? 'missing').trim().toLowerCase();
@@ -194,7 +227,7 @@ export const doAlterSql = (role: string): string => `do $$ begin execute pg_cata
   + "when others then raise exception using errcode = sqlstate, message = 'role password statement failed'; end $$";
 
 /**
- * One transaction: search_path and debug_print_* settings, timeouts (stricter existing ones kept), the role must exist exactly once, not be a superuser and not have an expired
+ * One transaction: search_path and session safety settings, timeouts (stricter existing ones kept), the role must exist exactly once, not be a superuser and not have an expired
  * VALID UNTIL, the verifier is bound to a transaction-local setting, a constant DO block runs the ALTER ROLE ... LOGIN PASSWORD,
  * then LOGIN must be on and every other attribute unchanged before COMMIT. Any refusal or error rolls back. A failed COMMIT is
  * `unknown` (the caller STOPS). One fixed result event; nothing sensitive is printed.
@@ -206,9 +239,9 @@ export async function runRolePassword(client: RebuiltSqlClient, plan: RolePasswo
   await client.query('begin');
   let committing = false;
   try {
-    // Search path and parse-tree logging first: nothing below can resolve a look-alike object, and the debug_print_* settings cannot log the statement.
+    // Search path and session safety first: nothing below can resolve a look-alike object, debug_print_* cannot log the statement, and no error inside the ALTER becomes a FATAL.
     await client.query(SEARCH_PATH_SQL);
-    for (const sql of DEBUG_PRINT_OFF_SQL) await client.query(sql);
+    for (const sql of SESSION_SAFETY_SQL) await client.query(sql);
     // Keep a stricter timeout that is already in force (0 means none); otherwise set ours for this transaction only.
     const settings = new Map(((await client.query(SETTINGS_SQL)).rows as { name: string; setting: string }[]).map((r) => [r.name, r.setting]));
     const needsOurs = (name: string, limitMs: number): boolean => { const ms = Number(settings.get(name)); return !(Number.isFinite(ms) && ms > 0 && ms <= limitMs); };
@@ -228,7 +261,7 @@ export async function runRolePassword(client: RebuiltSqlClient, plan: RolePasswo
       throw new RunnerRefusal('role_password_refused', 'pg_stat_statements.track is "all" with track_utility on, which would record the nested role statement; refusing; nothing changed');
     }
     if (loggingProblem(settings) !== null) {
-      throw new RunnerRefusal('role_password_logging_refused', 'a server logging setting would write the bound verifier to the server log; refusing; nothing changed');
+      throw new RunnerRefusal('role_password_logging_refused', 'a server logging setting would write the bound verifier to the server log, or is not one this tool has classified; refusing; nothing changed');
     }
     const before = (await client.query(ROLE_FACTS_SQL, [plan.role])).rows as RoleFacts[];
     if (before.length !== 1 || before[0]!.matches !== 1) throw new RunnerRefusal('role_password_refused', 'the role does not exist exactly once; nothing changed');
