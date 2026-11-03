@@ -8,7 +8,7 @@ import { readFileSync, readdirSync } from 'node:fs';
 import { test } from 'node:test';
 import {
   OLD_STAGING_REF, PRODUCTION_REF, PROBE_TABLES, READ_ONLY_RPCS, REALTIME_TABLES,
-  buildPlan, checkAnonKey, checkTarget, classifyHttp, isAllowedRequest, main, recordedStagingRef, runProbes,
+  buildPlan, checkAnonKey, checkTarget, classifyHttp, isAllowedRequest, main, recordedStagingRef, runProbes, checkTls,
 } from './signin-probes-hosted-a5a.mjs';
 
 const STG = recordedStagingRef();
@@ -309,24 +309,59 @@ test('request allow-list: reads only; every write verb, rpc outside the list and
   assert.equal(isAllowedRequest('POST', '/storage/v1/object/list/../x'), false);
 });
 
-/** Every `create [or replace] function public.X(` in the app migrations and pending M1*, with its header (up to `as $`). */
+/**
+ * Every "create [or replace] function public.X(" in SQL text. A definition runs to the next "create function"; its
+ * volatility is read from the header (before "as $tag$") or the tail (after the closing tag, up to the ";").
+ * Returns { defs: Map(name -> [{ stable }]), total } where total counts every create-function-public occurrence.
+ */
+function parsePublicFunctions(sql) {
+  const re = /create\s+(?:or\s+replace\s+)?function\s+public\.([a-z_][a-z_0-9]*)\s*\(/gi;
+  const starts = [...sql.matchAll(re)];
+  const defs = new Map();
+  starts.forEach((m, i) => {
+    const chunk = sql.slice(m.index, i + 1 < starts.length ? starts[i + 1].index : sql.length);
+    const open = /\bas\s+(\$[a-z_0-9]*\$)/i.exec(chunk);
+    assert.ok(open, `no "as $tag$" found for public.${m[1]}`);
+    const header = chunk.slice(0, open.index);
+    const close = chunk.indexOf(open[1], open.index + open[0].length);
+    assert.ok(close >= 0, `body of public.${m[1]} is not closed`);
+    const tail = chunk.slice(close + open[1].length).split(';')[0];
+    defs.set(m[1], (defs.get(m[1]) ?? []).concat({ stable: /\bstable\b/i.test(header) || /\bstable\b/i.test(tail) }));
+  });
+  return { defs, total: starts.length };
+}
+
 function publicFunctions() {
-  const out = new Map();
+  const all = new Map();
+  let total = 0;
   for (const rel of ['../supabase/migrations/', '../supabase/pending/']) {
     const dir = new URL(rel, import.meta.url);
     for (const file of readdirSync(dir).filter((x) => x.endsWith('.sql'))) {
-      const sql = readFileSync(new URL(file, dir), 'utf8');
-      for (const m of sql.matchAll(/create (?:or replace )?function public\.([a-z_]+)\(([\s\S]*?)\n\s*as\s+\$[a-z_]*\$/gi)) {
-        out.set(m[1], (out.get(m[1]) ?? []).concat(m[2]));
-      }
+      const r = parsePublicFunctions(readFileSync(new URL(file, dir), 'utf8'));
+      total += r.total;
+      for (const [name, defs] of r.defs) all.set(name, (all.get(name) ?? []).concat(defs));
     }
   }
-  return out;
+  return { all, total };
 }
 
+test('function parser (fixture SQL): digits in names, volatility after the body, same-line "as $$", counts every definition', () => {
+  const sql = [
+    'create or replace function public.fn_one(a int)\nreturns int language sql stable\nas $$ select 1 $$;',
+    'create function public.fn2_two()\nreturns int language sql\nas $body$ select 2 $body$ stable;',
+    'create function public.fn_three() returns int as $$ select 3 $$ language sql volatile;',
+    'create function public.fn_four() returns int as $$ select 4 $$ language sql;',
+  ].join('\n');
+  const { defs, total } = parsePublicFunctions(sql);
+  assert.equal(total, 4);
+  assert.deepEqual([...defs].map(([n, d]) => [n, d.map((x) => x.stable)]), [['fn_one', [true]], ['fn2_two', [true]], ['fn_three', [false]], ['fn_four', [false]]]);
+  assert.throws(() => parsePublicFunctions('create function public.broken() returns int language sql;'), /no "as/);
+});
+
 test('read-only RPC list holds only STABLE functions; every read-only (STABLE) public RPC is probed; probe tables cover every public table and view', () => {
-  const fns = publicFunctions();
-  const stable = (headers) => headers.every((h) => /\bstable\b/i.test(h));
+  const { all: fns, total } = publicFunctions();
+  assert.equal([...fns.values()].reduce((n, d) => n + d.length, 0), total, 'a public function definition was not parsed');
+  const stable = (defs) => defs.every((d) => d.stable);
   for (const rpc of Object.keys(READ_ONLY_RPCS)) {
     assert.ok(fns.has(rpc), `${rpc} not found`);
     assert.ok(stable(fns.get(rpc)), `${rpc} is not STABLE in every definition`);
@@ -351,4 +386,56 @@ test('classifyHttp covers the fixed classes', () => {
   assert.equal(classifyHttp(400, '{"code":"x"}'), 'client-error');
   assert.equal(classifyHttp(503, ''), 'server-error');
   assert.deepEqual(checkAnonKey('sb_publishable_abcdefghijkl', STG), []);
+});
+
+test('plan shows the control probe as accepted (200), and the other probes per phase', async () => {
+  for (const phase of ['after', 'before']) {
+    const r = await runCli([`--phase=${phase}`], {});
+    assert.ok(r.lines.includes('PLAN probe=control:key-accepted method=GET path=/auth/v1/health expected=accepted (200); otherwise the run aborts'), phase);
+    const expected = phase === 'after' ? 'denied|empty|absent (no event)' : 'recorded';
+    assert.ok(r.lines.some((l) => l.startsWith('PLAN probe=rest-get:carriers ') && l.endsWith(`expected=${expected}`)), phase);
+  }
+});
+
+test('weak pass paths now FAIL: GraphQL 4xx without errors list, crashed Realtime channel, unusual Storage error shape', async () => {
+  const fetchImpl = async (url) => (url.endsWith('/auth/v1/health')
+    ? { status: 200, text: async () => '{}' }
+    : url.endsWith('/graphql/v1')
+      ? { status: 400, text: async () => JSON.stringify({ message: 'Request rejected' }) }
+      : { status: 401, text: async () => JSON.stringify({ code: '42501', message: 'permission denied' }) });
+  const crashed = class {
+    constructor() { setTimeout(() => this.onopen && this.onopen(), 5); }
+    send(d) { const m = JSON.parse(d); if (m.event === 'phx_join') setTimeout(() => this.onmessage({ data: JSON.stringify({ topic: m.topic, event: 'phx_error', ref: m.ref, payload: {} }) }), 5); }
+    close() {}
+  };
+  const lines = [];
+  await runProbes({ baseUrl: 'http://127.0.0.1:9', key: 'k', phase: 'after', realtimeSeconds: 1, emit: (l) => lines.push(l), fetchImpl, WebSocketImpl: crashed });
+  for (const n of ['graphql:introspection', 'graphql:read-query']) assert.ok(lines.includes(`EVENT probe=${n} expected=denied|empty|absent observed=client-error result=FAIL`), n);
+  for (const t of REALTIME_TABLES) assert.ok(lines.includes(`EVENT probe=realtime:${t} expected=denied|empty|absent observed=channel-error result=FAIL`), t);
+  // Storage: the error name is checked for key words too
+  assert.equal(classifyHttp(400, '{"statusCode":"403","error":"InvalidJWT","message":"Invalid Compact JWS"}'), 'key-rejected');
+  assert.equal(classifyHttp(400, '{"statusCode":"403","error":"InvalidJWT","message":"anything"}'), 'key-rejected');
+  assert.equal(classifyHttp(400, '{"statusCode":"403","error":"Unauthorized","message":"row-level security"}'), 'denied');
+  // the before phase still only fails on transport, 5xx, key and redirect; the new classes are recorded
+  const before = [];
+  await runProbes({ baseUrl: 'http://127.0.0.1:9', key: 'k', phase: 'before', realtimeSeconds: 1, emit: (l) => before.push(l), fetchImpl, WebSocketImpl: crashed });
+  assert.ok(before.some((l) => l.includes('probe=graphql:read-query') && l.endsWith('observed=client-error result=RECORDED')));
+});
+
+test('refuses to run when certificate verification is disabled (NODE_TLS_REJECT_UNAUTHORIZED=0, TLS flags in NODE_OPTIONS)', async () => {
+  assert.equal(checkTls({}), undefined);
+  assert.equal(checkTls({ NODE_TLS_REJECT_UNAUTHORIZED: '1' }), undefined);
+  assert.equal(checkTls({ NODE_OPTIONS: '--max-old-space-size=512' }), undefined);
+  for (const env of [{ NODE_TLS_REJECT_UNAUTHORIZED: '0' }, { NODE_TLS_REJECT_UNAUTHORIZED: ' 0 ' }, { NODE_OPTIONS: '--tls-cipher-list=x' }, { NODE_OPTIONS: '--insecure-http-parser' }]) {
+    for (const args of [[], ['--execute']]) {
+      const srv = await fakeServer('locked');
+      try {
+        const r = await runCli(args, { ...GOOD_ENV, ...env }, { testBaseUrl: srv.url });
+        assert.equal(r.code, 2, JSON.stringify(env));
+        assert.match(r.text, /^REFUSED reason=.*(NODE_TLS_REJECT_UNAUTHORIZED=0|NODE_OPTIONS)/);
+        assert.ok(!r.text.includes(KEY));
+        assert.equal(srv.seen.length, 0, 'nothing is sent');
+      } finally { await srv.close(); }
+    }
+  }
 });

@@ -133,6 +133,13 @@ export function checkAnonKey(key, stagingRef) {
   return failures;
 }
 
+/** Refuse any setting that weakens certificate verification (doppler run could inject one). */
+export function checkTls(env = {}) {
+  if (String(env.NODE_TLS_REJECT_UNAUTHORIZED ?? '').trim() === '0') return 'NODE_TLS_REJECT_UNAUTHORIZED=0 disables certificate verification; refusing';
+  if (/--insecure|--tls-/i.test(String(env.NODE_OPTIONS ?? ''))) return 'NODE_OPTIONS changes TLS settings; refusing';
+  return undefined;
+}
+
 export function buildPlan(phase, realtimeSeconds) {
   const plan = [{ name: 'control:key-accepted', method: 'GET', path: '/auth/v1/health', expected: 'accepted (200); otherwise the run aborts' }];
   for (const t of PROBE_TABLES) plan.push({ name: `rest-get:${t}`, method: 'GET', path: `/rest/v1/${t}?select=*&limit=1` });
@@ -142,7 +149,7 @@ export function buildPlan(phase, realtimeSeconds) {
   plan.push({ name: 'storage:bucket-list', method: 'GET', path: '/storage/v1/bucket' });
   plan.push({ name: 'storage:object-list', method: 'POST', path: '/storage/v1/object/list/<each bucket found>' });
   for (const t of REALTIME_TABLES) plan.push({ name: `realtime:${t}`, method: 'WS', path: `/realtime/v1/websocket (${realtimeSeconds} s)` });
-  return plan.map((p) => ({ ...p, expected: p.expected ?? phase === 'after' ? 'denied|empty|absent (no event)' : 'recorded' }));
+  return plan.map((p) => ({ ...p, expected: p.expected ?? (phase === 'after' ? 'denied|empty|absent (no event)' : 'recorded') }));
 }
 
 /** Classify an HTTP answer without ever returning or printing the body. */
@@ -160,7 +167,8 @@ export function classifyHttp(status, text) {
     if (code === '42501') return 'denied';
     if (code === '42883' || code === '42P01' || /^PGRST20[0-9]$/.test(code)) return 'absent';
     if (/^PGRST30[0-9]$/.test(code)) return 'key-rejected';
-    if (code === '' && KEY_ERROR_TEXT.test(message)) return 'key-rejected';
+    const errorName = typeof obj.error === 'string' ? obj.error : '';
+    if (code === '' && KEY_ERROR_TEXT.test(`${message} ${errorName}`)) return 'key-rejected';
     // Storage answers { statusCode: "403" | "404" } with no code.
     if (code === '' && storageStatus === '403') return 'denied';
     if (code === '' && storageStatus === '404') return 'absent';
@@ -176,9 +184,10 @@ export function classifyHttp(status, text) {
 
 function classifyGraphql(status, text, mode) {
   const base = classifyHttp(status, text);
-  if (base !== 'data' && base !== 'empty' && base !== 'client-error') return base;
+  // A 4xx that is not a database refusal (no errors list) is never a pass.
+  if (base !== 'data' && base !== 'empty') return base;
   let body;
-  try { body = JSON.parse(text); } catch { return base === 'client-error' ? 'client-error' : 'data'; }
+  try { body = JSON.parse(text); } catch { return 'data'; }
   if (!body || typeof body !== 'object') return 'empty';
   if (Array.isArray(body.errors) && body.errors.length > 0 && !body.data) return 'denied';
   const data = body.data;
@@ -317,7 +326,7 @@ function realtimeProbe({ baseUrl, key, seconds, WebSocketImpl, connectTimeoutMs 
       else if (result[table] === 'event') return;
       else if (msg.event === 'phx_reply') result[table] = msg.payload?.status === 'ok' ? 'empty' : errorClass(msg.payload);
       else if (msg.event === 'system' && msg.payload?.status === 'error') result[table] = errorClass(msg.payload);
-      else if (msg.event === 'phx_error') result[table] = errorClass(msg.payload);
+      else if (msg.event === 'phx_error') result[table] = 'channel-error';
     };
     ws.onerror = () => { /* result stays transport-error unless a reply arrived */ };
     ws.onclose = () => { if (!timer) finish(); };
@@ -346,6 +355,8 @@ export async function main(argv, env, io = { out: (s) => process.stdout.write(`$
   const out = io.out;
   const opts = parseArgs(argv);
   if (opts.errors.length) { out(`REFUSED reason=${opts.errors[0]}`); return 2; }
+  const tlsFailure = checkTls(env);
+  if (tlsFailure) { out(`REFUSED reason=${tlsFailure}`); return 2; }
   let stagingRef;
   try { stagingRef = testHooks.stagingRef ?? recordedStagingRef(); } catch (e) { out(`REFUSED reason=${e.message}`); return 2; }
   const targetFailures = checkTarget({ ref: stagingRef, env, flagRef: opts.flagRef, stagingRef });
