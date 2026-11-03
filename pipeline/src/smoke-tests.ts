@@ -34,6 +34,7 @@ import { assessLedger, type LedgerFacts } from './ledger-preflight.js';
 import { REVIEWED_EVENT_TRIGGER_FUNCTIONS, REVIEWED_EVENT_TRIGGER_NAMES } from './environment-preflight.js';
 import { DRIVER_CODES, KNOWN_SERVER_REFUSALS, REFUSAL_IDS, RunnerRefusal, classifyRunnerFailure } from './refusals.js';
 import { DENIED_STATEMENTS } from './retention-dry-run.js';
+import { runRetentionFixtureRun } from './retention-run.js';
 import { retentionClientConfig, runRetentionForCron, runRetentionStep, type RetentionClient } from './retention-step.js';
 import { EventEmitter } from 'node:events';
 import { Duplex } from 'node:stream';
@@ -672,7 +673,7 @@ test('retention-dry-run: only as recruiter_maintenance on the rebuilt project; c
     async end() {},
     async query(sql: string, params?: unknown[]) {
       sent.push(sql);
-      if (/delete_outside/.test(sql)) return { rows: [{ delete_outside: 0, delete_inside: 5, write_anywhere: 0, select_outside: 0, direct_relation_grants_outside: 0, direct_column_grants_outside: 0, exec_public_internal: 0, direct_function_grants: 0, schema_create: 0, sequence_privileges: 0, database_create: 0, powerful_attributes: 0, memberships: 0 }] };
+      if (/delete_outside/.test(sql)) return { rows: [{ delete_outside: 0, delete_inside: 5, write_anywhere: 0, select_outside: 0, direct_relation_grants_outside: 0, direct_column_grants_outside: 0, exec_public_internal: 0, direct_function_grants: 0, schema_create: 0, sequence_privileges: 0, database_create: 0, powerful_attributes: 0, memberships: 0, other_object_acls: 0, owned_objects: 0, file_functions: 0, secret_catalogues: 0 }] };
       if (/current_user as u/.test(sql)) return { rows: [{ u: 'recruiter_maintenance' }] };
       if (/count\(\*\)::int/.test(sql)) return { rows: [{ n: 3 }] };
       if (/has_table_privilege/.test(sql)) return { rows: [{ s: true, d: true, i: false, u: false, t: false }] };
@@ -693,7 +694,7 @@ test('retention-dry-run: only as recruiter_maintenance on the rebuilt project; c
   assert.equal(report.ok, true);
   assert.deepEqual(Object.keys(report.would_delete).sort(), ['app_sessions', 'email_events', 'recovery_failures', 'request_buckets', 'signin_links']);
   assert.ok(Object.values(report.would_delete).every((n) => n === 3));
-  assert.ok(report.failed === 0 && report.checks === 25 && !('currentUser' in report) && !('checks' in report && Array.isArray(report.checks)), 'only counts, never check names or the login name');
+  assert.ok(report.failed === 0 && report.checks === 29 && !('currentUser' in report) && !('checks' in report && Array.isArray(report.checks)), 'only counts, never check names or the login name');
   const w = await wrapperModule();
   const retentionCounter = { fields: 0 };
   assert.notEqual(w.allowListLine(lines.find((l) => l.includes('retention_dry_run'))!, retentionCounter), null);
@@ -731,7 +732,7 @@ test('retention-run: only as recruiter_maintenance; refused before any delete un
       async end() {},
       async query(sql: string) {
         sent.push(sql);
-        if (/delete_outside/.test(sql)) return { rows: [{ delete_outside: 0, delete_inside: 5, write_anywhere: 0, select_outside: 0, direct_relation_grants_outside: 0, direct_column_grants_outside: 0, exec_public_internal: 0, direct_function_grants: 0, schema_create: 0, sequence_privileges: 0, database_create: 0, powerful_attributes: 0, memberships: 0 }] };
+        if (/delete_outside/.test(sql)) return { rows: [{ delete_outside: 0, delete_inside: 5, write_anywhere: 0, select_outside: 0, direct_relation_grants_outside: 0, direct_column_grants_outside: 0, exec_public_internal: 0, direct_function_grants: 0, schema_create: 0, sequence_privileges: 0, database_create: 0, powerful_attributes: 0, memberships: 0, other_object_acls: 0, owned_objects: 0, file_functions: 0, secret_catalogues: 0 }] };
         if (/current_user as u/.test(sql)) return { rows: [{ u: 'recruiter_maintenance' }] };
         if (/has_table_privilege/.test(sql)) return { rows: [{ s: true, d: true, i: false, u: false, t: false }] };
         if (/count\(\*\)::int as total/.test(sql)) return { rows: [{ total: deleted ? 4 : 5, due: deleted ? 0 : aged, aged_due: deleted ? 0 : Math.min(aged, 1), aged: deleted ? 0 : 1, fresh: 1, fresh_due: 0 }] };
@@ -777,6 +778,57 @@ test('retention-run: only as recruiter_maintenance; refused before any delete un
   assert.equal(refused.deletes_sent, false);
   assert.deepEqual(refused.failed_checks, ['each_rule_must_match_exactly_one_row']);
   assert.ok(!refusalLines.join('').includes('redacted-pw'));
+});
+
+test('retention-run: the COMMIT answer is verified (ROLLBACK tag and allowlisted refusal are failures; anything else is an unknown outcome)', async () => {
+  const healthy = { delete_outside: 0, delete_inside: 5, write_anywhere: 0, select_outside: 0, direct_relation_grants_outside: 0, direct_column_grants_outside: 0, exec_public_internal: 0, direct_function_grants: 0, schema_create: 0, sequence_privileges: 0, database_create: 0, powerful_attributes: 0, memberships: 0, other_object_acls: 0, owned_objects: 0, file_functions: 0, secret_catalogues: 0 };
+  const denied = DENIED_STATEMENTS.map((d) => d.sql);
+  const fake = (onCommit: () => unknown, privilege: Record<string, number> = healthy) => {
+    const sent: string[] = [];
+    let deleted = false;
+    const client = {
+      _queryable: true as boolean,
+      async query(sql: string): Promise<any> {
+        sent.push(sql);
+        if (/delete_outside/.test(sql)) return { rows: [privilege] };
+        if (/current_user as u/.test(sql)) return { rows: [{ u: 'recruiter_maintenance' }] };
+        if (/has_table_privilege/.test(sql)) return { rows: [{ s: true, d: true, i: false, u: false, t: false }] };
+        if (/count\(\*\)::int as total/.test(sql)) return { rows: [{ total: deleted ? 4 : 5, due: deleted ? 0 : 1, aged_due: deleted ? 0 : 1, aged: deleted ? 0 : 1, fresh: 1, fresh_due: 0 }] };
+        if (/^delete from/.test(sql)) { deleted = true; return { rowCount: 1 }; }
+        if (denied.includes(sql)) throw Object.assign(new Error('permission denied'), { code: '42501' });
+        if (sql === 'commit') return onCommit();
+        return { rows: [], rowCount: 0 };
+      },
+    };
+    return { client, sent };
+  };
+  const run = (c: ReturnType<typeof fake>) => runRetentionFixtureRun(c.client, 'recruiter_maintenance');
+
+  const ok = fake(() => ({ command: 'COMMIT' }));
+  const good = await run(ok);
+  assert.deepEqual([good.ok, good.committed], [true, true]);
+  assert.equal(ok.sent.filter((q) => q === 'begin').length, 1, 'one transaction: the privilege checks run inside it');
+  assert.ok(ok.sent.indexOf('select current_user as u') > ok.sent.findIndex((q) => /^lock table/.test(q)) && ok.sent.indexOf('select current_user as u') < ok.sent.findIndex((q) => /^delete from/.test(q)), 'lock, then privilege checks, then delete');
+  assert.ok(!ok.sent.includes('rollback'));
+
+  const tag = fake(() => ({ command: 'ROLLBACK' }));
+  const rolled = await run(tag);
+  assert.deepEqual([rolled.ok, rolled.committed, rolled.failed], [false, false, ['commit_answered_rollback']]);
+
+  const refused = fake(() => { throw Object.assign(new Error('could not serialize'), { code: '40001' }); });
+  const refusedReport = await run(refused);
+  assert.deepEqual([refusedReport.ok, refusedReport.committed, refusedReport.failed], [false, false, ['commit_refused']]);
+  assert.equal(refused.sent.filter((q) => q === 'rollback').length, 1, 'a confirmed ROLLBACK follows the refused COMMIT');
+
+  await assert.rejects(run(fake(() => { throw Object.assign(new Error('connection terminated'), { code: '08006' }); })), /unknown/); // unlisted SQLSTATE: unknown outcome
+  await assert.rejects(run(fake(() => { throw new Error('read ECONNRESET'); })), /unknown/); // no code at all
+  const dead = fake(() => { dead.client._queryable = false; throw Object.assign(new Error('x'), { code: '40001' }); });
+  await assert.rejects(run(dead), /unknown/); // allowlisted code but the connection is no longer usable
+
+  const widened = fake(() => ({ command: 'COMMIT' }), { ...healthy, other_object_acls: 1 });
+  const refusedGrant = await run(widened);
+  assert.deepEqual([refusedGrant.ok, refusedGrant.deletesSent, refusedGrant.failed], [false, false, ['least_privilege_checks_failed']]);
+  assert.ok(!widened.sent.some((q) => /^delete from|^commit$/.test(q)), 'a widened grant found inside the transaction stops the run before any delete');
 });
 
 const LEDGER_ABSENT: LedgerFacts = { profiles_absent: true, schema_exists: false, table_exists: false, db_create: true, schema_usage: null, schema_create: null, table_ordinary: null, version_text_not_null: null, statements_type: null, name_type: null, other_columns: null, special_columns: null, version_key: null, other_constraints: null, other_indexes: null, has_triggers_rules_rls: null, can_select: null, can_insert: null, owner_is_runner: null };

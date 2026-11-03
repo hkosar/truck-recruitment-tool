@@ -58,6 +58,8 @@ async function main(): Promise<void> {
 
   let markerMade = false;
   let testObjects = false;
+  let loOid = '';
+  const pendingRevokes: string[] = []; // every revoke of every widened grant, replayed in finally even when an assertion fails
   try {
     const hadMarker = (await admin.query(`select to_regclass('staging_identity.marker') as t`)).rows[0].t !== null;
     assert.equal(hadMarker, false, 'the throwaway database must not already have a staging marker');
@@ -74,9 +76,14 @@ async function main(): Promise<void> {
     // 2. Widened grants are caught (each is reverted straight away). The test-only objects are dropped in finally.
     const dbName = String((await admin.query('select current_database() as d')).rows[0].d);
     await admin.query(`create function public.ret_test_secdef() returns int language sql security definer as 'select 1'; revoke execute on function public.ret_test_secdef() from public;
-      create schema ret_test_vault; create table ret_test_vault.decrypted_secrets (id int, note text); create sequence public.ret_test_seq`);
+      create schema ret_test_vault; create table ret_test_vault.decrypted_secrets (id int, note text); create sequence public.ret_test_seq;
+      create foreign data wrapper ret_test_fdw; create server ret_test_srv foreign data wrapper ret_test_fdw; create type public.ret_test_type as enum ('a')`);
     testObjects = true;
-    assert.equal(dry.checks.length, 25, 'the dry run has 25 checks');
+    loOid = String((await admin.query('select lo_create(0) as o')).rows[0].o);
+    const lo = loOid;
+    assert.equal(dry.checks.length, 29, 'the dry run has 29 checks');
+    const OTHER = 'no ACL entry naming this role on any other object';
+    const RM = 'recruiter_maintenance';
     for (const [grant, revoke, expected] of [
       ['grant delete on internal.backout_window to recruiter_maintenance', 'revoke delete on internal.backout_window from recruiter_maintenance', 'delete is held on exactly the five ledgers'],
       ['grant update on internal.recovery_codes to recruiter_maintenance', 'revoke update on internal.recovery_codes from recruiter_maintenance', 'no insert, update, truncate, references or trigger privilege on any table'],
@@ -84,14 +91,32 @@ async function main(): Promise<void> {
       ['grant recruiter_api to recruiter_maintenance', 'revoke recruiter_api from recruiter_maintenance', 'member of no other role'],
       ['grant execute on function public.ret_test_secdef() to recruiter_maintenance', 'revoke execute on function public.ret_test_secdef() from recruiter_maintenance', 'no execute privilege on any non-extension function in public or internal'],
       ['grant execute on function public.ret_test_secdef() to recruiter_maintenance', 'revoke execute on function public.ret_test_secdef() from recruiter_maintenance', 'no direct execute grant on any function in any schema'],
-      ['grant usage on schema ret_test_vault to recruiter_maintenance; grant select on ret_test_vault.decrypted_secrets to recruiter_maintenance', 'revoke all on ret_test_vault.decrypted_secrets from recruiter_maintenance; revoke usage on schema ret_test_vault from recruiter_maintenance', 'no direct grant of any kind on any relation, sequence or column outside the five ledgers (every schema)'],
-      ['grant select (note) on ret_test_vault.decrypted_secrets to recruiter_maintenance', 'revoke all on ret_test_vault.decrypted_secrets from recruiter_maintenance', 'no direct grant of any kind on any relation, sequence or column outside the five ledgers (every schema)'],
+      ['grant usage on schema ret_test_vault to recruiter_maintenance; grant select on ret_test_vault.decrypted_secrets to recruiter_maintenance', 'revoke all on ret_test_vault.decrypted_secrets from recruiter_maintenance; revoke usage on schema ret_test_vault from recruiter_maintenance', 'no direct grant of any kind on any relation, sequence or column outside the five ledgers (every schema, system catalogues included)'],
+      ['grant select (note) on ret_test_vault.decrypted_secrets to recruiter_maintenance', 'revoke all on ret_test_vault.decrypted_secrets from recruiter_maintenance', 'no direct grant of any kind on any relation, sequence or column outside the five ledgers (every schema, system catalogues included)'],
       ['grant create on schema public to recruiter_maintenance', 'revoke create on schema public from recruiter_maintenance', 'no create privilege on any schema'],
       ['grant create on schema internal to recruiter_maintenance', 'revoke create on schema internal from recruiter_maintenance', 'no create privilege on any schema'],
       ['grant create on schema ret_test_vault to recruiter_maintenance', 'revoke create on schema ret_test_vault from recruiter_maintenance', 'no create privilege on any schema'],
       ['grant usage, update on sequence public.ret_test_seq to recruiter_maintenance', 'revoke all on sequence public.ret_test_seq from recruiter_maintenance', 'no usage, select or update privilege on any sequence'],
       [`grant create on database ${dbName} to recruiter_maintenance`, `revoke create on database ${dbName} from recruiter_maintenance`, 'no create privilege on the database'],
+      // Reviewer r2 note 1: the kinds the first 25 checks did not walk.
+      [`grant select on pg_catalog.pg_authid to ${RM}`, `revoke select on pg_catalog.pg_authid from ${RM}`, 'no select on a password-hash or secret catalogue'],
+      [`grant select on pg_catalog.pg_authid to ${RM}`, `revoke select on pg_catalog.pg_authid from ${RM}`, 'no direct grant of any kind on any relation, sequence or column outside the five ledgers (every schema, system catalogues included)'],
+      [`grant select (rolname) on pg_catalog.pg_roles to ${RM}`, `revoke select (rolname) on pg_catalog.pg_roles from ${RM}`, 'no direct grant of any kind on any relation, sequence or column outside the five ledgers (every schema, system catalogues included)'],
+      ['grant select on pg_catalog.pg_authid to public', 'revoke select on pg_catalog.pg_authid from public', 'no select on a password-hash or secret catalogue'],
+      [`grant execute on function pg_catalog.pg_read_file(text) to ${RM}`, `revoke execute on function pg_catalog.pg_read_file(text) from ${RM}`, 'no execute privilege on a server file function'],
+      [`grant execute on function pg_catalog.pg_read_file(text) to ${RM}`, `revoke execute on function pg_catalog.pg_read_file(text) from ${RM}`, 'no direct execute grant on any function in any schema (system and extension functions included)'],
+      ['grant execute on function pg_catalog.pg_ls_dir(text) to public', 'revoke execute on function pg_catalog.pg_ls_dir(text) from public', 'no execute privilege on a server file function'],
+      [`grant usage on foreign server ret_test_srv to ${RM}`, `revoke usage on foreign server ret_test_srv from ${RM}`, OTHER],
+      [`grant usage on foreign data wrapper ret_test_fdw to ${RM}`, `revoke usage on foreign data wrapper ret_test_fdw from ${RM}`, OTHER],
+      [`grant set on parameter session_replication_role to ${RM}`, `revoke set on parameter session_replication_role from ${RM}`, OTHER],
+      [`grant create on tablespace pg_default to ${RM}`, `revoke create on tablespace pg_default from ${RM}`, OTHER],
+      [`grant select on large object ${lo} to ${RM}`, `revoke select on large object ${lo} from ${RM}`, OTHER],
+      [`grant usage on language plpgsql to ${RM}`, `revoke usage on language plpgsql from ${RM}`, OTHER],
+      [`grant usage on type public.ret_test_type to ${RM}`, `revoke usage on type public.ret_test_type from ${RM}`, OTHER],
+      [`grant usage on schema ret_test_vault to ${RM}`, `revoke usage on schema ret_test_vault from ${RM}`, OTHER],
+      [`alter table ret_test_vault.decrypted_secrets owner to ${RM}`, 'alter table ret_test_vault.decrypted_secrets owner to tr_test_admin', 'owns no object'],
     ] as const) {
+      pendingRevokes.push(revoke);
       await admin.query(grant);
       try {
         const widened = await runRetentionDryRun(maint, 'recruiter_maintenance');
@@ -165,6 +190,54 @@ async function main(): Promise<void> {
     assert.equal(Number((await admin.query("select count(*)::int as n from internal.recovery_failures where email_hash = 'boundary-nonfixture'")).rows[0].n), 1, 'the boundary row survived');
     await admin.query("delete from internal.recovery_failures where email_hash = 'boundary-nonfixture'");
 
+    // 6d. The least-privilege checks run INSIDE the delete transaction, after the lock. Another session holds the lock, the run
+    // waits for it, and the grant is widened (committed) while the run waits: the run sees it and refuses before any delete. A dry run
+    // done before the transaction (the r2 shape) would have passed.
+    const beforeGap = await counts();
+    await admin.query('begin');
+    await admin.query('lock table internal.signin_links in share row exclusive mode');
+    const gapRun = runRetentionFixtureRun(maint, 'recruiter_maintenance');
+    await sleep(1000);
+    await admin.query('grant select on pg_catalog.pg_authid to recruiter_maintenance');
+    await admin.query('commit');
+    r = await gapRun;
+    await admin.query('revoke select on pg_catalog.pg_authid from recruiter_maintenance');
+    assert.equal(r.ok, false);
+    assert.equal(r.deletesSent, false);
+    assert.equal(r.committed, false);
+    assert.deepEqual(r.failed, ['least_privilege_checks_failed']);
+    assert.deepEqual(await counts(), beforeGap, 'the refused run deleted nothing');
+    assert.equal((await maint.query('select 1 as one')).rows[0].one, 1, 'the maintenance session is usable (transaction closed)');
+
+    // 6e. One transaction on the wire: the successful path sends a single begin, the checks sit between the lock and the delete, and COMMIT is last.
+    const wire: string[] = [];
+    const spy = { query: (sql: string, params?: unknown[]) => { wire.push(sql); return maint.query(sql, params as unknown[]); } };
+    const ghost = await runRetentionFixtureRun(spy as never, 'recruiter_maintenance', async () => ({ deleted: { request_buckets: 0, recovery_failures: 0, email_events: 0, signin_links: 0, app_sessions: 0 }, failed: [] }));
+    assert.equal(ghost.ok, false);
+    assert.equal(wire.filter((q) => q === 'begin').length, 1, 'exactly one begin');
+    assert.ok(!wire.some((q) => /^begin read only$/.test(q)), 'no separate read-only transaction');
+    const iLock = wire.findIndex((q) => /^lock table/.test(q));
+    const iWho = wire.indexOf('select current_user as u');
+    assert.ok(iLock > 0 && iWho > iLock, 'the privilege checks come after the lock, inside the transaction');
+    assert.equal(wire[wire.length - 1], 'rollback', 'a refused run ends with ROLLBACK, never COMMIT');
+    assert.ok(!wire.includes('commit'));
+
+    // 6f. COMMIT answered with the ROLLBACK tag (the transaction had failed and the failure was swallowed): ok false, committed false, nothing deleted.
+    const beforeTag = await counts();
+    const poisoned = {
+      query: async (sql: string, params?: unknown[]) => {
+        if (sql === 'commit') await maint.query('select 1/0').catch(() => undefined); // abort the transaction, swallow the error
+        return maint.query(sql, params as unknown[]);
+      },
+    };
+    r = await runRetentionFixtureRun(poisoned as never, 'recruiter_maintenance');
+    assert.equal(r.ok, false);
+    assert.equal(r.committed, false);
+    assert.equal(r.deletesSent, true);
+    assert.deepEqual(r.failed, ['commit_answered_rollback']);
+    assert.deepEqual(await counts(), beforeTag, 'the server rolled back: nothing was deleted');
+    assert.equal((await maint.query('select 1 as one')).rows[0].one, 1, 'the session is idle again');
+
     // 7. A delete step that did not delete is reported as a failure and rolled back (post-run proof).
     r = await runRetentionFixtureRun(maint, 'recruiter_maintenance', async () => ({ deleted: { request_buckets: 0, recovery_failures: 0, email_events: 0, signin_links: 0, app_sessions: 0 }, failed: [] }));
     assert.equal(r.ok, false);
@@ -224,8 +297,12 @@ async function main(): Promise<void> {
     for (const [table, col] of [['internal.auth_request_buckets', 'key_hash'], ['internal.recovery_failures', 'email_hash'], ['internal.signin_links', 'token_hash'], ['internal.app_sessions', 'token_hash'], ['internal.email_events', 'provider_event_id']]) {
       await admin.query(`delete from ${table} where ${col} like 'ret-fixture-20261101-%'`).catch(() => undefined);
     }
-    for (const revoke of ['revoke delete on internal.backout_window from recruiter_maintenance', 'revoke update on internal.recovery_codes from recruiter_maintenance', 'revoke select (id) on public.profiles from recruiter_maintenance', 'revoke recruiter_api from recruiter_maintenance', 'revoke create on schema public from recruiter_maintenance', 'revoke create on schema internal from recruiter_maintenance']) await admin.query(revoke).catch(() => undefined);
-    if (testObjects) await admin.query('drop function public.ret_test_secdef(); drop schema ret_test_vault cascade; drop sequence public.ret_test_seq').catch(() => undefined);
+    await admin.query('rollback').catch(() => undefined);
+    for (const revoke of pendingRevokes.reverse()) await admin.query(revoke).catch(() => undefined);
+    await admin.query('revoke select on pg_catalog.pg_authid from recruiter_maintenance').catch(() => undefined);
+    if (testObjects) {
+      for (const drop of [`select lo_unlink(${loOid || 0})`, 'drop function public.ret_test_secdef()', 'drop schema ret_test_vault cascade', 'drop sequence public.ret_test_seq', 'drop server ret_test_srv', 'drop foreign data wrapper ret_test_fdw', 'drop type public.ret_test_type']) await admin.query(drop).catch(() => undefined);
+    }
     if (markerMade) await admin.query('drop schema staging_identity cascade').catch(() => undefined);
     await other.end();
     await maint.end();

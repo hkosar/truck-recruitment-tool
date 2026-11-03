@@ -1,21 +1,26 @@
 // The ONE real retention run of the hosted least-privilege test (doc 16 section 4 step 3), run by the
 // rebuilt staging runner action `retention-run` while connected AS recruiter_maintenance.
 //
-// What makes "deletes only aged fixture rows" provable: the dry-run least-privilege checks pass first, then
-// EVERYTHING else happens in ONE transaction on the maintenance connection:
+// What makes "deletes only aged fixture rows" provable: EVERYTHING happens in ONE transaction on the maintenance
+// connection, the least-privilege checks included:
 //   1. lock the five ledgers in SHARE ROW EXCLUSIVE mode (DELETE privilege is enough), so no other session can
-//      insert or change a row between the checks and the delete;
+//      insert or change a row between the checks and the delete; then run the same least-privilege checks as the
+//      dry run (any failed check refuses the run before any delete);
 //   2. identity pre-check: per ledger, the rows the retention rule would delete are EXACTLY the one tagged aged
 //      fixture (due count 1, tagged-and-due count 1, tagged aged count 1), and the tagged fresh control exists and
 //      is not due; each ledger's total row count is recorded;
 //   3. delete ONLY the tagged aged fixture rows (the delete filters on the exact tag, never on "whatever is due");
 //   4. post-checks in the same transaction: one row deleted per ledger, nothing due is left, no tagged aged row
 //      is left, every fresh control survives, every ledger shrank by exactly one row.
-// COMMIT only if every check passes; any miss rolls back, so nothing is deleted. Output carries counts and
-// fixed names only: no row data, no connection details.
+// COMMIT only if every check passes; any miss rolls back, so nothing is deleted. The COMMIT answer is verified like
+// the other COMMIT helpers (commit-outcome.ts): a ROLLBACK tag is a failure (committed false); an allowlisted refusal
+// on a healthy connection followed by a successful ROLLBACK is a failure; anything else is an UNKNOWN outcome and
+// throws (confirm with the post-run row counts). Output carries counts and fixed names only: no row data, no
+// connection details.
 
+import { clientUsable, isDefiniteCommitRefusal, isRollbackTag } from './commit-outcome.js';
 import { RETENTION_RULES, type RetentionResult, type RetentionRule } from './retention.js';
-import { runRetentionDryRun, type DryRunClient } from './retention-dry-run.js';
+import { runLeastPrivilegeChecks, type DryRunClient } from './retention-dry-run.js';
 
 /** Tag prefix in every fixture key; the seed file (install-retention-fixtures.sql) uses the same literal. */
 export const RETENTION_FIXTURE_TAG = 'ret-fixture-20261101';
@@ -78,24 +83,28 @@ export const deleteTaggedFixtures: DeleteRun = async (db) => {
   return result;
 };
 
+const UNKNOWN_COMMIT = 'The connection was lost after COMMIT was sent; whether the fixture deletes were saved is unknown. Check the five ledgers (retention-dry-run counts) before running again.';
+
 /**
- * Run the least-privilege checks, then the fixture-bounded real delete in one locked transaction.
+ * Run the least-privilege checks and the fixture-bounded real delete in ONE locked transaction.
  * `deleteRun` is injectable for tests (it runs inside the transaction, after the identity pre-check).
  */
 export async function runRetentionFixtureRun(client: RunClient, expectedRole: string, deleteRun: DeleteRun = deleteTaggedFixtures): Promise<RetentionRunReport> {
   const report: RetentionRunReport = { ok: false, failed: [], deleted: {}, deletesSent: false, committed: false };
   const refuse = (name: string): RetentionRunReport => { report.failed.push(name); return report; };
 
-  const dry = await runRetentionDryRun(client, expectedRole);
-  if (!dry.ok) return refuse('least_privilege_checks_failed');
-
   let open = false;
+  let commitSent = false;
   try {
     await client.query('begin');
     open = true;
     await client.query("set local statement_timeout = '30s'");
     await client.query("set local lock_timeout = '10s'");
     await client.query(`lock table ${RETENTION_RULES.map((r) => r.table).join(', ')} in share row exclusive mode`);
+
+    const privilegeChecks: boolean[] = [];
+    await runLeastPrivilegeChecks(client, expectedRole, (_name, ok) => privilegeChecks.push(ok));
+    if (!privilegeChecks.every(Boolean)) return refuse('least_privilege_checks_failed');
 
     const before: Record<string, TableState> = {};
     for (const rule of RETENTION_RULES) before[rule.table] = await tableState(client, rule);
@@ -129,11 +138,22 @@ export async function runRetentionFixtureRun(client: RunClient, expectedRole: st
     report.failed = [...new Set(report.failed)];
     if (report.failed.length > 0) return report;
 
-    await client.query('commit');
-    open = false;
+    commitSent = true;
+    const answer = await client.query('commit');
+    open = false; // COMMIT was answered: the transaction is over, one way or the other
+    if (isRollbackTag(answer)) return refuse('commit_answered_rollback'); // the server rolled everything back
     report.committed = true;
     report.ok = true;
     return report;
+  } catch (err) {
+    if (!commitSent) throw err;
+    // After COMMIT was sent: only an allowlisted refusal on a healthy connection with a successful ROLLBACK is a definite failure.
+    if (!isDefiniteCommitRefusal(err) || !clientUsable(client)) throw new Error(UNKNOWN_COMMIT);
+    let rollbackFailed = false;
+    await client.query('rollback').catch(() => { rollbackFailed = true; });
+    open = false;
+    if (rollbackFailed || !clientUsable(client)) throw new Error(UNKNOWN_COMMIT);
+    return refuse('commit_refused');
   } finally {
     if (open) await client.query('rollback').catch(() => undefined);
   }

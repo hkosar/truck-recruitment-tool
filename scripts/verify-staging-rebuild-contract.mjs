@@ -184,17 +184,25 @@ for (const required of ['Data API must already be enabled with', 'never authoriz
     for (const required of ['due_row_is_not_the_tagged_fixture', 'fresh_control_is_due', 'lock table', 'in share row exclusive mode', "client.query('begin')", "client.query('commit')", "client.query('rollback')", 'deleteTaggedFixtures']) {
       if (!run.includes(required)) failures.push('retention-run.ts is missing (one locked transaction, identity pre-check): ' + required);
     }
+    // The least-privilege checks run INSIDE the delete transaction (after begin and the lock, before the delete); the COMMIT answer is verified.
+    const runCode = run.replace(/\/\/.*$/gm, '');
+    const at = (needle) => runCode.indexOf(needle);
+    if (!(at("client.query('begin')") >= 0 && at("client.query('begin')") < at('in share row exclusive mode') && at('in share row exclusive mode') < at('runLeastPrivilegeChecks(client') && at('runLeastPrivilegeChecks(client') < at('deleteRun(client'))) failures.push('retention-run.ts: the least-privilege checks must run inside the delete transaction (begin, lock, checks, delete)');
+    if (/runRetentionDryRun/.test(runCode)) failures.push('retention-run.ts: must not run the dry run in its own transactions before the delete transaction');
+    for (const required of ['isRollbackTag(answer)', 'isDefiniteCommitRefusal(', 'clientUsable(client)', "from './commit-outcome.js'", 'commit_answered_rollback']) {
+      if (!run.includes(required)) failures.push('retention-run.ts: COMMIT answer not verified (missing ' + required + ')');
+    }
     // The real delete filters on the exact fixture tag and never on a retention rule predicate ("whatever is due"); the generic runRetention is not used.
     const delFn = /export const deleteTaggedFixtures[\s\S]*?\n};/.exec(run)?.[0] ?? '';
     if (!delFn.includes('delete from ${rule.table} where ${FIXTURE_KEY_COLUMN[rule.table]!} = $1') || delFn.includes('rule.where')) failures.push('retention-run.ts: the real delete must filter on the exact fixture tag only');
     if (/\brunRetention\b/.test(run.replace(/\/\/.*$/gm, ''))) failures.push('retention-run.ts: must not use the generic runRetention (it deletes whatever is due)');
-    // Least-privilege checks are derived from the catalogue. Pinned count: 25 (asserted in smoke-tests.ts and the procedure PASS rule).
+    // Least-privilege checks are derived from the catalogue. Pinned count: 29 (asserted in smoke-tests.ts and the procedure PASS rule).
     const dry = read('pipeline/src/retention-dry-run.ts') ?? '';
-    for (const required of ['aclexplode', "has_schema_privilege(current_user, oid, 'CREATE')", 'has_sequence_privilege', "has_database_privilege(current_user, current_database(), 'CREATE')", 'direct_function_grants', 'exec_public_internal', 'direct_relation_grants_outside', 'direct_column_grants_outside']) {
+    for (const required of ['aclexplode', "has_schema_privilege(current_user, oid, 'CREATE')", 'has_sequence_privilege', "has_database_privilege(current_user, current_database(), 'CREATE')", 'direct_function_grants', 'exec_public_internal', 'direct_relation_grants_outside', 'direct_column_grants_outside', 'pg_shdepend', 'other_object_acls', 'owned_objects', 'file_functions', 'secret_catalogues', 'all_rels', 'all_funcs']) {
       if (!dry.includes(required)) failures.push('retention-dry-run.ts is missing catalogue check: ' + required);
     }
-    // 14 line-start check() calls (one is inside the per-ledger loop: 5 checks) + 7 denied statements (loop) = 1+1+7+5+11 = 25 checks.
-    if ((dry.match(/^\s+check\(/gm) ?? []).length !== 14) failures.push('retention-dry-run.ts: expected 14 line-start check() calls (25 checks in all); change the procedure PASS rule and smoke-tests.ts with it');
+    // 18 line-start check() calls: counted-every-rule, session, the per-ledger loop (5 checks) and 15 catalogue checks; the denied-statement loop (a one-line for, 7 checks) is not line-start: 1+1+7+5+15 = 29 checks.
+    if ((dry.match(/^\s+check\(/gm) ?? []).length !== 18) failures.push('retention-dry-run.ts: expected 18 line-start check() calls (29 checks in all); change the procedure PASS rule and smoke-tests.ts with it');
   }
 }
 
