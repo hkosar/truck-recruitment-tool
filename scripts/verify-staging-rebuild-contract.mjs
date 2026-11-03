@@ -145,12 +145,17 @@ const rolePw = read('pipeline/src/role-password.ts');
 if (!rolePw) failures.push('role-password.ts is missing');
 else {
   for (const required of ["'recruiter_app'", "'recruiter_maintenance'", "'STAGING_APP_DB_PASSWORD'", "'STAGING_MAINT_DB_PASSWORD'", 'pbkdf2Sync', "'Client Key'", "'Server Key'", 'requireRecordedRebuiltRef', 'parseSupabaseDbTarget', 'target.port !== 5432',
-    'refuses the production', "set local statement_timeout = '30s'", "set local lock_timeout = '10s'", "alter role ${role} login password %L", "current_setting('${VERIFIER_GUC}')", "select set_config('${VERIFIER_GUC}', $1, true)", 'exception when query_canceled then', 'when others then raise exception using errcode = sqlstate',
+    'refuses the production', "set local statement_timeout = '30s'", "set local lock_timeout = '10s'", "alter role ${role} login password %L", "current_setting('${VERIFIER_GUC}')", "select pg_catalog.set_config('${VERIFIER_GUC}', $1, true)", "pg_catalog.format('alter role ${role} login password %L', pg_catalog.current_setting('${VERIFIER_GUC}')", "from pg_catalog.pg_settings", "from pg_catalog.pg_roles", "set local search_path = pg_catalog, pg_temp", "set local debug_print_parse = off", "set local debug_print_rewritten = off", "set local debug_print_plan = off", "'log_lock_waits'", "'deadlock_timeout'", "await client.query(SEARCH_PATH_SQL)", "MIN_DEADLOCK_TIMEOUT_MS", 'exception when query_canceled then', 'when others then raise exception using errcode = sqlstate',
     'role_password_logging_refused', 'role_password_expiry_refused', "current_setting('pgaudit.log', true)", "current_setting('auto_explain.log_min_duration', true)", "'log_statement'", "'log_min_duration_statement'", "'log_transaction_sample_rate'", "'log_parameter_max_length'", "'log_parameter_max_length_on_error'", 'loggingProblem(settings)', 'expires_soon',
     'query_timeout: CLIENT_QUERY_TIMEOUT_MS', 'keepAlive: true', 'expired === true', 'pg_stat_statements.track', '/^[A-Za-z0-9_-]+$/', 'ROLE_PASSWORD_MIN_LENGTH = 32', '--out is not supported', 'const resultEvent', 'VERIFIER_SHAPE', 'rolsuper', "await client.query('commit')", 'rollback_not_confirmed']) {
     if (!rolePw.includes(required)) failures.push(`role-password.ts is missing: ${required}`);
   }
   const code = rolePw.replace(/\/\*[\s\S]*?\*\/|\/\/.*$/gm, '');
+  {
+    const at = (t) => code.indexOf(t);
+    const order = ['await client.query(SEARCH_PATH_SQL)', 'for (const sql of DEBUG_PRINT_OFF_SQL)', 'await client.query(SETTINGS_SQL)', 'await client.query(SET_VERIFIER_SQL, [plan.verifier])'].map(at);
+    if (order.some((i) => i < 0) || order.some((i, k) => k > 0 && i < order[k - 1])) failures.push('role-password.ts: search_path and the debug_print_* settings must be set before the settings read, and the settings read before the verifier is bound');
+  }
   for (const forbidden of [/process\.env/, /\bdrop\b/i, /delete\s+from/i, /truncate/i, /\bgrant\b/i, /\brevoke\b/i, /\b(createrole|superuser|createdb|bypassrls)\b/i, /password\s+'\$\{/, /\bline\(/, /process\.(stdout|stderr)/]) {
     if (forbidden.test(code)) failures.push(`role-password.ts must not contain ${forbidden}`);
   }
