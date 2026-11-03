@@ -1,3 +1,4 @@
+import { types } from 'node:util';
 import pg from 'pg';
 import { DbTlsRefusal, dbSecurityFields, scramOnlyClient } from './db-tls.js';
 
@@ -25,18 +26,28 @@ const ALLOWED_EXTRA_OPTIONS: ReadonlySet<string> = new Set(['max', 'idleTimeoutM
 /** `application_name` goes into the startup message unescaped: only a short plain label may pass, so it cannot add parameters. */
 const SAFE_APPLICATION_NAME = /^[A-Za-z0-9._-]{1,63}$/;
 
+function refuseOverride(): never {
+  throw new DbTlsRefusal('connection_override', 'refusing: a caller option may not replace the database target or its TLS settings');
+}
+
+/**
+ * Copies the caller's options once into a fresh null-prototype object of plain data values and returns only that copy.
+ * Each own key is read exactly once, through its property descriptor: a getter/setter, a Proxy, a symbol key, a non-plain
+ * prototype or a non-primitive value is refused, so nothing can answer differently between the check and the use.
+ */
 function checkedExtra<T extends object>(extra: T): T {
-  for (const key of Object.keys(extra)) {
-    if (!ALLOWED_EXTRA_OPTIONS.has(key)) throw new DbTlsRefusal('connection_override', 'refusing: a caller option may not replace the database target or its TLS settings');
+  if (types.isProxy(extra) || Object.getPrototypeOf(extra) !== Object.prototype || Object.getOwnPropertySymbols(extra).length > 0) refuseOverride();
+  const copy: Record<string, string | number | boolean> = Object.create(null);
+  for (const key of Object.getOwnPropertyNames(extra)) {
+    if (!ALLOWED_EXTRA_OPTIONS.has(key)) refuseOverride();
+    const descriptor = Object.getOwnPropertyDescriptor(extra, key);
+    if (descriptor === undefined || !('value' in descriptor) || !descriptor.enumerable) refuseOverride();
+    const value: unknown = descriptor.value;
+    if (typeof value !== 'string' && typeof value !== 'number' && typeof value !== 'boolean') refuseOverride();
+    if (key === 'application_name' && (typeof value !== 'string' || !SAFE_APPLICATION_NAME.test(value))) refuseOverride();
+    copy[key] = value;
   }
-  const applicationName = (extra as { application_name?: unknown }).application_name;
-  if ('application_name' in extra && (typeof applicationName !== 'string' || !SAFE_APPLICATION_NAME.test(applicationName))) {
-    throw new DbTlsRefusal('connection_override', 'refusing: a caller option may not replace the database target or its TLS settings');
-  }
-  if (Object.getOwnPropertySymbols(extra).length > 0 || Object.getPrototypeOf(extra) !== Object.prototype) {
-    throw new DbTlsRefusal('connection_override', 'refusing: a caller option may not replace the database target or its TLS settings');
-  }
-  return extra;
+  return copy as unknown as T;
 }
 
 export function securePgConfig(target: PgTargetFields): pg.ClientConfig {

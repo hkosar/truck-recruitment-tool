@@ -290,6 +290,38 @@ await check('a caller option that can replace the connection target or TLS setti
       assert.equal((ok as unknown as { connectionParameters: { host: string; ssl: unknown } }).connectionParameters.host, TEST_HOST);
       assert.ok((ok as unknown as { connectionParameters: { ssl: unknown } }).connectionParameters.ssl);
       void newSecurePgPool(target, { max: 1, idleTimeoutMillis: 1_000 }).end();
+      // Allowed settings really arrive at the pg client and pool (not just "nothing throws").
+      const tuned = newSecurePgClient(target, { application_name: 'pipeline', connectionTimeoutMillis: 3_000, statement_timeout: 5_000 }) as unknown as { connectionParameters: Record<string, unknown>; connectionTimeoutMillis?: number };
+      assert.equal(tuned.connectionParameters.application_name, 'pipeline');
+      assert.equal(tuned.connectionParameters.statement_timeout, 5_000);
+      assert.equal(tuned.connectionParameters.host, TEST_HOST);
+      const tunedPool = newSecurePgPool(target, { max: 2, idleTimeoutMillis: 1_000, connectionTimeoutMillis: 4_000, application_name: 'pipeline' }) as unknown as { options: Record<string, unknown>; end(): Promise<void> };
+      assert.equal(tunedPool.options.max, 2);
+      assert.equal(tunedPool.options.idleTimeoutMillis, 1_000);
+      assert.equal(tunedPool.options.connectionTimeoutMillis, 4_000);
+      assert.equal(tunedPool.options.application_name, 'pipeline');
+      assert.equal(tunedPool.options.host, TEST_HOST);
+      void tunedPool.end();
+      // The secure settings win whatever the order of the caller's keys (the target keys are refused anyway).
+      for (const extra of [{ max: 1, ssl: false }, { ssl: false, max: 1 }, { host: OTHER_HOST, application_name: 'pipeline' }, { application_name: 'pipeline', port: 1 }]) {
+        assert.throws(() => newSecurePgClient(target, extra as never), refusal('connection_override'));
+        assert.throws(() => newSecurePgPool(target, extra as never), refusal('connection_override'));
+      }
+      // Getter attack (time of check / time of use): a getter that answers well first and badly later is refused, and is read at most once.
+      for (const make of [newSecurePgClient, newSecurePgPool] as const) {
+        let reads = 0;
+        const evil = { get application_name() { reads += 1; return reads === 1 ? 'ok' : 'x\0database\0other_db'; } };
+        assert.throws(() => make(target, evil as never), refusal('connection_override'));
+        assert.ok(reads <= 1, 'getter read ' + reads + ' times');
+        assert.throws(() => make(target, Object.defineProperty({}, 'max', { get: () => 1, enumerable: true }) as never), refusal('connection_override'));
+        assert.throws(() => make(target, Object.defineProperty({}, 'max', { value: 1, enumerable: false }) as never), refusal('connection_override'));
+        assert.throws(() => make(target, { max: { valueOf: () => 1 } } as never), refusal('connection_override'));
+        // A Proxy (even a transparent one) is refused before any trap runs.
+        let trapped = 0;
+        const proxy = new Proxy({ max: 1 }, { get: (t, k, r) => { trapped += 1; return Reflect.get(t, k, r); }, ownKeys: (t) => { trapped += 1; return Reflect.ownKeys(t); }, getOwnPropertyDescriptor: (t, k) => { trapped += 1; return Reflect.getOwnPropertyDescriptor(t, k); } });
+        assert.throws(() => make(target, proxy as never), refusal('connection_override'));
+        assert.equal(trapped, 0, 'no Proxy trap may run');
+      }
     });
   } finally {
     undo();
