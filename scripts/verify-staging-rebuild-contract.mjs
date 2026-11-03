@@ -115,13 +115,18 @@ if (runner) {
 const compare = read('pipeline/src/batch-delete-compare.ts');
 if (!compare) failures.push('batch-delete-compare.ts is missing');
 else {
-  for (const required of ['pg_get_functiondef(to_regprocedure', 'staging-sql.batch_delete_compare', 'shortHash', 'slice(0, 12)', 'match: cmp.match', 'expected_hash: cmp.expected_hash', 'live_hash: cmp.live_hash']) {
+  for (const required of ['pg_get_functiondef(to_regprocedure', 'staging-sql.batch_delete_compare', 'shortHash', 'slice(0, 12)', 'match: cmp.match', 'expected_hash: cmp.expected_hash', 'live_hash: cmp.live_hash', 'proconfig', 'expectedProconfig', 'LIVE_SEARCH_PATH', 'FILE_SEARCH_PATH', "statement_timeout', '30s', true", 'client.query(BATCH_DELETE_STATEMENT_TIMEOUT_SQL)']) {
     if (!compare.includes(required)) failures.push(`batch-delete-compare.ts is missing: ${required}`);
   }
   const compareCode = compare.split('\n').filter((l) => !/^\s*\/\//.test(l)).join('\n');
   for (const forbidden of [/process\.env/, /\binsert\s+into\b/i, /\bupdate\s+\w+\s+set\b/i, /\bdelete\s+from\b/i, /\bdrop\s+\w+/i, /\btruncate\b/i, /\balter\s+\w+/i]) {
     if (forbidden.test(compareCode.replace(/^export const BATCH_DELETE_LIVE_SQL.*$/m, ''))) failures.push(`batch-delete-compare.ts must not contain ${forbidden}`);
   }
+  // The search_path is compared exactly (review finding B1): no case folding and no splitting of free text anywhere in the code,
+  // and the live body is never line-end normalised (only the pinned file text is).
+  if (compareCode.includes(".split(',')")) failures.push('batch-delete-compare.ts must not split search_path free text on commas');
+  if (compareCode.split('\n').some((l) => l.includes('_SEARCH_PATH = new RegExp(') && /, ?'[a-z]*i[a-z]*'\)/.test(l))) failures.push('the search_path patterns must be case-sensitive (no i flag)');
+  if (!compareCode.includes("splitHeaderBody(form === 'file' ? lf(def) : def, form === 'file')")) failures.push('batch-delete-compare.ts must normalise line ends of the pinned file text only, never of the live definition');
   // The only console output is the one fixed event.
   const logs = compareCode.match(/console\.(log|error)\(.*\)/g) ?? [];
   if (logs.length !== 1 || !logs[0].includes('msg: BATCH_DELETE_COMPARE_EVENT, match: cmp.match, expected_hash: cmp.expected_hash, live_hash: cmp.live_hash }')) failures.push('batch-delete-compare.ts must print exactly one fixed event (match and two short hashes)');

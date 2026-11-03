@@ -9,7 +9,7 @@ import assert from 'node:assert/strict';
 import { readFileSync } from 'node:fs';
 import { resolve } from 'node:path';
 import pg from 'pg';
-import { extractBatchDeleteFromFile } from './batch-delete-compare.js';
+import { BATCH_DELETE_STATEMENT_TIMEOUT_SQL, extractBatchDeleteFromFile } from './batch-delete-compare.js';
 import { classifyRunnerFailure } from './refusals.js';
 import { REBUILT_STAGING_SQL_ACTIONS, REPOSITORY_ROOT, executeRebuiltSqlPlan, planRebuiltSqlRun } from './staging-rebuilt.js';
 
@@ -73,7 +73,14 @@ async function main(): Promise<void> {
     const fresh = await runAction();
     check('fresh M1/M1b/M1c apply: match = true, no refusal', matchOf(fresh) === true && fresh.refusal === undefined);
     check('match: the two printed hashes are equal 12-character prefixes', /^[0-9a-f]{12}$/.test(hashes(fresh)!.expected_hash) && hashes(fresh)!.expected_hash === hashes(fresh)!.live_hash);
-    check('match: only the settings, begin read only, the fixed select and rollback were sent', JSON.stringify(fresh.sent.filter((s) => !/set_config/.test(s)).map((s) => (/pg_get_functiondef/.test(s) ? 'select' : s))) === '["begin read only","select","rollback"]');
+    check('match: only the settings, begin read only, the statement timeout, the fixed select and rollback were sent', JSON.stringify(fresh.sent.filter((s) => !s.startsWith('select set_config($1')).map((s) => (/pg_get_functiondef/.test(s) ? 'select' : s === BATCH_DELETE_STATEMENT_TIMEOUT_SQL ? 'timeout' : s))) === '["begin read only","timeout","select","rollback"]');
+    await admin.query('begin');
+    await admin.query(BATCH_DELETE_STATEMENT_TIMEOUT_SQL);
+    const st = (await admin.query("select current_setting('statement_timeout') as s")).rows[0].s as string;
+    await admin.query('rollback');
+    check('the timeout statement sets a 30 s statement_timeout on a real server (transaction-local)', st === '30s');
+    const proconfig = async () => (await admin.query("select proconfig from pg_proc where oid = 'public.batch_delete(uuid)'::regprocedure")).rows[0].proconfig as string[];
+    check('the stored setting of the reviewed function is exactly one string "search_path=public, internal, pg_temp"', JSON.stringify(await proconfig()) === '["search_path=public, internal, pg_temp"]');
     check('match: the definition text is never printed', noDefinitionLeak(fresh));
     check('read-only: the live definition and ACL are unchanged by the run', (await liveDef()) === before.def && JSON.stringify(await acl()) === JSON.stringify(before.acl));
     check('the live text really is in PostgreSQL layout (CREATE OR REPLACE ... $function$), not the file layout', /^CREATE OR REPLACE FUNCTION public\.batch_delete/.test(before.def) && before.def.includes('$function$'));
@@ -86,6 +93,14 @@ async function main(): Promise<void> {
       ['body whitespace changed', restore.replace('return true;', 'return true; ')],
       ['SECURITY INVOKER', restore.replace('security definer', 'security invoker')],
       ['search_path without internal', restore.replace('public, internal, pg_temp', 'public, pg_temp')],
+      ['search_path A: one schema "public, internal" then pg_temp', restore.replace('public, internal, pg_temp', '"public, internal", pg_temp')],
+      ['search_path B: "Public" upper case', restore.replace('public, internal, pg_temp', '"Public", internal, pg_temp')],
+      ['search_path C: "INTERNAL" upper case', restore.replace('public, internal, pg_temp', 'public, "INTERNAL", pg_temp')],
+      ['search_path D: all three in one quoted element (pg_temp effectively first)', restore.replace('public, internal, pg_temp', '"public, internal, pg_temp"')],
+      ['search_path with pg_temp first', restore.replace('public, internal, pg_temp', 'pg_temp, public, internal')],
+      ['search_path with pg_temp in the middle', restore.replace('public, internal, pg_temp', 'public, pg_temp, internal')],
+      ['search_path with a quoted comma in the middle element', restore.replace('public, internal, pg_temp', 'public, "internal, pg_temp"')],
+      ['search_path in a different order', restore.replace('public, internal, pg_temp', 'internal, public, pg_temp')],
       ['STRICT added', restore.replace('volatile\n', 'volatile strict\n')],
       ['STABLE instead of volatile', restore.replace('volatile\n', 'stable\n')],
       ['COST changed', restore.replace('volatile\n', 'volatile cost 7\n')],

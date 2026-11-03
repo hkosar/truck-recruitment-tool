@@ -547,12 +547,17 @@ privileges are checked; a separate comparison of its definition with the reviewe
 of the separately approved M1c run, not of approval 4. That comparison is the read-only runner action
 `batch-delete-compare` (confirmation `COMPARE TNBS BATCH DELETE DEFINITION`, dry run first; `pipeline/src/batch-delete-compare.ts`):
 in one read-only transaction it fetches `pg_get_functiondef` of `public.batch_delete(uuid)`, normalises it and the function
-text of the pinned M1c file the same documented way (line ends; the header reduced to name and argument list, return type,
-language, volatility, SECURITY DEFINER/INVOKER and search_path, any other header clause being unrecognised; the body compared
-byte for byte; dollar-quote tags ignored), and prints only `staging-sql.batch_delete_compare` with `match` and two 12-character
+text of the pinned M1c file the same documented way (line ends of the pinned FILE text only: the live definition is compared
+exactly as PostgreSQL holds it, so a CR byte in the live body is a difference; the header reduced to name and argument list,
+return type, language, volatility, SECURITY DEFINER/INVOKER and search_path, any other header clause being unrecognised; the
+body compared byte for byte; dollar-quote tags ignored). The `search_path` is compared exactly, with no case folding and no
+splitting of free text: the live header must list only quoted lower-case plain identifiers, and the stored setting
+(`pg_proc.proconfig`, read in the same statement) must equal byte for byte the one string `search_path=public, internal, pg_temp`
+derived from the pinned file, so a quoted schema containing commas, an upper-case name or a different order (for example
+`pg_temp` first) is refused. The read has a transaction-local 30 second `statement_timeout` (a stricter existing one is kept). It prints only `staging-sql.batch_delete_compare` with `match` and two 12-character
 SHA-256 prefixes (never the definition). A difference, an absent function or an unrecognised live header is refused with
 `batch_delete_definition_mismatch`; owner and privileges are not part of it. Proved locally on a real PostgreSQL 16 catalogue by
-`pipeline/src/batch-delete-compare-a3.test.ts` (30 checks: fresh apply matches; ten altered definitions refused and restored)
+`pipeline/src/batch-delete-compare-a3.test.ts` (48 checks: fresh apply matches; seventeen altered definitions refused and restored, including quoted-comma, upper-case and pg_temp-placement search_path variants)
 and offline by `pipeline/src/batch-delete-compare.test.ts`; the hosted catalogue is not proved, and a refusal there means a
 human inspects), other objects in the schema, and grants on objects other
 than those named. **Unsupported:** a database whose PostGIS extension lives outside schema `public` (M1 then pins

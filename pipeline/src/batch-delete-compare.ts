@@ -9,19 +9,27 @@
 // anything. A difference, or an absent function, is refused with the fixed id batch_delete_definition_mismatch.
 //
 // NORMALISATION (the whole of it; nothing else is ignored):
-//   1. CRLF and CR line ends become LF. Nothing else about the body changes: the text between the dollar quotes is
-//      compared byte for byte (comments, spacing, every character), so a body change of any kind is a difference.
+//   1. CRLF and CR line ends in the PINNED FILE text become LF (the file is stored with LF; this only guards a checkout that
+//      rewrote line ends). The LIVE text is NOT normalised: its body is compared exactly as PostgreSQL holds it, so a live
+//      body that contains a CR byte is a difference. Nothing else about either body changes: the text between the dollar
+//      quotes is compared byte for byte (comments, spacing, every character), so a body change of any kind is a difference.
 //   2. The header (everything before `AS <dollar tag>`) is reduced to a fixed list of facts, because PostgreSQL deparses
 //      it in its own layout (`CREATE OR REPLACE FUNCTION`, upper-case keywords, `SET search_path TO 'a', 'b'`, no
 //      `VOLATILE` for the default) while the file is written `create function ... volatile ... set search_path = a, b`.
 //      The facts are: schema-qualified name and argument list (single spaces), return type, language, volatility,
-//      SECURITY DEFINER or INVOKER, and the search_path list. The header must consist ONLY of those clauses; any other
+//      SECURITY DEFINER or INVOKER, and the search_path list. The search_path is compared EXACTLY, with no case folding and
+//      no splitting of free text: the live header must show `SET search_path TO 'a', 'b'` with every element a quoted
+//      lower-case plain identifier (`[a-z_][a-z0-9_]*`), the file must show unquoted lower-case plain identifiers, and in
+//      addition the stored setting (pg_proc.proconfig, read in the same statement) must equal, byte for byte, the single
+//      string `search_path=<elements joined by ", ">` derived from the pinned file. So `"Public"`, `"INTERNAL"`, one
+//      schema whose name contains commas, and any different order (pg_temp first) are all differences. The header must consist ONLY of those clauses; any other
 //      clause (STRICT, COST, ROWS, LEAKPROOF, PARALLEL, another SET, WINDOW, SUPPORT, TRANSFORM) makes the header
 //      unrecognised, which is a difference, never a pass.
 //   3. The dollar-quote tag (`$$` in the file, `$function$` from PostgreSQL) is not part of the comparison.
 //   4. Text after the closing dollar quote (the file's `;`, PostgreSQL's trailing newline) is ignored; the file's extraction
 //      stops at the first closing quote that is followed by `;` at a line start, and refuses if more than one statement
 //      creating public.batch_delete exists.
+// The read runs in a read-only transaction with a transaction-local 30 second statement_timeout (never raising a stricter one).
 // Not compared (not part of pg_get_functiondef): the owner, the privileges (reapply-m1c and the role matrix check those)
 // and comments on the function.
 //
@@ -31,10 +39,13 @@
 import { createHash } from 'node:crypto';
 import type { RebuiltSqlClient } from './staging-rebuilt.js';
 
+// Same bound as the STOP sweep (prod-sql.ts STATEMENT_TIMEOUT_SQL): transaction-local, never raises a stricter value. Repeated here, not imported, to keep staging-rebuilt <-> prod-sql free of an import cycle.
+export const BATCH_DELETE_STATEMENT_TIMEOUT_SQL = "select set_config('statement_timeout', '30s', true) from pg_catalog.pg_settings where name = 'statement_timeout' and (setting::bigint = 0 or setting::bigint > 30000)";
+
 export const BATCH_DELETE_COMPARE_EVENT = 'staging-sql.batch_delete_compare';
 
 /** The live-definition query: read-only, a fixed schema-qualified signature, no parameters, returns zero or one row. */
-export const BATCH_DELETE_LIVE_SQL = "select pg_get_functiondef(to_regprocedure('public.batch_delete(uuid)')) as def where to_regprocedure('public.batch_delete(uuid)') is not null";
+export const BATCH_DELETE_LIVE_SQL = "select pg_get_functiondef(to_regprocedure('public.batch_delete(uuid)')) as def, (select proconfig from pg_proc where oid = to_regprocedure('public.batch_delete(uuid)')) as config where to_regprocedure('public.batch_delete(uuid)') is not null";
 
 export interface NormalisedFunction {
   /** The fixed header facts, one per line, then the body; the exact text that is hashed. */
@@ -58,8 +69,12 @@ function splitHeaderBody(def: string, closingMustBeFollowedByStatementEnd: boole
   return { header: def.slice(0, open.index), body };
 }
 
+const SEARCH_PATH_ID = '[a-z_][a-z0-9_]*';
+const LIVE_SEARCH_PATH = new RegExp(`^[Ss][Ee][Tt] search_path [Tt][Oo] ('${SEARCH_PATH_ID}'(?:, '${SEARCH_PATH_ID}')*) `);
+const FILE_SEARCH_PATH = new RegExp(`^set search_path (?:to|=) (${SEARCH_PATH_ID}(?:, ${SEARCH_PATH_ID})*) `);
+
 /** Reduces the header to the fixed facts, or null when anything else is present. */
-function headerFacts(header: string): string[] | null {
+function headerFacts(header: string, form: 'file' | 'live'): string[] | null {
   let h = spaces(header);
   const create = /^create (?:or replace )?function /i.exec(h);
   if (!create) return null;
@@ -85,9 +100,11 @@ function headerFacts(header: string): string[] | null {
       volatility = m[1]!.toLowerCase();
     } else if ((m = /^security (definer|invoker) /i.exec(h))) {
       security = m[1]!.toLowerCase();
-    } else if ((m = /^set search_path (?:to|=) ((?:'?[a-z_][a-z0-9_]*'?)(?: ?, ?'?[a-z_][a-z0-9_]*'?)*) /i.exec(h))) {
+    } else if ((m = (form === 'live' ? LIVE_SEARCH_PATH : FILE_SEARCH_PATH).exec(h))) {
       if (searchPath !== null) return null;
-      searchPath = m[1]!.split(',').map((p) => p.trim().replace(/^'|'$/g, '').toLowerCase()).join(',');
+      // Case-sensitive and strict: every element is a lower-case plain identifier (quoted on the live side), so there is
+      // nothing to fold and a comma can only be an element separator. The list is kept verbatim, in order.
+      searchPath = m[1]!.replace(/'/g, '');
     } else {
       return null;
     }
@@ -100,11 +117,17 @@ function headerFacts(header: string): string[] | null {
 
 /** Normalises a CREATE FUNCTION text (file form or pg_get_functiondef form). Returns null when it is not recognised exactly. */
 export function normaliseFunctionDefinition(def: string, form: 'file' | 'live'): NormalisedFunction | null {
-  const parts = splitHeaderBody(lf(def), form === 'file');
+  const parts = splitHeaderBody(form === 'file' ? lf(def) : def, form === 'file');
   if (!parts) return null;
-  const facts = headerFacts(parts.header);
+  const facts = headerFacts(parts.header, form);
   if (!facts) return null;
   return { text: `${facts.join('\n')}\nbody:\n${parts.body}` };
+}
+
+/** The exact pg_proc.proconfig value the pinned file's search_path produces: one string, elements joined by ", ". */
+export function expectedProconfig(normalisedText: string): string[] | null {
+  const m = /^search_path=(.+)$/m.exec(normalisedText);
+  return m ? [`search_path=${m[1]!}`] : null;
 }
 
 /** The statement creating public.batch_delete in the pinned M1c file; null unless there is exactly one. */
@@ -130,22 +153,26 @@ export interface BatchDeleteComparison {
 }
 
 /** Pure comparison of the expected (file) text with the live pg_get_functiondef text (or null when absent). */
-export function compareBatchDelete(expectedFileText: string, liveDef: string | null): BatchDeleteComparison {
+export function compareBatchDelete(expectedFileText: string, liveDef: string | null, liveConfig: unknown = null): BatchDeleteComparison {
   const expected = normaliseFunctionDefinition(expectedFileText, 'file');
   if (!expected) throw new Error('the pinned M1c function text is not in the recognised shape');
   const expected_hash = shortHash(expected.text);
   if (liveDef === null) return { match: false, expected_hash, live_hash: 'absent' };
   const live = normaliseFunctionDefinition(liveDef, 'live');
   if (!live) return { match: false, expected_hash, live_hash: 'unrecognised' };
-  return { match: live.text === expected.text, expected_hash, live_hash: shortHash(live.text) };
+  // The stored setting must be exactly the one string derived from the file; any other shape (null, extra entries, other case) differs.
+  const want = expectedProconfig(expected.text);
+  const configOk = want !== null && Array.isArray(liveConfig) && liveConfig.length === want.length && liveConfig.every((c, i) => c === want[i]);
+  return { match: live.text === expected.text && configOk, expected_hash, live_hash: shortHash(live.text) };
 }
 
 /** Runs inside a read-only transaction opened by the caller. Prints the fixed event; returns the comparison. */
 export async function runBatchDeleteCompare(client: RebuiltSqlClient, expectedFileText: string): Promise<BatchDeleteComparison> {
+  await client.query(BATCH_DELETE_STATEMENT_TIMEOUT_SQL);
   const res = await client.query(BATCH_DELETE_LIVE_SQL);
-  const row = res.rows[0] as { def?: unknown } | undefined;
+  const row = res.rows[0] as { def?: unknown; config?: unknown } | undefined;
   const live = row === undefined ? null : typeof row.def === 'string' ? row.def : null;
-  const cmp = compareBatchDelete(expectedFileText, live);
+  const cmp = compareBatchDelete(expectedFileText, live, row?.config ?? null);
   console.log(JSON.stringify({ msg: BATCH_DELETE_COMPARE_EVENT, match: cmp.match, expected_hash: cmp.expected_hash, live_hash: cmp.live_hash }));
   return cmp;
 }
