@@ -1,5 +1,6 @@
 import { existsSync } from 'node:fs';
 import { createServer } from 'node:http';
+import { loopbackFetch } from './loopback-fetch.js';
 import { tmpdir } from 'node:os';
 import { resolve } from 'node:path';
 import assert from 'node:assert/strict';
@@ -827,7 +828,7 @@ test('owner Auth create (G1 step 1): exact request to the recorded address, one 
   // Only a loopback address is ever contacted: the production address is asserted, then rewritten to the fake server.
   const toLocal = (timeoutMs?: number): OwnerFetch => (url, init) => {
     requested.push(url);
-    return fetch(url.replace(`https://${ref}.supabase.co`, `http://127.0.0.1:${port}`), timeoutMs ? { ...init, signal: AbortSignal.timeout(timeoutMs) } : init);
+    return loopbackFetch(url.replace(`https://${ref}.supabase.co`, `http://127.0.0.1:${port}`), timeoutMs ? { ...init, signal: AbortSignal.timeout(timeoutMs) } : init);
   };
   const reply = (status: number, body: unknown) => (_q: unknown, res: import('node:http').ServerResponse) => { res.writeHead(status, { 'content-type': 'application/json' }); res.end(typeof body === 'string' ? body : JSON.stringify(body)); };
   const uuid = '3f2504e0-4f89-41d3-9a0c-0305e82c3301';

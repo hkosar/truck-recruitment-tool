@@ -11,6 +11,7 @@ import { parseServerEnv } from './config';
 import { FakeMailAdapter } from './mail/fake';
 import { startServer, type RunningServer } from './main';
 import { claimSuiteDatabase, suiteDatabase } from './testing/test-db';
+import { loopbackFetch } from './testing/loopback-fetch';
 // Loaded machines (manager decision): only TEST timeouts are raised; product limits are unchanged.
 vi.setConfig({ testTimeout: 30_000, hookTimeout: 60_000 });
 
@@ -73,11 +74,11 @@ describe.skipIf(!enabled)('A4 real HTTP: sign-in end to end, timing, bodies, shu
   });
 
   const post = (path: string, body: string, headers: Record<string, string>) =>
-    fetch(`${BASE}${path}`, { method: 'POST', redirect: 'manual', headers: { origin: ORIGIN, ...headers }, body });
+    loopbackFetch(`${BASE}${path}`, { method: 'POST', redirect: 'manual', headers: { origin: ORIGIN, ...headers }, body });
 
   it('health routes on the real server: /readyz and /healthz/db answer 200 "ok" with the database up', async () => {
     for (const path of ['/readyz', '/healthz/db']) {
-      const r = await fetch(`${BASE}${path}`);
+      const r = await loopbackFetch(`${BASE}${path}`);
       expect([r.status, await r.text(), r.headers.get('cache-control')]).toEqual([200, 'ok', 'no-store']);
     }
   });
@@ -95,13 +96,13 @@ describe.skipIf(!enabled)('A4 real HTTP: sign-in end to end, timing, bodies, shu
     expect(link).toMatch(new RegExp(`^${ORIGIN}/auth/verify\\?token=`));
 
     const jar: Jar = new Map();
-    const land = await fetch(link.replace(ORIGIN, BASE), { redirect: 'manual' });
+    const land = await loopbackFetch(link.replace(ORIGIN, BASE), { redirect: 'manual' });
     expect(land.status).toBe(303);
     expect(land.headers.get('location')).not.toContain('token');
     absorb(jar, land);
     expect(jar.has('__Host-tr_confirm')).toBe(true);
     const confirmUrl = land.headers.get('location')!.replace(ORIGIN, BASE);
-    const page = await fetch(confirmUrl, { headers: { cookie: cookieHeader(jar) } });
+    const page = await loopbackFetch(confirmUrl, { headers: { cookie: cookieHeader(jar) } });
     const html = await page.text();
     expect(html).toContain('Finish signing in as <strong>e•••@tnbs-recruiter.example.invalid</strong>.');
     absorb(jar, page);
@@ -112,23 +113,23 @@ describe.skipIf(!enabled)('A4 real HTTP: sign-in end to end, timing, bodies, shu
     expect(done.headers.getSetCookie().some((c) => /^__Host-tr_session=[A-Za-z0-9_-]{43}; Path=\/; Max-Age=7776000; Secure; HttpOnly; SameSite=Lax$/.test(c))).toBe(true);
     absorb(jar, done);
 
-    const me = await fetch(`${BASE}/api/session`, { headers: { cookie: cookieHeader(jar) } });
+    const me = await loopbackFetch(`${BASE}/api/session`, { headers: { cookie: cookieHeader(jar) } });
     const session = (await me.json()) as { csrfToken: string };
     expect(session).toMatchObject({ user: { email: 'editor@tnbs-recruiter.example.invalid', role: 'edit' }, sessionKind: 'link' });
     absorb(jar, me);
-    const totals = await fetch(`${BASE}/api/rpc/dashboard_totals`, { method: 'POST', headers: { origin: ORIGIN, cookie: cookieHeader(jar), 'content-type': 'application/json', 'x-csrf-token': session.csrfToken }, body: '{}' });
+    const totals = await loopbackFetch(`${BASE}/api/rpc/dashboard_totals`, { method: 'POST', headers: { origin: ORIGIN, cookie: cookieHeader(jar), 'content-type': 'application/json', 'x-csrf-token': session.csrfToken }, body: '{}' });
     expect(totals.status).toBe(200);
-    const dash = await fetch(`${BASE}/api/dashboard`, { headers: { cookie: cookieHeader(jar) } });
+    const dash = await loopbackFetch(`${BASE}/api/dashboard`, { headers: { cookie: cookieHeader(jar) } });
     expect(Array.isArray(await dash.json())).toBe(true);
-    const profile = await fetch(`${BASE}/api/carriers/1400001/profile`, { headers: { cookie: cookieHeader(jar) } });
+    const profile = await loopbackFetch(`${BASE}/api/carriers/1400001/profile`, { headers: { cookie: cookieHeader(jar) } });
     expect(((await profile.json()) as { carrier: { dot_number: number } }).carrier.dot_number).toBe(1400001);
-    const shell = await fetch(`${BASE}/dashboard`, { headers: { cookie: cookieHeader(jar), 'sec-fetch-mode': 'navigate', 'sec-fetch-dest': 'document', accept: 'text/html' } });
+    const shell = await loopbackFetch(`${BASE}/dashboard`, { headers: { cookie: cookieHeader(jar), 'sec-fetch-mode': 'navigate', 'sec-fetch-dest': 'document', accept: 'text/html' } });
     expect(shell.status).toBe(200);
     expect(await shell.text()).toContain('<div id="root">');
 
     const out = await post('/auth/signout', `csrf_token=${session.csrfToken}`, { 'content-type': 'application/x-www-form-urlencoded', cookie: cookieHeader(jar) });
     expect(out.status).toBe(303);
-    expect((await fetch(`${BASE}/api/session`, { headers: { cookie: cookieHeader(jar) } })).status).toBe(401);
+    expect((await loopbackFetch(`${BASE}/api/session`, { headers: { cookie: cookieHeader(jar) } })).status).toBe(401);
     const reuse = await post('/auth/confirm', `nonce=${nonce}&csrf_token=${csrf}`, { 'content-type': 'application/x-www-form-urlencoded', cookie: cookieHeader(jar) });
     expect(await reuse.text()).toContain('This link was already used or has expired.');
     expect(logs.join('\n')).not.toContain(link.split('token=')[1]);
@@ -147,9 +148,9 @@ describe.skipIf(!enabled)('A4 real HTTP: sign-in end to end, timing, bodies, shu
     }
     expect(link && link !== before).toBe(true);
     const jar: Jar = new Map();
-    const land = await fetch(link!.replace(ORIGIN, BASE), { redirect: 'manual' });
+    const land = await loopbackFetch(link!.replace(ORIGIN, BASE), { redirect: 'manual' });
     absorb(jar, land);
-    const page = await fetch(land.headers.get('location')!.replace(ORIGIN, BASE), { headers: { cookie: cookieHeader(jar) } });
+    const page = await loopbackFetch(land.headers.get('location')!.replace(ORIGIN, BASE), { headers: { cookie: cookieHeader(jar) } });
     const html = await page.text();
     absorb(jar, page);
     const nonce = /name="nonce" value="([^"]+)"/.exec(html)![1];
@@ -157,7 +158,7 @@ describe.skipIf(!enabled)('A4 real HTTP: sign-in end to end, timing, bodies, shu
     const done = await post('/auth/confirm', `nonce=${nonce}&csrf_token=${formCsrf}`, { 'content-type': 'application/x-www-form-urlencoded', cookie: cookieHeader(jar) });
     expect(done.status).toBe(303);
     absorb(jar, done);
-    const me = await fetch(`${BASE}/api/session`, { headers: { cookie: cookieHeader(jar) } });
+    const me = await loopbackFetch(`${BASE}/api/session`, { headers: { cookie: cookieHeader(jar) } });
     absorb(jar, me);
     const session = (await me.json()) as { csrfToken: string; user: { id: string; email: string; role: string } };
     return { jar, csrf: session.csrfToken, session };
@@ -167,7 +168,7 @@ describe.skipIf(!enabled)('A4 real HTTP: sign-in end to end, timing, bodies, shu
     const manager = await signInByLink('manager@tnbs-recruiter.example.invalid');
     const email = `newhire.${Date.now()}@example.invalid`;
     const sentBefore = mail.count;
-    const add = await fetch(`${BASE}/api/team/add`, {
+    const add = await loopbackFetch(`${BASE}/api/team/add`, {
       method: 'POST',
       headers: { origin: ORIGIN, cookie: cookieHeader(manager.jar), 'content-type': 'application/json', 'x-csrf-token': manager.csrf },
       body: JSON.stringify({ full_name: 'New Hire', email: email.toUpperCase(), role: 'view', mobile: '(555) 010-2030' }),
@@ -175,9 +176,9 @@ describe.skipIf(!enabled)('A4 real HTTP: sign-in end to end, timing, bodies, shu
     expect(add.status).toBe(201);
     const { id } = (await add.json()) as { id: string };
     expect(mail.count).toBe(sentBefore); // nothing is emailed at add time
-    const team = (await (await fetch(`${BASE}/api/team`, { headers: { cookie: cookieHeader(manager.jar) } })).json()) as Array<{ id: string; email: string; role: string; status: string }>;
+    const team = (await (await loopbackFetch(`${BASE}/api/team`, { headers: { cookie: cookieHeader(manager.jar) } })).json()) as Array<{ id: string; email: string; role: string; status: string }>;
     expect(team.find((m) => m.id === id)).toMatchObject({ email, role: 'view', status: 'approved' });
-    const dup = await fetch(`${BASE}/api/team/add`, {
+    const dup = await loopbackFetch(`${BASE}/api/team/add`, {
       method: 'POST',
       headers: { origin: ORIGIN, cookie: cookieHeader(manager.jar), 'content-type': 'application/json', 'x-csrf-token': manager.csrf },
       body: JSON.stringify({ full_name: 'Again', email, role: 'edit' }),
@@ -209,7 +210,7 @@ describe.skipIf(!enabled)('A4 real HTTP: sign-in end to end, timing, bodies, shu
 
   it('an oversized chunked body still gets the generic response, then the connection closes', async () => {
     const result = await new Promise<{ status: number; location: string | undefined; connection: string | undefined }>((resolve, reject) => {
-      const r = request({ host: '127.0.0.1', port: PORT, method: 'POST', path: '/auth/request', headers: { 'content-type': 'application/x-www-form-urlencoded', 'transfer-encoding': 'chunked', origin: ORIGIN } }, (res) => {
+      const r = request({ agent: false, host: '127.0.0.1', port: PORT, method: 'POST', path: '/auth/request', headers: { 'content-type': 'application/x-www-form-urlencoded', 'transfer-encoding': 'chunked', origin: ORIGIN } }, (res) => {
         res.resume();
         res.on('end', () => resolve({ status: res.statusCode ?? 0, location: res.headers.location, connection: res.headers.connection }));
       });
@@ -237,7 +238,7 @@ describe.skipIf(!enabled)('A4 real HTTP: sign-in end to end, timing, bodies, shu
     expect(logs.map((l) => (JSON.parse(l) as { event: string }).event)).toContain('shutdown');
     // Admission has stopped: a request on a reused keep-alive connection gets 503 + Retry-After
     // (doc 15 §4.1); a new connection is refused because the listener is closed.
-    const late = await fetch(`${BASE}/signin`).then((r) => ({ status: r.status, retry: r.headers.get('retry-after') }), () => ({ status: 0, retry: null }));
+    const late = await loopbackFetch(`${BASE}/signin`).then((r) => ({ status: r.status, retry: r.headers.get('retry-after') }), () => ({ status: 0, retry: null }));
     expect([0, 503]).toContain(late.status);
     if (late.status === 503) expect(late.retry).toBe('5');
   });

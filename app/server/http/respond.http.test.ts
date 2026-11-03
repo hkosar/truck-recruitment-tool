@@ -34,7 +34,7 @@ describe.skipIf(!enabled)('rejected bodies over real HTTP (A4)', () => {
 
   function send(body: Buffer[], headers: Record<string, string>): Promise<{ status: number; text: string }> {
     return new Promise((resolve, reject) => {
-      const req = request({ host: '127.0.0.1', port, method: 'POST', path: '/auth/request', headers }, (res) => {
+      const req = request({ agent: false, host: '127.0.0.1', port, method: 'POST', path: '/auth/request', headers }, (res) => {
         let text = '';
         res.setEncoding('utf8');
         res.on('data', (c) => (text += c));

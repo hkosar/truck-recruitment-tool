@@ -44,7 +44,7 @@ describe.skipIf(!enabled)('Node binding over real HTTP (A4)', () => {
     }), lifecycle);
     server!.on('request', (_req, res) => res.on('finish', () => order.push('response finished')));
     const received = await new Promise<number>((resolve, reject) => {
-      const req = request({ host: '127.0.0.1', port, path: '/big' }, (res) => {
+      const req = request({ agent: false, host: '127.0.0.1', port, path: '/big' }, (res) => {
         let n = 0;
         res.on('data', (c: Buffer) => { n += c.length; });
         res.on('end', () => resolve(n));
@@ -79,7 +79,7 @@ describe.skipIf(!enabled)('Node binding over real HTTP (A4)', () => {
       let uploadStart = 0;
       let uploadDoneAt: number | undefined;
       const result = await new Promise<{ status: number; location?: string; connection?: string } | { error: string; abortAtMs: number; uploadMs: number | null }>((resolve) => {
-        const req = request({ host: '127.0.0.1', port, method: 'POST', path: '/auth/request', headers: { 'content-type': 'application/x-www-form-urlencoded', 'transfer-encoding': 'chunked' } }, (res) => {
+        const req = request({ agent: false, host: '127.0.0.1', port, method: 'POST', path: '/auth/request', headers: { 'content-type': 'application/x-www-form-urlencoded', 'transfer-encoding': 'chunked' } }, (res) => {
           res.resume();
           res.on('end', () => resolve({ status: res.statusCode ?? 0, location: res.headers.location, connection: res.headers.connection }));
         });
@@ -118,7 +118,7 @@ describe.skipIf(!enabled)('Node binding over real HTTP (A4)', () => {
     const { port } = await start(async () => ({ status: 200, headers: {}, setCookies: [], body: 'ok' }), lifecycle);
     await lifecycle.shutdown(1_000, async () => {});
     const result = await new Promise<{ status: number; retry?: string }>((resolve, reject) => {
-      const req = request({ host: '127.0.0.1', port, method: 'POST', path: '/x', headers: { 'content-length': '5' } }, (res) => {
+      const req = request({ agent: false, host: '127.0.0.1', port, method: 'POST', path: '/x', headers: { 'content-length': '5' } }, (res) => {
         res.resume();
         res.on('end', () => resolve({ status: res.statusCode ?? 0, retry: res.headers['retry-after'] as string | undefined }));
       });
