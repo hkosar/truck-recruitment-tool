@@ -11,6 +11,7 @@
 // Test switches: RDB_SUITES_INJECT_FAIL=<suite id> replaces that one suite with a command that fails; RDB_SUITES_INJECT_HANG=<suite id>
 // replaces it with a command that never ends (to prove the TIMEOUT line); RDB_SUITES_TIMEOUT_MS=<n> sets the per-suite time limit
 // (default 15 minutes). RDB_SUITES_ONLY=<id>,<id> runs just those suites (for fixing one); the others print SKIP and the exit code stays non-zero.
+// RDB_SUITES_FIRST=<suite id> runs that suite first instead of in its normal place (to prove that no suite depends on the order).
 //
 // Not covered (no real-database run by this script):
 //   - pipeline/src/load-location-tables.test.ts: its real-PostgreSQL part needs external ZCTA / places data files that are not in the repo.
@@ -20,8 +21,9 @@
 //
 // What it does, in order:
 //   1. refuses to start if DATABASE_URL, STAGING_DB_URL, any *_DB_URL / *DATABASE_URL or a PG* variable points anywhere but loopback
-//      (a URL variable with a query string is refused too). Children never inherit the parent environment: they get only the short
-//      allow-list in ENV_ALLOW (PATH, Windows system folders, ...) plus the loopback settings this script gives each suite;
+//      (a URL variable with a query string is refused too). Every child process this script starts (suites, initdb, pg_ctl, vite) gets
+//      only the short allow-list in ENV_ALLOW (PATH, Windows system folders, ...) plus NO_COLOR=1 / FORCE_COLOR=0 and the loopback
+//      settings this script gives that child; the only spawn call is inside makeSh, which always sets that environment;
 //   2. creates a fresh temp folder, runs initdb (scram-sha-256, random passwords kept only in files inside that folder) and starts the
 //      cluster on 127.0.0.1 at a random free port;
 //   3. builds the test databases with scripts/a3-build-test-db.mjs, creates three empty owned databases for the suites that need one,
@@ -33,10 +35,14 @@
 // If this run is killed so hard that no handler runs (Task Manager, power loss), the folder rdb-suites-* in the temp directory and
 // the postgres process of its data folder remain: stop it with pg_ctl -D <that folder>\data stop, then delete the folder.
 //
-// Test isolation: PostgreSQL roles belong to the whole cluster, not to one database. pipeline/src/prod-sql-a3.test.ts deliberately runs
-// the production step "alter role recruiter_app nologin password null", which makes every later login as recruiter_app fail. So the
-// script (a) puts the prod-sql suites last and (b) re-applies the throwaway logins after EVERY suite (restoreLogins), so no suite
-// depends on the order of the others.
+// Test isolation: PostgreSQL roles belong to the whole cluster, not to one database. The prod-sql suites run production back-out steps
+// that take two things away from recruiter_app: supabase/backout/retire-app-credentials.sql:13 ("alter role recruiter_app nologin
+// password null": no login, no password) and, through prod-sql-a3.test.ts section 8, supabase/backout/M1-backout.sql:482 ("revoke
+// recruiter_api from recruiter_app": the role through which recruiter_app gets all its rights). So the script (a) puts the prod-sql
+// suites last and (b) after EVERY suite re-applies LOGIN, the password and the recruiter_api membership (restoreStatements), so no suite
+// depends on the order of the others; RDB_SUITES_FIRST=prod-sql proves it (13 of 13). Other cluster-wide changes (authenticator
+// settings, zz_ roles, recruiter_maintenance grants) are made and undone by the suites themselves; a suite that crashes half way can leave
+// them behind, which makes later suites FAIL (never a false PASS).
 
 import { spawnSync } from 'node:child_process';
 import { randomBytes } from 'node:crypto';
@@ -51,7 +57,20 @@ const root = resolve(import.meta.dirname, '..');
 const LOOPBACK_HOSTS = new Set(['127.0.0.1', 'localhost', '::1', '[::1]']);
 const ADMIN_USER = 'tr_test_admin';
 const RUN_ID = 'rdb';
-const DEFAULT_TIMEOUT_MS = 15 * 60 * 1000;
+export const DEFAULT_TIMEOUT_MS = 15 * 60 * 1000;
+/** Colour off for every child: vitest colours its summary on Windows unless NO_COLOR is set, and colour codes break the result parsing. */
+export const CHILD_COLOR_OFF = { NO_COLOR: '1', FORCE_COLOR: '0' };
+
+/** The per-suite time limit in ms. Anything that is not a number above zero gives the default (0 would mean "no limit" to spawnSync). Pure. */
+export function resolveTimeoutMs(value) {
+  const n = Number(value);
+  return Number.isFinite(n) && n > 0 ? n : DEFAULT_TIMEOUT_MS;
+}
+
+/** Removes ANSI escape sequences (colour, cursor) from child output. Pure. */
+export function stripAnsi(text) {
+  return String(text).replace(/\x1b\[[0-9;?]*[\x20-\x2f]*[\x40-\x7e]/g, '');
+}
 
 /** Variables that can name a database or a server. Anything URL-like must be loopback; hosts must be loopback; service files are refused. */
 const isConnectionVar = (k) => /^(DATABASE_URL|PG.*)$/i.test(k) || /(_|^)DB_URL$/i.test(k) || /DATABASE_URL$/i.test(k);
@@ -85,7 +104,7 @@ export const ENV_ALLOW = [
   'USERPROFILE', 'HOME', 'HOMEDRIVE', 'HOMEPATH', 'APPDATA', 'LOCALAPPDATA', 'PROGRAMDATA', 'PROGRAMFILES', 'PROGRAMFILES(X86)',
   'PROGRAMW6432', 'COMMONPROGRAMFILES', 'COMMONPROGRAMFILES(X86)', 'COMMONPROGRAMW6432', 'ALLUSERSPROFILE', 'PUBLIC',
   'USERNAME', 'USERDOMAIN', 'COMPUTERNAME', 'NUMBER_OF_PROCESSORS', 'PROCESSOR_ARCHITECTURE', 'PROCESSOR_IDENTIFIER',
-  'LANG', 'LC_ALL', 'TZ', 'TERM', 'NO_COLOR',
+  'LANG', 'LC_ALL', 'TZ', 'TERM',
 ];
 const ENV_ALLOW_SET = new Set(ENV_ALLOW.map((n) => n.toUpperCase()));
 
@@ -129,10 +148,11 @@ export function classifyOutcome({ kind, r, out, interrupted = false, allowedSkip
     const key = lines.filter((l) => /\b(FAIL|Error|AssertionError|Tests\s+\d)/.test(l)).slice(0, 8);
     return { status: 'FAIL', reason: `exit ${r.status ?? `signal ${r.signal}`}: ${[...key, ...lines.slice(-3)].join(' | ').slice(0, 1500)}` };
   }
+  const tail = out.split('\n').filter((l) => l.trim()).slice(-3).join(' | ').slice(0, 600);
   if (kind === 'tsx') {
-    if (findSkipLines(out, allowedSkips).length || !/^\s*PASS\b/m.test(out)) return { status: 'FAIL', reason: 'skipped itself or printed no PASS line (exit 0)' };
+    if (findSkipLines(out, allowedSkips).length || !/^\s*PASS\b/m.test(out)) return { status: 'FAIL', reason: `skipped itself or printed no PASS line (exit 0); last lines: ${tail}` };
   } else if (kind === 'vitest') {
-    if (/\b[1-9]\d* (skipped|todo)\b/i.test(out) || !/Tests\s+\d+ passed/.test(out)) return { status: 'FAIL', reason: 'some tests were skipped or no pass count was printed (exit 0)' };
+    if (/\b[1-9]\d* (skipped|todo)\b/i.test(out) || !/Tests\s+\d+ passed/.test(out)) return { status: 'FAIL', reason: `some tests were skipped or no pass count was printed (exit 0); last lines: ${tail}` };
   } else {
     return { status: 'FAIL', reason: `unknown suite kind: ${kind}` };
   }
@@ -144,8 +164,61 @@ export function executeSuite(s, { sh, mask, baseEnv, timeoutMs, isInterrupted })
   const pre = s.before ? s.before() : undefined;
   if (pre) return { status: 'FAIL', reason: pre };
   const r = sh(s.cmd, s.args, { cwd: s.cwd, env: { ...baseEnv, ...s.env }, timeout: timeoutMs });
-  const out = mask(`${r.stdout ?? ''}${r.stderr ?? ''}`);
+  const out = mask(stripAnsi(`${r.stdout ?? ''}${r.stderr ?? ''}`));
   return classifyOutcome({ kind: s.kind, r, out, interrupted: isInterrupted(), allowedSkips: s.allowedSkips ?? [], timeoutMs });
+}
+
+/** The one place a child process is started. `spawn` is spawnSync (a fake in the tests). Every call gets `env: baseEnv` unless the caller
+ *  passes its own env, which the callers build from baseEnv. */
+export function makeSh(baseEnv, spawn = spawnSync) {
+  return (cmd, args, opts = {}) => spawn(cmd, args, { encoding: 'utf8', windowsHide: true, maxBuffer: 256 * 1024 * 1024, env: baseEnv, ...opts });
+}
+
+/** The arguments of the app suite's vitest run. --no-cache: no results.json in node_modules/.vite; the module cache and the config loader
+ *  stay under the temp folder. Pure. */
+export function vitestArgs(vitestMjs, cacheDir) {
+  return [vitestMjs, 'run', '--no-cache', '--fsModuleCachePath', join(cacheDir, 'vitest'), '--configLoader', 'runner'];
+}
+
+/** The statements that give back everything the prod-sql suites can take from the throwaway logins (roles are cluster-wide):
+ *  retire-app-credentials.sql (nologin, no password) and M1-backout.sql (recruiter_api membership of recruiter_app). Pure. */
+export function restoreStatements({ maintPw, appPw }) {
+  const q = (s) => `'${s.replace(/'/g, "''")}'`;
+  return [
+    `alter role recruiter_maintenance login password ${q(maintPw)}`,
+    `alter role recruiter_app login password ${q(appPw)}`,
+    'grant recruiter_api to recruiter_app',
+  ];
+}
+
+/** Moves the suite named `first` (if any) to the front; everything else keeps its order. Pure. */
+export function orderSuites(suites, first) {
+  if (!first) return suites;
+  return [...suites.filter((s) => s.id === first), ...suites.filter((s) => s.id !== first)];
+}
+
+/** Runs the suites one after another and pushes one result per suite into `results` (so a throw keeps what was done). After every suite
+ *  that ran, `restore()` is awaited; if it fails the whole run fails. A suite not selected by `only` is recorded as SKIP (not a pass);
+ *  after an interrupt no further suite is started. */
+export async function runSuites(suites, { results, only, injectedFail, injectedHang, sh, mask, baseEnv, timeoutMs, isInterrupted, restore, log = console.log }) {
+  for (const s of suites) {
+    if (isInterrupted()) { results.push({ id: s.id, status: 'FAIL', reason: 'not run: interrupted' }); continue; }
+    if (only && !only.includes(s.id)) { results.push({ id: s.id, status: 'SKIP', reason: 'not selected' }); log(`SKIP ${s.id}: not selected (RDB_SUITES_ONLY); the run counts as incomplete`); continue; }
+    let outcome;
+    if (injectedFail === s.id) {
+      const r = sh(process.execPath, ['-e', 'console.error("injected failure"); process.exit(1)']);
+      outcome = { status: 'FAIL', reason: `injected failure (exit ${r.status})` };
+    } else if (injectedHang === s.id) {
+      const r = sh(process.execPath, ['-e', 'setTimeout(() => {}, 600000)'], { timeout: timeoutMs });
+      outcome = classifyOutcome({ kind: 'tsx', r, out: 'PASS', timeoutMs });
+      if (outcome.status === 'PASS') outcome = { status: 'FAIL', reason: 'injected hang ended without a timeout' };
+    } else {
+      outcome = executeSuite(s, { sh, mask, baseEnv, timeoutMs, isInterrupted });
+    }
+    results.push({ id: s.id, ...outcome });
+    log(outcome.status === 'PASS' ? `PASS ${s.id}` : `${outcome.status} ${s.id}: ${outcome.reason}`);
+    try { await restore(); } catch (e) { throw new Error(`could not restore the throwaway logins after ${s.id}: ${String(e?.message ?? e)}`); }
+  }
 }
 
 /** Summary line and exit code. Any result that is not PASS counts as failed, and an expected suite with no result counts as missing
@@ -228,6 +301,8 @@ async function run() {
   const distDir = join(root, 'app', 'dist');
 
   const mask = (text) => maskSecrets(text, secrets);
+  const baseEnv = { ...scrubbedEnv(process.env), ...CHILD_COLOR_OFF };
+  const sh = makeSh(baseEnv);
 
   function cleanup() {
     if (cleaned) return;
@@ -235,7 +310,7 @@ async function run() {
     const problems = [];
     // 1. Stop only the cluster in our own folder.
     if (dataDir && pgBin && existsSync(join(dataDir, 'postmaster.pid'))) {
-      const r = spawnSync(exe(pgBin, 'pg_ctl'), ['-D', dataDir, 'stop', '-m', 'fast', '-w'], { stdio: 'ignore', windowsHide: true });
+      const r = sh(exe(pgBin, 'pg_ctl'), ['-D', dataDir, 'stop', '-m', 'fast', '-w'], { stdio: 'ignore' });
       if (r.status !== 0) problems.push('pg_ctl stop did not report success');
     }
     // 2. Delete our own folder (passwords included), after checking it is the folder we made.
@@ -274,7 +349,7 @@ async function run() {
       process.exitCode = 2;
       return;
     }
-    const ver = spawnSync(exe(pgBin, 'pg_ctl'), ['--version'], { encoding: 'utf8', windowsHide: true });
+    const ver = sh(exe(pgBin, 'pg_ctl'), ['--version']);
     if (!/\b16\./.test(ver.stdout ?? '')) {
       console.error('REFUSED: the PostgreSQL bin folder is not version 16.');
       process.exitCode = 2;
@@ -297,7 +372,7 @@ async function run() {
       process.exitCode = 2;
       return;
     }
-    const timeoutMs = Number(process.env.RDB_SUITES_TIMEOUT_MS) > 0 ? Number(process.env.RDB_SUITES_TIMEOUT_MS) : DEFAULT_TIMEOUT_MS;
+    const timeoutMs = resolveTimeoutMs(process.env.RDB_SUITES_TIMEOUT_MS);
 
     // ---- Throwaway cluster.
     dir = mkdtempSync(join(tmpdir(), 'rdb-suites-'));
@@ -313,9 +388,6 @@ async function run() {
     writeFileSync(join(dir, 'maintpw.txt'), maintPw);
     writeFileSync(join(dir, 'apppw.txt'), appPw);
     writeFileSync(join(dir, 'A3_TASK_OWNED'), ownerToken);
-
-    const baseEnv = scrubbedEnv(process.env);
-    const sh = (cmd, args, opts = {}) => spawnSync(cmd, args, { encoding: 'utf8', windowsHide: true, maxBuffer: 256 * 1024 * 1024, env: baseEnv, ...opts });
 
     const init = sh(exe(pgBin, 'initdb'), ['-D', dataDir, '-U', ADMIN_USER, '-A', 'scram-sha-256', `--pwfile=${join(dir, 'pw.txt')}`, '-E', 'UTF8']);
     if (init.status !== 0) throw new Error('initdb failed: ' + mask(`${init.stdout}${init.stderr}`).split('\n').slice(-6).join(' | '));
@@ -361,8 +433,7 @@ async function run() {
       try { await fn(c); } finally { await c.end(); }
     };
     const restoreLogins = () => withAdmin(async (c) => {
-      await c.query(`alter role recruiter_maintenance login password '${maintPw.replace(/'/g, "''")}'`);
-      await c.query(`alter role recruiter_app login password '${appPw.replace(/'/g, "''")}'`);
+      for (const sql of restoreStatements({ maintPw, appPw })) await c.query(sql);
     });
     await restoreLogins();
     // Three suites need an EMPTY tr_ database carrying an ownership comment; each gets its own.
@@ -378,8 +449,7 @@ async function run() {
     const SUITES = [
       {
         id: 'app-vitest', cmd: process.execPath, kind: 'vitest', cwd: join(root, 'app'),
-        // --no-cache: no results cache; --fsModuleCachePath and --configLoader runner keep vitest from writing into node_modules.
-        args: [join(root, 'app', 'node_modules', 'vitest', 'vitest.mjs'), 'run', '--no-cache', '--fsModuleCachePath', join(cacheDir, 'vitest'), '--configLoader', 'runner'],
+        args: vitestArgs(join(root, 'app', 'node_modules', 'vitest', 'vitest.mjs'), cacheDir),
         env: { RUN_HTTP_TESTS: '1', A3_RUN_ID: RUN_ID, A3_ADMIN_URL: admin('tr_signin_test'), A3_APP_URL: app('tr_signin_test'), ROLLBACK_TAG_TEST_URL: admin('tr_rbt') },
         before: () => {
           builtDist = true; // from here on this run owns app/dist
@@ -405,29 +475,13 @@ async function run() {
     if (suiteIds.join() !== SUITE_IDS.join()) throw new Error('internal: SUITES and SUITE_FILES list different suites');
     const injectedFail = process.env.RDB_SUITES_INJECT_FAIL;
     const injectedHang = process.env.RDB_SUITES_INJECT_HANG;
-    for (const [name, v] of [['RDB_SUITES_INJECT_FAIL', injectedFail], ['RDB_SUITES_INJECT_HANG', injectedHang]]) {
+    const first = process.env.RDB_SUITES_FIRST;
+    for (const [name, v] of [['RDB_SUITES_INJECT_FAIL', injectedFail], ['RDB_SUITES_INJECT_HANG', injectedHang], ['RDB_SUITES_FIRST', first]]) {
       if (v && !suiteIds.includes(v)) throw new Error(`${name} names an unknown suite: ${v}`);
     }
 
     const only = process.env.RDB_SUITES_ONLY ? process.env.RDB_SUITES_ONLY.split(',').map((x) => x.trim()) : undefined;
-    for (const s of SUITES) {
-      if (interrupted) { results.push({ id: s.id, status: 'FAIL', reason: 'not run: interrupted' }); continue; }
-      if (only && !only.includes(s.id)) { results.push({ id: s.id, status: 'SKIP', reason: 'not selected' }); console.log(`SKIP ${s.id}: not selected (RDB_SUITES_ONLY); the run counts as incomplete`); continue; }
-      let outcome;
-      if (injectedFail === s.id) {
-        const r = sh(process.execPath, ['-e', 'console.error("injected failure"); process.exit(1)']);
-        outcome = { status: 'FAIL', reason: `injected failure (exit ${r.status})` };
-      } else if (injectedHang === s.id) {
-        const r = sh(process.execPath, ['-e', 'setTimeout(() => {}, 600000)'], { timeout: timeoutMs });
-        outcome = classifyOutcome({ kind: 'tsx', r, out: 'PASS', timeoutMs });
-        if (outcome.status === 'PASS') outcome = { status: 'FAIL', reason: 'injected hang ended without a timeout' };
-      } else {
-        outcome = executeSuite(s, { sh, mask, baseEnv, timeoutMs, isInterrupted: () => interrupted });
-      }
-      results.push({ id: s.id, ...outcome });
-      console.log(outcome.status === 'PASS' ? `PASS ${s.id}` : `${outcome.status} ${s.id}: ${outcome.reason}`);
-      try { await restoreLogins(); } catch (e) { throw new Error(`could not restore the throwaway logins after ${s.id}: ${String(e?.message ?? e)}`); }
-    }
+    await runSuites(orderSuites(SUITES, first), { results, only, injectedFail, injectedHang, sh, mask, baseEnv, timeoutMs, isInterrupted: () => interrupted, restore: restoreLogins });
   } catch (err) {
     console.error(`ERROR: ${mask(String(err?.message ?? err))}`);
     results.push({ id: 'harness', status: 'FAIL', reason: mask(String(err?.message ?? err)) });

@@ -5,7 +5,7 @@
 
 import { existsSync, readFileSync, readdirSync } from 'node:fs';
 import { resolve } from 'node:path';
-import { EXCLUDED_FILES, SUITE_FILES, nonLoopbackConnectionVars, scrubbedEnv } from './run-real-db-suites.mjs';
+import { EXCLUDED_FILES, SUITE_FILES, SUITE_IDS, nonLoopbackConnectionVars, scrubbedEnv } from './run-real-db-suites.mjs';
 
 const root = resolve(import.meta.dirname, '..');
 const src = readFileSync(resolve(root, 'scripts/run-real-db-suites.mjs'), 'utf8').replace(/\r\n/g, '\n');
@@ -23,7 +23,8 @@ check('no secret-store or hosted-service tool is named in code', !/doppler|supab
 check('every database host in code is 127.0.0.1', [...code.matchAll(/@([^:/'"`$]+)[:/]|host:\s*'([^']+)'/g)].every((m) => (m[1] ?? m[2]) === '127.0.0.1' || (m[1] ?? m[2]) === undefined));
 check('cluster listens on 127.0.0.1 only', /listen_addresses=127\.0\.0\.1/.test(code) && !/listen_addresses=['"]?(\*|0\.0\.0\.0)/.test(code));
 check('refuses non-loopback connection variables before creating anything', /nonLoopbackConnectionVars\(process\.env\)/.test(code) && code.indexOf('nonLoopbackConnectionVars(process.env)') < code.indexOf('mkdtempSync(join'));
-check('children get a scrubbed environment', /const baseEnv = scrubbedEnv\(process\.env\);/.test(code));
+check('children get a scrubbed environment with colour off', /const baseEnv = \{ \.\.\.scrubbedEnv\(process\.env\), \.\.\.CHILD_COLOR_OFF \};/.test(code) && /const sh = makeSh\(baseEnv\);/.test(code) && /NO_COLOR: '1', FORCE_COLOR: '0'/.test(code));
+check('spawnSync is called in exactly one place (makeSh), which defaults to env: baseEnv', (code.match(/\bspawnSync\(/g) ?? []).length === 0 && /spawn = spawnSync\)/.test(code) && (code.match(/\bspawn\(/g) ?? []).length === 1 && /spawn\(cmd, args, \{ encoding: 'utf8', windowsHide: true, maxBuffer: 256 \* 1024 \* 1024, env: baseEnv, \.\.\.opts \}\)/.test(code));
 // process.env is read in a few reviewed places only, and is never handed to a child.
 check('process.env appears only in the reviewed places', [...code.matchAll(/process\.env(\.\w+|\))?/g)].every((m) => /^\.(PG_BIN|RDB_SUITES_\w+)$/.test(m[1] ?? '') || /(nonLoopbackConnectionVars|scrubbedEnv)\(process\.env\)/.test(code.slice(Math.max(0, m.index - 30), m.index + m[0].length))));
 check('no spawn call is given process.env as env', !/env:\s*process\.env|\.\.\.process\.env/.test(code));
@@ -44,13 +45,23 @@ check('test switches for a failing and a hanging suite exist', /RDB_SUITES_INJEC
 
 // ---- Result handling (the behaviour is tested in run-real-db-suites.test.mjs; these lines check the wiring).
 check('the exit code comes from summarize() and nothing sets it to 0 afterwards', /process\.exitCode = s\.exitCode;/.test(code) && !/process\.exitCode\s*=\s*0\b/.test(code));
-check('every suite goes through executeSuite with the scrubbed base environment and a time limit', /executeSuite\(s, \{ sh, mask, baseEnv, timeoutMs, isInterrupted/.test(code));
-check('executeSuite masks the output before classifying it', /const out = mask\(`\$\{r\.stdout \?\? ''\}\$\{r\.stderr \?\? ''\}`\);/.test(code) && /classifyOutcome\(\{ kind: s\.kind, r, out,/.test(code));
+check('every suite goes through executeSuite with the scrubbed base environment and a time limit', /executeSuite\(s, \{ sh, mask, baseEnv, timeoutMs, isInterrupted \}\)/.test(code) && /await runSuites\(orderSuites\(SUITES, first\), \{ results, only, injectedFail, injectedHang, sh, mask, baseEnv, timeoutMs, isInterrupted: \(\) => interrupted, restore: restoreLogins \}\);/.test(code));
+check('executeSuite removes colour codes, then masks, then classifies', /const out = mask\(stripAnsi\(`\$\{r\.stdout \?\? ''\}\$\{r\.stderr \?\? ''\}`\)\);/.test(code) && /classifyOutcome\(\{ kind: s\.kind, r, out,/.test(code));
+check('the time limit comes from resolveTimeoutMs, and the vite build has one too', /const timeoutMs = resolveTimeoutMs\(process\.env\.RDB_SUITES_TIMEOUT_MS\);/.test(code) && /'build', '--configLoader', 'runner'\], \{ cwd: join\(root, 'app'\), timeout: timeoutMs \}\)/.test(code));
+check('RDB_SUITES_ONLY skips are recorded as SKIP', /status: 'SKIP', reason: 'not selected'/.test(code) && !/status: 'PASS', reason: 'not selected'/.test(code));
+check('an interrupt stops the suite loop from starting more suites', /for \(const s of suites\) \{\n    if \(isInterrupted\(\)\) \{ results\.push\(\{ id: s\.id, status: 'FAIL', reason: 'not run: interrupted' \}\); continue; \}/.test(code));
+check('all three run passwords are masked, also in the harness error line', /secrets\.push\(adminPw, maintPw, appPw\);/.test(code) && /console\.error\(`ERROR: \$\{mask\(String\(err\?\.message \?\? err\)\)\}`\);/.test(code));
+check('only first-manager may print a skip line (a single allowedSkips entry)', (code.match(/allowedSkips: \[/g) ?? []).length === 1 && /id: 'first-manager', \.\.\.tsx\([^\n]*allowedSkips: \['skip: the roster control table does not allow a second row'\]/.test(code));
+check('app/dist counts as this run\'s from before the build starts', /builtDist = true;[^\n]*\n\s*const r = sh\(process\.execPath, \[join\(root, 'app', 'node_modules', 'vite'/.test(code));
+check('the vitest run uses vitestArgs (tested in the unit tests) and the cache folder is under the temp folder', /args: vitestArgs\(join\(root, 'app', 'node_modules', 'vitest', 'vitest\.mjs'\), cacheDir\)/.test(code) && /const cacheDir = join\(dir, 'caches'\);/.test(code));
 check('the summary counts the expected suites, so a missing one is a failure', /summarize\(results, \{ expectedIds: results\.length \? SUITE_IDS : \[\]/.test(code));
-check('the logins are restored after every suite (roles are cluster-wide)', /try \{ await restoreLogins\(\); \}/.test(code));
-check('vite and vitest write their caches under the temp folder, not node_modules', /'--fsModuleCachePath', join\(cacheDir, 'vitest'\)/.test(code) && (code.match(/'--configLoader', 'runner'/g) ?? []).length === 2);
+check('the logins are restored after every suite that ran (roles are cluster-wide), and a failed restore stops the run', /try \{ await restore\(\); \} catch \(e\) \{ throw new Error\(`could not restore the throwaway logins/.test(code) && /for \(const sql of restoreStatements\(\{ maintPw, appPw \}\)\) await c\.query\(sql\);/.test(code));
+check('vite and vitest write their caches under the temp folder, not node_modules', /'--fsModuleCachePath', join\(cacheDir, 'vitest'\)/.test(code) && /'--no-cache'/.test(code) && (code.match(/'--configLoader', 'runner'/g) ?? []).length === 2);
 check('the app suite turns the HTTP end-to-end tests on (RUN_HTTP_TESTS)', /id: 'app-vitest'[\s\S]*?env: \{ RUN_HTTP_TESTS: '1', /.test(code));
 check('the prod-sql suites run last', /\{ id: 'prod-sql-stop-tables'[\s\S]*\{ id: 'prod-sql-a2-backouts'[\s\S]*\{ id: 'prod-sql', \.\.\.tsx\([^\n]*\n    \];/.test(code));
+
+const suitesBlock = code.slice(code.indexOf('const SUITES = ['), code.indexOf('const suiteIds = SUITES.map'));
+check('the SUITES in the script are exactly SUITE_IDS, and the script checks that itself', [...suitesBlock.matchAll(/\bid: '([a-z0-9-]+)'/g)].map((m) => m[1]).join() === SUITE_IDS.join() && /if \(suiteIds\.join\(\) !== SUITE_IDS\.join\(\)\) throw new Error\('internal: SUITES and SUITE_FILES list different suites'\);/.test(code));
 
 // ---- The suite list matches the real-PostgreSQL test files on disk.
 const listed = new Set(SUITE_FILES.map((f) => f.file));
