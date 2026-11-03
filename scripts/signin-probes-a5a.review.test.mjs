@@ -139,7 +139,7 @@ test('note 4: emails and other identifier shapes in headers or bodies fail with 
   const ok = { ...base, headers: { 'content-security-policy': "default-src 'self'; frame-ancestors 'none'; upgrade-insecure-requests", 'cache-control': 'no-store', 'content-type': 'application/json; charset=utf-8', 'referrer-policy': 'no-referrer' } };
   assert.equal(judge(ok, exp), null);
   assert.equal(judge({ ...base, body: '{"error":"signed_out"}' }, exp), null);
-  assert.equal(judge({ ...base, status: 200, body: '<input placeholder="you@example.com">' }, { status: [200] }), null, 'the page placeholder is the one allowed address');
+  assert.equal(judge({ ...base, status: 200, body: '<input placeholder="you@example.com">' }, { status: [200], allowPlaceholder: true }), null, 'the page placeholder is the one allowed address');
   assert.equal(judge({ ...base, status: 200, headers: { 'x-a': 'you@example.com' }, body: '' }, { status: [200] }), 'leak', 'not allowed in headers');
   assert.equal(judge({ ...base, status: 200, body: 'you@example.com person@example.invalid' }, { status: [200] }), 'leak');
 
@@ -153,4 +153,42 @@ test('note 4: emails and other identifier shapes in headers or bodies fail with 
   assert.deepEqual(out.find((e) => e.id === 'api-get/api/session'), { event: 'probe', id: 'api-get/api/session', result: 'fail', reason: 'leak' });
   const text = JSON.stringify(out);
   assert.ok(!text.includes('example.invalid') && !text.includes('@'));
+});
+
+test('review note 1: the placeholder exemption is the exact attribute text, on the sign-in page probe only', () => {
+  const base = { ok: true, status: 200, headers: {}, cookies: [], body: '' };
+  const page = { status: [200], allowPlaceholder: true };
+  const withBody = (body, exp) => judge({ ...base, body }, exp);
+  assert.equal(withBody('<input placeholder="you@example.com">', page), null);
+  for (const bad of ['thank-you@example.com', 'boss.you@example.com', 'you@example.com.au', 'you@example.community', '<b>you@example.com</b>', "placeholder='you@example.com'"]) {
+    assert.equal(withBody(`<input placeholder="you@example.com"> ${bad}`, page), 'leak', bad);
+  }
+  assert.equal(withBody('<input placeholder="you@example.com">', { status: [200] }), 'leak', 'a probe that does not opt in gets no exemption');
+  assert.equal(PROBES.filter((p) => p.exp.allowPlaceholder).map((p) => p.id).join(), 'signin-page', 'only the sign-in page probe opts in');
+});
+
+test('review note 2: percent-encoded and other encoded "@" forms in a body or header fail with "leak"', () => {
+  const base = { ok: true, status: 404, headers: {}, cookies: [], body: 'Not found' };
+  const exp = { status: [404] };
+  const BS = String.fromCharCode(92);
+  const encoded = {
+    percent: 'alice%40corp.invalid',
+    percentLower: 'alice%40Corp.invalid',
+    doublePercent: 'alice%2540corp.invalid',
+    entityDec: 'alice&#64;corp.invalid',
+    entityPadded: 'alice&#0064;corp.invalid',
+    entityHex: 'alice&#x40;corp.invalid',
+    entityName: 'alice&commat;corp.invalid',
+    hexEscape: `alice${BS}x40corp.invalid`,
+    unicodeEscape: `alice${BS}u0040corp.invalid`,
+    fullWidth: 'alice＠corp.invalid',
+    zeroWidth: 'ali​ce@corp.invalid',
+    placeholderSuffixed: 'thank-you@example.com',
+  };
+  for (const [name, value] of Object.entries(encoded)) {
+    assert.equal(judge({ ...base, body: `x ${value} y` }, exp), 'leak', `body ${name}`);
+    assert.equal(judge({ ...base, headers: { 'x-h': value } }, exp), 'leak', `header ${name}`);
+  }
+  assert.equal(judge(base, exp), null);
+  assert.equal(judge({ ...base, body: '100%40 off, a&#64 b, 50%' }, exp), null, 'no false alarm without an address shape');
 });

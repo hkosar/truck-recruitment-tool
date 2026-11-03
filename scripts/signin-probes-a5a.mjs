@@ -117,9 +117,26 @@ const LEAK_SHAPES = [
   /\bbearer\s+[A-Za-z0-9._~+/=-]{8,}/i,
   /(?=[A-Za-z0-9_-]*[0-9])(?=[A-Za-z0-9_-]*[A-Za-z])[A-Za-z0-9_-]{32,}/,
 ];
-// The sign-in page shows this fixed example address as the input placeholder; it is the one email allowed in a body.
-const PLACEHOLDER_EMAIL = 'you@example.com';
-const leaks = (text) => LEAK_SHAPES.some((re) => re.test(text));
+// The sign-in page shows this fixed example address as the input placeholder; this exact attribute text is the one email
+// allowed in a body, and only for a probe whose expectation sets `allowPlaceholder`.
+const PLACEHOLDER_ATTR = 'placeholder="you@example.com"';
+// Turns the encoded forms of "@" (percent, HTML entity, backslash escape, full-width) and zero-width characters into plain text,
+// repeatedly so double encoding is undone too, so an encoded address is matched like a plain one.
+function decodeAt(text) {
+  let t = text;
+  for (let i = 0; i < 4; i += 1) {
+    const next = t.normalize('NFKC')
+      .replace(/[\u200B-\u200D\u2060\uFEFF]/g, '')
+      .replace(/%25/g, '%')
+      .replace(/%40/gi, '@')
+      .replace(/&#0*64;|&#x0*40;|&commat;/gi, '@')
+      .replace(/\\x40|\\u0040|\\u\{0*40\}/gi, '@');
+    if (next === t) break;
+    t = next;
+  }
+  return t;
+}
+const leaks = (text) => LEAK_SHAPES.some((re) => re.test(text)) || LEAK_SHAPES.some((re) => re.test(decodeAt(text)));
 const headerText = (headers) => Object.entries(headers ?? {}).map(([k, v]) => `${k}: ${[].concat(v).join(', ')}`).join('\n');
 
 /** The path of a redirect target if it stays on the app (one leading "/", or exactly `appOrigin` + path), else null. */
@@ -133,7 +150,8 @@ function localPath(loc, appOrigin) {
 export function judge(res, exp, appOrigin) {
   if (!res.ok) return 'network';
   if (res.cookies.some((c) => !isClearing(c))) return 'cookie';
-  if (leaks(res.body.replaceAll(PLACEHOLDER_EMAIL, '')) || leaks(headerText(res.headers))) return 'leak';
+  const scanBody = exp.allowPlaceholder ? res.body.replaceAll(PLACEHOLDER_ATTR, '') : res.body;
+  if (leaks(scanBody) || leaks(headerText(res.headers))) return 'leak';
   if (res.tooBig) return 'body';
   if (!exp.status.includes(res.status)) return 'status';
   if (exp.location !== undefined) {
@@ -168,7 +186,7 @@ function buildProbes() {
   const p = [];
   const add = (id, req, exp) => p.push({ id, req, exp });
   add('ready', { path: '/readyz' }, { status: [200], exactBody: 'ok', headers: { 'cache-control': 'no-store' } });
-  add('signin-page', { path: '/signin' }, { status: [200], bodyHas: ['action="/auth/request"', 'type="email"'], bodyLacks: ['type="password"'], headers: PAGE_HEADERS });
+  add('signin-page', { path: '/signin' }, { status: [200], bodyHas: ['action="/auth/request"', 'type="email"'], bodyLacks: ['type="password"'], headers: PAGE_HEADERS, allowPlaceholder: true });
   for (const path of ['/login', '/register', '/forgot', '/reset', '/pending']) add(`legacy${path}`, { path }, { status: [303], location: toSignin });
   const apiGets = ['/api/session', '/api/dashboard', '/api/team', `/api/batches/${ZERO_UUID}`, `/api/batches/${ZERO_UUID}/activity`, `/api/batches/${ZERO_UUID}/sheet-header`, '/api/carriers/1/profile', '/api/batches', '/api/nonexistent'];
   for (const path of apiGets) add(`api-get${path.replace(ZERO_UUID, ':id')}`, { path }, SIGNED_OUT);
