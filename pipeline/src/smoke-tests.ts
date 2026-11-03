@@ -672,7 +672,7 @@ test('retention-dry-run: only as recruiter_maintenance on the rebuilt project; c
     async end() {},
     async query(sql: string, params?: unknown[]) {
       sent.push(sql);
-      if (/delete_outside/.test(sql)) return { rows: [{ delete_outside: 0, delete_inside: 5, write_anywhere: 0, select_outside: 0, internal_functions: 0, powerful_attributes: 0, memberships: 0 }] };
+      if (/delete_outside/.test(sql)) return { rows: [{ delete_outside: 0, delete_inside: 5, write_anywhere: 0, select_outside: 0, direct_relation_grants_outside: 0, direct_column_grants_outside: 0, exec_public_internal: 0, direct_function_grants: 0, schema_create: 0, sequence_privileges: 0, database_create: 0, powerful_attributes: 0, memberships: 0 }] };
       if (/current_user as u/.test(sql)) return { rows: [{ u: 'recruiter_maintenance' }] };
       if (/count\(\*\)::int/.test(sql)) return { rows: [{ n: 3 }] };
       if (/has_table_privilege/.test(sql)) return { rows: [{ s: true, d: true, i: false, u: false, t: false }] };
@@ -693,7 +693,7 @@ test('retention-dry-run: only as recruiter_maintenance on the rebuilt project; c
   assert.equal(report.ok, true);
   assert.deepEqual(Object.keys(report.would_delete).sort(), ['app_sessions', 'email_events', 'recovery_failures', 'request_buckets', 'signin_links']);
   assert.ok(Object.values(report.would_delete).every((n) => n === 3));
-  assert.ok(report.failed === 0 && report.checks > 0 && !('currentUser' in report) && !('checks' in report && Array.isArray(report.checks)), 'only counts, never check names or the login name');
+  assert.ok(report.failed === 0 && report.checks === 25 && !('currentUser' in report) && !('checks' in report && Array.isArray(report.checks)), 'only counts, never check names or the login name');
   const w = await wrapperModule();
   const retentionCounter = { fields: 0 };
   assert.notEqual(w.allowListLine(lines.find((l) => l.includes('retention_dry_run'))!, retentionCounter), null);
@@ -731,10 +731,10 @@ test('retention-run: only as recruiter_maintenance; refused before any delete un
       async end() {},
       async query(sql: string) {
         sent.push(sql);
-        if (/delete_outside/.test(sql)) return { rows: [{ delete_outside: 0, delete_inside: 5, write_anywhere: 0, select_outside: 0, internal_functions: 0, powerful_attributes: 0, memberships: 0 }] };
+        if (/delete_outside/.test(sql)) return { rows: [{ delete_outside: 0, delete_inside: 5, write_anywhere: 0, select_outside: 0, direct_relation_grants_outside: 0, direct_column_grants_outside: 0, exec_public_internal: 0, direct_function_grants: 0, schema_create: 0, sequence_privileges: 0, database_create: 0, powerful_attributes: 0, memberships: 0 }] };
         if (/current_user as u/.test(sql)) return { rows: [{ u: 'recruiter_maintenance' }] };
         if (/has_table_privilege/.test(sql)) return { rows: [{ s: true, d: true, i: false, u: false, t: false }] };
-        if (/count\(\*\)::int as total/.test(sql)) return { rows: [{ total: deleted ? 4 : 5, aged: deleted ? 0 : 1, fresh: 1 }] };
+        if (/count\(\*\)::int as total/.test(sql)) return { rows: [{ total: deleted ? 4 : 5, due: deleted ? 0 : aged, aged_due: deleted ? 0 : Math.min(aged, 1), aged: deleted ? 0 : 1, fresh: 1, fresh_due: 0 }] };
         if (/count\(\*\)::int as n/.test(sql)) return { rows: [{ n: deleted ? 0 : aged }] };
         if (/^delete from/.test(sql)) { deleted = true; return { rowCount: 1 }; }
         if (DENIED_RUN.includes(sql)) throw Object.assign(new Error('permission denied'), { code: '42501' });
@@ -759,6 +759,10 @@ test('retention-run: only as recruiter_maintenance; refused before any delete un
   assert.notEqual(w.allowListLine(lines.find((l) => l.includes('staging-sql.retention_run'))!, counter), null);
   assert.equal(counter.fields, 0, 'the real retention run event passes the output wrapper with no field withheld');
   assert.ok(sent.filter((q) => /^delete from/.test(q)).length >= 5, 'one delete per rule');
+  assert.ok(sent.filter((q) => /^delete from/.test(q)).every((q) => /where [a-z_]+ = \$1$/.test(q)), 'every delete filters on the exact fixture tag, never on what is due');
+  assert.ok(sent.some((q) => /^lock table .* in share row exclusive mode$/.test(q)), 'the five ledgers are locked');
+  const order = sent.filter((q) => q === 'begin' || q === 'commit' || /^delete from/.test(q) || /^lock table/.test(q));
+  assert.ok(order.lastIndexOf('commit') === order.length - 1 && order.indexOf('commit') > order.findIndex((q) => /^delete from/.test(q)), 'commit comes after every delete, in the same transaction');
 
   // More than the one fixture row due (an unknown aged row): refused, and no delete statement is ever sent.
   sent.length = 0;

@@ -34,25 +34,45 @@ export const DENIED_STATEMENTS: ReadonlyArray<{ name: string; sql: string }> = [
 ];
 
 /**
- * Catalogue-wide boundary proof (counts and yes/no only): the table list comes from the catalogue, so a table added later
- * or a grant widened by mistake is caught. System schemas are excluded (they are readable by PUBLIC by design); the
- * select/function checks cover only this application's own schemas, where nothing is granted to PUBLIC.
+ * Catalogue-wide boundary proof (counts and yes/no only): every list comes from the catalogue, so a table, schema,
+ * function or sequence added later, or a grant widened by mistake, is caught. System schemas (pg_*, information_schema)
+ * are excluded because PUBLIC may use them by design. "Direct" checks read the role's own ACL entries (aclexplode with
+ * grantee = this role), so they are schema-agnostic and ignore PUBLIC-by-design grants (hosted vault, storage, realtime...).
  */
 export const BOUNDARY_SQL = `
-  with rels as (
-    select c.oid, n.nspname || '.' || c.relname as name, n.nspname as schema
+  with me as (select oid from pg_roles where rolname = current_user),
+  schemas as (
+    select n.oid, n.nspname from pg_namespace n where n.nspname <> 'information_schema' and n.nspname !~ '^pg_'
+  ),
+  rels as (
+    select c.oid, n.nspname || '.' || c.relname as name, n.nspname as schema, c.relkind, c.relacl
       from pg_class c join pg_namespace n on n.oid = c.relnamespace
-     where c.relkind in ('r', 'p', 'v', 'm', 'f') and n.nspname not in ('pg_catalog', 'information_schema') and n.nspname !~ '^pg_'
+     where c.relkind in ('r', 'p', 'v', 'm', 'f', 'S') and n.nspname <> 'information_schema' and n.nspname !~ '^pg_'
+  ),
+  tables as (select * from rels where relkind <> 'S'),
+  funcs as (
+    select p.oid, n.nspname as schema, p.proacl
+      from pg_proc p join pg_namespace n on n.oid = p.pronamespace
+     where n.nspname <> 'information_schema' and n.nspname !~ '^pg_'
+       and not exists (select 1 from pg_depend d where d.classid = 'pg_proc'::regclass and d.objid = p.oid and d.deptype = 'e')
   )
   select
-    (select count(*)::int from rels where has_table_privilege(current_user, oid, 'DELETE') and name <> all ($1::text[])) as delete_outside,
-    (select count(*)::int from rels where name = any ($1::text[]) and has_table_privilege(current_user, oid, 'DELETE')) as delete_inside,
-    (select count(*)::int from rels where has_any_column_privilege(current_user, oid, 'INSERT') or has_any_column_privilege(current_user, oid, 'UPDATE')
+    (select count(*)::int from tables where has_table_privilege(current_user, oid, 'DELETE') and name <> all ($1::text[])) as delete_outside,
+    (select count(*)::int from tables where name = any ($1::text[]) and has_table_privilege(current_user, oid, 'DELETE')) as delete_inside,
+    (select count(*)::int from tables where has_any_column_privilege(current_user, oid, 'INSERT') or has_any_column_privilege(current_user, oid, 'UPDATE')
         or has_table_privilege(current_user, oid, 'TRUNCATE') or has_table_privilege(current_user, oid, 'REFERENCES') or has_table_privilege(current_user, oid, 'TRIGGER')) as write_anywhere,
-    (select count(*)::int from rels where schema in ('public', 'internal', 'auth', 'staging_identity', 'supabase_migrations')
+    (select count(*)::int from tables where schema in ('public', 'internal', 'auth', 'staging_identity', 'supabase_migrations')
         and has_any_column_privilege(current_user, oid, 'SELECT') and name <> all ($1::text[])) as select_outside,
-    (select count(*)::int from pg_proc p join pg_namespace n on n.oid = p.pronamespace
-      where n.nspname = 'internal' and has_function_privilege(current_user, p.oid, 'EXECUTE')) as internal_functions,
+    (select count(*)::int from rels r, aclexplode(r.relacl) a
+      where a.grantee = (select oid from me) and r.name <> all ($1::text[])) as direct_relation_grants_outside,
+    (select count(*)::int from pg_attribute at join rels r on r.oid = at.attrelid, aclexplode(at.attacl) a
+      where at.attacl is not null and a.grantee = (select oid from me) and r.name <> all ($1::text[])) as direct_column_grants_outside,
+    (select count(*)::int from funcs where schema in ('public', 'internal') and has_function_privilege(current_user, oid, 'EXECUTE')) as exec_public_internal,
+    (select count(*)::int from funcs f, aclexplode(f.proacl) a where a.grantee = (select oid from me)) as direct_function_grants,
+    (select count(*)::int from schemas where has_schema_privilege(current_user, oid, 'CREATE')) as schema_create,
+    (select count(*)::int from rels where relkind = 'S' and (has_sequence_privilege(current_user, oid, 'USAGE') or has_sequence_privilege(current_user, oid, 'UPDATE')
+        or has_sequence_privilege(current_user, oid, 'SELECT'))) as sequence_privileges,
+    (case when has_database_privilege(current_user, current_database(), 'CREATE') then 1 else 0 end) as database_create,
     (select count(*)::int from pg_roles r where r.rolname = current_user
         and (r.rolsuper or r.rolcreaterole or r.rolcreatedb or r.rolbypassrls or r.rolreplication)) as powerful_attributes,
     (select count(*)::int from pg_auth_members m join pg_roles r on r.oid = m.member where r.rolname = current_user) as memberships`;
@@ -104,7 +124,12 @@ export async function runRetentionDryRun(client: DryRunClient, expectedRole: str
     check('delete is held on exactly the five ledgers', boundary.delete_inside === MAINTENANCE_LEDGER_TABLES.length && boundary.delete_outside === 0);
     check('no insert, update, truncate, references or trigger privilege on any table', boundary.write_anywhere === 0);
     check('select is held on no table outside the five ledgers (application schemas)', boundary.select_outside === 0);
-    check('no execute privilege on any internal-schema function', boundary.internal_functions === 0);
+    check('no direct grant of any kind on any relation, sequence or column outside the five ledgers (every schema)', boundary.direct_relation_grants_outside === 0 && boundary.direct_column_grants_outside === 0);
+    check('no execute privilege on any non-extension function in public or internal', boundary.exec_public_internal === 0);
+    check('no direct execute grant on any function in any schema', boundary.direct_function_grants === 0);
+    check('no create privilege on any schema', boundary.schema_create === 0);
+    check('no usage, select or update privilege on any sequence', boundary.sequence_privileges === 0);
+    check('no create privilege on the database', boundary.database_create === 0);
     check('no superuser, create-role, create-db, bypass-rls or replication attribute', boundary.powerful_attributes === 0);
     check('member of no other role', boundary.memberships === 0);
   } finally {
