@@ -9,9 +9,12 @@
 // closes a connection. Tests that call node:http request() themselves pass agent: loopbackAgent().
 // Call closeLoopbackAgent() when the tests are done so idle sockets do not hold the process open.
 
+import { lookup } from 'node:dns';
 import { Agent, request } from 'node:http';
+import type { Socket } from 'node:net';
 
 const LOOPBACK_HOSTS = new Set(['127.0.0.1', '[::1]', 'localhost']);
+const LOOPBACK_ADDRESSES = new Set(['127.0.0.1', '::1']);
 const REDIRECT_STATUSES = new Set([301, 302, 303, 307, 308]);
 const STANDARD_METHODS = new Set(['DELETE', 'GET', 'HEAD', 'OPTIONS', 'POST', 'PUT']);
 const MAX_REDIRECTS = 20;
@@ -20,9 +23,36 @@ export type LoopbackInit = { method?: string; headers?: Record<string, string>; 
 
 let sharedAgent: Agent | undefined;
 
-/** The private proxy-free keep-alive agent (created on first use). */
+// The agent itself refuses any address that is not loopback: a host that is not one of the loopback names is
+// rejected before a socket is created, and a name (localhost) may only resolve to loopback addresses.
+type ConnectOptions = { host?: string | null; hostname?: string | null };
+type ConnectCallback = (err: Error | null, socket?: Socket) => void;
+
+function refuseOutsideConnections(agent: Agent): Agent {
+  const connect = agent.createConnection as unknown as (options: ConnectOptions, callback?: ConnectCallback) => Socket | undefined;
+  (agent as unknown as { createConnection: typeof connect }).createConnection = function (this: Agent, options, callback) {
+    const host = options.host ?? options.hostname ?? undefined;
+    if (host === undefined || !(LOOPBACK_HOSTS.has(host) || host === '::1')) {
+      callback?.(new Error(`loopback-fetch refuses non-loopback address: ${host}`));
+      return undefined;
+    }
+    const guarded = {
+      ...options,
+      lookup: (name: string, opts: object, done: (err: Error | null, address?: unknown, family?: number) => void) =>
+        lookup(name, opts, (err, address, family) => {
+          const list = Array.isArray(address) ? address : [{ address: address as string }];
+          if (!err && !list.every((a) => LOOPBACK_ADDRESSES.has(a.address))) done(new Error(`loopback-fetch refuses non-loopback address: ${name}`));
+          else done(err, address, family);
+        }),
+    };
+    return connect.call(this, guarded, callback);
+  };
+  return agent;
+}
+
+/** The private proxy-free keep-alive agent (created on first use). It refuses non-loopback addresses at connect time. */
 export function loopbackAgent(): Agent {
-  sharedAgent ??= new Agent({ keepAlive: true });
+  sharedAgent ??= refuseOutsideConnections(new Agent({ keepAlive: true }));
   return sharedAgent;
 }
 
@@ -41,7 +71,9 @@ function checkLoopback(target: URL): URL {
 
 function exchange(target: URL, method: string, headers: Record<string, string>, body: string | undefined, signal?: AbortSignal): Promise<Response> {
   return new Promise<Response>((resolve, reject) => {
-    const req = request(target, { method, headers, agent: loopbackAgent(), signal }, (res) => {
+    // Node frames a string body only for some methods (not DELETE/OPTIONS); fetch always sends Content-Length.
+    const framed = body !== undefined && !Object.keys(headers).some((n) => n.toLowerCase() === 'content-length') ? { ...headers, 'content-length': String(Buffer.byteLength(body)) } : headers;
+    const req = request(target, { method, headers: framed, agent: loopbackAgent(), signal }, (res) => {
       const chunks: Buffer[] = [];
       res.on('data', (c: Buffer) => chunks.push(c));
       res.on('error', reject);
@@ -82,8 +114,9 @@ export async function loopbackFetch(url: string, init: LoopbackInit = {}): Promi
   for (let hops = 0; ; hops++) {
     const response = await exchange(target, method, headers, body, init.signal);
     const location = response.headers.get('location');
-    if (!REDIRECT_STATUSES.has(response.status) || location === null || redirect === 'manual') return response;
+    if (!REDIRECT_STATUSES.has(response.status)) return response;
     if (redirect === 'error') throw new TypeError(`fetch failed: unexpected redirect (${response.status})`);
+    if (location === null || redirect === 'manual') return response;
     if (hops >= MAX_REDIRECTS) throw new TypeError('fetch failed: too many redirects');
     const next = checkLoopback(new URL(location, target));
     if ((response.status === 303 && method !== 'HEAD') || ((response.status === 301 || response.status === 302) && method === 'POST')) {

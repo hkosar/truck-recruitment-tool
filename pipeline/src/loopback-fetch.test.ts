@@ -9,7 +9,7 @@ import { createServer, request } from 'node:http';
 import type { IncomingMessage, ServerResponse } from 'node:http';
 import { join } from 'node:path';
 import { closeLoopbackAgent, loopbackAgent, loopbackFetch } from './loopback-fetch.js';
-import { createServer as createTcpServer } from 'node:net';
+import { createServer as createTcpServer, Socket } from 'node:net';
 import type { AddressInfo } from 'node:net';
 import { fileURLToPath } from 'node:url';
 
@@ -93,6 +93,36 @@ try {
     } finally { closeLoopbackAgent(); server.close(); }
   }
 
+  // The shared agent refuses non-loopback addresses at connect time, before any socket is opened.
+  {
+    const realConnect = Socket.prototype.connect; let opened = 0;
+    Socket.prototype.connect = function (this: Socket, ...args: unknown[]) { opened++; return (realConnect as (...a: unknown[]) => Socket).apply(this, args); } as typeof Socket.prototype.connect;
+    try {
+      for (const host of ['192.0.2.1', 'example.invalid', '10.0.0.5', '127.0.0.2']) {
+        await assert.rejects(new Promise((resolve, reject) => { request({ agent: loopbackAgent(), host, port: 9 }, resolve).on('error', reject).end(); }), /refuses non-loopback/, host);
+      }
+      assert.equal(opened, 0, 'no socket was opened for an outside address');
+    } finally { Socket.prototype.connect = realConnect; closeLoopbackAgent(); }
+  }
+
+  // A string body on DELETE and OPTIONS is framed with Content-Length, as fetch does.
+  {
+    const got: Array<[string, string, string | undefined]> = [];
+    const server = createServer((req, res) => {
+      let body = '';
+      req.on('data', (c) => { body += String(c); });
+      req.on('end', () => { got.push([req.method ?? '', body, req.headers['content-length']]); res.writeHead(200); res.end('ok'); });
+    });
+    await new Promise<void>((done) => server.listen(0, '127.0.0.1', done));
+    try {
+      for (const method of ['DELETE', 'OPTIONS', 'POST']) {
+        const r = await loopbackFetch(`http://127.0.0.1:${(server.address() as AddressInfo).port}/`, { method, body: 'héllo' });
+        assert.equal(r.status, 200, method);
+      }
+      assert.deepEqual(got, [['DELETE', 'héllo', '6'], ['OPTIONS', 'héllo', '6'], ['POST', 'héllo', '6']]);
+    } finally { closeLoopbackAgent(); server.close(); }
+  }
+
   // redirect option, as in fetch.
   {
     const seen: Array<{ port: number; method: string; url: string; body: string; authorization?: string }> = [];
@@ -139,8 +169,11 @@ try {
       await (await loopbackFetch(at('/cross'), { headers: { authorization: 'Bearer fake' } })).text();
       assert.deepEqual(seen.map((s) => [s.port === bPort ? 'b' : 'a', s.url, s.authorization]), [['a', '/cross', 'Bearer fake'], ['b', '/final', undefined]], 'credentials do not cross origins');
 
-      const plain = await loopbackFetch(at('/no-location'), { redirect: 'error' });
-      assert.deepEqual([plain.status, await plain.text()], [302, 'plain']);
+      await assert.rejects(loopbackFetch(at('/no-location'), { redirect: 'error' }), TypeError, "'error' rejects on a 3xx without Location, as fetch does");
+      for (const redirect of ['follow', 'manual']) {
+        const plain = await loopbackFetch(at('/no-location'), { redirect });
+        assert.deepEqual([plain.status, await plain.text()], [302, 'plain'], `${redirect} returns a 3xx without Location as is`);
+      }
       await assert.rejects(loopbackFetch(at('/'), { redirect: 'sideways' }), TypeError);
     } finally { closeLoopbackAgent(); a.close(); b.close(); }
   }

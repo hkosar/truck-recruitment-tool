@@ -5,10 +5,10 @@
 import { spawn } from 'node:child_process';
 import { readdirSync, readFileSync } from 'node:fs';
 import { createServer, request } from 'node:http';
-import { createServer as createTcpServer, type AddressInfo, type Server } from 'node:net';
+import { createServer as createTcpServer, Socket, type AddressInfo, type Server } from 'node:net';
 import { join } from 'node:path';
 import { fileURLToPath } from 'node:url';
-import { afterAll, beforeAll, describe, expect, it } from 'vitest';
+import { afterAll, beforeAll, describe, expect, it, vi } from 'vitest';
 import { closeLoopbackAgent, loopbackAgent, loopbackFetch } from './loopback-fetch';
 import { findLoopbackViolations } from './loopback-guard';
 
@@ -95,6 +95,56 @@ describe('loopbackFetch keeps connections alive on a private agent', () => {
   });
 });
 
+describe('the shared agent refuses non-loopback addresses at connect time', () => {
+  afterAll(() => closeLoopbackAgent());
+  it('an outside host is refused before any socket is opened', async () => {
+    const opened = vi.spyOn(Socket.prototype, 'connect');
+    try {
+      for (const host of ['192.0.2.1', 'example.invalid', '10.0.0.5', '127.0.0.2']) {
+        await expect(new Promise((resolve, reject) => { request({ agent: loopbackAgent(), host, port: 9 }, resolve).on('error', reject).end(); }), host).rejects.toThrow(/refuses non-loopback/);
+      }
+      expect(opened).not.toHaveBeenCalled();
+    } finally {
+      opened.mockRestore();
+    }
+  });
+
+  it('a loopback host still connects through the agent', async () => {
+    const server = createServer((req, res) => { req.resume(); res.writeHead(200); res.end('ok'); });
+    await new Promise<void>((done) => server.listen(0, '127.0.0.1', done));
+    try {
+      const r = await loopbackFetch(`http://127.0.0.1:${(server.address() as AddressInfo).port}/`);
+      expect(await r.text()).toBe('ok');
+    } finally {
+      closeLoopbackAgent();
+      await new Promise<void>((done) => server.close(() => done()));
+    }
+  });
+});
+
+describe('loopbackFetch sends a body on every method with its length', () => {
+  afterAll(() => closeLoopbackAgent());
+  it('a string body on DELETE and OPTIONS arrives as one request with that body', async () => {
+    const got: Array<[string, string, string | undefined]> = [];
+    const server = createServer((req, res) => {
+      let body = '';
+      req.on('data', (c) => { body += String(c); });
+      req.on('end', () => { got.push([req.method ?? '', body, req.headers['content-length']]); res.writeHead(200); res.end('ok'); });
+    });
+    await new Promise<void>((done) => server.listen(0, '127.0.0.1', done));
+    try {
+      for (const method of ['DELETE', 'OPTIONS', 'POST']) {
+        const r = await loopbackFetch(`http://127.0.0.1:${(server.address() as AddressInfo).port}/`, { method, body: 'héllo' });
+        expect(r.status, method).toBe(200);
+      }
+      expect(got).toEqual([['DELETE', 'héllo', '6'], ['OPTIONS', 'héllo', '6'], ['POST', 'héllo', '6']]);
+    } finally {
+      closeLoopbackAgent();
+      await new Promise<void>((done) => server.close(() => done()));
+    }
+  });
+});
+
 describe('loopbackFetch honours the redirect option like fetch', () => {
   const seen: Array<{ port: number; method: string; url: string; body: string; authorization?: string }> = [];
   let a: ReturnType<typeof createServer>; let b: ReturnType<typeof createServer>; let aPort = 0; let bPort = 0;
@@ -159,9 +209,15 @@ describe('loopbackFetch honours the redirect option like fetch', () => {
     expect(seen.map((s) => [s.port === bPort ? 'b' : 'a', s.url, s.authorization])).toEqual([['a', '/cross', 'Bearer fake'], ['b', '/final', undefined]]);
   });
 
-  it('a 3xx without Location is returned as is, and an invalid redirect option is a TypeError', async () => {
-    const r = await loopbackFetch(at('/no-location'), { redirect: 'error' });
-    expect([r.status, await r.text()]).toEqual([302, 'plain']);
+  it("a 3xx without Location rejects with 'error' (as fetch does) and is returned as is with 'follow' and 'manual'", async () => {
+    await expect(loopbackFetch(at('/no-location'), { redirect: 'error' })).rejects.toThrow(TypeError);
+    for (const redirect of ['follow', 'manual']) {
+      const r = await loopbackFetch(at('/no-location'), { redirect });
+      expect([r.status, await r.text()]).toEqual([302, 'plain']);
+    }
+  });
+
+  it('an invalid redirect option is a TypeError', async () => {
     await expect(loopbackFetch(at('/'), { redirect: 'sideways' })).rejects.toThrow(TypeError);
   });
 });
