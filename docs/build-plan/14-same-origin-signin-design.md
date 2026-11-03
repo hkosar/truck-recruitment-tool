@@ -772,6 +772,8 @@ Fixture classes: **K** known active (manager, editor, viewer) · **U** unknown a
 Run before and after cutover. After-cutover pass: permission errors or empty results
 everywhere, and no Realtime event.
 
+A5a tool rules (scripts/signin-probes-hosted-a5a.mjs): the first request is a key-accepted control (GET /auth/v1/health, must be 200) and the run aborts if it fails. "Denied" means the database itself refused anon (PostgREST 42501); a rejected key (invalid API key, PGRST300-302, 401/403 without 42501) is FAIL reason=key_rejected, and a redirect is FAIL. Every STABLE public function is probed (a test enforces it). Triage rule for the one known false failure: if GraphQL introspection fails only because PostGIS reference tables (for example spatial_ref_sys) are exposed, report it as FAIL-known-postgis, do not loosen the tool mid-run, and fix the grant or record the owner decision here before re-running.
+
 **Class B: stateful (approval A5b, separate; each item creates Auth sessions or tokens, or
 attempts mail).**
 

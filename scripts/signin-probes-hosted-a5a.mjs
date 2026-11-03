@@ -6,7 +6,7 @@
 //   node scripts/signin-probes-hosted-a5a.mjs --execute [--phase=after|before] [--realtime-seconds=N]
 //
 // Future command (NOT RUN; blocked until M1 is applied on staging-2 and Hunter says go):
-//   doppler --config-dir "$env:USERPROFILE.doppler-truck-stg" --no-read-env --no-check-version --scope 'C:Usershunte.bbpluginsenvironment-git-worktreehost-dataworktrees	hr_dnq6nmqppt-1	ruck-recruitment-tool' run --no-fallback --project truck-recruitment-tool --config stg -- node scripts/signin-probes-hosted-a5a.mjs --execute --phase=after
+//   doppler --config-dir "$env:USERPROFILE\.doppler-truck-stg" --no-read-env --no-check-version --scope "<this checkout's absolute path>" run --no-fallback --project truck-recruitment-tool --config stg -- node scripts/signin-probes-hosted-a5a.mjs --execute --phase=after
 //
 // Reads from the environment: VITE_SUPABASE_ANON_KEY (required to execute; never printed) and optionally
 // VITE_SUPABASE_URL (must equal the staging-2 URL if set). The target URL is always derived from the staging-2
@@ -15,6 +15,19 @@
 // Requests: GET, plus POST only to the read-only RPCs listed below, /graphql/v1 and the Storage list endpoint.
 // Output: fixed event lines only (probe name, expected class, observed class, result). No response bodies,
 // headers, keys or key-carrying URLs are ever printed.
+//
+// Key control: the FIRST request is GET /auth/v1/health with the anon key. It must answer 200; otherwise the run
+// aborts (ABORTED reason=key_rejected) before any data probe is sent. Result classes:
+//   denied        = the database itself refused the anon role (PostgREST 42501, or a Storage/GraphQL permission error)
+//   key-rejected  = the key was refused (gateway "Invalid API key", PGRST300-302, 401/403 without 42501): FAIL, reason=key_rejected
+//   unexpected    = a 3xx redirect (never followed): FAIL
+//
+// GraphQL / PostGIS triage rule (decide BEFORE the first run; never loosen a check on the spot): the introspection
+// probe FAILs if any OBJECT type is exposed. If the only exposed types are PostGIS reference tables (for example
+// spatial_ref_sys, from "create extension postgis" in public), that is a known false failure: report it as
+// FAIL-known-postgis in the written run report, do not edit this tool during the run, and fix the grant (revoke on
+// spatial_ref_sys from anon) or record the owner's decision in doc 14 section 8.1 before re-running. Any other
+// exposed type is a real failure.
 //
 // --phase=after  (default): PASS = denied, empty or absent everywhere and no Realtime event (doc 14 8.1).
 // --phase=before: records today's classes; result is RECORDED unless the request itself failed (transport/5xx).
@@ -55,17 +68,28 @@ export const READ_ONLY_RPCS = {
   dashboard_totals: {},
   batch_status_counts: { p_batch_id: NIL_UUID },
   is_contactable: { p_dot: 0, p_channel: 'call' },
+  search_carriers_map: { p_definition: {}, p_limit: 1 },
+  batch_members: { p_batch_id: NIL_UUID, p_page: 1, p_page_size: 1 },
+  batch_members_map: { p_batch_id: NIL_UUID },
+  generate_contact_sheet: { p_batch_id: NIL_UUID },
+  // Added by pending M1 (404 before M1 = absent):
+  team_list: {},
+  recovery_batches: {},
+  recovery_batch_members: { p_batch_id: NIL_UUID, p_limit: 1, p_offset: 0 },
 };
 
 // Tables in the supabase_realtime publication (20260720001300_realtime.sql).
 export const REALTIME_TABLES = ['batches', 'batch_zones', 'batch_carriers', 'batch_activity', 'contact_logs', 'profiles'];
 
 const PASS_CLASSES = new Set(['denied', 'empty', 'absent']);
+const HARD_FAIL_CLASSES = new Set(['transport-error', 'server-error', 'key-rejected', 'unexpected']);
+const KEY_ERROR_TEXT = /invalid api key|jwt|token|signature|apikey|api key/i;
+export const REALTIME_CONNECT_TIMEOUT_MS = 15000;
 const BUCKET_NAME = /^[A-Za-z0-9._-]{1,100}$/;
 
 /** The only requests this tool may ever send. */
 export function isAllowedRequest(method, path) {
-  if (method === 'GET') return /^\/(rest\/v1\/[a-z_]+\?select=\*&limit=1|storage\/v1\/bucket)$/.test(path);
+  if (method === 'GET') return /^\/(rest\/v1\/[a-z_]+\?select=\*&limit=1|storage\/v1\/bucket|auth\/v1\/health)$/.test(path);
   if (method !== 'POST') return false;
   const rpc = /^\/rest\/v1\/rpc\/([a-z_]+)$/.exec(path);
   if (rpc) return Object.prototype.hasOwnProperty.call(READ_ONLY_RPCS, rpc[1]);
@@ -105,12 +129,12 @@ export function checkAnonKey(key, stagingRef) {
   if (!claims) return ['VITE_SUPABASE_ANON_KEY is neither a publishable key nor a JWT'];
   const failures = [];
   if (claims.role !== 'anon') failures.push('VITE_SUPABASE_ANON_KEY does not carry the anon role');
-  if (claims.ref !== undefined && claims.ref !== stagingRef) failures.push('VITE_SUPABASE_ANON_KEY belongs to a different project');
+  if (claims.ref !== stagingRef) failures.push('VITE_SUPABASE_ANON_KEY does not carry the staging-2 project ref');
   return failures;
 }
 
 export function buildPlan(phase, realtimeSeconds) {
-  const plan = [];
+  const plan = [{ name: 'control:key-accepted', method: 'GET', path: '/auth/v1/health', expected: 'accepted (200); otherwise the run aborts' }];
   for (const t of PROBE_TABLES) plan.push({ name: `rest-get:${t}`, method: 'GET', path: `/rest/v1/${t}?select=*&limit=1` });
   for (const r of Object.keys(READ_ONLY_RPCS)) plan.push({ name: `rpc:${r}`, method: 'POST', path: `/rest/v1/rpc/${r}` });
   plan.push({ name: 'graphql:introspection', method: 'POST', path: '/graphql/v1' });
@@ -118,20 +142,30 @@ export function buildPlan(phase, realtimeSeconds) {
   plan.push({ name: 'storage:bucket-list', method: 'GET', path: '/storage/v1/bucket' });
   plan.push({ name: 'storage:object-list', method: 'POST', path: '/storage/v1/object/list/<each bucket found>' });
   for (const t of REALTIME_TABLES) plan.push({ name: `realtime:${t}`, method: 'WS', path: `/realtime/v1/websocket (${realtimeSeconds} s)` });
-  return plan.map((p) => ({ ...p, expected: phase === 'after' ? 'denied|empty|absent (no event)' : 'recorded' }));
+  return plan.map((p) => ({ ...p, expected: p.expected ?? phase === 'after' ? 'denied|empty|absent (no event)' : 'recorded' }));
 }
 
 /** Classify an HTTP answer without ever returning or printing the body. */
 export function classifyHttp(status, text) {
-  if (status === 401 || status === 403) return 'denied';
-  if (status === 404) return 'absent';
+  if (status >= 300 && status < 400) return 'unexpected';
   if (status >= 500) return 'server-error';
   let body;
   try { body = text === '' ? undefined : JSON.parse(text); } catch { body = undefined; if (status >= 200 && status < 300 && text !== '') return 'data'; }
   if (status >= 400) {
-    const code = body && typeof body === 'object' ? String(body.code ?? '') : '';
-    if (code === '42501' || /^PGRST30[0-9]$/.test(code)) return 'denied';
+    const obj = body && typeof body === 'object' ? body : {};
+    const code = String(obj.code ?? '');
+    const message = typeof obj.message === 'string' ? obj.message : '';
+    const storageStatus = String(obj.statusCode ?? '');
+    // Only the database refusing the anon role is "denied".
+    if (code === '42501') return 'denied';
     if (code === '42883' || code === '42P01' || /^PGRST20[0-9]$/.test(code)) return 'absent';
+    if (/^PGRST30[0-9]$/.test(code)) return 'key-rejected';
+    if (code === '' && KEY_ERROR_TEXT.test(message)) return 'key-rejected';
+    // Storage answers { statusCode: "403" | "404" } with no code.
+    if (code === '' && storageStatus === '403') return 'denied';
+    if (code === '' && storageStatus === '404') return 'absent';
+    if (status === 401 || status === 403) return 'key-rejected';
+    if (status === 404) return 'absent';
     return 'client-error';
   }
   if (status === 204 || body === undefined || body === null) return 'empty';
@@ -161,15 +195,15 @@ function classifyGraphql(status, text, mode) {
 }
 
 /** Run every class A probe. `emit` receives fixed event strings only. Returns { pass, fail }. */
-export async function runProbes({ baseUrl, key, phase = 'after', realtimeSeconds = 60, emit, fetchImpl = globalThis.fetch, WebSocketImpl = globalThis.WebSocket }) {
+export async function runProbes({ baseUrl, key, phase = 'after', realtimeSeconds = 60, emit, fetchImpl = globalThis.fetch, WebSocketImpl = globalThis.WebSocket, connectTimeoutMs = REALTIME_CONNECT_TIMEOUT_MS }) {
   let pass = 0;
   let fail = 0;
   const record = (name, observed) => {
     let result;
     if (phase === 'after') result = PASS_CLASSES.has(observed) ? 'PASS' : 'FAIL';
-    else result = observed === 'transport-error' || observed === 'server-error' ? 'FAIL' : 'RECORDED';
+    else result = HARD_FAIL_CLASSES.has(observed) ? 'FAIL' : 'RECORDED';
     if (result === 'FAIL') fail += 1; else pass += 1;
-    emit(`EVENT probe=${name} expected=${phase === 'after' ? 'denied|empty|absent' : 'recorded'} observed=${observed} result=${result}`);
+    emit(`EVENT probe=${name} expected=${phase === 'after' ? 'denied|empty|absent' : 'recorded'} observed=${observed} result=${result}${observed === 'key-rejected' ? ' reason=key_rejected' : ''}`);
   };
 
   const send = async (method, path, payload) => {
@@ -185,6 +219,16 @@ export async function runProbes({ baseUrl, key, phase = 'after', realtimeSeconds
     }
   };
   const classify = (r, mode) => (r.status === 0 ? 'transport-error' : mode ? classifyGraphql(r.status, r.text, mode) : classifyHttp(r.status, r.text));
+
+  // Mandatory first control: the anon key must be accepted by the gateway, or nothing else means anything.
+  const control = await send('GET', '/auth/v1/health');
+  if (control.status !== 200) {
+    const observed = control.status === 0 ? 'transport-error' : control.status >= 500 ? 'server-error' : control.status >= 300 && control.status < 400 ? 'unexpected' : 'key-rejected';
+    emit(`EVENT probe=control:key-accepted expected=accepted observed=${observed} result=FAIL${observed === 'key-rejected' ? ' reason=key_rejected' : ''}`);
+    return { pass: 0, fail: 1, aborted: true, reason: observed === 'key-rejected' ? 'key_rejected' : 'control_failed' };
+  }
+  emit('EVENT probe=control:key-accepted expected=accepted observed=accepted result=PASS');
+  pass += 1;
 
   for (const t of PROBE_TABLES) record(`rest-get:${t}`, classify(await send('GET', `/rest/v1/${t}?select=*&limit=1`)));
   for (const [r, args] of Object.entries(READ_ONLY_RPCS)) record(`rpc:${r}`, classify(await send('POST', `/rest/v1/rpc/${r}`, args)));
@@ -211,24 +255,32 @@ export async function runProbes({ baseUrl, key, phase = 'after', realtimeSeconds
     record('storage:object-list', worst);
   }
 
-  const rt = await realtimeProbe({ baseUrl, key, seconds: realtimeSeconds, WebSocketImpl });
+  const rt = await realtimeProbe({ baseUrl, key, seconds: realtimeSeconds, WebSocketImpl, connectTimeoutMs });
   for (const t of REALTIME_TABLES) record(`realtime:${t}`, rt[t]);
   return { pass, fail };
 }
 
+/** A Realtime error that complains about the token is a rejected key, not a refusal by the database. */
+function errorClass(payload) {
+  const text = [payload?.response?.reason, payload?.message, payload?.response?.message].filter((x) => typeof x === 'string').join(' ');
+  return KEY_ERROR_TEXT.test(text) ? 'key-rejected' : 'denied';
+}
+
 /** One socket, one channel per published table; reports denied / quiet / event per table. */
-function realtimeProbe({ baseUrl, key, seconds, WebSocketImpl }) {
+function realtimeProbe({ baseUrl, key, seconds, WebSocketImpl, connectTimeoutMs }) {
   const result = Object.fromEntries(REALTIME_TABLES.map((t) => [t, 'transport-error']));
   if (typeof WebSocketImpl !== 'function') return Promise.resolve(result);
   return new Promise((resolve) => {
     let ws;
     let timer;
     let beat;
+    let guard;
     let done = false;
     const finish = () => {
       if (done) return;
       done = true;
       clearTimeout(timer);
+      clearTimeout(guard);
       clearInterval(beat);
       try { ws.close(); } catch { /* ignore */ }
       resolve(result);
@@ -239,9 +291,12 @@ function realtimeProbe({ baseUrl, key, seconds, WebSocketImpl }) {
       resolve(result);
       return;
     }
+    // Hard limit from construction: connect window plus the listening window; the socket is closed when it expires.
+    guard = setTimeout(finish, connectTimeoutMs + seconds * 1000);
     const topicToTable = new Map(REALTIME_TABLES.map((t) => [`realtime:a5a-probe-${t}`, t]));
     let ref = 0;
     ws.onopen = () => {
+      if (done) return;
       for (const [topic, table] of topicToTable) {
         ref += 1;
         ws.send(JSON.stringify({
@@ -259,9 +314,10 @@ function realtimeProbe({ baseUrl, key, seconds, WebSocketImpl }) {
       const table = topicToTable.get(msg.topic);
       if (!table) return;
       if (msg.event === 'postgres_changes') result[table] = 'event';
-      else if (msg.event === 'phx_reply' && result[table] !== 'event') result[table] = msg.payload?.status === 'ok' ? 'empty' : 'denied';
-      else if (msg.event === 'system' && msg.payload?.status === 'error' && result[table] !== 'event') result[table] = 'denied';
-      else if (msg.event === 'phx_error' && result[table] !== 'event') result[table] = 'denied';
+      else if (result[table] === 'event') return;
+      else if (msg.event === 'phx_reply') result[table] = msg.payload?.status === 'ok' ? 'empty' : errorClass(msg.payload);
+      else if (msg.event === 'system' && msg.payload?.status === 'error') result[table] = errorClass(msg.payload);
+      else if (msg.event === 'phx_error') result[table] = errorClass(msg.payload);
     };
     ws.onerror = () => { /* result stays transport-error unless a reply arrived */ };
     ws.onclose = () => { if (!timer) finish(); };
@@ -313,7 +369,8 @@ export async function main(argv, env, io = { out: (s) => process.stdout.write(`$
   if (keyFailures.length) { for (const f of keyFailures) out(`REFUSED reason=${f}`); return 2; }
 
   out(`RUN target=staging-2 phase=${opts.phase} realtime_window_s=${opts.realtimeSeconds}${opts.realtimeSeconds < 60 ? ' (shorter than the 60 s in doc 14)' : ''}`);
-  const { pass, fail } = await runProbes({ baseUrl, key, phase: opts.phase, realtimeSeconds: opts.realtimeSeconds, emit: out, ...(testHooks.runHooks ?? {}) });
+  const { pass, fail, aborted, reason } = await runProbes({ baseUrl, key, phase: opts.phase, realtimeSeconds: opts.realtimeSeconds, emit: out, ...(testHooks.runHooks ?? {}) });
+  if (aborted) { out(`ABORTED reason=${reason} no data probe was sent`); return 1; }
   out(`SUMMARY ok=${pass} failed=${fail}`);
   return fail === 0 ? 0 : 1;
 }
