@@ -34,6 +34,7 @@ import { assessLedger, type LedgerFacts } from './ledger-preflight.js';
 import { REVIEWED_EVENT_TRIGGER_FUNCTIONS, REVIEWED_EVENT_TRIGGER_NAMES } from './environment-preflight.js';
 import { DRIVER_CODES, KNOWN_SERVER_REFUSALS, REFUSAL_IDS, RunnerRefusal, classifyRunnerFailure } from './refusals.js';
 import { DENIED_STATEMENTS } from './retention-dry-run.js';
+import { runRetentionFixtureRun } from './retention-run.js';
 import { retentionClientConfig, runRetentionForCron, runRetentionStep, type RetentionClient } from './retention-step.js';
 import { EventEmitter } from 'node:events';
 import { Duplex } from 'node:stream';
@@ -325,7 +326,7 @@ test('rebuilt staging runner: the recorded ref is the exact reviewed value, and 
   for (const [action, spec] of Object.entries(REBUILT_STAGING_SQL_ACTIONS)) {
     const p = planRebuiltSqlRun({
       action,
-      dbUrl: spec.kind === 'retention' ? pooler(rebuilt).replace('postgres.', 'recruiter_maintenance.') : pooler(rebuilt),
+      dbUrl: (spec.kind === 'retention' || spec.kind === 'retention-run') ? pooler(rebuilt).replace('postgres.', 'recruiter_maintenance.') : pooler(rebuilt),
       confirm: spec.confirmation,
       recordedRebuiltRef: rebuilt,
       ...(spec.kind === 'snapshot' ? { out: resolve(tmpdir(), `tnbs-snapshot-test-${process.pid}.json`) } : {}),
@@ -672,6 +673,7 @@ test('retention-dry-run: only as recruiter_maintenance on the rebuilt project; c
     async end() {},
     async query(sql: string, params?: unknown[]) {
       sent.push(sql);
+      if (/delete_outside/.test(sql)) return { rows: [{ delete_outside: 0, delete_inside: 5, write_anywhere: 0, select_outside: 0, direct_relation_grants_outside: 0, direct_column_grants_outside: 0, exec_public_internal: 0, direct_function_grants: 0, schema_create: 0, sequence_privileges: 0, database_create: 0, powerful_attributes: 0, memberships: 0, other_object_acls: 0, owned_objects: 0, file_functions: 0, secret_catalogues: 0, ledger_grant_options: 0, database_acls: 0, value_leaking_catalogues: 0 }] };
       if (/current_user as u/.test(sql)) return { rows: [{ u: 'recruiter_maintenance' }] };
       if (/count\(\*\)::int/.test(sql)) return { rows: [{ n: 3 }] };
       if (/has_table_privilege/.test(sql)) return { rows: [{ s: true, d: true, i: false, u: false, t: false }] };
@@ -692,7 +694,7 @@ test('retention-dry-run: only as recruiter_maintenance on the rebuilt project; c
   assert.equal(report.ok, true);
   assert.deepEqual(Object.keys(report.would_delete).sort(), ['app_sessions', 'email_events', 'recovery_failures', 'request_buckets', 'signin_links']);
   assert.ok(Object.values(report.would_delete).every((n) => n === 3));
-  assert.ok(report.failed === 0 && report.checks > 0 && !('currentUser' in report) && !('checks' in report && Array.isArray(report.checks)), 'only counts, never check names or the login name');
+  assert.ok(report.failed === 0 && report.checks === 32 && !('currentUser' in report) && !('checks' in report && Array.isArray(report.checks)), 'only counts, never check names or the login name');
   const w = await wrapperModule();
   const retentionCounter = { fields: 0 };
   assert.notEqual(w.allowListLine(lines.find((l) => l.includes('retention_dry_run'))!, retentionCounter), null);
@@ -706,6 +708,154 @@ test('retention-dry-run: only as recruiter_maintenance on the rebuilt project; c
   try {
     await assert.rejects(executeRebuiltSqlPlan(plan(url('recruiter_maintenance')), () => session(false)), /check\(s\) failed/);
   } finally { console.log = origLog; }
+});
+
+test('retention-run: only as recruiter_maintenance; refused before any delete unless exactly the tagged aged fixtures are due; one event the output wrapper passes', async () => {
+  const rebuilt = 'abcdefghijklmnopqrst';
+  const url = (role: string) => `postgresql://${role}.${rebuilt}:redacted-pw@aws-0-us-east-2.pooler.supabase.com:5432/postgres`;
+  const confirm = REBUILT_STAGING_SQL_ACTIONS['retention-run']!.confirmation;
+  const plan = (dbUrl: string, over: Record<string, unknown> = {}) => planRebuiltSqlRun({ action: 'retention-run', dbUrl, confirm, recordedRebuiltRef: rebuilt, ...over });
+  assert.equal(plan(url('recruiter_maintenance')).kind, 'retention-run');
+  assert.throws(() => plan(url('postgres')), /must connect as recruiter_maintenance/);
+  assert.throws(() => plan(url('recruiter_maintenance').replace(':5432/', ':6543/')), /port 5432/);
+  assert.throws(() => plan(url('recruiter_maintenance'), { confirm: REBUILT_STAGING_SQL_ACTIONS['retention-dry-run']!.confirmation }), /--confirm=/);
+  for (const action of ['install-retention-fixtures', 'remove-retention-fixtures']) {
+    assert.equal(planRebuiltSqlRun({ action, dbUrl: url('postgres'), confirm: REBUILT_STAGING_SQL_ACTIONS[action]!.confirmation, recordedRebuiltRef: rebuilt }).kind, 'file', action);
+  }
+
+  const sent: string[] = [];
+  // aged = how many rows each rule would delete; deleteOk = whether the (fake) delete statements remove one row per rule.
+  const session = (aged: number) => {
+    let deleted = false;
+    return {
+      async connect() {},
+      async end() {},
+      async query(sql: string) {
+        sent.push(sql);
+        if (/delete_outside/.test(sql)) return { rows: [{ delete_outside: 0, delete_inside: 5, write_anywhere: 0, select_outside: 0, direct_relation_grants_outside: 0, direct_column_grants_outside: 0, exec_public_internal: 0, direct_function_grants: 0, schema_create: 0, sequence_privileges: 0, database_create: 0, powerful_attributes: 0, memberships: 0, other_object_acls: 0, owned_objects: 0, file_functions: 0, secret_catalogues: 0, ledger_grant_options: 0, database_acls: 0, value_leaking_catalogues: 0 }] };
+        if (/current_user as u/.test(sql)) return { rows: [{ u: 'recruiter_maintenance' }] };
+        if (/has_table_privilege/.test(sql)) return { rows: [{ s: true, d: true, i: false, u: false, t: false }] };
+        if (/count\(\*\)::int as total/.test(sql)) return { rows: [{ total: deleted ? 4 : 5, due: deleted ? 0 : aged, aged_due: deleted ? 0 : Math.min(aged, 1), aged: deleted ? 0 : 1, fresh: 1, fresh_due: 0 }] };
+        if (/count\(\*\)::int as n/.test(sql)) return { rows: [{ n: deleted ? 0 : aged }] };
+        if (/^delete from/.test(sql)) { deleted = true; return { rowCount: 1 }; }
+        if (DENIED_RUN.includes(sql)) throw Object.assign(new Error('permission denied'), { code: '42501' });
+        return { rows: [], rowCount: 0 };
+      },
+    };
+  };
+  const DENIED_RUN = DENIED_STATEMENTS.map((d) => d.sql);
+  const origLog = console.log;
+  const lines: string[] = [];
+  console.log = (m: string) => lines.push(m);
+  try {
+    await executeRebuiltSqlPlan(plan(url('recruiter_maintenance')), () => session(1));
+  } finally { console.log = origLog; }
+  const event = JSON.parse(lines.find((l) => l.includes('staging-sql.retention_run'))!);
+  assert.equal(event.ok, true);
+  assert.equal(event.deletes_sent, true);
+  assert.deepEqual(event.failed_checks, []);
+  assert.deepEqual(event.deleted, { request_buckets: 1, recovery_failures: 1, email_events: 1, signin_links: 1, app_sessions: 1 });
+  const w = await wrapperModule();
+  const counter = { fields: 0 };
+  assert.notEqual(w.allowListLine(lines.find((l) => l.includes('staging-sql.retention_run'))!, counter), null);
+  assert.equal(counter.fields, 0, 'the real retention run event passes the output wrapper with no field withheld');
+  assert.ok(sent.filter((q) => /^delete from/.test(q)).length >= 5, 'one delete per rule');
+  assert.ok(sent.filter((q) => /^delete from/.test(q)).every((q) => /where [a-z_]+ = \$1$/.test(q)), 'every delete filters on the exact fixture tag, never on what is due');
+  assert.ok(sent.some((q) => /^lock table .* in share row exclusive mode nowait$/.test(q)), 'the five ledgers are locked, without waiting');
+  const order = sent.filter((q) => q === 'begin' || q === 'commit' || /^delete from/.test(q) || /^lock table/.test(q));
+  assert.ok(order.lastIndexOf('commit') === order.length - 1 && order.indexOf('commit') > order.findIndex((q) => /^delete from/.test(q)), 'commit comes after every delete, in the same transaction');
+
+  // More than the one fixture row due (an unknown aged row): refused, and no delete statement is ever sent.
+  sent.length = 0;
+  const refusalLines: string[] = [];
+  console.log = (m: string) => refusalLines.push(m);
+  try {
+    await assert.rejects(executeRebuiltSqlPlan(plan(url('recruiter_maintenance')), () => session(2)), /retention run refused or failed/);
+  } finally { console.log = origLog; }
+  assert.ok(!sent.some((q) => /^\s*delete/i.test(q)), 'refused before any delete');
+  const refused = JSON.parse(refusalLines.find((l) => l.includes('staging-sql.retention_run'))!);
+  assert.equal(refused.ok, false);
+  assert.equal(refused.deletes_sent, false);
+  assert.deepEqual(refused.failed_checks, ['each_rule_must_match_exactly_one_row']);
+  assert.ok(!refusalLines.join('').includes('redacted-pw'));
+});
+
+test('retention-run: the COMMIT answer is verified (ROLLBACK tag and allowlisted refusal are failures; anything else is an unknown outcome)', async () => {
+  const healthy = { delete_outside: 0, delete_inside: 5, write_anywhere: 0, select_outside: 0, direct_relation_grants_outside: 0, direct_column_grants_outside: 0, exec_public_internal: 0, direct_function_grants: 0, schema_create: 0, sequence_privileges: 0, database_create: 0, powerful_attributes: 0, memberships: 0, other_object_acls: 0, owned_objects: 0, file_functions: 0, secret_catalogues: 0, ledger_grant_options: 0, database_acls: 0, value_leaking_catalogues: 0 };
+  const denied = DENIED_STATEMENTS.map((d) => d.sql);
+  const fake = (onCommit: () => unknown, privilege: Record<string, number> = healthy) => {
+    const sent: string[] = [];
+    let deleted = false;
+    const client = {
+      _queryable: true as boolean,
+      async query(sql: string): Promise<any> {
+        sent.push(sql);
+        if (/delete_outside/.test(sql)) return { rows: [privilege] };
+        if (/current_user as u/.test(sql)) return { rows: [{ u: 'recruiter_maintenance' }] };
+        if (/has_table_privilege/.test(sql)) return { rows: [{ s: true, d: true, i: false, u: false, t: false }] };
+        if (/count\(\*\)::int as total/.test(sql)) return { rows: [{ total: deleted ? 4 : 5, due: deleted ? 0 : 1, aged_due: deleted ? 0 : 1, aged: deleted ? 0 : 1, fresh: 1, fresh_due: 0 }] };
+        if (/^delete from/.test(sql)) { deleted = true; return { rowCount: 1 }; }
+        if (denied.includes(sql)) throw Object.assign(new Error('permission denied'), { code: '42501' });
+        if (sql === 'commit') return onCommit();
+        return { rows: [], rowCount: 0 };
+      },
+    };
+    return { client, sent };
+  };
+  const run = (c: ReturnType<typeof fake>) => runRetentionFixtureRun(c.client, 'recruiter_maintenance');
+
+  const ok = fake(() => ({ command: 'COMMIT' }));
+  const good = await run(ok);
+  assert.deepEqual([good.ok, good.committed], [true, true]);
+  assert.equal(ok.sent.filter((q) => q === 'begin').length, 1, 'one transaction: the privilege checks run inside it');
+  assert.ok(ok.sent.indexOf('select current_user as u') > ok.sent.findIndex((q) => /^lock table/.test(q)) && ok.sent.indexOf('select current_user as u') < ok.sent.findIndex((q) => /^delete from/.test(q)), 'lock, then privilege checks, then delete');
+  assert.ok(!ok.sent.includes('rollback'));
+
+  const tag = fake(() => ({ command: 'ROLLBACK' }));
+  const rolled = await run(tag);
+  assert.deepEqual([rolled.ok, rolled.committed, rolled.failed], [false, false, ['commit_answered_rollback']]);
+
+  const refused = fake(() => { throw Object.assign(new Error('could not serialize'), { code: '40001' }); });
+  const refusedReport = await run(refused);
+  assert.deepEqual([refusedReport.ok, refusedReport.committed, refusedReport.failed], [false, false, ['commit_refused']]);
+  assert.equal(refused.sent.filter((q) => q === 'rollback').length, 1, 'a confirmed ROLLBACK follows the refused COMMIT');
+
+  await assert.rejects(run(fake(() => { throw Object.assign(new Error('connection terminated'), { code: '08006' }); })), /unknown/); // unlisted SQLSTATE: unknown outcome
+  await assert.rejects(run(fake(() => { throw new Error('read ECONNRESET'); })), /unknown/); // no code at all
+  const dead = fake(() => { dead.client._queryable = false; throw Object.assign(new Error('x'), { code: '40001' }); });
+  await assert.rejects(run(dead), /unknown/); // allowlisted code but the connection is no longer usable
+
+  // Locks: never waited for. A busy lock (55P03) rolls back and is retried a bounded number of times, then the run gives up cleanly.
+  const busyFake = (busyTimes: number) => {
+    let busy = busyTimes;
+    const f = fake(() => ({ command: 'COMMIT' }));
+    const inner = f.client.query.bind(f.client);
+    f.client.query = async (sql: string): Promise<any> => {
+      if (/^lock table/.test(sql) && busy-- > 0) { f.sent.push(sql); throw Object.assign(new Error('could not obtain lock'), { code: '55P03' }); }
+      return inner(sql);
+    };
+    return f;
+  };
+  const fast = { lockAttempts: 3, lockRetryDelayMs: 1 };
+  const alwaysBusy = busyFake(99);
+  const gaveUp = await runRetentionFixtureRun(alwaysBusy.client, 'recruiter_maintenance', undefined, fast);
+  assert.deepEqual([gaveUp.ok, gaveUp.committed, gaveUp.deletesSent, gaveUp.failed], [false, false, false, ['lock_busy_nothing_deleted']]);
+  assert.equal(alwaysBusy.sent.filter((q) => /^lock table/.test(q)).length, 3, 'bounded: exactly the allowed attempts');
+  assert.ok(alwaysBusy.sent.filter((q) => /^lock table/.test(q)).every((q) => / nowait$/.test(q)), 'every lock attempt is NOWAIT');
+  assert.equal(alwaysBusy.sent.filter((q) => q === 'rollback').length, 3, 'each failed attempt is rolled back (locks released)');
+  assert.ok(!alwaysBusy.sent.some((q) => /^delete from|^commit$|current_user as u/.test(q)), 'nothing deleted, no checks, no commit');
+  const retried = busyFake(2);
+  const second = await runRetentionFixtureRun(retried.client, 'recruiter_maintenance', undefined, fast);
+  assert.deepEqual([second.ok, second.committed], [true, true], 'a lock that frees up within the attempts lets the run proceed');
+  const otherLockError = busyFake(0);
+  const origQ = otherLockError.client.query;
+  otherLockError.client.query = async (sql: string): Promise<any> => { if (/^lock table/.test(sql)) throw Object.assign(new Error('permission denied'), { code: '42501' }); return origQ(sql); };
+  await assert.rejects(runRetentionFixtureRun(otherLockError.client, 'recruiter_maintenance', undefined, fast), /permission denied/); // only 55P03 is a retry
+
+  const widened = fake(() => ({ command: 'COMMIT' }), { ...healthy, other_object_acls: 1 });
+  const refusedGrant = await run(widened);
+  assert.deepEqual([refusedGrant.ok, refusedGrant.deletesSent, refusedGrant.failed], [false, false, ['least_privilege_checks_failed']]);
+  assert.ok(!widened.sent.some((q) => /^delete from|^commit$/.test(q)), 'a widened grant found inside the transaction stops the run before any delete');
 });
 
 const LEDGER_ABSENT: LedgerFacts = { profiles_absent: true, schema_exists: false, table_exists: false, db_create: true, schema_usage: null, schema_create: null, table_ordinary: null, version_text_not_null: null, statements_type: null, name_type: null, other_columns: null, special_columns: null, version_key: null, other_constraints: null, other_indexes: null, has_triggers_rules_rls: null, can_select: null, can_insert: null, owner_is_runner: null };

@@ -91,6 +91,9 @@ if (runner) {
     'supabase_migrations.schema_migrations',
     'ledger?: { version: string; name: string }',
     "'retention-dry-run'",
+    "'retention-run'",
+    "'install-retention-fixtures'",
+    "'remove-retention-fixtures'",
     "'ledger-preflight'",
     "'environment-preflight'",
     "'owner-login-check'",
@@ -192,6 +195,66 @@ if (owner) {
 const doc16 = read('docs/build-plan/16-staging-and-hosting-plan.md');
 for (const required of ['Data API must already be enabled with', 'never authorizes another create', 'rollback_not_confirmed']) {
   if (!doc16 || !doc16.replace(/\s+/g, ' ').includes(required)) failures.push('doc 16 is missing: ' + required);
+}
+
+// Retention fixture boundary (doc 16 section 4 step 3): seed and remove files are scoped to one exact tag, the tag literal is
+// the same in the seed file, the removal file and retention-run.ts, and the seed file refuses unless nothing is aged yet.
+{
+  const TAG = 'ret-fixture-20261101';
+  const ins = read('supabase/staging/rebuild/install-retention-fixtures.sql');
+  const rem = read('supabase/staging/rebuild/remove-retention-fixtures.sql');
+  const run = read('pipeline/src/retention-run.ts');
+  const rules = read('pipeline/src/retention.ts');
+  if (!ins || !rem || !run || !rules) failures.push('retention fixture files or retention-run.ts are missing');
+  else {
+    for (const [name, sql] of [['install-retention-fixtures', ins], ['remove-retention-fixtures', rem]]) {
+      const c = code(sql);
+      if (sql.includes(PRODUCTION_REF)) failures.push(name + ': contains the production project ref');
+      if (!c.includes("current_setting('app.staging_runner_verified_ref', true) is distinct from '" + OLD_STAGING_REF + "'")) failures.push(name + ': must refuse unless the runner verified the pinned ref');
+      if (!c.includes("to_regclass('staging_identity.marker') is null") || !c.includes('marker_id =')) failures.push(name + ': must require the staging identity marker');
+      if (!/^begin;$/m.test(c) || !/^commit;$/m.test(c)) failures.push(name + ': must be one transaction');
+      if (/password\s+'|postgres(ql)?:\/\/|truncate/i.test(c)) failures.push(name + ': contains a credential, connection string or truncate');
+    }
+    if (!code(ins).includes("'INSTALL TNBS RETENTION TEST FIXTURES'") || !code(rem).includes("'REMOVE TNBS RETENTION TEST FIXTURES'")) failures.push('retention fixture confirmation phrases missing');
+    if (!run.includes("RETENTION_FIXTURE_TAG = '" + TAG + "'")) failures.push('retention-run.ts: tag literal differs from the seed file');
+    for (const [name, sql] of [['install', ins], ['remove', rem]]) {
+      if (!code(sql).includes("'" + TAG + "-aged'") || !code(sql).includes("'" + TAG + "-fresh'")) failures.push(name + '-retention-fixtures: must use the exact -aged and -fresh tags');
+    }
+    // Every delete in the removal file is by exact tag; none is unconditional or by age.
+    const deletes = code(rem).split(';').map((x) => x.trim()).filter((x) => /^delete\s+from/i.test(x));
+    if (deletes.length !== 5) failures.push('remove-retention-fixtures: expected exactly five tag-scoped deletes');
+    for (const d of deletes) if (!d.includes("in ('" + TAG + "-aged', '" + TAG + "-fresh')")) failures.push('remove-retention-fixtures: delete is not scoped to the exact tags');
+    // The seed file's "nothing aged yet" gate uses every retention rule predicate (text taken from retention.ts).
+    const insFlat = code(ins).replace(/\s+/g, ' ');
+    for (const m of rules.matchAll(/where: "([^"]+)"/g)) {
+      if (!insFlat.includes(m[1])) failures.push('install-retention-fixtures: aged gate is missing a retention rule predicate: ' + m[1]);
+    }
+    for (const required of ['each_rule_must_match_exactly_one_row', 'aged_fixture_missing_or_duplicated', 'ledger_did_not_shrink_by_exactly_one', 'least_privilege_checks_failed']) {
+      if (!run.includes(required)) failures.push('retention-run.ts is missing: ' + required);
+    }
+    for (const required of ['due_row_is_not_the_tagged_fixture', 'fresh_control_is_due', 'lock table', 'in share row exclusive mode nowait', 'lock_busy_nothing_deleted', "55P03", "client.query('begin')", "client.query('commit')", "client.query('rollback')", 'deleteTaggedFixtures']) {
+      if (!run.includes(required)) failures.push('retention-run.ts is missing (one locked transaction, identity pre-check): ' + required);
+    }
+    // The least-privilege checks run INSIDE the delete transaction (after begin and the lock, before the delete); the COMMIT answer is verified.
+    const runCode = run.replace(/\/\/.*$/gm, '');
+    const at = (needle) => runCode.indexOf(needle);
+    if (!(at("client.query('begin')") >= 0 && at("client.query('begin')") < at('in share row exclusive mode') && at('in share row exclusive mode') < at('runLeastPrivilegeChecks(client') && at('runLeastPrivilegeChecks(client') < at('deleteRun(client'))) failures.push('retention-run.ts: the least-privilege checks must run inside the delete transaction (begin, lock, checks, delete)');
+    if (/runRetentionDryRun/.test(runCode)) failures.push('retention-run.ts: must not run the dry run in its own transactions before the delete transaction');
+    for (const required of ['isRollbackTag(answer)', 'isDefiniteCommitRefusal(', 'clientUsable(client)', "from './commit-outcome.js'", 'commit_answered_rollback']) {
+      if (!run.includes(required)) failures.push('retention-run.ts: COMMIT answer not verified (missing ' + required + ')');
+    }
+    // The real delete filters on the exact fixture tag and never on a retention rule predicate ("whatever is due"); the generic runRetention is not used.
+    const delFn = /export const deleteTaggedFixtures[\s\S]*?\n};/.exec(run)?.[0] ?? '';
+    if (!delFn.includes('delete from ${rule.table} where ${FIXTURE_KEY_COLUMN[rule.table]!} = $1') || delFn.includes('rule.where')) failures.push('retention-run.ts: the real delete must filter on the exact fixture tag only');
+    if (/\brunRetention\b/.test(run.replace(/\/\/.*$/gm, ''))) failures.push('retention-run.ts: must not use the generic runRetention (it deletes whatever is due)');
+    // Least-privilege checks are derived from the catalogue. Pinned count: 32 (asserted in smoke-tests.ts and the procedure PASS rule).
+    const dry = read('pipeline/src/retention-dry-run.ts') ?? '';
+    for (const required of ['aclexplode', "has_schema_privilege(current_user, oid, 'CREATE')", 'has_sequence_privilege', "has_database_privilege(current_user, current_database(), 'CREATE')", 'direct_function_grants', 'exec_public_internal', 'direct_relation_grants_outside', 'direct_column_grants_outside', 'pg_shdepend', 'other_object_acls', 'owned_objects', 'file_functions', 'secret_catalogues', 'ledger_grant_options', 'database_acls', 'value_leaking_catalogues', 'is_grantable', 'all_rels', 'all_funcs']) {
+      if (!dry.includes(required)) failures.push('retention-dry-run.ts is missing catalogue check: ' + required);
+    }
+    // 21 line-start check() calls: counted-every-rule, session, the per-ledger loop (5 checks) and 18 catalogue checks; the denied-statement loop (a one-line for, 7 checks) is not line-start: 1+1+7+5+18 = 32 checks.
+    if ((dry.match(/^\s+check\(/gm) ?? []).length !== 21) failures.push('retention-dry-run.ts: expected 21 line-start check() calls (32 checks in all); change the procedure PASS rule and smoke-tests.ts with it');
+  }
 }
 
 if (failures.length) {

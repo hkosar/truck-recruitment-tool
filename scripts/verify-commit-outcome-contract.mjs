@@ -19,6 +19,7 @@ const users = [
   ['app/server/db/database.ts', ["from './commit-outcome'", 'isRollbackTag(', 'isDefiniteCommitRefusal(', 'clientUsable(']],
   ['pipeline/src/db.ts', ["from './commit-outcome.js'", 'isRollbackTag(', 'isDefiniteCommitRefusal(', 'clientUsable(']],
   ['pipeline/src/load-location-tables.ts', ["from './commit-outcome.js'", 'isRollbackTag(', 'isDefiniteCommitRefusal(', 'clientUsable(']],
+  ['pipeline/src/retention-run.ts', ["from './commit-outcome.js'", 'isRollbackTag(', 'isDefiniteCommitRefusal(', 'clientUsable(']],
 ];
 for (const [file, needles] of users) {
   const text = read(file);

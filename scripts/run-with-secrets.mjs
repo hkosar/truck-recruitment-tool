@@ -130,7 +130,7 @@ export const REFUSAL_IDS = [
   'plan_refused', 'ref_not_recorded', 'ref_invalid', 'db_url_required', 'production_refused', 'target_not_recorded_staging',
   'port_must_be_5432', 'confirmation_required', 'unknown_action', 'unknown_argument', 'bad_project_option', 'ledger_preflight_failed',
   'profiles_already_exist', 'ledger_not_empty', 'ledger_not_exact', 'm1c_state_unrecognised', 'm1c_postcondition_failed',
-  'retention_dry_run_failed', 'role_matrix_failed', 'role_matrix_result_missing', 'batch_delete_definition_mismatch', 'reapply_m1_not_backed_out', 'reapply_m1_still_applied', 'reapply_m1b_not_backed_out',
+  'retention_dry_run_failed', 'role_matrix_failed', 'role_matrix_result_missing', 'batch_delete_definition_mismatch', 'retention_run_refused', 'reapply_m1_not_backed_out', 'reapply_m1_still_applied', 'reapply_m1b_not_backed_out',
   'reapply_m1b_still_applied', 'reapply_m1c_not_backed_out', 'reapply_m1c_still_applied', 'owner_email_invalid',
   'owner_password_too_short', 'owner_auth_not_created', 'owner_auth_unknown_result', 'owner_promotion_refused',
   'owner_bootstrap_target_refused', 'bootstrap_target_required', 'target_not_recorded_production', 'first_manager_refused',
@@ -140,7 +140,7 @@ export const REFUSAL_IDS = [
 /** Keep equal to pipeline/src/refusals.ts DRIVER_CODES (a test compares them). */
 export const DRIVER_CODES = ['ECONNREFUSED', 'ECONNRESET', 'ECONNABORTED', 'ETIMEDOUT', 'ENOTFOUND', 'EAI_AGAIN', 'EPIPE', 'EHOSTUNREACH', 'ENETUNREACH', 'ENETDOWN', 'EADDRNOTAVAIL'];
 /** Keep equal to the action tables in pipeline/src/staging-sql-runner.ts and staging-rebuilt.ts plus owner-auth-create (a test compares them). */
-export const ACTIONS = ['install-marker', 'reset', 'cleanup', 'apply-migrations', 'ledger-preflight', 'environment-preflight', 'batch-delete-compare', 'owner-login-check', 'owner-promote', 'retention-dry-run', 'profile-fixtures', 'install-shutdown-fixtures', 'remove-shutdown-fixtures', 'cleanup-ledgers-m1', 'apply-m1', 'apply-m1b', 'apply-m1c', 'reapply-m1', 'reapply-m1b', 'reapply-m1c', 'role-matrix-m1', 'snapshot', 'auth-schema-inventory', 'window-on', 'window-off', 'backout-m1c', 'backout-m1b', 'backout-m1', 'owner-auth-create'];
+export const ACTIONS = ['install-marker', 'reset', 'cleanup', 'apply-migrations', 'ledger-preflight', 'environment-preflight', 'batch-delete-compare', 'owner-login-check', 'owner-promote', 'retention-dry-run', 'retention-run', 'install-retention-fixtures', 'remove-retention-fixtures', 'profile-fixtures', 'install-shutdown-fixtures', 'remove-shutdown-fixtures', 'cleanup-ledgers-m1', 'apply-m1', 'apply-m1b', 'apply-m1c', 'reapply-m1', 'reapply-m1b', 'reapply-m1c', 'role-matrix-m1', 'snapshot', 'auth-schema-inventory', 'window-on', 'window-off', 'backout-m1c', 'backout-m1b', 'backout-m1', 'owner-auth-create'];
 /** Keep equal to pipeline/src/environment-preflight.ts REVIEWED_EVENT_TRIGGER_* (a test compares them). */
 export const EVENT_TRIGGER_NAMES = ['issue_graphql_placeholder', 'issue_pg_cron_access', 'issue_pg_graphql_access', 'issue_pg_net_access', 'pgrst_ddl_watch', 'pgrst_drop_watch', 'ensure_rls'];
 export const EVENT_TRIGGER_FUNCTIONS = ['set_graphql_placeholder', 'grant_pg_cron_access', 'grant_pg_graphql_access', 'grant_pg_net_access', 'pgrst_ddl_watch', 'pgrst_drop_watch', 'rls_auto_enable'];
@@ -211,6 +211,7 @@ const EVENTS = {
   'staging-sql.ledger_verified': { expected: int, found: int, exact_match: bool },
   'staging-sql.ledger_preflight_check': { check: ident, ok: bool, detail },
   'staging-sql.ledger_preflight': { case: ident, ok: bool, checks: int, failed: int },
+  'staging-sql.retention_run': { ok: bool, deletes_sent: bool, failed_checks: listOf(ident, 20), deleted: wouldDelete },
   'staging-sql.retention_dry_run': { ok: bool, checks: int, failed: int, would_delete: wouldDelete },
   'staging-sql.role_matrix': { ok: bool, total: int, passed: int, failed: int },
   // Fixed event of the read-only batch-delete-compare action (pipeline/src/batch-delete-compare.ts): a boolean and two 12-character hash prefixes, or the words absent/unrecognised in place of the live hash; never the definition.

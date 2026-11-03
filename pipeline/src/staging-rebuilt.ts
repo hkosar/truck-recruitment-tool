@@ -9,6 +9,7 @@ import { extractBatchDeleteFromFile, runBatchDeleteCompare } from './batch-delet
 import { reportLedgerPreflight, runLedgerPreflight } from './ledger-preflight.js';
 import { MAINTENANCE_ROLE, roleOf } from './retention-step.js';
 import { runRetentionDryRun, type DryRunReport } from './retention-dry-run.js';
+import { runRetentionFixtureRun } from './retention-run.js';
 import { RunnerRefusal } from './refusals.js';
 import { RECORDED_PROJECT_REFS, parseSupabaseDbTarget, type SupabaseDbTarget } from './target-guard.js';
 
@@ -27,7 +28,7 @@ import { RECORDED_PROJECT_REFS, parseSupabaseDbTarget, type SupabaseDbTarget } f
 export const REPOSITORY_ROOT = resolve(import.meta.dirname, '..', '..');
 const REBUILT_REF_PATTERN = /^[a-z]{20}$/;
 
-type RebuiltKind = 'file' | 'migrations' | 'inline' | 'snapshot' | 'retention' | 'ledger-preflight' | 'environment-preflight' | 'owner-check' | 'owner-promote' | 'batch-delete-compare';
+type RebuiltKind = 'file' | 'migrations' | 'inline' | 'snapshot' | 'retention' | 'retention-run' | 'ledger-preflight' | 'environment-preflight' | 'owner-check' | 'owner-promote' | 'batch-delete-compare';
 
 interface RebuiltActionSpec {
   kind: RebuiltKind;
@@ -60,6 +61,11 @@ export const REBUILT_STAGING_SQL_ACTIONS: Readonly<Record<string, RebuiltActionS
   'owner-promote': { kind: 'owner-promote', confirmation: OWNER_PROMOTE_CONFIRMATION, pinned: false },
   // Connects AS recruiter_maintenance (STAGING_DB_URL must be that login): counts, never deletes.
   'retention-dry-run': { kind: 'retention', confirmation: 'RUN TNBS RETENTION DRY RUN', pinned: false },
+  // Connects AS recruiter_maintenance: the ONE real retention run. Refused unless the only aged ledger rows are the tagged fixtures of install-retention-fixtures (retention-run.ts).
+  'retention-run': { kind: 'retention-run', confirmation: 'RUN TNBS RETENTION FIXTURE RUN', pinned: false },
+  // Runner login: seed / remove the tagged aged and fresh ledger rows for that run.
+  'install-retention-fixtures': { kind: 'file', file: 'supabase/staging/rebuild/install-retention-fixtures.sql', confirmation: 'INSTALL TNBS RETENTION TEST FIXTURES', confirmationSetting: 'app.staging_retention_fixtures_confirmation', pinned: true },
+  'remove-retention-fixtures': { kind: 'file', file: 'supabase/staging/rebuild/remove-retention-fixtures.sql', confirmation: 'REMOVE TNBS RETENTION TEST FIXTURES', confirmationSetting: 'app.staging_retention_fixtures_confirmation', pinned: true },
   'install-marker': { kind: 'file', file: 'supabase/staging/install-staging-identity-marker.sql', confirmation: 'INSTALL TNBS STAGING IDENTITY MARKER', confirmationSetting: 'app.staging_marker_install_confirmation', pinned: true },
   'profile-fixtures': { kind: 'file', file: 'supabase/staging/profile-fixtures.sql', confirmation: 'INSTALL TNBS PROFILE FIXTURES', pinned: false },
   'install-shutdown-fixtures': { kind: 'file', file: 'supabase/staging/rebuild/install-shutdown-fixtures.sql', confirmation: 'INSTALL TNBS SHUTDOWN TEST FIXTURES', confirmationSetting: 'app.staging_shutdown_fixtures_confirmation', pinned: true },
@@ -216,14 +222,14 @@ export function planRebuiltSqlRun(input: {
     throw new Error('--out is only valid for snapshot');
   }
 
-  if (spec.kind === 'retention' && roleOf(target.user) !== MAINTENANCE_ROLE) {
-    throw new Error(`retention-dry-run must connect as ${MAINTENANCE_ROLE} (STAGING_DB_URL user), not another role`);
+  if ((spec.kind === 'retention' || spec.kind === 'retention-run') && roleOf(target.user) !== MAINTENANCE_ROLE) {
+    throw new Error(`${input.action} must connect as ${MAINTENANCE_ROLE} (STAGING_DB_URL user), not another role`);
   }
 
   let steps: RebuiltSqlStep[];
   let expectedFunction: string | undefined;
-  if (spec.kind === 'retention') {
-    steps = [{ label: 'retention-dry-run', sql: '', transaction: false }];
+  if (spec.kind === 'retention' || spec.kind === 'retention-run') {
+    steps = [{ label: input.action, sql: '', transaction: false }];
   } else if (spec.kind === 'ledger-preflight' || spec.kind === 'environment-preflight' || spec.kind === 'owner-check' || spec.kind === 'owner-promote') {
     steps = [{ label: spec.kind, sql: '', transaction: false }];
   } else if (spec.kind === 'batch-delete-compare') {
@@ -311,6 +317,13 @@ export async function executeRebuiltSqlPlan(plan: RebuiltSqlPlan, clientFactory:
       // Pass/fail, check counts and the per-rule would-delete counts only (rule names are repository constants).
       console.log(JSON.stringify({ msg: 'staging-sql.retention_dry_run', ok: report.ok, checks: report.checks.length, failed: report.checks.filter((c) => !c.ok).length, would_delete: report.wouldDelete }));
       if (!report.ok) throw new RunnerRefusal('retention_dry_run_failed', `retention dry run: ${report.checks.filter((c) => !c.ok).length} check(s) failed`);
+      return;
+    }
+    if (plan.kind === 'retention-run') {
+      const report = await runRetentionFixtureRun(client, MAINTENANCE_ROLE);
+      // Fixed check names, per-rule delete counts and a flag only; never row data.
+      console.log(JSON.stringify({ msg: 'staging-sql.retention_run', ok: report.ok, deletes_sent: report.deletesSent, failed_checks: report.failed, deleted: report.deleted }));
+      if (!report.ok) throw new RunnerRefusal('retention_run_refused', `retention run refused or failed: ${report.failed.length} check(s)`);
       return;
     }
     for (const [name, value] of plan.settings) {

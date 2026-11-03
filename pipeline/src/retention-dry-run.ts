@@ -33,6 +33,95 @@ export const DENIED_STATEMENTS: ReadonlyArray<{ name: string; sql: string }> = [
   { name: 'cannot truncate a ledger', sql: 'truncate internal.email_events' },
 ];
 
+/**
+ * Catalogue-wide boundary proof (counts and yes/no only). Every list comes from the catalogue, so a table, schema,
+ * function or sequence added later, or a grant widened by mistake, is caught. Three kinds of check, stated exactly:
+ *  - DIRECT checks read the ACL entries that name this role (aclexplode with grantee = this role) over EVERY schema,
+ *    pg_catalog and information_schema included, and over every function, extension functions included. A role has no
+ *    direct entry on a system object by default, so PUBLIC-by-design grants (hosted vault, storage, realtime, system
+ *    catalogues) are ignored and any real grant to this role is caught.
+ *  - EFFECTIVE checks (select, delete, execute, create ...) cover only application schemas (not pg_* or
+ *    information_schema), because PUBLIC may use the system schemas by design. A grant to PUBLIC on a table in some
+ *    other schema is therefore outside them (procedure caveat). Fixed lists cover the dangerous system objects: the
+ *    server file functions and the password-hash catalogues.
+ *  - pg_shdepend (every ACL entry and ownership that names a role, in this database and the shared catalogues) is a net
+ *    for the object kinds the lists above do not walk: foreign server, wrapper, tablespace, language, type, large
+ *    object, parameter, any schema but public/internal, and anything this role owns.
+ *  - Three small direct checks close the last known gaps: WITH GRANT OPTION on a ledger, any database privilege but
+ *    CONNECT on the current database, and select on the catalogues that can show table values or connection strings.
+ *    Still outside (procedure caveat): a PUBLIC grant on some other application table, and PUBLIC-by-default
+ *    TEMPORARY/CONNECT on databases, which no role-specific check can see.
+ */
+export const BOUNDARY_SQL = `
+  with me as (select oid from pg_roles where rolname = current_user),
+  schemas as (
+    select n.oid, n.nspname from pg_namespace n where n.nspname <> 'information_schema' and n.nspname !~ '^pg_'
+  ),
+  rels as (
+    select c.oid, n.nspname || '.' || c.relname as name, n.nspname as schema, c.relkind, c.relacl
+      from pg_class c join pg_namespace n on n.oid = c.relnamespace
+     where c.relkind in ('r', 'p', 'v', 'm', 'f', 'S') and n.nspname <> 'information_schema' and n.nspname !~ '^pg_'
+  ),
+  all_rels as (
+    select c.oid, n.nspname || '.' || c.relname as name, c.relacl
+      from pg_class c join pg_namespace n on n.oid = c.relnamespace
+     where c.relkind in ('r', 'p', 'v', 'm', 'f', 'S')
+  ),
+  all_funcs as (select p.oid, p.proacl from pg_proc p),
+  tables as (select * from rels where relkind <> 'S'),
+  funcs as (
+    select p.oid, n.nspname as schema, p.proacl
+      from pg_proc p join pg_namespace n on n.oid = p.pronamespace
+     where n.nspname <> 'information_schema' and n.nspname !~ '^pg_'
+       and not exists (select 1 from pg_depend d where d.classid = 'pg_proc'::regclass and d.objid = p.oid and d.deptype = 'e')
+  )
+  select
+    (select count(*)::int from tables where has_table_privilege(current_user, oid, 'DELETE') and name <> all ($1::text[])) as delete_outside,
+    (select count(*)::int from tables where name = any ($1::text[]) and has_table_privilege(current_user, oid, 'DELETE')) as delete_inside,
+    (select count(*)::int from tables where has_any_column_privilege(current_user, oid, 'INSERT') or has_any_column_privilege(current_user, oid, 'UPDATE')
+        or has_table_privilege(current_user, oid, 'TRUNCATE') or has_table_privilege(current_user, oid, 'REFERENCES') or has_table_privilege(current_user, oid, 'TRIGGER')) as write_anywhere,
+    (select count(*)::int from tables where schema in ('public', 'internal', 'auth', 'staging_identity', 'supabase_migrations')
+        and has_any_column_privilege(current_user, oid, 'SELECT') and name <> all ($1::text[])) as select_outside,
+    (select count(*)::int from all_rels r, aclexplode(r.relacl) a
+      where a.grantee = (select oid from me) and r.name <> all ($1::text[])) as direct_relation_grants_outside,
+    (select count(*)::int from pg_attribute at join all_rels r on r.oid = at.attrelid, aclexplode(at.attacl) a
+      where at.attacl is not null and a.grantee = (select oid from me) and r.name <> all ($1::text[])) as direct_column_grants_outside,
+    (select count(*)::int from funcs where schema in ('public', 'internal') and has_function_privilege(current_user, oid, 'EXECUTE')) as exec_public_internal,
+    (select count(*)::int from all_funcs f, aclexplode(f.proacl) a where a.grantee = (select oid from me)) as direct_function_grants,
+    (select count(*)::int from schemas where has_schema_privilege(current_user, oid, 'CREATE')) as schema_create,
+    (select count(*)::int from rels where relkind = 'S' and (has_sequence_privilege(current_user, oid, 'USAGE') or has_sequence_privilege(current_user, oid, 'UPDATE')
+        or has_sequence_privilege(current_user, oid, 'SELECT'))) as sequence_privileges,
+    (case when has_database_privilege(current_user, current_database(), 'CREATE') then 1 else 0 end) as database_create,
+    (select count(*)::int from pg_roles r where r.rolname = current_user
+        and (r.rolsuper or r.rolcreaterole or r.rolcreatedb or r.rolbypassrls or r.rolreplication)) as powerful_attributes,
+    (select count(*)::int from pg_auth_members m join pg_roles r on r.oid = m.member where r.rolname = current_user) as memberships,
+    (select count(*)::int from pg_shdepend s
+      where s.refclassid = 'pg_authid'::regclass and s.refobjid = (select oid from me) and s.deptype = 'a'
+        and s.dbid in (0, (select oid from pg_database where datname = current_database()))
+        and not (s.classid = 'pg_class'::regclass and s.objid in (select oid from all_rels where name = any ($1::text[])))
+        and not (s.classid = 'pg_namespace'::regclass and s.objid in (select oid from pg_namespace where nspname in ('public', 'internal')))
+        and s.classid <> 'pg_database'::regclass) as other_object_acls,
+    (select count(*)::int from pg_shdepend s
+      where s.refclassid = 'pg_authid'::regclass and s.refobjid = (select oid from me) and s.deptype = 'o'
+        and s.dbid in (0, (select oid from pg_database where datname = current_database()))) as owned_objects,
+    (select count(*)::int from pg_proc p join pg_namespace n on n.oid = p.pronamespace
+      where n.nspname = 'pg_catalog'
+        and p.proname in ('pg_read_file', 'pg_read_binary_file', 'pg_ls_dir', 'pg_stat_file', 'pg_ls_logdir', 'pg_ls_waldir', 'pg_ls_tmpdir',
+                          'pg_ls_archive_statusdir', 'pg_logdir_ls', 'pg_file_write', 'pg_file_read', 'pg_file_rename', 'pg_file_unlink', 'lo_import', 'lo_export')
+        and has_function_privilege(current_user, p.oid, 'EXECUTE')) as file_functions,
+    (select count(*)::int from all_rels r, aclexplode(r.relacl) a
+      where a.grantee = (select oid from me) and a.is_grantable and r.name = any ($1::text[])) +
+    (select count(*)::int from pg_attribute at join all_rels r on r.oid = at.attrelid, aclexplode(at.attacl) a
+      where at.attacl is not null and a.grantee = (select oid from me) and a.is_grantable and r.name = any ($1::text[])) as ledger_grant_options,
+    (select count(*)::int from pg_database d, aclexplode(d.datacl) a
+      where a.grantee = (select oid from me) and not (d.datname = current_database() and a.privilege_type = 'CONNECT')) as database_acls,
+    (select count(*)::int from unnest(array['pg_statistic', 'pg_statistic_ext_data']) t(n)
+      where to_regclass('pg_catalog.' || t.n) is not null and has_any_column_privilege(current_user, to_regclass('pg_catalog.' || t.n)::oid, 'SELECT'))
+    + (case when to_regclass('pg_catalog.pg_subscription') is not null
+            and has_column_privilege(current_user, 'pg_catalog.pg_subscription'::regclass, 'subconninfo', 'SELECT') then 1 else 0 end) as value_leaking_catalogues,
+    (select count(*)::int from unnest(array['pg_authid', 'pg_shadow', 'pg_user_mapping', 'pg_largeobject']) t(n)
+      where to_regclass('pg_catalog.' || t.n) is not null and has_any_column_privilege(current_user, to_regclass('pg_catalog.' || t.n)::oid, 'SELECT')) as secret_catalogues`;
+
 async function refusedWith42501(client: DryRunClient, sql: string): Promise<boolean> {
   await client.query('savepoint dry_run_check');
   try {
@@ -45,6 +134,46 @@ async function refusedWith42501(client: DryRunClient, sql: string): Promise<bool
   }
 }
 
+/**
+ * The least-privilege checks, with NO transaction handling of their own: the caller owns the transaction (the dry run
+ * rolls it back; the real run keeps it open and runs these inside the delete transaction, under the table lock). Every
+ * refused statement is wrapped in a savepoint. Returns the login name the session runs as.
+ */
+export async function runLeastPrivilegeChecks(client: DryRunClient, expectedRole: string, check: (name: string, ok: boolean) => void): Promise<string> {
+  const currentUser = String((await client.query('select current_user as u')).rows[0]?.u ?? '');
+  check(`session is ${expectedRole}`, currentUser === expectedRole);
+  for (const denied of DENIED_STATEMENTS) check(denied.name, await refusedWith42501(client, denied.sql));
+  for (const table of MAINTENANCE_LEDGER_TABLES) {
+    const row = (await client.query(
+      `select has_table_privilege(current_user, $1, 'SELECT') as s, has_table_privilege(current_user, $1, 'DELETE') as d,
+              has_table_privilege(current_user, $1, 'INSERT') as i, has_table_privilege(current_user, $1, 'UPDATE') as u,
+              has_table_privilege(current_user, $1, 'TRUNCATE') as t`,
+      [table],
+    )).rows[0];
+    check(`${table}: select and delete only`, row?.s === true && row?.d === true && row?.i === false && row?.u === false && row?.t === false);
+  }
+  const boundary = (await client.query(BOUNDARY_SQL, [MAINTENANCE_LEDGER_TABLES])).rows[0] ?? {};
+  check('delete is held on exactly the five ledgers', boundary.delete_inside === MAINTENANCE_LEDGER_TABLES.length && boundary.delete_outside === 0);
+  check('no insert, update, truncate, references or trigger privilege on any table', boundary.write_anywhere === 0);
+  check('select is held on no table outside the five ledgers (application schemas)', boundary.select_outside === 0);
+  check('no direct grant of any kind on any relation, sequence or column outside the five ledgers (every schema, system catalogues included)', boundary.direct_relation_grants_outside === 0 && boundary.direct_column_grants_outside === 0);
+  check('no execute privilege on any non-extension function in public or internal', boundary.exec_public_internal === 0);
+  check('no direct execute grant on any function in any schema (system and extension functions included)', boundary.direct_function_grants === 0);
+  check('no create privilege on any schema', boundary.schema_create === 0);
+  check('no usage, select or update privilege on any sequence', boundary.sequence_privileges === 0);
+  check('no create privilege on the database', boundary.database_create === 0);
+  check('no superuser, create-role, create-db, bypass-rls or replication attribute', boundary.powerful_attributes === 0);
+  check('member of no other role', boundary.memberships === 0);
+  check('no ACL entry naming this role on any other object (server, wrapper, tablespace, language, type, large object, parameter, other schema)', boundary.other_object_acls === 0);
+  check('owns no object', boundary.owned_objects === 0);
+  check('no execute privilege on a server file function (pg_read_file, pg_ls_dir, lo_import ...)', boundary.file_functions === 0);
+  check('no select on a password-hash or secret catalogue (pg_authid, pg_shadow, pg_user_mapping, pg_largeobject)', boundary.secret_catalogues === 0);
+  check('no grant option on any of the five ledgers (the role could not pass its rights on)', boundary.ledger_grant_options === 0);
+  check('no privilege on any database except CONNECT on the current one (TEMPORARY, CREATE, other databases)', boundary.database_acls === 0);
+  check('no select on a catalogue that shows table values or connection strings (pg_statistic, pg_statistic_ext_data, pg_subscription.subconninfo)', boundary.value_leaking_catalogues === 0);
+  return currentUser;
+}
+
 export async function runRetentionDryRun(client: DryRunClient, expectedRole: string): Promise<DryRunReport> {
   const report: DryRunReport = { currentUser: null, wouldDelete: {}, checks: [], ok: false };
   const check = (name: string, ok: boolean) => report.checks.push({ name, ok });
@@ -52,8 +181,6 @@ export async function runRetentionDryRun(client: DryRunClient, expectedRole: str
   await client.query('begin read only');
   try {
     await client.query("set local statement_timeout = '30s'");
-    report.currentUser = String((await client.query('select current_user as u')).rows[0]?.u ?? '');
-    check(`session is ${expectedRole}`, report.currentUser === expectedRole);
     for (const rule of RETENTION_RULES) {
       const n = (await client.query(`select count(*)::int as n from ${rule.table} where ${rule.where}`)).rows[0]?.n;
       report.wouldDelete[rule.name] = typeof n === 'number' ? n : -1;
@@ -66,16 +193,7 @@ export async function runRetentionDryRun(client: DryRunClient, expectedRole: str
   await client.query('begin');
   try {
     await client.query("set local statement_timeout = '10s'");
-    for (const denied of DENIED_STATEMENTS) check(denied.name, await refusedWith42501(client, denied.sql));
-    for (const table of MAINTENANCE_LEDGER_TABLES) {
-      const row = (await client.query(
-        `select has_table_privilege(current_user, $1, 'SELECT') as s, has_table_privilege(current_user, $1, 'DELETE') as d,
-                has_table_privilege(current_user, $1, 'INSERT') as i, has_table_privilege(current_user, $1, 'UPDATE') as u,
-                has_table_privilege(current_user, $1, 'TRUNCATE') as t`,
-        [table],
-      )).rows[0];
-      check(`${table}: select and delete only`, row?.s === true && row?.d === true && row?.i === false && row?.u === false && row?.t === false);
-    }
+    report.currentUser = await runLeastPrivilegeChecks(client, expectedRole, check);
   } finally {
     await client.query('rollback');
   }
