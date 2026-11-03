@@ -97,13 +97,52 @@ describe('loopbackFetch keeps connections alive on a private agent', () => {
 
 describe('the shared agent refuses non-loopback addresses at connect time', () => {
   afterAll(() => closeLoopbackAgent());
+  // Even if a refusal regressed, these tests cannot reach a network: the resolver is a stub that answers with a
+  // reserved documentation address (192.0.2.x), and Socket.connect is stubbed to fail instead of connecting.
+  const answerWith = (address: string, calls: string[] = []) =>
+    ((name: string, opts: { all?: boolean }, done: (err: null, a: unknown, f?: number) => void) => {
+      calls.push(name);
+      if (opts.all) done(null, [{ address, family: 4 }]); else done(null, address, 4);
+    }) as unknown as typeof import('node:dns').lookup;
+  const refusedRequest = (host: string, lookup: unknown) => new Promise((resolve, reject) => { request({ agent: loopbackAgent(), host, port: 9, lookup: lookup as typeof import('node:dns').lookup }, resolve).on('error', reject).end(); });
+  const noRealConnect = () => vi.spyOn(Socket.prototype, 'connect').mockImplementation(function (this: Socket, options: unknown) {
+    // Stands in for net: resolve the host with the options' lookup (as net would), then "connect" by failing.
+    const o = (Array.isArray(options) ? options[0] : options) as { host?: string; lookup?: (name: string, opts: object, done: (err: Error | null) => void) => void };
+    if (o.lookup && o.host) o.lookup(o.host, {}, (err) => { this.destroy(err ?? new Error('socket opened')); });
+    else this.destroy(new Error('socket opened'));
+    return this;
+  });
   it('an outside host is refused before any socket is opened', async () => {
-    const opened = vi.spyOn(Socket.prototype, 'connect');
+    const opened = noRealConnect();
     try {
-      for (const host of ['192.0.2.1', 'example.invalid', '10.0.0.5', '127.0.0.2']) {
-        await expect(new Promise((resolve, reject) => { request({ agent: loopbackAgent(), host, port: 9 }, resolve).on('error', reject).end(); }), host).rejects.toThrow(/refuses non-loopback/);
+      for (const host of ['192.0.2.1', 'example.invalid', '192.0.2.5', '127.0.0.2']) {
+        await expect(refusedRequest(host, answerWith('192.0.2.1')), host).rejects.toThrow(/refuses non-loopback/);
       }
       expect(opened).not.toHaveBeenCalled();
+    } finally {
+      opened.mockRestore();
+    }
+  });
+
+  it('the bracketed [::1] spelling is refused before any name lookup', async () => {
+    const opened = noRealConnect();
+    const lookups: string[] = [];
+    try {
+      await expect(refusedRequest('[::1]', answerWith('192.0.2.1', lookups))).rejects.toThrow(/refuses non-loopback/);
+      expect(lookups).toEqual([]);
+      expect(opened).not.toHaveBeenCalled();
+    } finally {
+      opened.mockRestore();
+    }
+  });
+
+  it('localhost may only resolve to loopback addresses', async () => {
+    const opened = noRealConnect();
+    const lookups: string[] = [];
+    try {
+      await expect(refusedRequest('localhost', answerWith('192.0.2.1', lookups))).rejects.toThrow(/refuses non-loopback address: localhost/);
+      expect(lookups).toEqual(['localhost']);
+      // Not asserted: connect is entered for localhost (the lookup runs inside it); only a 'socket opened' error would mean a regression.
     } finally {
       opened.mockRestore();
     }

@@ -5,6 +5,7 @@
 import assert from 'node:assert/strict';
 import { spawn } from 'node:child_process';
 import { readdirSync, readFileSync } from 'node:fs';
+import type { lookup } from 'node:dns';
 import { createServer, request } from 'node:http';
 import type { IncomingMessage, ServerResponse } from 'node:http';
 import { join } from 'node:path';
@@ -95,13 +96,36 @@ try {
 
   // The shared agent refuses non-loopback addresses at connect time, before any socket is opened.
   {
+    // Even if a refusal regressed, nothing reaches a network: the resolver is a stub that answers with a reserved
+    // documentation address (192.0.2.x), and Socket.connect fails instead of connecting.
     const realConnect = Socket.prototype.connect; let opened = 0;
-    Socket.prototype.connect = function (this: Socket, ...args: unknown[]) { opened++; return (realConnect as (...a: unknown[]) => Socket).apply(this, args); } as typeof Socket.prototype.connect;
+    Socket.prototype.connect = function (this: Socket, options: unknown) {
+      // Stands in for net: resolve the host with the options' lookup (as net would), then "connect" by failing.
+      opened++;
+      const o = (Array.isArray(options) ? options[0] : options) as { host?: string; lookup?: (name: string, opts: object, done: (err: Error | null) => void) => void };
+      if (o.lookup && o.host) o.lookup(o.host, {}, (err) => { this.destroy(err ?? new Error('socket opened')); });
+      else this.destroy(new Error('socket opened'));
+      return this;
+    } as typeof Socket.prototype.connect;
+    const answerWith = (address: string, calls: string[] = []) =>
+      ((name: string, opts: { all?: boolean }, done: (err: null, a: unknown, f?: number) => void) => {
+        calls.push(name);
+        if (opts.all) done(null, [{ address, family: 4 }]); else done(null, address, 4);
+      }) as unknown as typeof lookup;
+    const refusedRequest = (host: string, lookup: unknown) => new Promise((resolve, reject) => { request({ agent: loopbackAgent(), host, port: 9, lookup: lookup as typeof import('node:dns').lookup }, resolve).on('error', reject).end(); });
     try {
-      for (const host of ['192.0.2.1', 'example.invalid', '10.0.0.5', '127.0.0.2']) {
-        await assert.rejects(new Promise((resolve, reject) => { request({ agent: loopbackAgent(), host, port: 9 }, resolve).on('error', reject).end(); }), /refuses non-loopback/, host);
+      for (const host of ['192.0.2.1', 'example.invalid', '192.0.2.5', '127.0.0.2']) {
+        await assert.rejects(refusedRequest(host, answerWith('192.0.2.1')), /refuses non-loopback/, host);
       }
+      // The bracketed [::1] spelling is refused before any name lookup.
+      const bracketLookups: string[] = [];
+      await assert.rejects(refusedRequest('[::1]', answerWith('192.0.2.1', bracketLookups)), /refuses non-loopback/);
+      assert.deepEqual(bracketLookups, [], '[::1] is refused before a lookup');
       assert.equal(opened, 0, 'no socket was opened for an outside address');
+      // localhost may only resolve to loopback addresses (connect is entered for it, the lookup runs inside; 'socket opened' would mean a regression).
+      const localhostLookups: string[] = [];
+      await assert.rejects(refusedRequest('localhost', answerWith('192.0.2.1', localhostLookups)), /refuses non-loopback address: localhost/);
+      assert.deepEqual(localhostLookups, ['localhost']);
     } finally { Socket.prototype.connect = realConnect; closeLoopbackAgent(); }
   }
 

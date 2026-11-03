@@ -14,6 +14,8 @@ import { Agent, request } from 'node:http';
 import type { Socket } from 'node:net';
 
 const LOOPBACK_HOSTS = new Set(['127.0.0.1', '[::1]', 'localhost']);
+// What the agent accepts as a host: URLs arrive with the brackets already stripped, so "[::1]" is not accepted here.
+const CONNECT_HOSTS = new Set(['127.0.0.1', '::1', 'localhost']);
 const LOOPBACK_ADDRESSES = new Set(['127.0.0.1', '::1']);
 const REDIRECT_STATUSES = new Set([301, 302, 303, 307, 308]);
 const STANDARD_METHODS = new Set(['DELETE', 'GET', 'HEAD', 'OPTIONS', 'POST', 'PUT']);
@@ -25,21 +27,24 @@ let sharedAgent: Agent | undefined;
 
 // The agent itself refuses any address that is not loopback: a host that is not one of the loopback names is
 // rejected before a socket is created, and a name (localhost) may only resolve to loopback addresses.
-type ConnectOptions = { host?: string | null; hostname?: string | null };
+// A caller's lookup option (a test stub) replaces the system resolver, but its answers are checked the same way.
+type Resolver = (name: string, opts: object, done: (err: Error | null, address?: unknown, family?: number) => void) => void;
+type ConnectOptions = { host?: string | null; hostname?: string | null; lookup?: Resolver };
 type ConnectCallback = (err: Error | null, socket?: Socket) => void;
 
 function refuseOutsideConnections(agent: Agent): Agent {
   const connect = agent.createConnection as unknown as (options: ConnectOptions, callback?: ConnectCallback) => Socket | undefined;
   (agent as unknown as { createConnection: typeof connect }).createConnection = function (this: Agent, options, callback) {
     const host = options.host ?? options.hostname ?? undefined;
-    if (host === undefined || !(LOOPBACK_HOSTS.has(host) || host === '::1')) {
+    if (host === undefined || !CONNECT_HOSTS.has(host)) {
       callback?.(new Error(`loopback-fetch refuses non-loopback address: ${host}`));
       return undefined;
     }
+    const resolve: Resolver = options.lookup ?? (lookup as unknown as Resolver);
     const guarded = {
       ...options,
-      lookup: (name: string, opts: object, done: (err: Error | null, address?: unknown, family?: number) => void) =>
-        lookup(name, opts, (err, address, family) => {
+      lookup: (name: string, opts: object, done: Parameters<Resolver>[2]) =>
+        resolve(name, opts, (err, address, family) => {
           const list = Array.isArray(address) ? address : [{ address: address as string }];
           if (!err && !list.every((a) => LOOPBACK_ADDRESSES.has(a.address))) done(new Error(`loopback-fetch refuses non-loopback address: ${name}`));
           else done(err, address, family);
