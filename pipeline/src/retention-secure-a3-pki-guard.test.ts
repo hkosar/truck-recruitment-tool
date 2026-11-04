@@ -101,6 +101,14 @@ try {
     for (const name of ['CON', 'nul', 'NUL.txt', 'com1', 'LPT9.key', 'aux ']) {
       assert.throws(() => assertOutsideRepository(join(sandbox, name, 'x'), REPOSITORY_ROOT), /reserved device name/, `device name ${name} must be refused`);
     }
+    // A segment ending in a dot or a space is another folder to Node than to Windows tools (review t40, N1). Checked on the raw text:
+    // path.join would not keep a trailing space reliably, and nothing is created.
+    for (const name of ['keys.', 'keys ', 'a. ']) {
+      assert.throws(() => assertOutsideRepository(`${sandbox}\\${name}\\x`, REPOSITORY_ROOT), /ends in a dot or a space/, `segment "${name}" must be refused`);
+      assert.throws(() => assertOutsideRepository(`${sandbox}\\x\\${name}`, REPOSITORY_ROOT), /ends in a dot or a space/, `last segment "${name}" must be refused`);
+    }
+    assert.throws(() => assertOutsideRepository(`${REPOSITORY_ROOT}.\\x`, REPOSITORY_ROOT), /ends in a dot or a space/, 'the repository folder name plus a dot');
+    assert.doesNotThrow(() => assertOutsideRepository(`${sandbox}\\.\\ok\\..\\fine`, REPOSITORY_ROOT), '"." and ".." segments are navigation, not names');
     assert.doesNotThrow(() => assertOutsideRepository(join(sandbox, 'console', 'connect', 'nullx'), REPOSITORY_ROOT), 'names that only start like a device name are fine');
   }
 

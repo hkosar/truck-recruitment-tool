@@ -5,8 +5,8 @@ import { tmpdir } from 'node:os';
 import { join, parse, resolve } from 'node:path';
 import { test } from 'node:test';
 import {
-  CHILD_COLOR_OFF, DEFAULT_TIMEOUT_MS, ENV_ALLOW, EXCLUDED_FILES, SUITE_FILES, SUITE_IDS, classifyOutcome, executeSuite, findSkipLines, isSafeToDelete, makeSh, maskSecrets,
-  nonLoopbackConnectionVars, orderSuites, pgServerOptions, resolveTimeoutMs, restoreStatements, runSuites, scrubbedEnv, stripAnsi, summarize, tlsClusterFiles, vitestArgs,
+  CHILD_COLOR_OFF, DEFAULT_TIMEOUT_MS, ENV_ALLOW, EXCLUDED_FILES, SUITE_FILES, SUITE_IDS, classifyOutcome, describePkiFailure, executeSuite, findSkipLines, isSafeToDelete, makeSh, maskSecrets,
+  nonLoopbackConnectionVars, orderNotice, orderSuites, pgServerOptions, resolveTimeoutMs, restoreStatements, runSuites, scrubbedEnv, stripAnsi, summarize, terminateStrayBackends, tlsClusterFiles, vitestArgs,
 } from './run-real-db-suites.mjs';
 
 const ok = { status: 0 };
@@ -324,4 +324,53 @@ test('suite list: every SUITE_FILES entry is a real file; the retention-secure t
   assert.ok(SUITE_FILES.some((f) => f.id === 'retention-secure' && f.file === 'pipeline/src/retention-secure-a3.test.ts'));
   assert.ok(src.includes('retention-secure-a3-pki-guard.test.ts') && !SUITE_FILES.some((f) => /pki-guard/.test(f.file)), 'the PKI-guard test needs no database: it runs in pipeline npm test, not here');
   assert.ok(EXCLUDED_FILES.every((f) => !/retention-secure/.test(f.file)));
+});
+test('makeSh: a caller env that is undefined or null still gets baseEnv, never the whole parent environment', () => {
+  const calls = [];
+  const sh = makeSh({ PATH: 'x' }, (cmd, args, opts) => { calls.push(opts); return { status: 0 }; });
+  sh('a', [], { env: undefined });
+  sh('b', [], { env: null, timeout: 3 });
+  sh('c', [], { env: {} });
+  assert.deepEqual(calls[0].env, { PATH: 'x' });
+  assert.deepEqual(calls[1].env, { PATH: 'x' });
+  assert.equal(calls[1].timeout, 3);
+  assert.deepEqual(calls[2].env, {}, 'an explicitly empty env stays empty');
+});
+
+test('after a TIMEOUT the leftover sessions are ended (afterTimeout runs before restore), and only after a TIMEOUT', async () => {
+  const t = loopOpts({ sh: (cmd, args) => (args[0] === 'a' ? { error: { code: 'ETIMEDOUT' }, status: null } : { status: 0, stdout: 'PASS x', stderr: '' }) });
+  t.o.afterTimeout = async (id) => { t.events.push(`stray ${id}`); };
+  await runSuites(fakeSuites(['a', 'b']), t.o);
+  assert.deepEqual(t.events.filter((e) => /^(restore|stray)/.test(e)), ['stray a', 'restore', 'restore']);
+  const failing = loopOpts({ sh: () => ({ status: 1, stdout: 'Error x', stderr: '' }) });
+  failing.o.afterTimeout = async () => { throw new Error('must not run'); };
+  await runSuites(fakeSuites(['a']), failing.o);
+  const broken = loopOpts({ sh: () => ({ error: { code: 'ETIMEDOUT' }, status: null }) });
+  broken.o.afterTimeout = async () => { throw new Error('boom'); };
+  await assert.rejects(runSuites(fakeSuites(['a']), broken.o), /could not end the leftover database sessions after a timed out: boom/);
+});
+
+test('terminateStrayBackends: ends the sessions of the cluster it is given and polls until none are left; reports what is still open', async () => {
+  const sqls = [];
+  let left = 3;
+  const query = async (sql) => { sqls.push(sql); if (/pg_terminate_backend/.test(sql)) return []; return [{ n: left-- > 1 ? 2 : 0 }]; };
+  assert.equal(await terminateStrayBackends(query, { sleep: async () => {} }), 0);
+  assert.ok(sqls.every((s) => /backend_type = 'client backend' and pid <> pg_backend_pid\(\)/.test(s)), 'only client sessions, never its own');
+  assert.ok(sqls.filter((s) => /pg_terminate_backend/.test(s)).length >= 2);
+  assert.equal(await terminateStrayBackends(async (sql) => (/count/.test(sql) ? [{ n: 1 }] : []), { tries: 3, sleep: async () => {} }), 1);
+});
+
+test('order notice: names the suite RDB_SUITES_FIRST moved; nothing when it is not set', () => {
+  assert.equal(orderNotice('prod-sql'), 'order: prod-sql moved first (RDB_SUITES_FIRST)');
+  assert.equal(orderNotice(undefined), undefined);
+  assert.equal(orderNotice(''), undefined);
+});
+
+test('certificate step failure: the helper\'s own refusing/usage line is shown, the time limit is named, other output keeps its last lines', () => {
+  const trace = 'refusing: the directory is not empty\n    at a (x.ts:1)\n    at b (x.ts:2)\n    at c (x.ts:3)\n    at d (x.ts:4)\nNode.js v24';
+  assert.equal(describePkiFailure({ r: { status: 1 }, out: trace, timeoutMs: 1000 }), 'refusing: the directory is not empty');
+  assert.match(describePkiFailure({ r: { status: 1 }, out: 'usage: make-pki <dir>\nx', timeoutMs: 1000 }), /^usage: make-pki/);
+  assert.match(describePkiFailure({ r: { error: { code: 'ETIMEDOUT' }, status: null }, out: '', timeoutMs: 90000 }), /exceeded the 90 s time limit/);
+  assert.match(describePkiFailure({ r: { error: { code: 'ENOENT' } }, out: '', timeoutMs: 1 }), /could not start: ENOENT/);
+  assert.equal(describePkiFailure({ r: { status: 1 }, out: '1\n2\n3\n4\n5\n6', timeoutMs: 1 }), '3 | 4 | 5 | 6');
 });
