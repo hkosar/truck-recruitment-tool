@@ -1,4 +1,4 @@
-﻿// Tests scripts/net-guard.mjs in child node processes. No network: each child first loads a stub that replaces
+// Tests scripts/net-guard.mjs in child node processes. No network: each child first loads a stub that replaces
 // Socket.prototype.connect (it only records and fails), THEN the guard, so the guard sits on top of the stub and a guard that
 // failed to block would reach the stub, never a real socket.
 // Run: node --test scripts/net-guard.test.mjs
@@ -193,4 +193,29 @@ test('N7: a Proxy over a marked array whose [0] flips and ignores writes: Node i
 });
 test('N8: an honest net._normalizeArgs array with 0.0.0.0 is blocked', () => {
   blockedZero(run(arrayCase(`const arg = net._normalizeArgs([{ host: '0.0.0.0', port }]);`)));
+});
+// Round 4 (review of b341896): C1 to C3. Target 0.0.0.0 only; every prototype or builtin change is undone in finally.
+test('C1: a pre-marked array whose [0] is a number, string or boolean is refused, even with Object.prototype pollution pointing at 0.0.0.0', () => {
+  for (const primitive of ['1', "'x'", 'true']) {
+    const r = run(arrayCase(`const arg = [${primitive}, null]; arg[mark] = true;`, `Object.prototype.host = '0.0.0.0'; Object.prototype.port = port;
+      try { return await attempt(arg); } finally { delete Object.prototype.host; delete Object.prototype.port; }`));
+    assert.match(r.out, /^net-guard blocked a connect with a (number|string|boolean) where options were expected$/, primitive);
+    assert.equal(r.reached, 0, primitive);
+    assert.equal(r.log.trim().split('\n').length, 1, primitive);
+  }
+});
+test('C2: an inherited setter for Node\'s mark on Array.prototype neither sees nor changes the destination (cleaned up in finally)', () => {
+  const r = run(arrayCase('const arg = { host: \'127.0.0.1\', port }; let calls = 0;', `Object.defineProperty(Array.prototype, mark, { configurable: true, set(v) {
+      calls++; Object.defineProperty(this, mark, { value: true, configurable: true, writable: true, enumerable: false }); if (calls === 2) this[0] = { host: '0.0.0.0', port };
+    } });
+    try { const out = await attempt(arg); return [out, calls]; } finally { delete Array.prototype[mark]; }`));
+  sawNoZero({ ...r, out: r.out[0] });
+  assert.equal(r.out[1], 1); // only Node's own normalisation touched the setter; the guard's own array never did
+});
+test('C3: replacing net.isIP, net._normalizeArgs and dns.lookup, then syncBuiltinESMExports(), does not change the guard\'s decisions (restored in finally)', () => {
+  blockedZero(run(arrayCase(`const dns = (await import('node:dns')).default; const cjs = net.default; const { syncBuiltinESMExports } = await import('node:module');
+    const saved = { isIP: cjs.isIP, normalize: cjs._normalizeArgs, lookup: dns.lookup }; const arg = { host: '0.0.0.0', port, lookup: () => {} };`, `try {
+      cjs.isIP = () => 0; cjs._normalizeArgs = () => [{ host: '127.0.0.1', port }, undefined]; dns.lookup = () => {}; syncBuiltinESMExports();
+      return await attempt(arg);
+    } finally { cjs.isIP = saved.isIP; cjs._normalizeArgs = saved.normalize; dns.lookup = saved.lookup; syncBuiltinESMExports(); }`)));
 });
