@@ -5,6 +5,7 @@
 
 import { readFileSync } from 'node:fs';
 import { resolve } from 'node:path';
+import { pathToFileURL } from 'node:url';
 
 const root = resolve(import.meta.dirname, '..');
 const read = (p) => readFileSync(resolve(root, p), 'utf8');
@@ -36,7 +37,8 @@ for (const [file, needles] of users) {
   for (const needle of needles) if (!text.includes(needle)) failures.push(`${file} does not contain ${needle}`);
   if (/agent:\s*false/.test(text.replace(/\/\/[^\n]*/g, '').replace(/'[^'\n]*agent: false[^'\n]*'/g, ''))) failures.push(`${file} uses agent: false`);
 }
-if (!read('pipeline/package.json').includes('tsx src/loopback-fetch.test.ts')) failures.push('pipeline npm test does not run loopback-fetch.test.ts');
+const pipelineList = await import(pathToFileURL(resolve(root, 'pipeline/scripts/test-list.mjs')).href);
+if (!pipelineList.TESTS.includes('src/loopback-fetch.test.ts') || !read('pipeline/package.json').includes('"test": "node scripts/run-tests.mjs"')) failures.push('pipeline npm test does not run loopback-fetch.test.ts');
 
 if (failures.length > 0) {
   console.error('FAIL loopback fetch contract');

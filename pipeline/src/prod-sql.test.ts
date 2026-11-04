@@ -508,7 +508,7 @@ const wrapper = await import(pathToFileURL(resolve(REPOSITORY_ROOT, 'scripts/run
 {
   const copy = mkdtempSync(resolve(tmpdir(), 'tnbs-stop-drift-'));
   try {
-    const listed = spawnSync('git', ['ls-files', '-z', '--', 'scripts', 'supabase', 'docs', 'pipeline/src', 'pipeline/package.json', '.github'], { cwd: REPOSITORY_ROOT, encoding: 'utf8' }).stdout.split('\0').filter(Boolean);
+    const listed = spawnSync('git', ['ls-files', '-z', '--', 'scripts', 'supabase', 'docs', 'pipeline/src', 'pipeline/scripts', 'pipeline/package.json', '.github'], { cwd: REPOSITORY_ROOT, encoding: 'utf8' }).stdout.split('\0').filter(Boolean);
     for (const f of listed) { mkdirSync(dirname(resolve(copy, f)), { recursive: true }); copyFileSync(resolve(REPOSITORY_ROOT, f), resolve(copy, f)); }
     const target = resolve(copy, 'pipeline/src/prod-sql.ts');
     const original = readFileSync(target, 'utf8').replace(/\r\n/g, '\n');

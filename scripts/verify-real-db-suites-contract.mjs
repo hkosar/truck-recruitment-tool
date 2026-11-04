@@ -5,6 +5,7 @@
 
 import { existsSync, readFileSync, readdirSync } from 'node:fs';
 import { resolve } from 'node:path';
+import { pathToFileURL } from 'node:url';
 import { EXCLUDED_FILES, SUITE_FILES, SUITE_IDS, nonLoopbackConnectionVars, pgServerOptions, scrubbedEnv, tlsClusterFiles } from './run-real-db-suites.mjs';
 
 const root = resolve(import.meta.dirname, '..');
@@ -69,7 +70,8 @@ check('the runner\'s own admin client has a connect time limit and loopback host
 check('the stray-session SQL touches only client sessions other than its own', /where backend_type = 'client backend' and pid <> pg_backend_pid\(\)"/.test(code) && (code.match(/pg_terminate_backend/g) ?? []).length === 1);
 // The PKI-guard test needs no database, so it is not run here; it must stay in the pipeline npm test chain (review t40, N5).
 const pipelineTest = JSON.parse(readFileSync(resolve(root, 'pipeline/package.json'), 'utf8')).scripts?.test ?? '';
-check('the PKI-guard test stays in the pipeline npm test chain', pipelineTest.split('&&').map((c) => c.trim()).includes('tsx src/retention-secure-a3-pki-guard.test.ts'));
+const pipelineList = await import(pathToFileURL(resolve(root, 'pipeline/scripts/test-list.mjs')).href);
+check('the PKI-guard test stays in the pipeline npm test chain', pipelineTest === 'node scripts/run-tests.mjs' && pipelineList.TESTS.includes('src/retention-secure-a3-pki-guard.test.ts'));
 check('the PKI guard refuses a folder name ending in a dot or a space', /hasTrailingDotOrSpaceSegment\(dir\)/.test(readFileSync(resolve(root, 'pipeline/src/retention-secure-a3-pki-guard.ts'), 'utf8')));
 check('executeSuite removes colour codes, then masks, then classifies', /const out = mask\(stripAnsi\(`\$\{r\.stdout \?\? ''\}\$\{r\.stderr \?\? ''\}`\)\);/.test(code) && /classifyOutcome\(\{ kind: s\.kind, r, out,/.test(code));
 check('the time limit comes from resolveTimeoutMs, and the vite build has one too', /const timeoutMs = resolveTimeoutMs\(process\.env\.RDB_SUITES_TIMEOUT_MS\);/.test(code) && /'build', '--configLoader', 'runner'\], \{ cwd: join\(root, 'app'\), timeout: timeoutMs \}\)/.test(code));

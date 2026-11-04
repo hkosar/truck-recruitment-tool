@@ -7,6 +7,7 @@
 import { createHash } from 'node:crypto';
 import { existsSync, readFileSync } from 'node:fs';
 import { resolve } from 'node:path';
+import { pathToFileURL } from 'node:url';
 
 const root = resolve(import.meta.dirname, '..');
 const PRODUCTION_REF = 'ejrfobddnojbijzrjbii';
@@ -540,7 +541,8 @@ if (wrapper) {
 }
 if (pkg) {
   for (const required of ['"prod-sql": "tsx src/prod-sql-runner.ts"', '"test:prod-sql": "tsx src/prod-sql.test.ts"']) if (!pkg.includes(required)) failures.push(`pipeline/package.json is missing: ${required}`);
-  if (!/"test": "[^"]*tsx src\/prod-sql\.test\.ts/.test(pkg)) failures.push('pipeline/package.json: the "test" script (and so "build" and "verify") must run src/prod-sql.test.ts');
+  const { TESTS: pipelineTests } = await import(pathToFileURL(resolve(root, 'pipeline/scripts/test-list.mjs')).href);
+  if (!pkg.includes('"test": "node scripts/run-tests.mjs"') || !pipelineTests.includes('src/prod-sql.test.ts')) failures.push('pipeline/package.json: the "test" script (and so "build" and "verify") must run src/prod-sql.test.ts');
 }
 if (!ci || !ci.includes('node scripts/verify-prod-sql-runner-contract.mjs')) failures.push('.github/workflows/ci.yml must run scripts/verify-prod-sql-runner-contract.mjs next to the first-manager contract');
 if (!safety || !safety.includes('verify-prod-sql-runner-contract.mjs')) failures.push('.github/ci/repository-safety.sh must run verify-prod-sql-runner-contract.mjs');

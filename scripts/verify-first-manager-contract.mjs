@@ -5,6 +5,7 @@
 
 import { existsSync, readFileSync } from 'node:fs';
 import { resolve } from 'node:path';
+import { pathToFileURL } from 'node:url';
 
 const root = resolve(import.meta.dirname, '..');
 const PRODUCTION_REF = 'ejrfobddnojbijzrjbii';
@@ -197,7 +198,8 @@ if (unit) {
 // Wiring: the behavioural tests and this contract must run in the normal offline verification route.
 if (pkg) {
   const m = pkg.match(/"test": "([^"]*)"/);
-  if (!m || !m[1].includes('tsx src/smoke-tests.ts') || !m[1].includes('tsx src/first-manager-bootstrap.test.ts')) failures.push('pipeline/package.json: "test" (which "build" and "verify" run) must run the smoke tests and the first-manager offline tests');
+  const { SMOKE, TESTS } = await import(pathToFileURL(resolve(root, 'pipeline/scripts/test-list.mjs')).href);
+  if (!m || m[1] !== 'node scripts/run-tests.mjs' || SMOKE !== 'src/smoke-tests.ts' || !TESTS.includes('src/first-manager-bootstrap.test.ts')) failures.push('pipeline/package.json: "test" (which "build" and "verify" run) must be the run-tests.mjs runner, and its list must run the smoke tests and the first-manager offline tests');
   const b = pkg.match(/"build": "([^"]*)"/); const v = pkg.match(/"verify": "([^"]*)"/);
   if (!b || !b[1].includes('npm test') || !v || !v[1].includes('npm run build')) failures.push('pipeline/package.json: "build" must run "npm test" and "verify" must run "npm run build"');
 }
