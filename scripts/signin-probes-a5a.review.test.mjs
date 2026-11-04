@@ -247,6 +247,48 @@ test('origin blanking applies only to the opaque-string rule: a user part glued 
   assert.equal(j(`see ${long}/signin`, long), null);
 });
 
+test('TRUCKRECRU-47: the app address in capitals, without the scheme, or percent-encoded is not a false leak', () => {
+  const base = { ok: true, status: 200, headers: {}, cookies: [], body: '' };
+  const j = (body, app, headers = {}) => judge({ ...base, body, headers }, { status: [200] }, app);
+  const long = 'https://twisted-nail-recruiter-app-staging-2.onrender.com';
+  const host = 'twisted-nail-recruiter-app-staging-2.onrender.com';
+  assert.equal(j(`go ${long.toUpperCase()}/signin`, long), null, 'capitals');
+  assert.equal(j('go https://Twisted-Nail-Recruiter-App-Staging-2.onrender.com/x', long), null, 'mixed case');
+  assert.equal(j(`host ${host}`, long), null, 'no scheme');
+  assert.equal(j(`host ${host.toUpperCase()}`, long), null, 'no scheme, capitals');
+  assert.equal(j(`next=${encodeURIComponent(`${long}/signin`)}`, long), null, 'percent-encoded');
+  assert.equal(j(`next=${encodeURIComponent(`${long}/signin`).toLowerCase()}`, long), null, 'percent-encoded, lower-case hex');
+  assert.equal(j('', long, { location: `/signin?next=${encodeURIComponent(`${long}/signin`)}` }), null, 'percent-encoded in a header');
+  // Without --app-origin the rule is unchanged.
+  assert.equal(j(`go ${long.toUpperCase()}/signin`), 'leak');
+  assert.equal(j(`host ${host}`), 'leak');
+});
+
+test('TRUCKRECRU-47: the wider recognition hides no real leak', () => {
+  const base = { ok: true, status: 200, headers: {}, cookies: [], body: '' };
+  const j = (body, app, headers = {}) => judge({ ...base, body, headers }, { status: [200] }, app);
+  const long = 'https://twisted-nail-recruiter-app-staging-2.onrender.com';
+  const host = 'twisted-nail-recruiter-app-staging-2.onrender.com';
+  const tok = 'abcdef0123456789abcdef0123456789zz';
+  const enc = encodeURIComponent(long);
+  assert.equal(j(`${long.toUpperCase()}@EVIL.EXAMPLE.COM`, long), 'leak', 'capitals + user part');
+  assert.equal(j(`${long.toUpperCase()}%40Evil.Example.COM`, long), 'leak', 'capitals + %40');
+  assert.equal(j(`${host}@evil.example.com`, long), 'leak', 'bare host + user part');
+  assert.equal(j(`${enc}@evil.example.com`, long), 'leak', 'encoded origin + user part');
+  assert.equal(j(`${enc}%40evil.example.com`, long), 'leak', 'encoded origin + %40');
+  assert.equal(j(`${long.toUpperCase()}/${tok}`, long), 'leak', 'capitals + token');
+  assert.equal(j(`${host}/${tok}`, long), 'leak', 'bare host + token');
+  assert.equal(j(`${host}${tok}`, long), 'leak', 'bare host glued to token');
+  assert.equal(j(`${tok}${host}`, long), 'leak', 'token glued before bare host');
+  assert.equal(j(`${enc}${tok}`, long), 'leak', 'encoded origin glued to token');
+  assert.equal(j(`${enc}/x?token=${'A'.repeat(20)}`, long), 'leak', 'encoded origin + token=');
+  assert.equal(j('', long, { location: `${long.toUpperCase()}@evil.example.com` }), 'leak', 'header, capitals + user part');
+  assert.equal(j('', long, { 'x-debug': tok }), 'leak', 'opaque string in another header');
+  // A short host must not eat letters out of a longer secret (bare host is blanked as a whole token only).
+  assert.equal(j('http://abcdef0123456789abcdef0123456789z', 'http://a'), 'leak', 'one-letter host inside a secret');
+  assert.equal(j('xxxxxxxx0123456789a0123456789xxxxxxxxxxxx', 'http://a'), 'leak', 'one-letter host inside a secret (2)');
+});
+
 test('review note 2: the usage example in the script header names --app-origin', async () => {
   const { readFileSync } = await import('node:fs');
   const text = readFileSync(join(dirname(fileURLToPath(import.meta.url)), 'signin-probes-a5a.mjs'), 'utf8');
