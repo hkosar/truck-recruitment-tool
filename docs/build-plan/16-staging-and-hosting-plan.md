@@ -449,8 +449,8 @@ Exactly these paths are covered:
   same `isStaging2PoolerAddress` rule and the fixed message
   `refusing (staging2_pooler_required): DATABASE_URL must use the Supabase session pooler host on port 5432, not the direct database host`.
 
-Not covered: test-only code that builds its own client (`*.test.ts`, `scripts/a3-build-test-db.mjs`,
-`scripts/run-real-db-suites.mjs`; loopback only), and an injected client in the retention step's
+Not covered: test-only code that builds its own client (`*.test.ts`, `app/server/testing/test-db.ts`,
+`scripts/a3-build-test-db.mjs`, `scripts/run-real-db-suites.mjs`; loopback only), and an injected client in the retention step's
 `deps.createClient` test hook. `scripts/seed-auth-users.ts` and `cleanup-auth-users.ts` use the Auth
 admin API over HTTPS, not a database connection. The runner prints only
 `{"msg":"staging-sql.refused","refusal":"staging2_pooler_required"}`: never the URL, host, user,
