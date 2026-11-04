@@ -178,7 +178,7 @@ async function main(): Promise<void> {
   //          pg_signal_backend. The pre-check's answer is compared with what the server itself allows (ground truth, rolled back).
   {
     const pw = randomBytes(18).toString('hex');
-    const ZZ = ['zz_t76_none', 'zz_t76_alter', 'zz_t76_full'] as const;
+    const ZZ = ['zz_t76_none', 'zz_t76_alter', 'zz_t76_full', 'zz_t76_noadmin'] as const;
     const as = (role: string) => { const u = new URL(ADMIN!); u.username = role; u.password = pw; return u.toString(); };
     const appLogin = async () => (await q("select rolcanlogin, rolpassword is not null as haspw from pg_authid where rolname = 'recruiter_app'")).rows[0] as { rolcanlogin: boolean; haspw: boolean };
     const sqlState = async (role: string, fn: (c: pg.Client) => Promise<unknown>): Promise<string> => {
@@ -196,7 +196,10 @@ async function main(): Promise<void> {
       await q(`create role zz_t76_full login createrole password '${pw}'`);
       await q('grant recruiter_app to zz_t76_alter, zz_t76_full with admin true, inherit false, set false');
       await q('grant pg_signal_backend to zz_t76_full');
-      for (const role of ['zz_t76_none', 'zz_t76_alter'] as const) {
+      // noadmin = CREATEROLE + pg_signal_backend but NO grant on recruiter_app, while zz_t76_alter/zz_t76_full hold ADMIN OPTION on it (T89, review note N3).
+      await q(`create role zz_t76_noadmin login createrole password '${pw}'`);
+      await q('grant pg_signal_backend to zz_t76_noadmin');
+      for (const role of ['zz_t76_none', 'zz_t76_alter', 'zz_t76_noadmin'] as const) {
         const before = await fingerprint();
         const r = await run('retire-app-credentials', as(role));
         const login = await appLogin();
@@ -205,10 +208,11 @@ async function main(): Promise<void> {
         check(`retire pre-check (real PG16), login ${role}: refused retire_privileges_missing; only begin read only, the pre-check, rollback were sent`, idOf(r) === 'retire_privileges_missing' && JSON.stringify(r.sent) === JSON.stringify(['begin read only', RETIRE_PRIVILEGE_SQL, 'rollback']));
         check(`retire pre-check (real PG16), login ${role}: nothing committed: recruiter_app is still LOGIN with its password, the open app connection still works, roles/grants/functions/users fingerprint unchanged`, login.rolcanlogin === true && login.haspw === true && appStillWorks && (await fingerprint()) === before);
         const lines = Object.fromEntries(r.events.filter((e) => e.msg === 'staging-sql.retire_privilege').map((e) => [e.check, e.answer]));
-        check(`retire pre-check (real PG16), login ${role}: fixed yes/no lines only (end sessions no; change login ${role === 'zz_t76_alter' ? 'yes' : 'no'}), no partial-state line`, onlyFixedEvents(r) && lines.can_end_app_sessions === 'no' && lines.can_alter_app_role === (role === 'zz_t76_alter' ? 'yes' : 'no') && lines.login_superuser === 'no' && ev(r, 'staging-sql.retire_partial_state') === undefined);
+        check(`retire pre-check (real PG16), login ${role}: fixed yes/no lines only (end sessions ${role === 'zz_t76_noadmin' ? 'yes' : 'no'}; change login ${role === 'zz_t76_alter' ? 'yes' : 'no'}), no partial-state line`, onlyFixedEvents(r) && lines.can_end_app_sessions === (role === 'zz_t76_noadmin' ? 'yes' : 'no') && lines.can_alter_app_role === (role === 'zz_t76_alter' ? 'yes' : 'no') && lines.login_superuser === 'no' && ev(r, 'staging-sql.retire_partial_state') === undefined);
       }
       // Ground truth from the server itself (each inside a transaction that is rolled back; the terminate is aimed at a throwaway connection).
       check('retire pre-check ground truth: zz_t76_none may not change recruiter_app (42501)', (await alterTruth('zz_t76_none')) === '42501');
+      check('retire pre-check ground truth: zz_t76_noadmin (CREATEROLE + pg_signal_backend, no ADMIN OPTION on recruiter_app) may not change it (42501)', (await alterTruth('zz_t76_noadmin')) === '42501');
       check('retire pre-check ground truth: zz_t76_alter may change recruiter_app (CREATEROLE + ADMIN OPTION; rolled back)', (await alterTruth('zz_t76_alter')) === 'ok' && (await appLogin()).rolcanlogin === true);
       check('retire pre-check ground truth: zz_t76_alter may not end a recruiter_app session (42501)', (await sqlState('zz_t76_alter', (c) => c.query('select pg_terminate_backend(pid) from pg_stat_activity where usename = $1', ['recruiter_app']))) === '42501');
       const spare = new pg.Client({ connectionString: APP });

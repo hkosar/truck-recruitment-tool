@@ -157,6 +157,15 @@ for (const [name, o] of [['a live session', { checks: { backends: '0', live_sess
 // ---- 3b. T76: the read-only privilege pre-check (PostgreSQL 16 rules) runs before NOLOGIN; a missing privilege commits nothing.
 check('retire pre-check: the select reads only catalogue views and functions and writes nothing', !/\b(insert|update|delete|create|alter|drop|grant|revoke|set_config|nextval)\b/i.test(RETIRE_PRIVILEGE_SQL)
   && /pg_catalog\.pg_has_role\(l\.oid, 'pg_signal_backend', 'USAGE'\)/.test(RETIRE_PRIVILEGE_SQL) && /pg_catalog\.pg_auth_members m where m\.roleid = a\.oid and m\.admin_option/.test(RETIRE_PRIVILEGE_SQL) && /where l\.rolname = current_user$/.test(RETIRE_PRIVILEGE_SQL));
+// T89 (review note N3): the whole permission-check text is pinned, so a change to any correlation in it (the ADMIN OPTION holder tied to the login,
+// USAGE vs MEMBER, the current_user filter) fails here even where no real-DB login would notice.
+check('retire pre-check: the exact permission-check query text is pinned', RETIRE_PRIVILEGE_SQL === `select l.rolsuper as login_superuser, l.rolcreaterole as login_createrole,
+  pg_catalog.pg_has_role(l.oid, 'pg_signal_backend', 'USAGE') as login_signal_backend,
+  coalesce(pg_catalog.pg_has_role(l.oid, a.oid, 'USAGE'), false) as login_app_role_privileges,
+  exists (select 1 from pg_catalog.pg_auth_members m where m.roleid = a.oid and m.admin_option and pg_catalog.pg_has_role(l.oid, m.member, 'MEMBER')) as login_app_role_admin_option,
+  a.oid is not null as app_role_exists, coalesce(a.rolsuper, false) as app_role_superuser, coalesce(a.rolreplication, false) as app_role_replication
+from pg_catalog.pg_roles l left join pg_catalog.pg_roles a on a.rolname = 'recruiter_app'
+where l.rolname = current_user`);
 const decide = (over: Record<string, unknown>) => decideRetirePrivileges({ rows: [{ ...PRIV_OK, ...over }] });
 const SUPER_ONLY = { login_superuser: true, login_createrole: false, login_signal_backend: false, login_app_role_privileges: false, login_app_role_admin_option: false };
 for (const [name, over, end, alter] of [
