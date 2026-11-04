@@ -1,4 +1,4 @@
-// Tests scripts/net-guard.mjs in child node processes. No network: each child first loads a stub that replaces
+﻿// Tests scripts/net-guard.mjs in child node processes. No network: each child first loads a stub that replaces
 // Socket.prototype.connect (it only records and fails), THEN the guard, so the guard sits on top of the stub and a guard that
 // failed to block would reach the stub, never a real socket.
 // Run: node --test scripts/net-guard.test.mjs
@@ -156,4 +156,41 @@ process.exit(0);
   const r = spawnSync(process.execPath, ['--import', guardUrl, file], { env: { ...process.env, NODE_OPTIONS: '', NET_GUARD_LOG: join(dir, 'plain.log') }, encoding: 'utf8', timeout: 30_000 });
   assert.equal(r.status, 0, r.stderr);
   assert.deepEqual(JSON.parse(r.stdout.trim().split('\n').pop()), { httpGet: 'hi', netConnect: 'connected', netConnectObject: 'connected', fetch: 'hi' });
+});
+
+// The array shapes Socket.prototype.connect can be handed (review of 9279f3b, N1 to N7). Target 0.0.0.0 only. The guard must decide as Node does
+// (Node's real mark, truthy, inherited counts) and give Node a fresh array, so no later read of the caller's array can change the destination.
+const arrayCase = (setup, tail = 'return await attempt(arg);') => `const net = await import('node:net');
+  const mark = Object.getOwnPropertySymbols(net._normalizeArgs([]))[0];
+  const port = 9;
+  ${setup}
+  ${tail}`;
+const blockedZero = (r) => { assert.equal(r.out, 'net-guard blocked a connect to 0.0.0.0'); assert.equal(r.reached, 0); assert.equal(r.log.trim().split('\n').length, 1); };
+const sawNoZero = (r) => { assert.equal(r.reached, 1); assert.equal(r.seen[0].host, '127.0.0.1'); assert.equal(r.out, 'stub: reached the real connect'); };
+
+test('N1: a plain array with own host and port is read as options, as Node reads it, and is blocked', () => {
+  blockedZero(run(arrayCase(`const arg = Object.assign([], { host: '0.0.0.0', port });`)));
+});
+test('N2: an array with a fake own Symbol("normalizedArgs") is not Node\'s array; its own host is what counts', () => {
+  blockedZero(run(arrayCase(`const arg = Object.assign([{ host: '127.0.0.1', port }], { host: '0.0.0.0', port }); arg[Symbol('normalizedArgs')] = true;`)));
+});
+test('N3: Node\'s real mark set to false does not make an array pre-normalised', () => {
+  blockedZero(run(arrayCase(`const arg = Object.assign([{ host: '127.0.0.1', port }], { host: '0.0.0.0', port }); arg[mark] = false;`)));
+});
+test('N4: a mark inherited from the array\'s prototype counts, and [0] is checked', () => {
+  blockedZero(run(arrayCase(`const proto = Object.create(Array.prototype); proto[mark] = true; const arg = [{ host: '0.0.0.0', port }, null]; Object.setPrototypeOf(arg, proto);`)));
+});
+test('N5: Array.prototype pollution with the mark makes plain arrays pre-normalised, and [0] is checked (cleaned up in finally)', () => {
+  blockedZero(run(arrayCase(`const arg = [{ host: '0.0.0.0', port }, null];`, `Array.prototype[mark] = true; try { return await attempt(arg); } finally { delete Array.prototype[mark]; }`)));
+});
+test('N6: an accessor at [0] is read once; Node is handed a fresh array holding the checked value', () => {
+  sawNoZero(run(arrayCase(`let reads = 0; const arg = []; arg[mark] = true;
+    Object.defineProperty(arg, 0, { get() { return { host: reads++ === 0 ? '127.0.0.1' : '0.0.0.0', port }; }, set() {}, enumerable: true });`)));
+});
+test('N7: a Proxy over a marked array whose [0] flips and ignores writes: Node is handed a fresh array holding the checked value', () => {
+  sawNoZero(run(arrayCase(`let reads = 0; const base = [null, null]; base[mark] = true;
+    const arg = new Proxy(base, { get(t, k) { return k === '0' ? { host: reads++ === 0 ? '127.0.0.1' : '0.0.0.0', port } : t[k]; }, set() { return true; } });`)));
+});
+test('N8: an honest net._normalizeArgs array with 0.0.0.0 is blocked', () => {
+  blockedZero(run(arrayCase(`const arg = net._normalizeArgs([{ host: '0.0.0.0', port }]);`)));
 });

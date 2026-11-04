@@ -1,10 +1,10 @@
-// TEST TOOLING ONLY (never imported by product code). A preload that keeps a test process on loopback:
+﻿// TEST TOOLING ONLY (never imported by product code). A preload that keeps a test process on loopback:
 //   - blocks every Socket.connect to an address that is not loopback (127.x, ::1, ::ffff:127.x), and every name except localhost
 //     unless the caller supplied its own resolver;
 //   - checks the answers of every resolver, the system one (for localhost) and caller-supplied ones (test stubs): an answer that is
 //     empty, not an address or not loopback is refused, and what net receives is a plain copy of the checked answer. A hook on
 //     connect alone cannot do this, because net dials AFTER the lookup without coming back through connect.
-// NOT covered: dns.lookup / dns.resolve* called directly, UDP (dgram), and a caller-supplied resolver is run for whatever name net
+// NOT covered: native handles (process.binding('tcp_wrap') and other internal bindings), dns.lookup / dns.resolve* called directly, UDP (dgram), and a caller-supplied resolver is run for whatever name net
 // passes it (only its answers are checked). Anyone who needs "no name lookups at all" must not rely on this guard alone.
 // A blocked connect fails the socket with "net-guard blocked ..." and adds one line to the log (stderr, or the file in NET_GUARD_LOG).
 //
@@ -16,7 +16,7 @@
 
 import { lookup as systemLookup } from 'node:dns';
 import { appendFileSync } from 'node:fs';
-import { isIP, Socket } from 'node:net';
+import { _normalizeArgs, isIP, Socket } from 'node:net';
 
 const isLoopbackAddress = (a) => {
   if (typeof a !== 'string') return false;
@@ -47,31 +47,25 @@ const guardLookup = (resolve) => (name, opts, done) => {
   });
 };
 
-// Node's own rules (lib/net.js): a string is a pipe path only when it is not a number (Number(s) >= 0 makes it a port).
-const isPipeName = (s) => typeof s === 'string' && !(Number(s) >= 0);
-// The array net.connect/createConnection hand to socket.connect carries an internal symbol; without it Node reads the array as options.
-const isNormalizedArgs = (a) => Array.isArray(a) && Object.getOwnPropertySymbols(a).some((s) => s.description === 'normalizedArgs');
+// Node's own mark on the [options, cb] array that net.connect/http hand to socket.connect (lib/net.js reads it as args[0][mark]).
+const kNormalized = Object.getOwnPropertySymbols(_normalizeArgs([]))[0];
 
 const realConnect = Socket.prototype.connect;
 Socket.prototype.connect = function (...args) {
-  // Same argument shapes as net: ([options, cb]) from net.connect and http, (options, cb), (port, host, cb), (path, cb).
-  const normalized = isNormalizedArgs(args[0]);
-  if (Array.isArray(args[0]) && !normalized) return realConnect.apply(this, args); // Node reads a plain array as options with no port or path: it throws
-  const first = normalized ? args[0][0] : args[0];
-  const given = first !== null && typeof first === 'object';
-  if (!given && isPipeName(first)) return realConnect.apply(this, args); // a pipe or Unix socket path: not the network
+  // Decide exactly as Node does: an array is Node's own pre-normalised [options, cb] only when args[0][mark] is truthy (an inherited
+  // mark counts); anything else (options, (port, host, cb), (path, cb), a plain array read as options) goes through Node's own rules.
+  const norm = Array.isArray(args[0]) && args[0][kNormalized] ? args[0] : _normalizeArgs(args);
+  const first = norm[0]; // each slot is read ONCE
+  const callback = norm[1];
+  // Whatever happens next, Node gets a fresh array built here with Node's mark; the caller's array is never written to or reused.
+  const send = (options) => { const out = [options, callback]; out[kNormalized] = true; return realConnect.call(this, out); };
+  if (first === null || (typeof first !== 'object' && typeof first !== 'function')) return send(first); // Node fails on this by itself
   // Read each option Node uses to choose a destination ONCE, and hand Node a copy holding exactly those values.
-  const source = given ? first : { host: typeof args[1] === 'string' ? args[1] : undefined, port: first };
-  const path = source.path;
-  const rawHost = source.host;
-  const rawLookup = source.lookup;
-  const options = { ...source, path, host: rawHost, lookup: rawLookup };
-  const callback = args.at(-1);
-  const send = () => {
-    if (normalized) { args[0][0] = options; return realConnect.apply(this, args); } // keep Node's own array (and its mark)
-    return typeof callback === 'function' && args.length > 1 ? realConnect.call(this, options, callback) : realConnect.call(this, options);
-  };
-  if (path) return send();
+  const path = first.path;
+  const rawHost = first.host;
+  const rawLookup = first.lookup;
+  const options = { ...first, path, host: rawHost, lookup: rawLookup };
+  if (path) return send(options); // a pipe or Unix socket path: not the network
   const host = rawHost || 'localhost'; // the text Node uses: brackets are NOT stripped ("[::1]" is a name to Node, not an address)
   const supplied = typeof rawLookup === 'function';
   const allowed = typeof host !== 'string' ? true /* Node throws on a non-string host before any connect */ : isIP(host) ? isLoopbackAddress(host) : host.toLowerCase() === 'localhost' || supplied;
@@ -81,5 +75,5 @@ Socket.prototype.connect = function (...args) {
     return this;
   }
   if (typeof host === 'string' && !isIP(host)) options.lookup = guardLookup(supplied ? rawLookup : systemLookup); // net looks a name up; an address it does not
-  return send();
+  return send(options);
 };
