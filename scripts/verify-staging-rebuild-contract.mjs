@@ -198,6 +198,13 @@ if (runner && rehearsal) {
     "new RunnerRefusal('retire_backends_not_gone'", "new RunnerRefusal('retire_checks_failed'", "new RunnerRefusal('identity_alignment_failed'", "new RunnerRefusal('identity_alignment_result_missing'", "await client.query('rollback')", "IDENTITY_ALIGNMENT_SHA256 = '50e6cd622a4d34fe9d50c53ef95205f517af82e8b365878a29a878d4b73d48e1'"]) {
     if (!rehearsal.includes(required)) failures.push(`backout-rehearsal.ts is missing: ${required}`);
   }
+  // T76: the read-only privilege pre-check runs before step 2 (the first commit), and any failure after step 2 prints the partial-state line.
+  const precheckAt = rehearsal.indexOf('await runRetirePrivilegeCheck(client);');
+  const nologinAt = rehearsal.indexOf("await single('nologin');");
+  if (precheckAt < 0 || nologinAt < 0 || precheckAt > nologinAt) failures.push('backout-rehearsal.ts: runRetirePrivilegeCheck must run before the NOLOGIN step');
+  for (const required of ["await client.query('begin read only');", "new RunnerRefusal('retire_privileges_missing'", "msg: 'staging-sql.retire_partial_state', app_login: 'off', restore_with: 'set-app-password'"]) {
+    if (!rehearsal.includes(required)) failures.push(`backout-rehearsal.ts is missing: ${required}`);
+  }
   const rehearsalCode = rehearsal.replace(/\/\*[\s\S]*?\*\/|\/\/.*$/gm, '');
   for (const forbidden of [/process\.env/, /new\s+pg\.Client/, /from 'pg'/, /rejectUnauthorized/, /\bssl\s*:/, /\binsert\s+into\b/i, /\bupdate\s+\w+\s+set\b/i, /\bdelete\s+from\b/i, /\bdrop\s+\w+/i, /\balter\s+role\b/i, /\bgrant\b/i]) {
     if (forbidden.test(rehearsalCode)) failures.push(`backout-rehearsal.ts must not contain ${forbidden} (its only SQL is the pinned files and one catalogue select; the client comes from the runner)`);
@@ -209,13 +216,15 @@ if (runner && rehearsal) {
   }
   const refusalsSrc = read('pipeline/src/refusals.ts') ?? '';
   const wrapperSrc = read('scripts/run-with-secrets.mjs') ?? '';
-  for (const id of ['retire_backends_not_gone', 'retire_checks_failed', 'identity_alignment_failed', 'identity_alignment_result_missing', 'backout_window_not_expected']) {
+  for (const id of ['retire_backends_not_gone', 'retire_checks_failed', 'retire_privileges_missing', 'identity_alignment_failed', 'identity_alignment_result_missing', 'backout_window_not_expected']) {
     if (!refusalsSrc.includes(`'${id}'`)) failures.push(`refusals.ts REFUSAL_IDS is missing ${id}`);
     if (!wrapperSrc.includes(`'${id}'`)) failures.push(`run-with-secrets.mjs REFUSAL_IDS is missing ${id}`);
   }
   for (const line of [
     "'staging-sql.backout_window': { action: oneOf(['window-on', 'window-off']), email_edits_paused: (v) => bool(v) || v === 'unknown', rows: int, ok: bool }",
     "'staging-sql.retire_terminate': { backends_signalled: int }",
+    "'staging-sql.retire_privilege_precheck': { ok: bool }",
+    "'staging-sql.retire_partial_state': { app_login: oneOf(['off']), restore_with: oneOf(['set-app-password']) }",
     "'staging-sql.retire_checks': { ok: bool, backends: count, live_sessions: count, live_links: count, live_codes: count, email_mismatches: count }",
     "'staging-sql.identity_alignment': { ok: bool, approved_profiles: count, email_mismatches: count, approved_profiles_without_auth_user: count, approved_auth_email_null: count }",
     "'staging-sql.postgis_placement': { schema: oneOf(['public', 'extensions', 'other', 'absent']) }",
@@ -224,7 +233,7 @@ if (runner && rehearsal) {
     if (!wrapperSrc.includes(line)) failures.push(`run-with-secrets.mjs is missing: ${line}`);
   }
   const doc16text = (read('docs/build-plan/16-staging-and-hosting-plan.md') ?? '').replace(/\s+/g, ' ');
-  for (const phrase of ['`retire-app-credentials`', 'RETIRE TNBS STAGING APP CREDENTIALS', '`identity-alignment-check`', 'RUN TNBS IDENTITY ALIGNMENT CHECK', '`postgis-placement`', 'RECORD TNBS POSTGIS PLACEMENT', 'staging-sql.backout_window']) {
+  for (const phrase of ['`retire-app-credentials`', 'RETIRE TNBS STAGING APP CREDENTIALS', '`identity-alignment-check`', 'RUN TNBS IDENTITY ALIGNMENT CHECK', '`postgis-placement`', 'RECORD TNBS POSTGIS PLACEMENT', 'staging-sql.backout_window', 'retire_privileges_missing', 'staging-sql.retire_partial_state']) {
     if (!doc16text.includes(phrase)) failures.push(`doc 16 must list the backout-rehearsal action/phrase/event: ${phrase}`);
   }
 }

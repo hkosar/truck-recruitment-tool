@@ -80,10 +80,80 @@ export const RETIRE_ZERO_READS_REQUIRED = 3;
 const done = (label: string) => console.log(JSON.stringify({ msg: 'staging-sql.step_done', step: label }));
 const labelOf = (name: RetireStageName) => RETIRE_STAGES.find((s) => s.name === name)!.label;
 
+// ---------------------------------------------------------------------------------------------------------------------------------
+// Privilege pre-check (T50 review open question (8)1). Runs read-only, before step 2 (the first step that commits), so a runner login
+// that PostgreSQL would refuse at a later step is refused here with nothing changed. The rules are PostgreSQL 16's own:
+//   - ending a session (docs/16 "Server Signaling Functions", pg_cancel_backend / pg_terminate_backend): "allowed if the calling role
+//     is a member of the role whose backend is being canceled or the calling role has privileges of pg_signal_backend, however only
+//     superusers can cancel superuser backends" (the server checks has_privs_of_role, which is pg_has_role(..., 'USAGE'));
+//   - changing recruiter_app's LOGIN and password (docs/16 ALTER ROLE): "Superusers can change any of these settings for any role ...
+//     Non-superuser roles having CREATEROLE privilege can change most of these properties, but only for non-superuser and
+//     non-replication roles for which they have been granted ADMIN OPTION" (CREATEROLE is the login's own attribute; ADMIN OPTION may
+//     come through any role the login is a member of, as the server's is_admin_of_role walks memberships).
+// Catalogue functions and views only (pg_roles, pg_auth_members, pg_has_role); nothing is written and nothing about a role is printed
+// except the fixed yes/no answers below.
+
+export const RETIRE_PRIVILEGE_SQL = `select l.rolsuper as login_superuser, l.rolcreaterole as login_createrole,
+  pg_catalog.pg_has_role(l.oid, 'pg_signal_backend', 'USAGE') as login_signal_backend,
+  coalesce(pg_catalog.pg_has_role(l.oid, a.oid, 'USAGE'), false) as login_app_role_privileges,
+  exists (select 1 from pg_catalog.pg_auth_members m where m.roleid = a.oid and m.admin_option and pg_catalog.pg_has_role(l.oid, m.member, 'MEMBER')) as login_app_role_admin_option,
+  a.oid is not null as app_role_exists, coalesce(a.rolsuper, false) as app_role_superuser, coalesce(a.rolreplication, false) as app_role_replication
+from pg_catalog.pg_roles l left join pg_catalog.pg_roles a on a.rolname = 'recruiter_app'
+where l.rolname = current_user`;
+
+export const RETIRE_PRIVILEGE_CHECKS = [
+  'login_superuser', 'login_createrole', 'login_signal_backend', 'login_app_role_privileges', 'login_app_role_admin_option',
+  'app_role_exists', 'app_role_superuser', 'app_role_replication', 'can_end_app_sessions', 'can_alter_app_role',
+] as const;
+export type RetirePrivilegeCheck = (typeof RETIRE_PRIVILEGE_CHECKS)[number];
+export interface RetirePrivilegeDecision { answers: Record<RetirePrivilegeCheck, boolean>; ok: boolean }
+
+/** Pure: the PostgreSQL 16 decision from the pre-check's one row. A missing row or any value that is not a boolean counts as "no". */
+export function decideRetirePrivileges(result: unknown): RetirePrivilegeDecision {
+  const r = lastResult(result);
+  const row = Array.isArray(r?.rows) && r!.rows.length === 1 ? r!.rows[0]! : {};
+  const yes = (k: string): boolean => row[k] === true;
+  const superuser = yes('login_superuser');
+  const exists = yes('app_role_exists');
+  // A superuser target is checked as "yes" unless the value is exactly false, so an unreadable answer never lets a non-superuser through.
+  const appSuper = row.app_role_superuser !== false;
+  const appReplication = row.app_role_replication !== false;
+  const canEnd = exists && (superuser || (!appSuper && (yes('login_signal_backend') || yes('login_app_role_privileges'))));
+  const canAlter = exists && (superuser || (yes('login_createrole') && yes('login_app_role_admin_option') && !appSuper && !appReplication));
+  const answers: Record<RetirePrivilegeCheck, boolean> = {
+    login_superuser: superuser, login_createrole: yes('login_createrole'), login_signal_backend: yes('login_signal_backend'),
+    login_app_role_privileges: yes('login_app_role_privileges'), login_app_role_admin_option: yes('login_app_role_admin_option'),
+    app_role_exists: exists, app_role_superuser: appSuper, app_role_replication: appReplication, can_end_app_sessions: canEnd, can_alter_app_role: canAlter,
+  };
+  return { answers, ok: canEnd && canAlter };
+}
+
+/** Runs the pre-check in a read-only transaction that is always rolled back, prints one fixed yes/no line per check, refuses if a needed privilege is missing. */
+export async function runRetirePrivilegeCheck(client: RebuiltSqlClient): Promise<void> {
+  let result: unknown;
+  await client.query('begin read only');
+  try {
+    result = await client.query(RETIRE_PRIVILEGE_SQL);
+  } catch (err) {
+    console.error(JSON.stringify({ msg: 'staging-sql.step_failed', step: 'retire-privilege-precheck' }));
+    throw err;
+  } finally {
+    await client.query('rollback');
+  }
+  const decision = decideRetirePrivileges(result);
+  for (const check of RETIRE_PRIVILEGE_CHECKS) console.log(JSON.stringify({ msg: 'staging-sql.retire_privilege', check, answer: decision.answers[check] ? 'yes' : 'no' }));
+  if (!decision.ok) {
+    console.error(JSON.stringify({ msg: 'staging-sql.retire_privilege_precheck', ok: false }));
+    throw new RunnerRefusal('retire_privileges_missing', 'retire-app-credentials: the runner login lacks a PostgreSQL 16 privilege a later step needs (ending recruiter_app sessions or changing its login); nothing was changed');
+  }
+  console.log(JSON.stringify({ msg: 'staging-sql.retire_privilege_precheck', ok: true }));
+}
+
 /**
- * Runs the file's steps 2-6 in order on one connection. Step 2 commits on its own; step 3 ends the app role's connections (cannot be
- * undone) and then polls until the count reads 0 three times in a row (else refuses: nothing after it runs); step 4 is the file's own
- * transaction (any failure is rolled back); steps 5 and 6 are the read checks, all of which must be 0.
+ * Runs the privilege pre-check (read-only), then the file's steps 2-6 in order on one connection. Step 2 commits on its own; step 3
+ * ends the app role's connections (cannot be undone) and then polls until the count reads 0 three times in a row (else refuses: nothing
+ * after it runs); step 4 is the file's own transaction (any failure is rolled back); steps 5 and 6 are the read checks, all of which
+ * must be 0. Any failure after step 2 also prints staging-sql.retire_partial_state: the app login stays OFF until set-app-password.
  */
 export async function runRetireAppCredentials(client: RebuiltSqlClient, stages: RetireStages, opts: RetireOptions = {}): Promise<void> {
   const sleep = opts.sleep ?? ((ms: number) => new Promise<void>((r) => setTimeout(r, ms)));
@@ -99,9 +169,24 @@ export async function runRetireAppCredentials(client: RebuiltSqlClient, stages: 
     }
   };
 
+  await runRetirePrivilegeCheck(client);
+
   await single('nologin');
   done(labelOf('nologin'));
 
+  try {
+    await retireAfterNologin(client, stages, single, { sleep, now, interval, maxWait });
+  } catch (err) {
+    // NOLOGIN (and the null password) committed in step 2 and stays: one fixed line so the operator knows the app cannot log in.
+    console.error(JSON.stringify({ msg: 'staging-sql.retire_partial_state', app_login: 'off', restore_with: 'set-app-password' }));
+    throw err;
+  }
+}
+
+async function retireAfterNologin(
+  client: RebuiltSqlClient, stages: RetireStages, single: (name: RetireStageName) => Promise<unknown>,
+  { sleep, now, interval, maxWait }: { sleep: (ms: number) => Promise<void>; now: () => number; interval: number; maxWait: number },
+): Promise<void> {
   const terminated = lastResult(await single('terminate'));
   // Only how many backends were signalled; the pids and per-row flags are dropped here.
   console.log(JSON.stringify({ msg: 'staging-sql.retire_terminate', backends_signalled: Array.isArray(terminated?.rows) ? terminated!.rows.length : 0 }));

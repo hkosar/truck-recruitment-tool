@@ -11,7 +11,8 @@
 
 import assert from 'node:assert/strict';
 import pg from 'pg';
-import { POSTGIS_PLACEMENT_SQL, RETIRE_STAGES, classifyPostgisPlacement } from './backout-rehearsal.js';
+import { randomBytes } from 'node:crypto';
+import { POSTGIS_PLACEMENT_SQL, RETIRE_PRIVILEGE_SQL, RETIRE_STAGES, classifyPostgisPlacement, runRetirePrivilegeCheck } from './backout-rehearsal.js';
 import { RunnerRefusal } from './refusals.js';
 import { REBUILT_STAGING_SQL_ACTIONS, executeRebuiltSqlPlan, planRebuiltSqlRun } from './staging-rebuilt.js';
 
@@ -52,11 +53,11 @@ async function main(): Promise<void> {
   const check = (name: string, ok: boolean) => { assert.ok(ok, name); console.log(`PASS ${name}`); n += 1; };
 
   /** The real planner and executor for one action; the client is a loopback pg client that records what was sent. */
-  async function run(action: string): Promise<Outcome> {
+  async function run(action: string, connectionString: string = ADMIN!): Promise<Outcome> {
     const plan = planRebuiltSqlRun({ action, dbUrl: STAGING_URL, confirm: REBUILT_STAGING_SQL_ACTIONS[action]!.confirmation, recordedRebuiltRef: REF });
     const sent: string[] = [];
     const events: Array<Record<string, unknown>> = [];
-    const client = new pg.Client({ connectionString: ADMIN });
+    const client = new pg.Client({ connectionString });
     const wrapped = {
       on: (e: 'error', l: (err: Error) => void) => client.on(e, l),
       connect: () => client.connect(),
@@ -171,6 +172,70 @@ async function main(): Promise<void> {
   appClient.on('error', () => { appError = true; });
   await appClient.connect();
   check('retire: an open recruiter_app connection works before the run', (await appClient.query('select current_user as u')).rows[0].u === 'recruiter_app');
+  // ---- 4a. T76: the privilege pre-check on real PostgreSQL 16 roles. Three throwaway logins (cluster-wide zz_ roles, dropped below):
+  //          none = no privilege at all; alter = CREATEROLE + ADMIN OPTION on recruiter_app but no pg_signal_backend and no inherited
+  //          privileges of recruiter_app (INHERIT FALSE), so it may change the login but may NOT end its sessions; full = alter plus
+  //          pg_signal_backend. The pre-check's answer is compared with what the server itself allows (ground truth, rolled back).
+  {
+    const pw = randomBytes(18).toString('hex');
+    const ZZ = ['zz_t76_none', 'zz_t76_alter', 'zz_t76_full', 'zz_t76_noadmin'] as const;
+    const as = (role: string) => { const u = new URL(ADMIN!); u.username = role; u.password = pw; return u.toString(); };
+    const appLogin = async () => (await q("select rolcanlogin, rolpassword is not null as haspw from pg_authid where rolname = 'recruiter_app'")).rows[0] as { rolcanlogin: boolean; haspw: boolean };
+    const sqlState = async (role: string, fn: (c: pg.Client) => Promise<unknown>): Promise<string> => {
+      const c = new pg.Client({ connectionString: as(role) });
+      opened.push(c);
+      c.on('error', () => undefined);
+      await c.connect();
+      try { await fn(c); return 'ok'; } catch (e) { return String((e as { code?: string }).code); } finally { await c.query('rollback').catch(() => undefined); await c.end(); }
+    };
+    const alterTruth = (role: string) => sqlState(role, async (c) => { await c.query('begin'); await c.query('alter role recruiter_app nologin password null'); });
+    try {
+      for (const r of ZZ) await q(`drop role if exists ${r}`);
+      await q(`create role zz_t76_none login password '${pw}'`);
+      await q(`create role zz_t76_alter login createrole password '${pw}'`);
+      await q(`create role zz_t76_full login createrole password '${pw}'`);
+      await q('grant recruiter_app to zz_t76_alter, zz_t76_full with admin true, inherit false, set false');
+      await q('grant pg_signal_backend to zz_t76_full');
+      // noadmin = CREATEROLE + pg_signal_backend but NO grant on recruiter_app, while zz_t76_alter/zz_t76_full hold ADMIN OPTION on it (T89, review note N3).
+      await q(`create role zz_t76_noadmin login createrole password '${pw}'`);
+      await q('grant pg_signal_backend to zz_t76_noadmin');
+      for (const role of ['zz_t76_none', 'zz_t76_alter', 'zz_t76_noadmin'] as const) {
+        const before = await fingerprint();
+        const r = await run('retire-app-credentials', as(role));
+        const login = await appLogin();
+        let appStillWorks = false;
+        try { appStillWorks = (await appClient.query('select current_user as u')).rows[0].u === 'recruiter_app'; } catch { /* stays false */ }
+        check(`retire pre-check (real PG16), login ${role}: refused retire_privileges_missing; only begin read only, the pre-check, rollback were sent`, idOf(r) === 'retire_privileges_missing' && JSON.stringify(r.sent) === JSON.stringify(['begin read only', RETIRE_PRIVILEGE_SQL, 'rollback']));
+        check(`retire pre-check (real PG16), login ${role}: nothing committed: recruiter_app is still LOGIN with its password, the open app connection still works, roles/grants/functions/users fingerprint unchanged`, login.rolcanlogin === true && login.haspw === true && appStillWorks && (await fingerprint()) === before);
+        const lines = Object.fromEntries(r.events.filter((e) => e.msg === 'staging-sql.retire_privilege').map((e) => [e.check, e.answer]));
+        check(`retire pre-check (real PG16), login ${role}: fixed yes/no lines only (end sessions ${role === 'zz_t76_noadmin' ? 'yes' : 'no'}; change login ${role === 'zz_t76_alter' ? 'yes' : 'no'}), no partial-state line`, onlyFixedEvents(r) && lines.can_end_app_sessions === (role === 'zz_t76_noadmin' ? 'yes' : 'no') && lines.can_alter_app_role === (role === 'zz_t76_alter' ? 'yes' : 'no') && lines.login_superuser === 'no' && ev(r, 'staging-sql.retire_partial_state') === undefined);
+      }
+      // Ground truth from the server itself (each inside a transaction that is rolled back; the terminate is aimed at a throwaway connection).
+      check('retire pre-check ground truth: zz_t76_none may not change recruiter_app (42501)', (await alterTruth('zz_t76_none')) === '42501');
+      check('retire pre-check ground truth: zz_t76_noadmin (CREATEROLE + pg_signal_backend, no ADMIN OPTION on recruiter_app) may not change it (42501)', (await alterTruth('zz_t76_noadmin')) === '42501');
+      check('retire pre-check ground truth: zz_t76_alter may change recruiter_app (CREATEROLE + ADMIN OPTION; rolled back)', (await alterTruth('zz_t76_alter')) === 'ok' && (await appLogin()).rolcanlogin === true);
+      check('retire pre-check ground truth: zz_t76_alter may not end a recruiter_app session (42501)', (await sqlState('zz_t76_alter', (c) => c.query('select pg_terminate_backend(pid) from pg_stat_activity where usename = $1', ['recruiter_app']))) === '42501');
+      const spare = new pg.Client({ connectionString: APP });
+      opened.push(spare);
+      spare.on('error', () => undefined);
+      await spare.connect();
+      const sparePid = (await spare.query('select pg_backend_pid() as p')).rows[0].p as number;
+      check('retire pre-check ground truth: zz_t76_full may end a recruiter_app session (pg_signal_backend; aimed at a spare app connection only)', (await sqlState('zz_t76_full', (c) => c.query('select pg_terminate_backend($1::int, 5000)', [sparePid]))) === 'ok');
+      await spare.end().catch(() => undefined);
+      const full = new pg.Client({ connectionString: as('zz_t76_full') });
+      opened.push(full);
+      await full.connect();
+      const lines: Array<Record<string, unknown>> = [];
+      const log = console.log; const err = console.error;
+      console.log = (...x: unknown[]) => { lines.push(JSON.parse(String(x[0])) as Record<string, unknown>); }; console.error = console.log;
+      let fullError: unknown;
+      try { await runRetirePrivilegeCheck(full as never); } catch (e) { fullError = e; } finally { console.log = log; console.error = err; await full.end(); }
+      check('retire pre-check (real PG16), login zz_t76_full (non-superuser, CREATEROLE + ADMIN OPTION + pg_signal_backend): proceeds (ok true), matching the ground truth', fullError === undefined && lines.some((l) => l.msg === 'staging-sql.retire_privilege_precheck' && l.ok === true)
+        && lines.some((l) => l.check === 'can_end_app_sessions' && l.answer === 'yes') && lines.some((l) => l.check === 'can_alter_app_role' && l.answer === 'yes') && (await appLogin()).rolcanlogin === true);
+    } finally {
+      for (const r of ZZ) await q(`drop role if exists ${r}`);
+    }
+  }
   {
     const started = Date.now();
     const r = await run('retire-app-credentials');
@@ -194,11 +259,33 @@ async function main(): Promise<void> {
     check('retire: step 4: the seeded live credentials were revoked (row counts printed as numbers) and none is left live', rev !== undefined && rev.sessions === seeded.s && rev.links === seeded.l && rev.recovery_sets === seeded.rs && rev.codes === seeded.c && after.s === 0 && after.l === 0 && after.rs === 0 && after.c === 0);
     check('retire: step 4 wrote its audit event in the same transaction', Number((await q("select count(*) as n from internal.auth_events where kind = 'backout_credentials_retired'")).rows[0].n) === 1);
     check('retire: steps 5 and 6: every check reads 0', JSON.stringify(ev(r, 'staging-sql.retire_checks')) === JSON.stringify({ msg: 'staging-sql.retire_checks', ok: true, backends: 0, live_sessions: 0, live_links: 0, live_codes: 0, email_mismatches: 0 }));
-    check('retire: the runner sent exactly the pinned file\'s statements (no extra statement)', r.sent.filter((s) => !/recruiter_app_backends/.test(s)).length === 12 - 1);
+    check('retire: the runner sent the read-only pre-check first, then exactly the pinned file\'s statements (no extra statement)', JSON.stringify(r.sent.slice(0, 3)) === JSON.stringify(['begin read only', RETIRE_PRIVILEGE_SQL, 'rollback']) && r.sent.slice(3).filter((s) => !/recruiter_app_backends/.test(s)).length === 12 - 1);
   }
   {
     const twice = await run('retire-app-credentials');
     check('retire: a second run is safe: nothing left to end or revoke, checks still 0', twice.error === undefined && ev(twice, 'staging-sql.retire_terminate')?.backends_signalled === 0 && JSON.stringify(ev(twice, 'staging-sql.retire_revoked')) === JSON.stringify({ msg: 'staging-sql.retire_revoked', sessions: 0, links: 0, recovery_sets: 0, codes: 0 }) && ev(twice, 'staging-sql.retire_checks')?.ok === true);
+  }
+  {
+    // T76 / N3: a step after NOLOGIN forced to fail (a trigger makes step 4's audit insert raise). recruiter_app's login is given back
+    // first (the same statement scripts/run-real-db-suites.mjs uses between suites), so the run itself is what turns it off again.
+    const restore = (await q('select format($f$alter role recruiter_app login password %L$f$, $1::text) as s', [decodeURIComponent(new URL(APP).password)])).rows[0].s as string;
+    await q(restore);
+    const loginBefore = (await q("select rolcanlogin from pg_roles where rolname = 'recruiter_app'")).rows[0].rolcanlogin as boolean;
+    const auditBefore = Number((await q("select count(*) as n from internal.auth_events where kind = 'backout_credentials_retired'")).rows[0].n);
+    await q("create function internal.zz_t76_fail() returns trigger language plpgsql as $f$ begin raise exception 'zz t76 forced failure'; end $f$");
+    await q("create trigger zz_t76_fail before insert on internal.auth_events for each row when (new.kind = 'backout_credentials_retired') execute function internal.zz_t76_fail()");
+    try {
+      const failed = await run('retire-app-credentials');
+      const loginAfter = (await q("select rolcanlogin from pg_roles where rolname = 'recruiter_app'")).rows[0].rolcanlogin as boolean;
+      check('retire partial state (real PG16): the pre-check passed and NOLOGIN committed, then step 4 failed and was rolled back (no new audit row)', failed.error !== undefined && ev(failed, 'staging-sql.retire_privilege_precheck')?.ok === true
+        && failed.events.some((e) => e.msg === 'staging-sql.step_done' && e.step === 'retire-step-2-nologin') && JSON.stringify(ev(failed, 'staging-sql.step_failed')) === JSON.stringify({ msg: 'staging-sql.step_failed', step: 'retire-step-4-revoke' })
+        && Number((await q("select count(*) as n from internal.auth_events where kind = 'backout_credentials_retired'")).rows[0].n) === auditBefore);
+      check('retire partial state (real PG16): the app login was ON before and is OFF now, and exactly one fixed line says so (restore with set-app-password)', loginBefore === true && loginAfter === false && onlyFixedEvents(failed)
+        && failed.events.filter((e) => e.msg === 'staging-sql.retire_partial_state').length === 1 && JSON.stringify(ev(failed, 'staging-sql.retire_partial_state')) === JSON.stringify({ msg: 'staging-sql.retire_partial_state', app_login: 'off', restore_with: 'set-app-password' }));
+    } finally {
+      await q('drop trigger if exists zz_t76_fail on internal.auth_events');
+      await q('drop function if exists internal.zz_t76_fail()');
+    }
   }
   {
     // A live session that appears between step 4 and step 5 is caught by the checks (a trigger on the audit insert adds one inside step 4's transaction).
