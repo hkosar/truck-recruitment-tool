@@ -1,4 +1,5 @@
 import { useState } from 'react';
+import { resolveDisposition } from '../lib/contactDisposition';
 import { DISPOSITIONS_BY_CHANNEL } from '../types/domain';
 import type { Channel, ContactDisposition } from '../types/domain';
 
@@ -49,7 +50,7 @@ export function LogContactPanel({
         <label className="text-[10px] font-bold uppercase text-text-muted">Next step<input value={nextSteps} onChange={(event) => setNextSteps(event.target.value)} placeholder="Optional follow-up" className="mt-1 w-full border border-border-strong bg-surface px-3 py-2 text-xs normal-case text-text" /></label>
       </div>
       <label className="mt-2 block text-[10px] font-bold uppercase text-text-muted">Notes<textarea value={notes} onChange={(event) => setNotes(event.target.value)} rows={2} placeholder="What happened?" className="mt-1 w-full border border-border-strong bg-surface px-3 py-2 text-xs normal-case text-text" /></label>
-      <button type="button" disabled={submitting} onClick={() => onSubmit({ channel, disposition, notes: notes.trim(), nextSteps: nextSteps.trim() })} className="mt-3 bg-accent px-4 py-2 text-xs font-bold text-accent-ink disabled:opacity-50">{submitting ? 'Saving…' : `Save ${channel}`}</button>
+      <button type="button" disabled={submitting} onClick={() => onSubmit({ channel, disposition: resolveDisposition(channel, disposition), notes: notes.trim(), nextSteps: nextSteps.trim() })} className="mt-3 bg-accent px-4 py-2 text-xs font-bold text-accent-ink disabled:opacity-50">{submitting ? 'Saving…' : `Save ${channel}`}</button>
     </section>
   );
 }

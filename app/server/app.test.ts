@@ -3,6 +3,7 @@ import { createApp, DEFAULT_TIMING, type AppConfig, type StaticFiles } from './a
 import { APP_CSRF_COOKIE, CONFIRM_COOKIE, CONFIRM_CSRF_COOKIE, SESSION_COOKIE } from './auth/cookies';
 import { csrfTokenForCookie } from './auth/csrf';
 import { keyedHash } from './auth/keys';
+import { CONTACT_DISPOSITIONS_BY_CHANNEL } from './core/contact-dispositions';
 import { RPC_SPECS } from './core/rpc-spec';
 import { Lifecycle } from './core/lifecycle';
 import { NotPermittedError, OutcomeUnknownError, RefusedError, UnavailableError, type AppResponse } from './core/types';
@@ -580,5 +581,48 @@ describe('continuations and shutdown (doc 15 §4.1, unit level)', () => {
     expect(closed).toBe(true);
     expect(env.lifecycle.trackRequest(async () => 1)).toBeUndefined();
     expect([...env.auth.links.values()][0].status).toBe('pending');
+  });
+});
+
+describe('POST /api/contact-logs outcome check', () => {
+  const B = '44444444-4444-4444-8444-444444444444';
+  const post = (env: ReturnType<typeof setup>, who: ReturnType<typeof signedIn>, extra: Record<string, unknown>) =>
+    apiPost(env, who, '/api/contact-logs', { dot_number: 1, batch_id: B, channel: 'call', notes: null, next_steps: null, ...extra });
+
+  it('answers 400 with a fixed message for a missing, empty or wrong-channel outcome, and never reaches the store', async () => {
+    const env = setup();
+    const who = signedIn(env);
+    const before = env.data.calls.length;
+    const bodies: Array<Record<string, unknown>> = [
+      {},
+      { disposition: '' },
+      { disposition: null },
+      { disposition: 'sent' },
+      { disposition: 'bounced', channel: 'text' },
+      { disposition: 'connected', channel: 'email' },
+      { disposition: 'nonsense' },
+      { disposition: 'constructor' },
+    ];
+    const seen = new Set<string>();
+    for (const extra of bodies) {
+      const res = await post(env, who, extra);
+      expect(res.status, JSON.stringify(extra)).toBe(400);
+      seen.add(String(res.body));
+    }
+    expect(seen.size).toBe(1);
+    expect([...seen][0]).toContain('Choose an outcome that fits the contact channel.');
+    expect(env.data.calls.length).toBe(before);
+  });
+
+  it('passes every allowed outcome through unchanged', async () => {
+    const env = setup();
+    const who = signedIn(env);
+    for (const [channel, list] of Object.entries(CONTACT_DISPOSITIONS_BY_CHANNEL)) {
+      for (const disposition of list) {
+        expect((await post(env, who, { channel, disposition })).status).toBe(200);
+        expect(env.data.calls.at(-1)).toMatchObject({ op: 'logContact' });
+        expect((env.data.calls.at(-1) as { args: unknown[] }).args).toContainEqual(expect.objectContaining({ channel, disposition }));
+      }
+    }
   });
 });
