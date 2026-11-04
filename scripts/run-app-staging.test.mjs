@@ -89,6 +89,42 @@ test('refusal messages never contain a secret value', () => {
   }
 });
 
+// TRUCKRECRU-49 review B1: staging-2 only through the session pooler (target-guard.ts isStaging2PoolerAddress). FAKE URLs only.
+const POOLER_REFUSAL = /^refusing \(staging2_pooler_required\): DATABASE_URL must use the Supabase session pooler host on port 5432, not the direct database host$/;
+const nonPoolerUrls = () => [
+  `postgresql://recruiter_app.${STG2}:Fake-Pw-Zz9981-only@db.${STG2}.supabase.co:5432/postgres`,
+  `postgresql://recruiter_app.${STG2}:Fake-Pw-Zz9981-only@a.b.pooler.supabase.com:5432/postgres`,
+];
+
+test('B1: refuses the direct staging-2 host and a multi-label pooler host with staging2_pooler_required; no part of the URL in the message', () => {
+  for (const url of nonPoolerUrls()) {
+    try { buildAppEnv({ ...goodEnv(), DATABASE_URL: url }, 8788); assert.fail('must refuse'); } catch (e) {
+      assert.match(String(e.message), POOLER_REFUSAL);
+      for (const v of ['Fake-Pw-Zz9981-only', STG2, 'supabase.co', 'pooler.supabase.com', 'postgresql://', 'a.b.']) assert.ok(!String(e.message).includes(v), `message leaks ${v}`);
+    }
+  }
+  // The real pooler shape (one plain label) is still accepted.
+  assert.equal(buildAppEnv(goodEnv(), 8788).DATABASE_URL, dbUrl('recruiter_app', STG2));
+});
+
+test('B1: main refuses a non-pooler staging-2 URL before starting anything and prints nothing', async () => {
+  const dir = mkdtempSync(join(tmpdir(), 'run-app-staging-test-'));
+  try {
+    builtApp(dir);
+    writeFileSync(join(dir, 'dist-server', 'main.js'), "process.stdout.write('started\\n');");
+    for (const url of nonPoolerUrls()) {
+      const out = sink();
+      const err = sink();
+      let started = false;
+      await assert.rejects(main({ argv: [], env: { ...goodEnv(), DATABASE_URL: url }, stdout: out.stream, stderr: err.stream, appDir: dir, onChild: () => { started = true; } }), (e) => POOLER_REFUSAL.test(e.message));
+      assert.equal(started, false);
+      assert.equal(out.text() + err.text(), '');
+    }
+  } finally {
+    rmSync(dir, { recursive: true, force: true });
+  }
+});
+
 test('refuses EMAIL_MODE other than test, a non-localhost bind and any SendGrid setting (any capitalisation)', () => {
   refused({ ...goodEnv(), EMAIL_MODE: 'production' }, /EMAIL_MODE must be test/);
   refused({ ...goodEnv(), EMAIL_MODE: 'live' }, /EMAIL_MODE must be test/);

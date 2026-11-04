@@ -1,6 +1,10 @@
 import { types } from 'node:util';
 import pg from 'pg';
 import { DbTlsRefusal, dbSecurityFields, scramOnlyClient } from './db-tls.js';
+import { refuseStaging2UnlessPooler } from './staging2-pooler.js';
+
+/** Re-exported: staging2-pooler.ts holds the one copy (no pg import, so the app server uses it too). */
+export { refuseStaging2UnlessPooler };
 
 /**
  * pg clients and pools for the pipeline and its runners, with the hosted-database policy of db-tls.ts: a hosted target
@@ -54,7 +58,9 @@ function checkedExtra<T extends object>(extra: T): T {
   return copy as unknown as T;
 }
 
+/** Every pg client and pool in the pipeline is configured here, so the staging-2 pooler check (staging2-pooler.ts) runs before any client exists. */
 export function securePgConfig(target: PgTargetFields): pg.ClientConfig {
+  refuseStaging2UnlessPooler(target);
   const { ssl, enableChannelBinding } = dbSecurityFields(target.host);
   return { host: target.host, port: target.port, user: target.user, password: target.password, database: target.database, ssl, enableChannelBinding } as pg.ClientConfig;
 }

@@ -430,6 +430,37 @@ The server sets session values with `SET LOCAL` / `set_config(…, true)` inside
 and uses no named prepared statements; the runner requires 5432. **Use session mode (5432).**
 This settles doc 14's open item E16 from documentation.
 
+**Staging-2 is reached only through the pooler (code check, TRUCKRECRU-49).** The pinned database
+root was verified only against the staging-2 pooler chain (`supabase-root-ca.ts`), never against the
+direct `db.<ref>.supabase.co` host. So the code refuses, before any client is built, any target that
+points at staging-2 (its ref in the host, a `<role>.<staging-2 ref>` user, or a parsed staging-2 ref)
+unless the host is `<one label>.pooler.supabase.com` and the port is 5432. The allowed shape is the
+one constant `STAGING2_POOLER_ADDRESS` in `pipeline/src/target-guard.ts`; the exact real pooler label
+is not verified from the repository, so only its shape is checked. Refusal id: `staging2_pooler_required`.
+Exactly these paths are covered:
+- every pg client and pool in `pipeline/src` (`pg-secure.ts` `securePgConfig`, used by
+  `newSecurePgClient`, `newSecurePgPool` and the retention step's client config), which calls
+  `refuseStaging2UnlessPooler` in `pipeline/src/staging2-pooler.ts`;
+- the staging-2 planners (rebuilt runner, role-password, first-manager staging), so a plan-only run
+  refuses too;
+- the app server's `Database` (`app/server/db/database.ts`), before it builds its `pg.Pool`, with the
+  same function and the same id (a hosted staging-2 app is covered wherever it runs);
+- the local app launcher `scripts/run-app-staging.mjs` (doc 19), before it starts anything, with the
+  same `isStaging2PoolerAddress` rule and the fixed message
+  `refusing (staging2_pooler_required): DATABASE_URL must use the Supabase session pooler host on port 5432, not the direct database host`.
+
+Not covered: test-only code that builds its own client (`*.test.ts`, `scripts/a3-build-test-db.mjs`,
+`scripts/run-real-db-suites.mjs`; loopback only), and an injected client in the retention step's
+`deps.createClient` test hook. `scripts/seed-auth-users.ts` and `cleanup-auth-users.ts` use the Auth
+admin API over HTTPS, not a database connection. The runner prints only
+`{"msg":"staging-sql.refused","refusal":"staging2_pooler_required"}`: never the URL, host, user,
+password or project ref. Other projects are not affected. At the pipeline clients and the app's
+`Database` only, local test databases (a loopback host, or a name ending in the reserved `.invalid`
+test domain) are left to the existing TLS rules; no planner and not the launcher accepts either,
+because only Supabase hosts parse. Tests: `pipeline/src/staging2-pooler-guard.test.ts`,
+`app/server/db/database.staging2-pooler.test.ts`, `scripts/run-app-staging.test.mjs` (B1 cases);
+`scripts/verify-app-staging-contract.mjs` checks that all three paths still call the one rule.
+
 **Connection budget.** Per instance: auth pool max 4 + data pool max 10 = **14**; during a
 deploy two instances overlap = **28**; plus maintenance (1) and operator/runner sessions (≤ 2).
 Micro limits: **60** direct database connections, **200** pooler clients

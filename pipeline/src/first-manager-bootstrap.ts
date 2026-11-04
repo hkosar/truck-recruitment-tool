@@ -1,6 +1,7 @@
 import { createHash } from 'node:crypto';
 import { RunnerRefusal } from './refusals.js';
 import { APPROVED_OWNER_EMAIL } from './owner-bootstrap.js';
+import { refuseStaging2UnlessPooler } from './pg-secure.js';
 import { requireRecordedRebuiltRef, type RebuiltSqlClient } from './staging-rebuilt.js';
 import { RECORDED_PROJECT_REFS, parseSupabaseDbTarget, type SupabaseDbTarget } from './target-guard.js';
 import { REQUIRED_FUNCTION_SIGNATURES } from './first-manager-required-functions.js';
@@ -77,6 +78,7 @@ export function planFirstManager(input: {
     throw new RunnerRefusal('target_not_recorded_production', 'A production first-manager run only targets the recorded production project');
   }
   if (db.port !== 5432) throw new RunnerRefusal('port_must_be_5432', 'First-manager bootstrap requires a session connection on port 5432 (not the 6543 transaction pooler)');
+  if (target === 'staging') refuseStaging2UnlessPooler(db);
   const wanted = input.action === 'first-manager-check' ? FIRST_MANAGER_CHECK_CONFIRMATION : FIRST_MANAGER_CREATE_CONFIRMATION[target];
   if (input.confirm !== wanted) {
     throw new RunnerRefusal('confirmation_required', `First-manager bootstrap requires --confirm="${wanted}" for ${input.action} on ${target}`);

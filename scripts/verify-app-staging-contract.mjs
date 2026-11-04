@@ -132,9 +132,17 @@ need(/ALLOWED_EXTRA_OPTIONS/.test(pgSecure) && /checkedExtra\(extra\)/.test(pgSe
 need(/'keepAlive', 'keepAliveInitialDelayMillis'\]/.test(pgSecure) && /key === 'keepAlive' && typeof value !== 'boolean'\) refuseOverride\(\)/.test(pgSecure)
   && /key === 'keepAliveInitialDelayMillis' && \(typeof value !== 'number' \|\| !Number\.isSafeInteger\(value\) \|\| value < 0 \|\| value > MAX_KEEPALIVE_INITIAL_DELAY_MS\)\) refuseOverride\(\)/.test(pgSecure) && /MAX_KEEPALIVE_INITIAL_DELAY_MS = 600_000;/.test(pgSecure),
   'pg-secure.ts must allow keepAlive only as a boolean and keepAliveInitialDelayMillis only as a whole number 0 to 600000');
+// Staging-2 only through the session pooler (TRUCKRECRU-49): one rule (target-guard.ts isStaging2PoolerAddress) and one refusal
+// (staging2-pooler.ts, no pg import so the app can use it), applied by the launcher, the app's Database and every pipeline client.
+const poolerGuard = read('pipeline/src/staging2-pooler.ts');
+const appDb = read('app/server/db/database.ts');
+need(importsOf(poolerGuard) === ['./db-tls.js', './refusals.js', './target-guard.js'].sort().join() && /namesRebuiltStaging\(target\) && !isStaging2PoolerAddress\(target\)/.test(poolerGuard) && /'staging2_pooler_required'/.test(poolerGuard), 'staging2-pooler.ts must hold the one staging-2 pooler refusal (isStaging2PoolerAddress, staging2_pooler_required) and import only db-tls, refusals and target-guard');
+need(/from '\.\.\/pipeline\/src\/target-guard\.ts'/.test(src) && /if \(!isStaging2PoolerAddress\(target\)\) throw new Error\('refusing \(staging2_pooler_required\): [^'$`]*'\)/.test(src), 'launcher must refuse a non-pooler staging-2 DATABASE_URL with the shared isStaging2PoolerAddress rule, id staging2_pooler_required, fixed text');
+need(/from '\.\.\/\.\.\/\.\.\/pipeline\/src\/staging2-pooler'/.test(appDb) && /refuseStaging2UnlessPooler\(target\);/.test(appDb) && appDb.indexOf('refuseStaging2UnlessPooler(target);') < appDb.indexOf('new pg.Pool('), 'app Database must call refuseStaging2UnlessPooler before it builds its pg.Pool');
+need(/from '\.\/staging2-pooler\.js'/.test(pgSecure) && /securePgConfig\(target: PgTargetFields\): pg\.ClientConfig \{\n  refuseStaging2UnlessPooler\(target\);/.test(pgSecure), 'pg-secure.ts securePgConfig must call refuseStaging2UnlessPooler first');
 need(doc.includes(PIN_SHA) && doc.includes('Production has NOT been checked') && doc.includes('prod-ca-2021.crt') && !doc.includes('No root is pinned yet'), 'doc 19 must record the pinned fingerprint, its provenance and that production is unchecked');
 // Tests cover every refusal; the doc carries the names and the command.
-for (const phrase of ['only the staging Doppler scope', 'is missing or empty', 'production project', 'does not target the recorded staging-2', 'recruiter_app login', 'session-mode port', 'EMAIL_MODE must be test', 'HOST must be 127', 'SendGrid', '<masked>']) {
+for (const phrase of ['only the staging Doppler scope', 'is missing or empty', 'production project', 'does not target the recorded staging-2', 'recruiter_app login', 'session-mode port', 'EMAIL_MODE must be test', 'HOST must be 127', 'SendGrid', '<masked>', 'staging2_pooler_required']) {
   need(test.includes(phrase), `test file does not cover: ${phrase}`);
 }
 for (const n of listed) need(doc.includes(`\`${n}\``), `doc 19 does not name ${n}`);

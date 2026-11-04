@@ -12,6 +12,7 @@ import { NotFoundError, NotPermittedError, OutcomeUnknownError, RefusedError, Un
 import { clientUsable, isDefiniteCommitRefusal, isRollbackTag } from './commit-outcome';
 import { dbConnectionFieldsFromUrl, dbSecurityFields, scramOnlyClient } from '../../../pipeline/src/db-tls';
 import type { PinnedRootCa } from '../../../pipeline/src/supabase-root-ca';
+import { refuseStaging2UnlessPooler } from '../../../pipeline/src/staging2-pooler';
 
 export interface Tx {
   query<R extends QueryResultRow = Record<string, unknown>>(sql: string, params?: unknown[]): Promise<{ rows: R[]; rowCount: number }>;
@@ -153,6 +154,9 @@ export class Database {
     // target gets verify-full TLS against the pinned root only and the constructor throws if none is pinned; every target
     // is SCRAM-SHA-256 only, so a server asking for a cleartext or MD5 password gets none (pipeline/src/db-tls.ts).
     const target = dbConnectionFieldsFromUrl(options.connectionString);
+    // Staging-2 only through the Supabase session pooler (pipeline/src/staging2-pooler.ts, refusal staging2_pooler_required,
+    // fixed text). Only a target that names staging-2 is checked; every other database is unaffected.
+    refuseStaging2UnlessPooler(target);
     const security = options.trustedRootCas ? dbSecurityFields(target.host, options.trustedRootCas) : dbSecurityFields(target.host);
     this.pool = new pg.Pool({
       host: target.host,
