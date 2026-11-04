@@ -141,15 +141,15 @@ function decodeAt(text) {
 // So the exact origin text is blanked out for the opaque-string rule (the last shape) ONLY. Every other shape (token=, cookie, email, UUID, JWT,
 // bearer) is scanned on the raw text, so a secret that starts inside the origin text (for example "<origin>@evil.example") is still caught.
 // The origin is also recognised in capitals, percent-encoded (scheme://host as %3A%2F%2F), and as the bare host[:port] without the scheme.
-// The bare host is blanked only as a whole token (no token character right before or after it), so it can never eat characters out of a longer secret.
+// Every form is blanked only as a whole token (no token character right before or after it), so it can never eat characters out of a longer secret.
 const escapeRe = (s) => s.replace(/[.*+?^${}()|[\]\\]/g, '\\$&');
 const TOKEN_CHAR = '[A-Za-z0-9_-]';
 const withoutOrigin = (text, appOrigin) => {
   if (appOrigin === undefined) return text;
-  const forms = [appOrigin, encodeURIComponent(appOrigin)].map(escapeRe).join('|');
+  const forms = '(?:' + [appOrigin, encodeURIComponent(appOrigin)].map(escapeRe).join('|') + ')';
   const bareHost = escapeRe(appOrigin.replace(/^https?:\/\//i, ''));
   return text
-    .replace(new RegExp(forms, 'gi'), ' ')
+    .replace(new RegExp(`(?<!${TOKEN_CHAR})${forms}(?!${TOKEN_CHAR})`, 'gi'), ' ')
     .replace(new RegExp(`(?<!${TOKEN_CHAR})${bareHost}(?!${TOKEN_CHAR})`, 'gi'), ' ');
 };
 const OPAQUE_SHAPE = LEAK_SHAPES[LEAK_SHAPES.length - 1];

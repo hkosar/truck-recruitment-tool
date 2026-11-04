@@ -287,6 +287,17 @@ test('TRUCKRECRU-47: the wider recognition hides no real leak', () => {
   // A short host must not eat letters out of a longer secret (bare host is blanked as a whole token only).
   assert.equal(j('http://abcdef0123456789abcdef0123456789z', 'http://a'), 'leak', 'one-letter host inside a secret');
   assert.equal(j('xxxxxxxx0123456789a0123456789xxxxxxxxxxxx', 'http://a'), 'leak', 'one-letter host inside a secret (2)');
+  // Boundary check itself (review of TRUCKRECRU-47): in each case the host is at the edge of a secret that is 32+ characters on its own.
+  const s30 = 'Qx7Lm2Pz9Rt4Vb6Nc8Wd1Ye3Hf5Gk0';
+  assert.equal(j(`id=${s30}Za/x`, 'http://a'), 'leak', 'secret ends in the host, then a slash');
+  assert.equal(j(`/x/aZ${s30}`, 'http://a'), 'leak', 'secret starts with the host, after a slash');
+  assert.equal(j(`${s30.slice(0, 16)}-a-${s30.slice(16)}`, 'http://a'), 'leak', 'host between hyphens inside a secret');
+  assert.equal(j(`k=${s30.slice(0, 10)}${host}`, long), 'leak', 'real address: secret glued in front of the staging app host');
+  // Overlap: a secret that starts with the end of the app address, or ends with its scheme, glued on with no gap.
+  assert.equal(j('https://app.example.COMQx7Lm2Pz9Rt4Vb6Nc8Wd1Ye3Hf5Gk', 'https://app.example.com'), 'leak', 'secret starts with the last label, capitals');
+  assert.equal(j('https%3A%2F%2Fapp.example.comQx7Lm2Pz9Rt4Vb6Nc8Wd1Ye3Hf5Gk', 'https://app.example.com'), 'leak', 'secret starts with the last label, encoded');
+  assert.equal(j('https://app.example.comQx7Lm2Pz9Rt4Vb6Nc8Wd1Ye3Hf5Gk', 'https://app.example.com'), 'leak', 'secret starts with the last label, exact');
+  assert.equal(j(`${s30.slice(0, 28)}https://app.example.com`, 'https://app.example.com'), 'leak', 'secret ends with the scheme text, glued before the address');
 });
 
 test('review note 2: the usage example in the script header names --app-origin', async () => {
