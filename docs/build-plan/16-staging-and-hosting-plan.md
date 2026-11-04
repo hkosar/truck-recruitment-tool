@@ -430,6 +430,21 @@ The server sets session values with `SET LOCAL` / `set_config(…, true)` inside
 and uses no named prepared statements; the runner requires 5432. **Use session mode (5432).**
 This settles doc 14's open item E16 from documentation.
 
+**Staging-2 is reached only through the pooler (code check, TRUCKRECRU-49).** The pinned database
+root was verified only against the staging-2 pooler chain (`supabase-root-ca.ts`), never against the
+direct `db.<ref>.supabase.co` host. So the code now refuses, before any client is built, any target
+that points at staging-2 (its ref in the host, or a `<role>.<staging-2 ref>` user) unless the host is
+`<one label>.pooler.supabase.com` and the port is 5432. The allowed shape is the one constant
+`STAGING2_POOLER_ADDRESS` in `pipeline/src/target-guard.ts`; the exact real pooler label is not
+verified from the repository, so only its shape is checked. The check runs in
+`pg-secure.ts` (`refuseStaging2UnlessPooler`, called by `securePgConfig`, which every pipeline client
+and pool goes through) and in the staging-2 planners (rebuilt runner, role-password, first-manager
+staging), so a plan-only run refuses too. The runner prints only
+`{"msg":"staging-sql.refused","refusal":"staging2_pooler_required"}`: never the URL, host, user,
+password or project ref. Other projects are not affected. At the client only, local test databases
+(a loopback host, or a reserved `.invalid` test name) are left to the existing TLS rules; no planner
+accepts either, because only Supabase hosts parse. Tests: `pipeline/src/staging2-pooler-guard.test.ts`.
+
 **Connection budget.** Per instance: auth pool max 4 + data pool max 10 = **14**; during a
 deploy two instances overlap = **28**; plus maintenance (1) and operator/runner sessions (≤ 2).
 Micro limits: **60** direct database connections, **200** pooler clients

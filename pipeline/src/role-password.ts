@@ -1,5 +1,6 @@
 import { createHash, createHmac, pbkdf2Sync, randomBytes } from 'node:crypto';
 import { newSecurePgClient } from './pg-secure.js';
+import { refuseStaging2UnlessPooler } from './pg-secure.js';
 import { RunnerRefusal } from './refusals.js';
 import { requireRecordedRebuiltRef, type RebuiltSqlClient } from './staging-rebuilt.js';
 import { roleOf } from './retention-step.js';
@@ -214,6 +215,7 @@ export function planRolePassword(input: {
   if (target.port !== 5432) {
     throw new RunnerRefusal('port_must_be_5432', 'Staging SQL runner requires a session connection on port 5432 (not the 6543 transaction pooler)');
   }
+  refuseStaging2UnlessPooler(target);
   if (input.out !== undefined) throw new RunnerRefusal('role_password_refused', '--out is not supported for the role-password actions');
   if (input.confirm !== spec.confirmation) {
     throw new RunnerRefusal('confirmation_required', `Staging SQL runner requires --confirm="${spec.confirmation}" for ${action}`);

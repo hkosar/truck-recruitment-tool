@@ -1,7 +1,7 @@
 import { createHash } from 'node:crypto';
 import { existsSync, readFileSync, readdirSync, writeFileSync } from 'node:fs';
 import { isAbsolute, relative, resolve } from 'node:path';
-import { newSecurePgClient } from './pg-secure.js';
+import { newSecurePgClient, refuseStaging2UnlessPooler } from './pg-secure.js';
 import { M1C_POSTCONDITION_SQL, M1C_STATE_PROBE_SQL, REAPPLY_POST_SQL, REAPPLY_PRECHECKS, classifyM1cState, idempotentReapplySql, type M1cStateFacts, type ReapplyTarget } from './reapply.js';
 import { reportEnvironmentPreflight, runEnvironmentPreflight } from './environment-preflight.js';
 import { OWNER_CHECK_CONFIRMATION, OWNER_PROMOTE_CONFIRMATION, runOwnerLoginCheck, runOwnerPromotion } from './owner-bootstrap.js';
@@ -208,6 +208,7 @@ export function planRebuiltSqlRun(input: {
   if (target.port !== 5432) {
     throw new RunnerRefusal('port_must_be_5432', 'Staging SQL runner requires a session connection on port 5432 (not the 6543 transaction pooler)');
   }
+  refuseStaging2UnlessPooler(target);
   if (input.confirm !== spec.confirmation) {
     throw new RunnerRefusal('confirmation_required', `Staging SQL runner requires --confirm="${spec.confirmation}" for ${input.action}`);
   }

@@ -150,6 +150,32 @@ export function verifyPipelineTarget(input: TargetGuardInput): VerifiedTarget {
   return { projectRef, environment: input.environment };
 }
 
+/**
+ * The ONLY database address accepted for the rebuilt staging project (staging-2): the shared Supavisor pooler in session
+ * mode. The pinned root (supabase-root-ca.ts) was verified only against the staging-2 pooler chain *.pooler.supabase.com;
+ * the direct host db.<ref>.supabase.co was never checked (and is IPv6-only without the add-on, doc 16 section 2.7). Session
+ * mode is port 5432 (doc 16 section 2.6). The host must be one plain label followed by the suffix; the exact real label
+ * (aws-<n>-<region>, as in this repository's fake test URLs) is (not verified) from the repository, so only its shape is
+ * checked. Enforced before any connection by pg-secure.ts refuseStaging2UnlessPooler (refusal staging2_pooler_required).
+ */
+export const STAGING2_POOLER_ADDRESS = { hostSuffix: '.pooler.supabase.com', hostLabel: /^[a-z0-9-]+$/, port: 5432 } as const;
+
+/** True when the fields point at staging-2: a parsed projectRef, a host that contains its ref, or a pooler user `<role>.<ref>`. */
+export function namesRebuiltStaging(target: { host: string; user: string; projectRef?: string }): boolean {
+  const ref = REBUILT_STAGING_PROJECT_REF;
+  if (ref === null) return false;
+  const user = String(target.user).toLowerCase();
+  const dot = user.lastIndexOf('.');
+  return target.projectRef === ref || String(target.host).toLowerCase().includes(ref) || (dot >= 0 && user.slice(dot + 1) === ref);
+}
+
+/** True only for the STAGING2_POOLER_ADDRESS shape: `<label>.pooler.supabase.com`, port 5432. */
+export function isStaging2PoolerAddress(target: { host: string; port: number }): boolean {
+  const host = String(target.host).toLowerCase();
+  const { hostSuffix, hostLabel, port } = STAGING2_POOLER_ADDRESS;
+  return host.endsWith(hostSuffix) && hostLabel.test(host.slice(0, -hostSuffix.length)) && target.port === port;
+}
+
 export const RECORDED_PROJECT_REFS = {
   production: PRODUCTION_PROJECT_REF,
   staging: STAGING_PROJECT_REF,
