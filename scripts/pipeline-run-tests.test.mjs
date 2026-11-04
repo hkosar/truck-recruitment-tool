@@ -3,7 +3,8 @@
 // Run: node --test scripts/pipeline-run-tests.test.mjs
 
 import assert from 'node:assert/strict';
-import { mkdirSync, mkdtempSync, readFileSync, rmSync, writeFileSync } from 'node:fs';
+import { spawnSync } from 'node:child_process';
+import { existsSync, mkdirSync, mkdtempSync, readFileSync, rmSync, rmdirSync, symlinkSync, unlinkSync, writeFileSync } from 'node:fs';
 import { tmpdir } from 'node:os';
 import { join, resolve } from 'node:path';
 import test from 'node:test';
@@ -83,7 +84,7 @@ test('refuses an unlisted new *.test.ts, before running anything', () => {
   assert.equal(code, REFUSAL_EXIT);
   assert.deepEqual(calls, []);
   assert.ok(c.errs.some((l) => l.includes('src/sub/new.test.ts exists but is in neither TESTS nor NOT_RUN')));
-  assert.ok(c.errs.some((l) => l.includes('found 2 *.test.ts files, the lists name 1')));
+  assert.ok(c.errs.some((l) => l.includes('found 2 test-like files, the lists name 1')));
 });
 
 test('refuses a listed file that is missing (renamed), before running anything', () => {
@@ -116,6 +117,88 @@ test('a NOT_RUN file is neither run nor a refusal', () => {
 });
 
 test('discovery ignores node_modules and non-test files', () => {
-  const dir = fixture({ 'src/a.test.ts': ok, 'src/a.ts': ok, 'src/a.test.js': ok, 'node_modules/x/src/y.test.ts': ok, 'src/node_modules/z.test.ts': ok });
+  const dir = fixture({ 'src/a.test.ts': ok, 'src/a.ts': ok, 'src/a.test.d.ts': ok, 'src/latest.ts': ok, 'node_modules/x/src/y.test.ts': ok, 'src/node_modules/z.test.ts': ok });
   assert.deepEqual(discoverTests(dir), ['src/a.test.ts']);
+});
+
+for (const name of ['src/b.spec.ts', 'src/b.test.mts', 'src/b.test.cts', 'src/b.test.tsx', 'src/b.test.js', 'src/b.TEST.ts', 'src/B.Spec.TS']) {
+  test(`refuses an unlisted test-like name: ${name}`, () => {
+    const dir = fixture({ 'src/smoke-tests.ts': ok, 'src/a.test.ts': ok, [name]: ok });
+    const calls = [];
+    const c = capture();
+    const code = runAll({ dir, tests: ['src/a.test.ts'], notRun: [], spawn: (f) => { calls.push(f); return 0; }, ...c });
+    assert.equal(code, REFUSAL_EXIT);
+    assert.deepEqual(calls, []);
+    assert.ok(c.errs.some((l) => l.includes(`${name} exists but is in neither TESTS nor NOT_RUN`)), c.errs.join('\n'));
+  });
+
+  test(`a test-like name is accepted only in NOT_RUN with a reason: ${name}`, () => {
+    const dir = fixture({ 'src/smoke-tests.ts': ok, 'src/a.test.ts': ok, [name]: ok });
+    assert.equal(runAll({ dir, tests: ['src/a.test.ts'], notRun: [[name, 'runs elsewhere']], spawn: () => 0, ...capture() }), 0);
+    const c = capture();
+    assert.equal(runAll({ dir, tests: ['src/a.test.ts', name], notRun: [], spawn: () => 0, ...c }), REFUSAL_EXIT, 'listed in TESTS is still refused');
+    assert.ok(c.errs.some((l) => l.includes(`${name} has a test-like name that npm test would never run`)), c.errs.join('\n'));
+  });
+}
+
+test('a NOT_RUN reason of only spaces is refused', () => {
+  const dir = fixture({ 'src/smoke-tests.ts': ok, 'src/a.test.ts': ok, 'src/b.test.ts': ok });
+  for (const why of ['   ', '\t \n', undefined]) {
+    const c = capture();
+    assert.equal(runAll({ dir, tests: ['src/a.test.ts'], notRun: [['src/b.test.ts', why]], spawn: () => 0, ...c }), REFUSAL_EXIT);
+    assert.ok(c.errs.some((l) => l.includes('src/b.test.ts is in NOT_RUN without a reason')));
+  }
+});
+
+test('zero test files to run is a failure, never a pass', () => {
+  const dir = fixture({ 'src/smoke-tests.ts': ok });
+  const calls = [];
+  const c = capture();
+  const code = runAll({ dir, tests: [], notRun: [], spawn: (f) => { calls.push(f); return 0; }, ...c });
+  assert.notEqual(code, 0);
+  assert.ok(c.errs.some((l) => l.includes('no test files to run')));
+  assert.ok(!c.out.some((l) => l.includes('passed')));
+});
+
+/** A link to a folder: a junction on Windows (no admin needed), a symlink elsewhere. Removes only the link itself. */
+function link(target, path) {
+  symlinkSync(target, path, 'junction');
+  return () => { try { unlinkSync(path); } catch { rmdirSync(path); } };
+}
+
+test('a test inside a linked subfolder is found (so an unlisted one is refused), and a link back to a parent does not loop', () => {
+  const outside = fixture({ 'x.test.ts': ok });
+  const dir = fixture({ 'src/smoke-tests.ts': ok, 'src/a.test.ts': ok });
+  const unlink = link(outside, join(dir, 'src', 'linked'));
+  const unlinkLoop = link(join(dir, 'src'), join(dir, 'src', 'loop'));
+  try {
+    assert.deepEqual(discoverTests(dir), ['src/a.test.ts', 'src/linked/x.test.ts']);
+    const c = capture();
+    assert.equal(runAll({ dir, tests: ['src/a.test.ts'], notRun: [], spawn: () => 0, ...c }), REFUSAL_EXIT);
+    assert.ok(c.errs.some((l) => l.includes('src/linked/x.test.ts exists but is in neither TESTS nor NOT_RUN')), c.errs.join('\n'));
+  } finally { unlinkLoop(); unlink(); }
+  assert.ok(existsSync(join(outside, 'x.test.ts')), 'the link target is untouched');
+});
+
+test('npm test style run through a junction/symlink to the pipeline folder runs the tests (real tsx, real path compare)', () => {
+  const dir = fixture({
+    'src/smoke-tests.ts': ok,
+    'src/a.test.ts': ok,
+    'scripts/run-tests.mjs': readFileSync(join(pipeline, 'scripts', 'run-tests.mjs'), 'utf8'),
+    'scripts/test-list.mjs': "export const SMOKE = 'src/smoke-tests.ts';\nexport const TESTS = ['src/a.test.ts'];\nexport const NOT_RUN = [];\n",
+  });
+  const unlinkModules = link(join(pipeline, 'node_modules'), join(dir, 'node_modules'));
+  const via = join(tmp, `via${n++}`);
+  const unlinkVia = link(dir, via);
+  try {
+    for (const cwd of [dir, via]) {
+      const r = spawnSync(process.execPath, [join(cwd, 'scripts', 'run-tests.mjs')], { cwd, encoding: 'utf8', env: process.env });
+      assert.equal(r.status, 0, `${cwd}: ${r.stdout}${r.stderr}`);
+      assert.match(r.stdout, /pipeline tests: all 2 files passed/, `${cwd}: ${r.stdout}${r.stderr}`);
+    }
+    // a failing test is reported as a failure through the link too
+    writeFileSync(join(dir, 'src', 'a.test.ts'), 'process.exit(4);\n');
+    const r = spawnSync(process.execPath, [join(via, 'scripts', 'run-tests.mjs')], { cwd: via, encoding: 'utf8', env: process.env });
+    assert.equal(r.status, 4, `${r.stdout}${r.stderr}`);
+  } finally { unlinkVia(); unlinkModules(); }
 });
