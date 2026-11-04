@@ -122,6 +122,34 @@ test('a .md citation under a real top-level folder is checked; thr_ notes and ba
   assert.equal(info.length, 2);
 });
 
+test('./, wrong-case, backslash and partial-folder forms of a repo path are checked; thr_ stays INFO', () => {
+  mkdirSync(join(root, 'docs/build-plan'), { recursive: true });
+  writeFileSync(join(root, 'docs/build-plan/14-design.md'), 'one\ntwo\n');
+  const info = [];
+  const k = (md) => checkRunbook(md, { root, info }).map((f) => f.split(' ')[0]);
+  for (const bad of ['./docs/build-plan/14-desing.md:1', 'Docs/build-plan/14-desing.md:1', 'docs\\build-plan\\14-desing.md:1', 'build-plan/14-desing.md:1']) {
+    assert.deepEqual(k(`see ${bad}\n`), ['CITATION'], bad);
+  }
+  assert.deepEqual(k('see Docs/build-plan/14-design.md:2\n'), ['CITATION']); // exact case does not exist
+  assert.deepEqual(k('see ./docs/build-plan/14-design.md:2\n'), []);
+  assert.deepEqual(k('see ./docs/build-plan/14-design.md:99\n'), ['CITATION']);
+  assert.deepEqual(k('see docs\\build-plan\\14-design.md:2\n'), []);
+  assert.deepEqual(k('see build-plan/14-design.md:2\n'), []);
+  assert.deepEqual(info, []);
+  assert.deepEqual(k('see thr_abc123/docs/x.md:1\n'), []);
+  assert.equal(info.length, 1);
+});
+
+test('a missing non-.md file outside the top-level folders is a finding', () => {
+  assert.deepEqual(kinds('see foo/bar/nothere.mjs:1\n'), ['CITATION']);
+});
+
+test('a non-.md thr_ citation is INFO only', () => {
+  const info = [];
+  assert.deepEqual(checkRunbook('see thr_abc123/out.json:3 and thr_abc123/scripts/nothere.mjs:1\n', { root, info }), []);
+  assert.equal(info.length, 2);
+});
+
 test('citation line 0 is flagged', () => {
   assert.deepEqual(kinds('see scripts/probe.mjs:0\n'), ['CITATION']);
 });
@@ -180,6 +208,7 @@ test('command line prints INFO lines without changing the exit code', () => {
   const r = spawnSync(process.execPath, [script, md, '--root', root], { encoding: 'utf8' });
   assert.equal(r.status, 0);
   assert.match(r.stdout, /^INFO OUTSIDE-REPO line=1 /m);
+  assert.match(r.stdout, /^SUMMARY findings=0 info=1$/m);
 });
 
 test('cleanup',() => { rmSync(root, { recursive: true, force: true }); });
