@@ -74,6 +74,10 @@ jobs:
       - name: Build
         run: npm run build
 
+      # The app unit and server tests (vitest, includes the loopback-fetch test). The real-database test files skip themselves when their database settings are absent, and none are set here; no secrets, no network.
+      - name: Test
+        run: npm test
+
   pipeline:
     name: pipeline
     runs-on: ubuntu-latest
@@ -119,3 +123,66 @@ jobs:
           node scripts/verify-first-manager-contract.mjs
           node scripts/verify-prod-sql-runner-contract.mjs
           node --test scripts/run-with-secrets.test.mjs
+
+  # The same pipeline checks on Node 24 as a separate job, so the existing "pipeline" check name (a possible required check) is unchanged.
+  pipeline-node24:
+    name: pipeline (Node 24)
+    runs-on: ubuntu-latest
+    defaults:
+      run:
+        working-directory: pipeline
+    steps:
+      - name: Checkout
+        uses: actions/checkout@v4
+
+      - name: Set up Node 24
+        uses: actions/setup-node@v4
+        with:
+          node-version: 24
+
+      - name: Cache npm dependencies
+        uses: actions/cache@v4
+        with:
+          path: ~/.npm
+          key: ${{ runner.os }}-npm-pipeline-node24-${{ hashFiles('pipeline/package-lock.json') }}
+          restore-keys: |
+            ${{ runner.os }}-npm-pipeline-node24-
+
+      - name: Install dependencies
+        run: npm ci
+
+      - name: Type check
+        run: npm run typecheck
+
+      # `npm run build` runs the pipeline tests first (npm test), then compiles.
+      - name: Build
+        run: npm run build
+
+  # Repo-level offline checks that need no install, no secrets and no network. Not run in app/ or pipeline/ because they read files across the whole repo.
+  repo-checks:
+    name: repo checks
+    runs-on: ubuntu-latest
+    steps:
+      # fetch-depth 0: verify-cutover-runbook-contract.mjs reads two reviewed commits with `git show`, which a one-commit shallow clone does not have.
+      - name: Checkout
+        uses: actions/checkout@v4
+        with:
+          fetch-depth: 0
+
+      - name: Set up Node 22
+        uses: actions/setup-node@v4
+        with:
+          node-version: 22
+
+      # Every scripts/verify-*.mjs contract check (text-level checks of SQL, runbooks and source; none connects anywhere). bash -e stops at the first failure.
+      - name: Contract checks (scripts/verify-*.mjs)
+        run: |
+          for f in scripts/verify-*.mjs; do
+            echo "::group::$f"
+            node "$f"
+            echo "::endgroup::"
+          done
+
+      # All scripts/*.test.mjs unit tests (node's built-in runner). Run without NODE_OPTIONS set, because one test asserts the child process environment.
+      - name: Script tests (scripts/*.test.mjs)
+        run: node --test scripts/*.test.mjs
