@@ -1,4 +1,4 @@
-﻿// Tests scripts/simulate-ci-jobs.mjs (the fresh-clone CI job simulator). No network; the --run test builds a tiny temp git repo.
+// Tests scripts/simulate-ci-jobs.mjs (the fresh-clone CI job simulator). No network; the --run test builds a tiny temp git repo.
 // Run: node --test scripts/simulate-ci-jobs.test.mjs
 
 import assert from 'node:assert/strict';
@@ -191,8 +191,89 @@ test('--run: fresh clone, only installed packages are junctioned, steps run, clo
   assert.equal(code, 1, text);
   assert.match(text, /=== job ok on Node \d+: PASS \(junctions: pipeline\)/);
   assert.match(text, /=== job bad on Node \d+: FAIL \(junctions: none\)/);
-  assert.match(text, /Install: skipped \(install replaced by junction\)/);
+  assert.match(text, /Install: passed/);
   assert.match(text, /Checkout: skipped \(uses: action\)/);
   assert.deepEqual(readdirSync(tmpdir()).filter((n) => n.startsWith('ci-sim-ok-') || n.startsWith('ci-sim-bad-')), before, 'clones are deleted');
   assert.ok(existsSync(join(borrow, 'pipeline', 'node_modules', 'marker')), 'the borrowed folder is untouched');
+});
+
+// ---- Round 2 regressions (Codex review of dc90bea, findings 1-3) ----
+
+test('parseWorkflow: a step with an empty or non-text value is rejected, never dropped (finding 2)', () => {
+  const bad = (steps, re) => assert.throws(() => parseWorkflow(wf(job(steps))), re, steps);
+  bad('      - name: x\n        run:\n', /"run" must be a nonempty text value, got nothing/);
+  bad('      - name: x\n        uses:\n', /"uses" must be a nonempty text value, got nothing/);
+  bad('      - name: x\n        uses:\n          action: local\n', /"uses" must be a nonempty text value, got a collection/);
+  bad('      - name: x\n        run:\n          a: b\n', /"run" must be a nonempty text value, got a collection/);
+  bad('      - name: x\n        run: ""\n', /"run" must be a nonempty text value, got an empty string/);
+  bad('      - name:\n          a: b\n        run: echo hi\n', /"name" must be a nonempty text value/);
+  bad('      - run: echo hi\n        working-directory:\n', /"working-directory" must be a nonempty text value/);
+  bad('      - uses: a/b@v1\n        with: text\n', /"with" must be a mapping/);
+  assert.throws(() => parseWorkflow(wf('  j:\n    name:\n    steps:\n      - run: echo hi\n')), /"name" must be a nonempty text value/);
+});
+
+/** A repo with a workflow, a pipeline/ package and (optionally) more files, committed; runs --run against it and returns { code, text }. */
+function runFixture(t, workflow, files = {}) {
+  let bash;
+  try { bash = findBash(); } catch { t.skip('no bash'); return null; }
+  if (process.platform === 'win32' && !existsSync(bash)) { t.skip('no bash'); return null; }
+  const tmp = mkdtempSync(join(tmpdir(), 'ci-sim-test-'));
+  t.after(() => rmSync(tmp, { recursive: true, force: true }));
+  const repo = join(tmp, 'repo');
+  const borrow = join(tmp, 'borrow');
+  mkdirSync(join(borrow, 'pipeline', NM, 'marker'), { recursive: true });
+  const put = (rel, text) => { mkdirSync(join(repo, rel, '..'), { recursive: true }); writeFileSync(join(repo, rel), text); };
+  put('.github/workflows/ci.yml', workflow);
+  put('pipeline/package.json', '{"scripts":{}}');
+  for (const [k, v] of Object.entries(files)) put(k, v);
+  spawnSync('git', ['init', '-q', repo]);
+  git(repo, 'add', '-A');
+  git(repo, 'commit', '-q', '-m', 'x');
+  const lines = [];
+  const code = main(['--run', '--borrow', borrow, '--node', `${process.versions.node.split('.')[0]}=${process.execPath}`], repo, { out: (s) => lines.push(s) });
+  const leftovers = readdirSync(tmpdir()).filter((n) => n.startsWith('ci-sim-j-') || n.startsWith('ci-sim-shim-j-'));
+  assert.deepEqual(leftovers, [], 'clones and shim folders are deleted');
+  assert.ok(existsSync(join(borrow, 'pipeline', NM, 'marker')), 'the borrowed folder is untouched');
+  return { code, text: lines.join('\n') };
+}
+const ONE_JOB = (steps) => wf(`  j:\n    steps:\n${steps}`);
+const SEES_PIPELINE = `node -e "require('fs').accessSync('pipeline/${NM}/marker')"`;
+
+test('--run: an install and a failing command in the same step: the failing command runs and fails the step (finding 1)', (t) => {
+  const r = runFixture(t, ONE_JOB('      - name: Mixed\n        working-directory: pipeline\n        run: npm ci && node -e "process.exit(7)"\n      - name: After\n        run: echo after\n'));
+  if (!r) return;
+  assert.equal(r.code, 1, r.text);
+  assert.match(r.text, /=== job j on Node \d+: FAIL/);
+  assert.match(r.text, /Mixed: FAILED \(exit 7\)/);
+  assert.match(r.text, /After: not run \(earlier step failed\)/);
+});
+
+test('--run: an install in the middle of a multi-line step: the lines before and after it both run (finding 1)', (t) => {
+  const r = runFixture(t, ONE_JOB(`      - name: Mixed\n        working-directory: pipeline\n        run: |\n          node -e "process.exit(0)"\n          npm ci\n          node -e "require('fs').accessSync('${NM}/marker')"\n`));
+  if (!r) return;
+  assert.equal(r.code, 0, r.text);
+  assert.match(r.text, /Mixed: passed/);
+  const bad = runFixture(t, ONE_JOB(`      - name: Mixed\n        working-directory: pipeline\n        run: |\n          npm ci\n          node -e "process.exit(9)"\n          echo not reached\n`));
+  assert.equal(bad.code, 1, bad.text);
+  assert.match(bad.text, /Mixed: FAILED \(exit 9\)/);
+});
+
+test('--run: a folder is junctioned only from its install step on; an earlier step cannot see it (finding 3)', (t) => {
+  const early = runFixture(t, ONE_JOB(`      - name: Early\n        run: ${SEES_PIPELINE}\n      - name: Install\n        working-directory: pipeline\n        run: npm ci\n`));
+  if (!early) return;
+  assert.equal(early.code, 1, early.text);
+  assert.match(early.text, /Early: FAILED/);
+  assert.match(early.text, /Install: not run/);
+  const late = runFixture(t, ONE_JOB(`      - name: Install\n        working-directory: pipeline\n        run: npm ci\n      - name: Late\n        run: ${SEES_PIPELINE}\n`));
+  assert.equal(late.code, 0, late.text);
+  assert.match(late.text, /Install: passed/);
+  assert.match(late.text, /Late: passed/);
+  // within one step too: the command before the install must not see the folder
+  const same = runFixture(t, ONE_JOB(`      - name: Same\n        run: |\n          ${SEES_PIPELINE}\n          npm ci --prefix pipeline\n`));
+  assert.equal(same.code, 1, same.text);
+});
+
+test('--run: an install of a folder the borrow does not have fails the step', (t) => {
+  // the static pass accepts it; the borrow has no app/node_modules, which --run reports before running anything
+  assert.throws(() => runFixture(t, ONE_JOB('      - name: Install\n        working-directory: app\n        run: npm ci\n'), { 'app/package.json': '{}' }), /--borrow has no app\/node_modules/);
 });

@@ -27,7 +27,7 @@
 
 import { builtinModules } from 'node:module';
 import { spawnSync } from 'node:child_process';
-import { existsSync, lstatSync, mkdtempSync, readFileSync, readdirSync, rmSync, rmdirSync, symlinkSync, unlinkSync } from 'node:fs';
+import { existsSync, lstatSync, mkdtempSync, readFileSync, readdirSync, rmSync, rmdirSync, unlinkSync, writeFileSync } from 'node:fs';
 import { tmpdir } from 'node:os';
 import { dirname, join, posix, resolve } from 'node:path';
 import { fileURLToPath, pathToFileURL } from 'node:url';
@@ -152,9 +152,15 @@ export function parseWorkflow(text) {
       if (!s || typeof s !== 'object' || Array.isArray(s)) fail(`job ${id} step ${index + 1}: not a mapping`);
       for (const k of Object.keys(s)) if (!STEP_KEYS.has(k)) fail(`job ${id} step ${index + 1}: key not understood: ${k}`);
       if ((s.uses === undefined) === (s.run === undefined)) fail(`job ${id} step ${index + 1}: needs exactly one of uses / run`);
+      // Every field must be a real, nonempty string (an empty `run:` parses to null and a mapping under `uses:` to an object); never drop a step quietly.
+      for (const k of ['name', 'uses', 'run', 'working-directory']) {
+        if (s[k] !== undefined && (typeof s[k] !== 'string' || s[k].trim() === '')) fail(`job ${id} step ${index + 1}: "${k}" must be a nonempty text value, got ${s[k] === null ? 'nothing' : typeof s[k] === 'object' ? 'a collection' : 'an empty string'}`);
+      }
+      if (s.with !== undefined && (!s.with || typeof s.with !== 'object' || Array.isArray(s.with) || Object.values(s.with).some((v) => typeof v !== 'string'))) fail(`job ${id} step ${index + 1}: "with" must be a mapping of text values`);
       if (s.uses !== undefined && s['working-directory'] !== undefined) fail(`job ${id} step ${index + 1}: working-directory on a uses step is not understood`);
       return { index, name: s.name ?? s.uses ?? `step ${index + 1}`, uses: s.uses ?? null, with: s.with ?? null, run: s.run ?? null, cwd: s['working-directory'] ?? defaultCwd ?? '.' };
     });
+    if (job.name !== undefined && (typeof job.name !== 'string' || job.name.trim() === '')) fail(`job ${id}: "name" must be a nonempty text value`);
     return { id, name: job.name ?? id, defaultCwd, steps };
   });
 }
@@ -437,9 +443,39 @@ function removeLink(p) {
   try { rmdirSync(p); } catch { unlinkSync(p); }
 }
 
+// `npm ci|install|i` inside a --run step is replaced by this shim: it junctions <borrow>/<folder>/node_modules into the clone AT THAT MOMENT
+// (so earlier commands, and earlier steps, cannot see it) and exits 0; every other npm command goes to the real npm. The rest of the step's
+// script runs unchanged in bash -e, so a failing command after (or before) the install fails the step.
+const SHIM_JS = `import { appendFileSync, existsSync, realpathSync, symlinkSync } from 'node:fs';
+import { join, relative, resolve } from 'node:path';
+const args = process.argv.slice(2);
+const p = args.indexOf('--prefix');
+let dir = resolve(process.cwd(), p >= 0 ? args[p + 1] ?? '' : '.');
+if (!existsSync(join(dir, 'package.json'))) { console.error('ci-sim npm shim: no package.json in ' + dir); process.exit(1); }
+dir = realpathSync(dir);
+const pkg = relative(realpathSync(process.env.CI_SIM_ROOT), dir).replace(/\\\\/g, '/') || '.';
+const from = join(process.env.CI_SIM_BORROW, pkg, 'node_modules');
+const to = join(dir, 'node_modules');
+if (!existsSync(from)) { console.error('ci-sim npm shim: --borrow has no ' + pkg + '/node_modules to link'); process.exit(1); }
+if (existsSync(to)) { console.error('ci-sim npm shim: ' + to + ' already exists'); process.exit(1); }
+symlinkSync(from, to, 'junction');
+appendFileSync(process.env.CI_SIM_LINKS_LOG, to + '\\n');
+console.log('ci-sim npm shim: linked ' + pkg + '/node_modules (replaces npm ' + args.join(' ') + ')');
+`;
+const SHIM_SH = `#!/bin/sh
+case "$1" in ci|install|i) exec "$CI_SIM_NODE" "$CI_SIM_SHIM_JS" "$@";; esac
+self=$(cd "$(dirname "$0")" && pwd)
+newpath=
+IFS=:
+for d in $PATH; do [ "$d" = "$self" ] || newpath="\${newpath:+$newpath:}$d"; done
+unset IFS
+PATH=$newpath exec npm "$@"
+`;
+
 /** Runs one job once in a fresh clone. nodeExe: node binary to put first on PATH. Returns { ok, steps: [{ name, status, output }] }. */
 export function runJob({ repo, sha, job, result, nodeExe, borrow, timeoutMs, workflowPath }) {
   const dir = mkdtempSync(join(tmpdir(), `ci-sim-${job.id}-`));
+  const shimDir = mkdtempSync(join(tmpdir(), `ci-sim-shim-${job.id}-`));
   const links = [];
   const steps = [];
   try {
@@ -451,19 +487,21 @@ export function runJob({ repo, sha, job, result, nodeExe, borrow, timeoutMs, wor
     for (const pkg of result.installedAll) {
       const from = join(borrow, pkg, 'node_modules');
       if (!existsSync(from)) fail(`--borrow has no ${pkg}/node_modules to link`);
-      const to = join(dir, pkg, 'node_modules');
-      symlinkSync(from, to, 'junction');
-      links.push(to);
     }
-    const env = { ...process.env, CI: 'true', GITHUB_ACTIONS: 'true', PATH: `${dirname(nodeExe)}${process.platform === 'win32' ? ';' : ':'}${process.env.PATH ?? ''}` };
+    // Nothing is junctioned yet: the npm shim links a folder when (and only when) a step runs `npm ci|install` for it.
+    const linksLog = join(shimDir, 'links.log');
+    writeFileSync(linksLog, '');
+    writeFileSync(join(shimDir, 'shim.mjs'), SHIM_JS);
+    writeFileSync(join(shimDir, 'npm'), SHIM_SH, { mode: 0o755 });
+    const sep = process.platform === 'win32' ? ';' : ':';
+    const env = { ...process.env, CI: 'true', GITHUB_ACTIONS: 'true', PATH: `${shimDir}${sep}${dirname(nodeExe)}${sep}${process.env.PATH ?? ''}`, CI_SIM_NODE: nodeExe, CI_SIM_SHIM_JS: join(shimDir, 'shim.mjs'), CI_SIM_ROOT: dir, CI_SIM_BORROW: borrow, CI_SIM_LINKS_LOG: linksLog };
     delete env.NODE_OPTIONS;
     let ok = true;
     for (const step of job.steps) {
       if (step.run === null) { steps.push({ name: step.name, status: 'skipped (uses: action)', output: '' }); continue; }
-      const cmds = readCommands(step.run, norm(step.cwd));
-      if (cmds.some((c) => c.kind === 'install')) { steps.push({ name: step.name, status: 'skipped (install replaced by junction)', output: '' }); continue; }
       if (!ok) { steps.push({ name: step.name, status: 'not run (earlier step failed)', output: '' }); continue; }
       const r = spawnSync(findBash(), ['-e', '-c', step.run], { cwd: join(dir, step.cwd), env, encoding: 'utf8', timeout: timeoutMs, maxBuffer: 256 * 1024 * 1024 });
+      for (const l of readFileSync(linksLog, 'utf8').split('\n').filter(Boolean)) if (!links.includes(l)) links.push(l);
       const output = `${r.stdout ?? ''}${r.stderr ?? ''}${r.error ? `\n${r.error.message}` : ''}`;
       const pass = r.status === 0 && !r.error;
       steps.push({ name: step.name, status: pass ? 'passed' : `FAILED (exit ${r.status}${r.signal ? `, ${r.signal}` : ''})`, output });
@@ -471,10 +509,12 @@ export function runJob({ repo, sha, job, result, nodeExe, borrow, timeoutMs, wor
     }
     return { ok, steps };
   } finally {
+    // A junction the shim made may be missing from `links` if bash died before the log was read; read it once more.
+    try { for (const l of readFileSync(join(shimDir, 'links.log'), 'utf8').split('\n').filter(Boolean)) if (!links.includes(l)) links.push(l); } catch { /* no shim yet */ }
     for (const l of links) { try { removeLink(l); } catch { /* reported below */ } }
     const leftover = links.filter((l) => { try { lstatSync(l); return true; } catch { return false; } });
     if (leftover.length) process.stderr.write(`NOT deleting ${dir}: a junction could not be removed (${leftover.join(', ')})\n`);
-    else rmSync(dir, { recursive: true, force: true });
+    else { rmSync(dir, { recursive: true, force: true }); rmSync(shimDir, { recursive: true, force: true }); }
   }
 }
 
