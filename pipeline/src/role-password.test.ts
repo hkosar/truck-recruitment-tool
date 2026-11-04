@@ -7,8 +7,9 @@
 import assert from 'node:assert/strict';
 import { spawnSync } from 'node:child_process';
 import { randomBytes } from 'node:crypto';
-import { existsSync, readFileSync, unlinkSync, writeFileSync } from 'node:fs';
-import { resolve } from 'node:path';
+import { existsSync, mkdtempSync, readFileSync, readdirSync, rmSync, writeFileSync } from 'node:fs';
+import { tmpdir } from 'node:os';
+import { relative, resolve } from 'node:path';
 import { pathToFileURL } from 'node:url';
 import pg from 'pg';
 import {
@@ -537,10 +538,15 @@ async function main(): Promise<void> {
     // log_min_messages taken off the classified lists stands in for a newer server's unclassified setting; it must refuse under a German lc_messages too.
     {
       const modPath = resolve(REPOSITORY_ROOT, 'pipeline/src/role-password.ts');
-      const mutPath = resolve(REPOSITORY_ROOT, 'pipeline/src/role-password-mutant.tmp.ts');
+      // The copy lives in the OS temp folder, not in the code folder, so a killed run cannot leave a file that tsc or the contract scan would pick up;
+      // its relative imports are rewritten to the real module folder.
+      const mutDir = mkdtempSync(resolve(tmpdir(), 'rpw-mutant-'));
+      const mutPath = resolve(mutDir, 'role-password-mutant.ts');
       const src = readFileSync(modPath, 'utf8');
-      const mutSrc = src.replace("'log_min_messages', ", '');
-      check('the mutant module differs from the real one only by one classified name', mutSrc !== src && src.length - mutSrc.length === "'log_min_messages', ".length);
+      const unclassified = src.replace("'log_min_messages', ", '');
+      check('the mutant module differs from the real one only by one classified name', unclassified !== src && src.length - unclassified.length === "'log_min_messages', ".length);
+      const mutSrc = unclassified.replace(/from '\.\/([\w-]+)\.js'/g, (_m, f: string) => `from '${pathToFileURL(resolve(REPOSITORY_ROOT, 'pipeline/src', `${f}.ts`)).href}'`);
+      check('the mutant copy is outside the code folder, and no leftover mutant file is in pipeline/src', relative(REPOSITORY_ROOT, mutPath).startsWith('..') && readdirSync(resolve(REPOSITORY_ROOT, 'pipeline/src')).every((f) => !/mutant/.test(f)));
       writeFileSync(mutPath, mutSrc);
       try {
         const mut = await import(pathToFileURL(mutPath).href) as { runRolePassword: typeof runRolePassword };
@@ -555,7 +561,8 @@ async function main(): Promise<void> {
           const res = await captured(() => which.runRolePassword(c as unknown as RebuiltSqlClient, lplan));
           await c.end().catch(() => undefined);
           if (lc) await admin.query('alter role tr_runner reset lc_messages');
-          const refused = res.error instanceof RunnerRefusal && res.error.id === 'role_password_logging_refused' && JSON.parse(res.lines[0]!).result === 'rolled_back';
+          // by name and id, not instanceof: the mutant copy in the temp folder loads its own RunnerRefusal class
+          const refused = (res.error as Error | undefined)?.constructor.name === 'RunnerRefusal' && (res.error as { id?: string }).id === 'role_password_logging_refused' && JSON.parse(res.lines[0]!).result === 'rolled_back';
           check(`real server, ${label}${lc ? ` (the English group-name pattern matches ${rows} rows)` : ''}: ${expectRefusal ? 'refused (role_password_logging_refused), rolled back' : 'commits'}`, expectRefusal ? refused : (res.error === undefined && JSON.parse(res.lines[0]!).result === 'committed'));
         };
         await caseRun('mutant (unclassified log_min_messages), default lc_messages', null, mut, true);
@@ -563,7 +570,7 @@ async function main(): Promise<void> {
           await caseRun('mutant (unclassified log_min_messages), per-role lc_messages = de', 'de', mut, true);
           await caseRun('real module, per-role lc_messages = de', 'de', { runRolePassword }, false);
         } else console.log('SKIP lc_messages = de cases: this server has no German messages (not counted as passed)');
-      } finally { unlinkSync(mutPath); await admin.query('alter role recruiter_app password null'); }
+      } finally { rmSync(mutDir, { recursive: true, force: true }); await admin.query('alter role recruiter_app password null'); }
     }
     const refusedCases: [string, string[]][] = [
       ['log_statement = all', ["log_statement = 'all'"]], ['log_min_duration_statement = 0', ['log_min_duration_statement = 0']], ['log_transaction_sample_rate = 1', ['log_transaction_sample_rate = 1']],
