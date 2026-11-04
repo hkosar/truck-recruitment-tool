@@ -75,6 +75,11 @@ export function resolveTimeoutMs(value) {
   return Number.isFinite(n) && n > 0 ? n : DEFAULT_TIMEOUT_MS;
 }
 
+/** A time limit for messages: under 1 second in ms (never "0 s"), otherwise in seconds (one decimal only when needed). Pure. */
+export function formatLimit(ms) {
+  return ms < 1000 ? `${Math.round(ms)} ms` : `${Number((ms / 1000).toFixed(1))} s`;
+}
+
 /** Removes ANSI escape sequences (colour, cursor) from child output. Pure. */
 export function stripAnsi(text) {
   return String(text).replace(/\x1b\[[0-9;?]*[\x20-\x2f]*[\x40-\x7e]/g, '');
@@ -149,7 +154,7 @@ export function isSafeToDelete(dir, tmp) {
 /** Turns one finished child process into { status: 'PASS' | 'FAIL' | 'TIMEOUT', reason }. `out` must already be masked. Pure. */
 export function classifyOutcome({ kind, r, out, interrupted = false, allowedSkips = [], timeoutMs = DEFAULT_TIMEOUT_MS }) {
   if (interrupted) return { status: 'FAIL', reason: 'interrupted' };
-  if (r.error?.code === 'ETIMEDOUT') return { status: 'TIMEOUT', reason: `exceeded the ${Math.round(timeoutMs / 1000)} s time limit and was ended` };
+  if (r.error?.code === 'ETIMEDOUT') return { status: 'TIMEOUT', reason: `exceeded the ${formatLimit(timeoutMs)} time limit and was ended` };
   if (r.error) return { status: 'FAIL', reason: `could not start: ${r.error.code ?? 'error'}` };
   if (r.status !== 0) {
     const lines = out.split('\n').filter((l) => l.trim());
@@ -177,9 +182,10 @@ export function executeSuite(s, { sh, mask, baseEnv, timeoutMs, isInterrupted })
 }
 
 /** The one place a child process is started. `spawn` is spawnSync (a fake in the tests). Every call gets `env: baseEnv` unless the caller
- *  passes its own env, which the callers build from baseEnv. */
+ *  passes its own env, which the callers build from baseEnv. A missing, undefined or null env also gets baseEnv (spawn would hand the
+ *  child the whole parent environment). */
 export function makeSh(baseEnv, spawn = spawnSync) {
-  return (cmd, args, opts = {}) => spawn(cmd, args, { encoding: 'utf8', windowsHide: true, maxBuffer: 256 * 1024 * 1024, env: baseEnv, ...opts });
+  return (cmd, args, opts = {}) => spawn(cmd, args, { encoding: 'utf8', windowsHide: true, maxBuffer: 256 * 1024 * 1024, ...opts, env: opts.env ?? baseEnv });
 }
 
 /** The arguments of the app suite's vitest run. --no-cache: no results.json in node_modules/.vite; the module cache and the config loader
@@ -233,10 +239,60 @@ export function orderSuites(suites, first) {
   return [...suites.filter((s) => s.id === first), ...suites.filter((s) => s.id !== first)];
 }
 
+/** The statements that end the client sessions of a throwaway cluster (all but the one running them) and count what is left. Pure. */
+export const STRAY_BACKENDS_SQL = "select pg_terminate_backend(pid) from pg_stat_activity where backend_type = 'client backend' and pid <> pg_backend_pid()";
+export const STRAY_COUNT_SQL = "select count(*)::int as n from pg_stat_activity where backend_type = 'client backend' and pid <> pg_backend_pid()";
+
+/** After a suite was ended by its time limit, its database sessions can outlive it (a backend waiting on a lock does not notice that the
+ *  client is gone). `query(sql)` runs on one of THIS run's own clusters and returns the rows; the sessions are ended there and the count
+ *  is polled until it is 0. Returns the number still open after `tries` polls. */
+export async function terminateStrayBackends(query, { tries = 20, sleep = (ms) => new Promise((ok) => setTimeout(ok, ms)) } = {}) {
+  let n = 0;
+  for (let i = 0; i < tries; i++) {
+    await query(STRAY_BACKENDS_SQL);
+    n = Number((await query(STRAY_COUNT_SQL))[0]?.n ?? 0);
+    if (n === 0) return 0;
+    await sleep(250);
+  }
+  return n;
+}
+
+/** How long the runner's own admin client waits to connect to a throwaway cluster (a stuck local server must not hang the run). */
+export const ADMIN_CONNECT_TIMEOUT_MS = 30000;
+
+/** The connection settings of the runner's own admin client: loopback only, with a connect time limit. Pure. */
+export function adminClientConfig({ port, password, database = 'postgres' }) {
+  return { host: '127.0.0.1', port, user: ADMIN_USER, password, database, connectionTimeoutMillis: ADMIN_CONNECT_TIMEOUT_MS };
+}
+
+/** Ends the stray sessions on each given port through withAdmin(fn, { onPort }); throws if any session cannot be cleared. */
+export async function endStrayOnPorts(ports, withAdmin, terminate = terminateStrayBackends) {
+  for (const onPort of ports) {
+    let left = 0;
+    await withAdmin(async (c) => { left = await terminate(async (sql) => (await c.query(sql)).rows); }, { onPort });
+    if (left) throw new Error(`${left} session(s) still open on port ${onPort}`);
+  }
+}
+
+/** The line that says which suite RDB_SUITES_FIRST moved to the front (so a misspelt switch cannot go unnoticed). Pure. */
+export function orderNotice(first) {
+  return first ? `order: ${first} moved first (RDB_SUITES_FIRST)` : undefined;
+}
+
+/** Why the throwaway-certificate step failed: the time limit, or the helper's own refusing/usage line, or else its last lines.
+ *  `out` must already be masked. Pure. */
+export function describePkiFailure({ r, out, timeoutMs }) {
+  if (r.error?.code === 'ETIMEDOUT') return `the certificate step exceeded the ${formatLimit(timeoutMs)} time limit and was ended`;
+  if (r.error) return `the certificate step could not start: ${r.error.code ?? 'error'}`;
+  const lines = out.split('\n').map((l) => l.trim()).filter(Boolean);
+  const why = lines.filter((l) => /^(Error:\s*)?(refusing|usage)\b/i.test(l)); // anchored: tsx also prints the helper's source line, which contains the word
+  return (why.length ? why : lines.slice(-4)).join(' | ').slice(0, 600);
+}
+
 /** Runs the suites one after another and pushes one result per suite into `results` (so a throw keeps what was done). After every suite
  *  that ran, `restore()` is awaited; if it fails the whole run fails. A suite not selected by `only` is recorded as SKIP (not a pass);
  *  after an interrupt no further suite is started. */
-export async function runSuites(suites, { results, only, injectedFail, injectedHang, sh, mask, baseEnv, timeoutMs, isInterrupted, restore, log = console.log }) {
+export async function runSuites(suites, { results, only, injectedFail, injectedHang, sh, mask, baseEnv, timeoutMs, isInterrupted, restore, afterTimeout, log = console.log }) {
   for (const s of suites) {
     if (isInterrupted()) { results.push({ id: s.id, status: 'FAIL', reason: 'not run: interrupted' }); continue; }
     if (only && !only.includes(s.id)) { results.push({ id: s.id, status: 'SKIP', reason: 'not selected' }); log(`SKIP ${s.id}: not selected (RDB_SUITES_ONLY); the run counts as incomplete`); continue; }
@@ -253,6 +309,9 @@ export async function runSuites(suites, { results, only, injectedFail, injectedH
     }
     results.push({ id: s.id, ...outcome });
     log(outcome.status === 'PASS' ? `PASS ${s.id}` : `${outcome.status} ${s.id}: ${outcome.reason}`);
+    if (outcome.status === 'TIMEOUT' && afterTimeout) {
+      try { await afterTimeout(s.id); } catch (e) { throw new Error(`could not end the leftover database sessions after ${s.id} timed out: ${String(e?.message ?? e)}`); }
+    }
     try { await restore(); } catch (e) { throw new Error(`could not restore the throwaway logins after ${s.id}: ${String(e?.message ?? e)}`); }
   }
 }
@@ -460,8 +519,8 @@ async function run() {
     const rpPort = await startCluster(rpDataDir, rpLog, { rolePassword: true }, 'role-password');
     // The TLS cluster: a throwaway CA and server certificate/key from the repository's own helper (it refuses any folder inside the
     // repository), written into this run's temp folder and deleted with it.
-    const pki = sh(process.execPath, [join(root, 'pipeline', 'node_modules', 'tsx', 'dist', 'cli.mjs'), 'src/retention-secure-a3-make-pki.ts', tlsPkiDir], { cwd: join(root, 'pipeline') });
-    if (pki.status !== 0 || !/wrote root\.crt, server\.crt, server\.key/.test(pki.stdout ?? '')) throw new Error('making the throwaway TLS certificates failed: ' + mask(`${pki.stdout}${pki.stderr}`).split('\n').filter(Boolean).slice(-4).join(' | '));
+    const pki = sh(process.execPath, [join(root, 'pipeline', 'node_modules', 'tsx', 'dist', 'cli.mjs'), 'src/retention-secure-a3-make-pki.ts', tlsPkiDir], { cwd: join(root, 'pipeline'), timeout: timeoutMs });
+    if (pki.error || pki.status !== 0 || !/wrote root\.crt, server\.crt, server\.key/.test(pki.stdout ?? '')) throw new Error('making the throwaway TLS certificates failed: ' + describePkiFailure({ r: pki, out: mask(stripAnsi(`${pki.stdout ?? ''}${pki.stderr ?? ''}`)), timeoutMs }));
     const tlsRootCrt = join(tlsPkiDir, 'root.crt');
     const tlsPort = await startCluster(tlsDataDir, join(dir, 'tls-server.log'), {}, 'tls', () => {
       const files = tlsClusterFiles({ certFile: join(tlsPkiDir, 'server.crt'), keyFile: join(tlsPkiDir, 'server.key') });
@@ -493,7 +552,7 @@ async function run() {
     const require = createRequire(join(root, 'app', 'package.json'));
     const pg = require('pg');
     const withAdmin = async (fn, { onPort = port, database = 'postgres' } = {}) => {
-      const c = new pg.Client({ host: '127.0.0.1', port: onPort, user: ADMIN_USER, password: adminPw, database });
+      const c = new pg.Client(adminClientConfig({ port: onPort, password: adminPw, database }));
       await c.connect();
       try { await fn(c); } finally { await c.end(); }
     };
@@ -568,7 +627,10 @@ async function run() {
     }
 
     const only = process.env.RDB_SUITES_ONLY ? process.env.RDB_SUITES_ONLY.split(',').map((x) => x.trim()) : undefined;
-    await runSuites(orderSuites(SUITES, first), { results, only, injectedFail, injectedHang, sh, mask, baseEnv, timeoutMs, isInterrupted: () => interrupted, restore: restoreLogins });
+    // After a TIMEOUT: end the leftover sessions on this run's own three clusters (SQL on each cluster, no process is signalled by us).
+    const endStraySessions = () => endStrayOnPorts([port, rpPort, tlsPort], withAdmin);
+    if (orderNotice(first)) console.log(orderNotice(first));
+    await runSuites(orderSuites(SUITES, first), { results, only, injectedFail, injectedHang, sh, mask, baseEnv, timeoutMs, isInterrupted: () => interrupted, restore: restoreLogins, afterTimeout: endStraySessions });
   } catch (err) {
     console.error(`ERROR: ${mask(String(err?.message ?? err))}`);
     results.push({ id: 'harness', status: 'FAIL', reason: mask(String(err?.message ?? err)) });

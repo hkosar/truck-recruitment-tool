@@ -4,7 +4,7 @@
 // as `..keys` inside the repository is not mistaken for a parent path.
 // UNC, network-share and device paths (\\host\share, \\localhost\C$, \\?\UNC\..., \\?\C:\..., \\.\...) are refused outright, also when
 // the real path of a folder turns out to be one (a mapped network drive): such a path can name the repository folder without looking
-// like it (review t33 r2, N1). On Windows a path segment that is a reserved device name (CON, NUL, COM1, ...) is refused too.
+// like it (review t33 r2, N1). On Windows a path segment that is a reserved device name (CON, NUL, COM1, ...) is refused too, and so is a segment ending in a dot or a space.
 
 import { existsSync, realpathSync } from 'node:fs';
 import { basename, dirname, isAbsolute, join, relative, resolve, sep } from 'node:path';
@@ -37,6 +37,12 @@ export function hasDeviceNameSegment(p: string): boolean {
   return p.split(/[\\/]/).some((seg) => /^(con|prn|aux|nul|com[0-9¹²³]|lpt[0-9¹²³]|conin\$|conout\$)(\.[^\\/]*)?[ .]*$/i.test(seg));
 }
 
+/** True when a real segment of p ends in a dot or a space ("keys.", "keys "). Windows tools drop that character, so such a name can
+ *  mean a different folder to Node than to PostgreSQL or Explorer (review t40, N1). "." and ".." are navigation, not names. */
+export function hasTrailingDotOrSpaceSegment(p: string): boolean {
+  return p.split(/[\\/]/).some((seg) => seg !== '.' && seg !== '..' && /[. ]$/.test(seg));
+}
+
 export function isInsideRepository(dir: string, repositoryRoot: string): boolean {
   const target = resolve(dir);
   const root = resolve(repositoryRoot);
@@ -47,6 +53,7 @@ export function assertOutsideRepository(dir: string | undefined, repositoryRoot:
   if (!dir || !isAbsolute(dir)) throw new Error('usage: make-pki <absolute, empty directory outside the repository>');
   if (isUncOrDevicePath(dir) || isUncOrDevicePath(resolve(dir))) throw new Error('refusing: UNC, network-share and device paths are not allowed');
   if (process.platform === 'win32' && hasDeviceNameSegment(dir)) throw new Error('refusing: a path segment is a reserved device name');
+  if (process.platform === 'win32' && hasTrailingDotOrSpaceSegment(dir)) throw new Error('refusing: a path segment ends in a dot or a space');
   if (isUncOrDevicePath(realOfNearestAncestor(dir))) throw new Error('refusing: the folder is on a network share');
   if (isInsideRepository(dir, repositoryRoot)) throw new Error('refusing: the key material must live outside the repository');
   return resolve(dir);
