@@ -96,7 +96,7 @@ test('pipeline target guard requires exact production and allowlisted developmen
       supabaseUrl: `https://${RECORDED_PROJECT_REFS.staging}.supabase.co`,
       supabaseDbUrl: `postgresql://postgres.${RECORDED_PROJECT_REFS.staging}:redacted@aws-0-us-east-2.pooler.supabase.com:5432/postgres`,
     }),
-    /requires the production Carrier Recruiter ref/
+    /requires the recorded production Carrier Recruiter project/
   );
   assert.throws(
     () => verifyPipelineTarget({
@@ -170,13 +170,13 @@ test('pipeline target guard binds SUPABASE_DB_URL to the same approved project a
   for (const dbUrl of [poolerUrl(production), directUrl(production)]) {
     assert.throws(
       () => verifyPipelineTarget({ environment: 'dev', supabaseUrl: apiUrl(staging), supabaseDbUrl: dbUrl, allowedDevRefs: [staging], allowStagingWrites: true }),
-      /SUPABASE_DB_URL .* does not match SUPABASE_URL/
+      /SUPABASE_DB_URL and SUPABASE_URL name different projects/
     );
   }
   // And the reverse: production API settings with a staging bulk connection.
   assert.throws(
     () => verifyPipelineTarget({ environment: 'prod', supabaseUrl: apiUrl(production), supabaseDbUrl: poolerUrl(staging) }),
-    /SUPABASE_DB_URL .* does not match SUPABASE_URL/
+    /SUPABASE_DB_URL and SUPABASE_URL name different projects/
   );
 
   // Connection strings whose project cannot be established are refused, never assumed.

@@ -31,7 +31,7 @@ function projectRefFromUrl(rawUrl: string): string {
   }
   const projectRef = url.hostname.slice(0, -'.supabase.co'.length);
   if (!PROJECT_REF_PATTERN.test(projectRef)) {
-    throw new Error(`SUPABASE_URL contains an invalid project ref: ${projectRef || '(empty)'}`);
+    throw new Error('SUPABASE_URL contains an invalid project ref');
   }
   return projectRef;
 }
@@ -126,12 +126,12 @@ export function verifyPipelineTarget(input: TargetGuardInput): VerifiedTarget {
   const dbProjectRef = parseSupabaseDbTarget(input.supabaseDbUrl).projectRef;
   if (dbProjectRef !== projectRef) {
     throw new Error(
-      `SUPABASE_DB_URL project ${dbProjectRef} does not match SUPABASE_URL project ${projectRef}; refusing to open either client`
+      'SUPABASE_DB_URL and SUPABASE_URL name different projects; refusing to open either client'
     );
   }
   if (input.environment === 'prod') {
     if (projectRef !== PRODUCTION_PROJECT_REF) {
-      throw new Error(`PIPELINE_ENV=prod requires the production Carrier Recruiter ref ${PRODUCTION_PROJECT_REF}`);
+      throw new Error('PIPELINE_ENV=prod requires the recorded production Carrier Recruiter project');
     }
   } else {
     const allowed = new Set(input.allowedDevRefs ?? []);
@@ -139,7 +139,7 @@ export function verifyPipelineTarget(input: TargetGuardInput): VerifiedTarget {
       throw new Error('PIPELINE_ENV=dev refuses the production Carrier Recruiter project');
     }
     if (!allowed.has(projectRef)) {
-      throw new Error(`Dev project ref ${projectRef} is not in PIPELINE_ALLOWED_DEV_REFS`);
+      throw new Error('PIPELINE_ENV=dev project is not in PIPELINE_ALLOWED_DEV_REFS');
     }
     if ((projectRef === STAGING_PROJECT_REF || projectRef === REBUILT_STAGING_PROJECT_REF) && input.allowStagingWrites !== true) {
       throw new Error(
