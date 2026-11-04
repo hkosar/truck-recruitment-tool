@@ -40,7 +40,7 @@ import { RECORDED_PROJECT_REFS, parseSupabaseDbTarget, type SupabaseDbTarget } f
  * refused when track_utility is also on (with track_utility off no utility statement is recorded).
  * Every visible row of pg_settings is read and compared BY NAME (never by category: the category text is translated by lc_messages, which
  * a role or database can set to a non-English value). A name without a dot that is not in CHECKED_SETTINGS, HARMLESS_LOGGING_SETTINGS (of
- * its 68 entries, 43 were probed on a real server and 25 were judged harmless by kind, by reading, and not tested) or OTHER_KNOWN_SETTINGS
+ * its 68 entries, 43 were counted as probed on a real server, though debug_discard_caches is refused by this build and jit_expressions and jit_tuple_deforming are moot with jit off, and 25 were judged harmless by kind, by reading, and not tested) or OTHER_KNOWN_SETTINGS
  * (the other PostgreSQL 16.15 settings) is refused, and a set of sentinel names must come back or the read is not trusted. Any server major
  * version other than 16 is refused first (role_password_server_version_unverified) until it has been audited: for 17 that audit must cover
  * transaction_timeout (a FATAL like exit_on_error) and every other new setting. client_connection_check_interval is set to 0 (a dropped
@@ -49,8 +49,8 @@ import { RECORDED_PROJECT_REFS, parseSupabaseDbTarget, type SupabaseDbTarget } f
  * shutdown; PL/pgSQL cannot catch FATAL and ALTER ROLE accepts no bind parameter): the log's CONTEXT line then quotes the statement;
  * (2) any other LOG or WARNING raised inside the ALTER by code this module does not name (an extension, a preloaded library or a host
  * hook, e.g. Supabase supautils, not verified): it carries the same CONTEXT at the default log_min_messages = warning; (3) a setting
- * in those groups that a role without pg_read_all_settings cannot see (in PostgreSQL 16 only log_directory and log_filename, both
- * destination-only) is not read. The window for (1) and (2) is at most the lock wait (10 s, or less as above) plus the statement's run
+ * that a role without pg_read_all_settings cannot see is not read (on 16.15, 21 of the 368 rows are hidden from such a role; only 2 of
+ * them are logging settings, log_directory and log_filename, both destination-only). The window for (1) and (2) is at most the lock wait (10 s, or less as above) plus the statement's run
  * time; any rollback_not_confirmed or unknown result is a STOP. The node-postgres error then holds the text in its `where` field in
  * memory; it is never printed (only the classifier's id and SQLSTATE are). Extension settings other than pgaudit.log and
  * auto_explain.log_min_duration are not covered.
@@ -99,7 +99,7 @@ export const MUST_BE_OFF_SETTINGS: readonly string[] = ['debug_print_parse', 'de
 export const CHECKED_SETTINGS: readonly string[] = ['statement_timeout', 'lock_timeout', 'deadlock_timeout', 'log_lock_waits', 'pg_stat_statements.track', 'pg_stat_statements.track_utility',
   'log_statement', 'log_min_duration_statement', 'log_min_duration_sample', 'log_statement_sample_rate', 'log_transaction_sample_rate', 'log_parameter_max_length', 'log_parameter_max_length_on_error', 'client_connection_check_interval', ...MUST_BE_OFF_SETTINGS];
 /**
- * The rest of PostgreSQL 16's settings in those groups: a real-server probe as a non-superuser runner (each at its loudest value, then all at
+ * The rest of PostgreSQL 16's settings in the Reporting and Logging, Statistics, Developer Options and Error Handling groups: a real-server probe as a non-superuser runner (each at its loudest value, then all at
  * once on the success, error and lock-wait paths) found no part of the verifier in the server log, pg_stat_statements or pg_stat_activity,
  * or the setting cannot change what one session writes (server-wide or destination only). Evidence: scram-6b r5 settings audit.
  */
@@ -113,7 +113,7 @@ export const HARMLESS_LOGGING_SETTINGS: readonly string[] = ['allow_in_place_tab
   'update_process_title', 'wal_consistency_checking', 'zero_damaged_pages'];
 /**
  * The remaining PostgreSQL 16.15 settings (every other name in pg_settings without a dot, taken from a full 368-row listing), none of which
- * is about logging. Together with CHECKED_SETTINGS and HARMLESS_LOGGING_SETTINGS this is the full list of names the tool knows; a name outside
+ * can write the statement to the server log on its own (probed or judged by kind; library loading is residual (2)). Together with CHECKED_SETTINGS and HARMLESS_LOGGING_SETTINGS this is the full list of names the tool knows; a name outside
  * it (a setting of a newer server, a build-only setting, a renamed one) is refused. Names are compared, never categories, because pg_settings.category
  * is translated by lc_messages (superuser-only to set, so a role or database can carry a translated one).
  */

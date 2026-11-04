@@ -7,8 +7,9 @@
 import assert from 'node:assert/strict';
 import { spawnSync } from 'node:child_process';
 import { randomBytes } from 'node:crypto';
-import { existsSync, readFileSync, unlinkSync, writeFileSync } from 'node:fs';
-import { resolve } from 'node:path';
+import { existsSync, mkdtempSync, readFileSync, readdirSync, rmSync, writeFileSync } from 'node:fs';
+import { tmpdir } from 'node:os';
+import { relative, resolve } from 'node:path';
 import { pathToFileURL } from 'node:url';
 import pg from 'pg';
 import {
@@ -231,7 +232,7 @@ async function main(): Promise<void> {
   check('client_connection_check_interval must read 0 (SET LOCAL sets it); a name nobody classified is refused, a dotted extension setting is not', loggingProblem(settingsMap({ client_connection_check_interval: '1000' })) !== null
     && loggingProblem(settingsMap({ transaction_timeout: '0' })) !== null && loggingProblem(settingsMap({ 'supautils.something': 'x', 'pg_stat_statements.max': '5000' })) === null
     && OTHER_KNOWN_SETTINGS.every((s) => loggingProblem(settingsMap({ [s]: 'x' })) === null));
-  for (const [label, ver] of [['PostgreSQL 17.6 (160006 = 170006)', '170006'], ['PostgreSQL 15', '150013'], ['PostgreSQL 18', '180000'], ['an unreadable version', 'x'], ['an empty version', '']] as [string, string][]) {
+  for (const [label, ver] of [['PostgreSQL 17.6 (server_version_num 170006)', '170006'], ['PostgreSQL 15', '150013'], ['PostgreSQL 18', '180000'], ['an unreadable version', 'x'], ['an empty version', '']] as [string, string][]) {
     sent.length = 0;
     r = await captured(() => runRolePassword(fake({ settings: { server_version_num: ver } }), plan));
     check(`server_version_num on ${label}: refused with role_password_server_version_unverified before the verifier is bound; rolled back`, r.error instanceof RunnerRefusal && r.error.id === 'role_password_server_version_unverified' && !sent.some((x) => /set_config|^do |^commit/.test(x)) && JSON.parse(r.lines[0]!).result === 'rolled_back');
@@ -348,13 +349,16 @@ async function main(): Promise<void> {
   const u = new URL(URL_ENV);
   assert.ok(['127.0.0.1', 'localhost'].includes(u.hostname) && u.port !== '' && u.port !== '5432' && u.port !== '6543' && u.search === '', 'refusing: ROLE_PASSWORD_PG_URL must be a plain loopback URL on the owned cluster port');
   assert.match(decodeURIComponent(u.pathname.slice(1)), /^tr_[a-z0-9_]+$/, 'refusing: database name must start with tr_');
-  const admin = new pg.Client({ connectionString: URL_ENV });
+  const opened: pg.Client[] = []; // every client the real-server half opens, closed in the finally below so a failed check exits instead of hanging
+  const open = (config: pg.ClientConfig): pg.Client => { const c = new pg.Client(config); opened.push(c); return c; };
+  const admin = open({ connectionString: URL_ENV });
   admin.on('error', () => undefined);
   await admin.connect();
+  try {
   assert.match((await admin.query("select shobj_description(oid, 'pg_database') as c from pg_database where datname = current_database()")).rows[0].c as string, /^role-password-owned:/, 'refusing: database is not task-owned');
   assert.equal((await admin.query('show password_encryption')).rows[0].password_encryption, 'scram-sha-256');
   const loginAs = async (role: string, password: string): Promise<{ ok: boolean; who?: string; code?: string }> => {
-    const c = new pg.Client({ host: u.hostname, port: Number(u.port), user: role, password, database: decodeURIComponent(u.pathname.slice(1)) });
+    const c = open({ host: u.hostname, port: Number(u.port), user: role, password, database: decodeURIComponent(u.pathname.slice(1)) });
     c.on('error', () => undefined);
     try { await c.connect(); const who = (await c.query('select current_user as u')).rows[0].u as string; return { ok: true, who }; } catch (e) { return { ok: false, code: (e as { code?: string }).code }; } finally { await c.end().catch(() => undefined); }
   };
@@ -454,7 +458,7 @@ async function main(): Promise<void> {
     const via = (replace: Record<string, string>): RebuiltSqlClient => ({ connect: async () => undefined, end: async () => undefined, query: (q: string, a?: unknown[]) => admin.query(replace[q] ?? q, a) });
     const ok1 = await captured(() => runRolePassword(asClient(), leakPlan));
     check('leak test, success: committed and the role logs in with the random password', ok1.error === undefined && JSON.parse(ok1.lines[0]!).result === 'committed' && (await loginAs('recruiter_app', LEAK_PW)).ok);
-    const holder = new pg.Client({ connectionString: URL_ENV });
+    const holder = open({ connectionString: URL_ENV });
     holder.on('error', () => undefined);
     await holder.connect();
     await holder.query('begin');
@@ -481,7 +485,7 @@ async function main(): Promise<void> {
       await admin.query('select pg_stat_statements_reset()');
       const mark = readFileSync(LOG, 'utf8').length;
       await admin.query(`alter role recruiter_app login password '${oldV}'`);
-      const holder2 = new pg.Client({ connectionString: URL_ENV });
+      const holder2 = open({ connectionString: URL_ENV });
       holder2.on('error', () => undefined);
       await holder2.connect();
       await holder2.query('begin');
@@ -513,7 +517,7 @@ async function main(): Promise<void> {
     const lparts = [lplan.verifier, lm[1]!, lm[2]!, lm[3]!, LPW];
     const runAsRunner = async (settings: string[], plan = lplan, direct = false, options?: string, during?: () => Promise<void>) => {
       for (const st of settings) await admin.query(`alter role tr_runner set ${st}`);
-      const c = new pg.Client({ host: u.hostname, port: Number(u.port), user: 'tr_runner', password: RUNNER_PW, database: dbName, ...(options ? { options } : {}) });
+      const c = open({ host: u.hostname, port: Number(u.port), user: 'tr_runner', password: RUNNER_PW, database: dbName, ...(options ? { options } : {}) });
       c.on('error', () => undefined);
       await c.connect();
       try {
@@ -528,7 +532,7 @@ async function main(): Promise<void> {
       }
     };
     const logSince = async (mark: number): Promise<string> => { await sleep(1500); return readFileSync(LOG!, 'utf8').slice(mark); };
-    const visible = async () => { const c = new pg.Client({ host: u.hostname, port: Number(u.port), user: 'tr_runner', password: RUNNER_PW, database: dbName }); c.on('error', () => undefined); await c.connect(); try { return (await c.query(SETTINGS_SQL)).rows as { name: string; setting: string }[]; } finally { await c.end(); } };
+    const visible = async () => { const c = open({ host: u.hostname, port: Number(u.port), user: 'tr_runner', password: RUNNER_PW, database: dbName }); c.on('error', () => undefined); await c.connect(); try { return (await c.query(SETTINGS_SQL)).rows as { name: string; setting: string }[]; } finally { await c.end(); } };
     const seenRows = await visible();
     // jit is on by default outside the module's transaction (the module switches it off before it reads).
     check('a non-superuser runner can read every setting checked by name (pg_stat_statements rows when present), and every setting it sees in the logging, statistics, developer and error-handling groups is classified', CHECKED_SETTINGS.filter((s) => hasPss || !s.startsWith('pg_stat_statements.')).every((s) => seenRows.some((x) => x.name === s))
@@ -537,25 +541,33 @@ async function main(): Promise<void> {
     // log_min_messages taken off the classified lists stands in for a newer server's unclassified setting; it must refuse under a German lc_messages too.
     {
       const modPath = resolve(REPOSITORY_ROOT, 'pipeline/src/role-password.ts');
-      const mutPath = resolve(REPOSITORY_ROOT, 'pipeline/src/role-password-mutant.tmp.ts');
+      // The copy lives in the OS temp folder, not in the code folder, so a killed run cannot leave a file that tsc or the contract scan would pick up;
+      // its relative imports are rewritten to the real module folder.
       const src = readFileSync(modPath, 'utf8');
-      const mutSrc = src.replace("'log_min_messages', ", '');
-      check('the mutant module differs from the real one only by one classified name', mutSrc !== src && src.length - mutSrc.length === "'log_min_messages', ".length);
-      writeFileSync(mutPath, mutSrc);
+      const unclassified = src.replace("'log_min_messages', ", '');
+      check('the mutant module differs from the real one only by one classified name', unclassified !== src && src.length - unclassified.length === "'log_min_messages', ".length);
+      const mutSrc = unclassified.replace(/from '\.\/([\w-]+)\.js'/g, (_m, f: string) => `from '${pathToFileURL(resolve(REPOSITORY_ROOT, 'pipeline/src', `${f}.ts`)).href}'`);
+      // the temp folder is made only after the pre-checks, and inside the try, so an early failure leaves no empty rpw-mutant-* folder
+      let mutDir: string | undefined;
       try {
+        mutDir = mkdtempSync(resolve(tmpdir(), 'rpw-mutant-'));
+        const mutPath = resolve(mutDir, 'role-password-mutant.ts');
+        check('the mutant copy is outside the code folder, and no leftover mutant file is in pipeline/src', relative(REPOSITORY_ROOT, mutPath).startsWith('..') && readdirSync(resolve(REPOSITORY_ROOT, 'pipeline/src')).every((f) => !/mutant/.test(f)));
+        writeFileSync(mutPath, mutSrc);
         const mut = await import(pathToFileURL(mutPath).href) as { runRolePassword: typeof runRolePassword };
         const deOk = await admin.query("alter role tr_runner set lc_messages = 'de'").then(() => true, () => false);
         await admin.query('alter role tr_runner reset lc_messages');
         const caseRun = async (label: string, lc: string | null, which: { runRolePassword: typeof runRolePassword }, expectRefusal: boolean) => {
           if (lc) await admin.query(`alter role tr_runner set lc_messages = '${lc}'`);
-          const c = new pg.Client({ host: u.hostname, port: Number(u.port), user: 'tr_runner', password: RUNNER_PW, database: dbName });
+          const c = open({ host: u.hostname, port: Number(u.port), user: 'tr_runner', password: RUNNER_PW, database: dbName });
           c.on('error', () => undefined);
           await c.connect();
           const rows = lc ? (await c.query("select count(*)::int as n from pg_catalog.pg_settings where category ~ '^(Reporting and Logging|Statistics|Developer Options|Error Handling)'")).rows[0].n as number : -1;
           const res = await captured(() => which.runRolePassword(c as unknown as RebuiltSqlClient, lplan));
           await c.end().catch(() => undefined);
           if (lc) await admin.query('alter role tr_runner reset lc_messages');
-          const refused = res.error instanceof RunnerRefusal && res.error.id === 'role_password_logging_refused' && JSON.parse(res.lines[0]!).result === 'rolled_back';
+          // by name and id, not instanceof: the mutant copy in the temp folder loads its own RunnerRefusal class
+          const refused = (res.error as Error | undefined)?.constructor.name === 'RunnerRefusal' && (res.error as { id?: string }).id === 'role_password_logging_refused' && JSON.parse(res.lines[0]!).result === 'rolled_back';
           check(`real server, ${label}${lc ? ` (the English group-name pattern matches ${rows} rows)` : ''}: ${expectRefusal ? 'refused (role_password_logging_refused), rolled back' : 'commits'}`, expectRefusal ? refused : (res.error === undefined && JSON.parse(res.lines[0]!).result === 'committed'));
         };
         await caseRun('mutant (unclassified log_min_messages), default lc_messages', null, mut, true);
@@ -563,7 +575,7 @@ async function main(): Promise<void> {
           await caseRun('mutant (unclassified log_min_messages), per-role lc_messages = de', 'de', mut, true);
           await caseRun('real module, per-role lc_messages = de', 'de', { runRolePassword }, false);
         } else console.log('SKIP lc_messages = de cases: this server has no German messages (not counted as passed)');
-      } finally { unlinkSync(mutPath); await admin.query('alter role recruiter_app password null'); }
+      } finally { if (mutDir) rmSync(mutDir, { recursive: true, force: true }); await admin.query('alter role recruiter_app password null'); }
     }
     const refusedCases: [string, string[]][] = [
       ['log_statement = all', ["log_statement = 'all'"]], ['log_min_duration_statement = 0', ['log_min_duration_statement = 0']], ['log_transaction_sample_rate = 1', ['log_transaction_sample_rate = 1']],
@@ -580,7 +592,7 @@ async function main(): Promise<void> {
     // B1 (r3 review): settings that logged the verifier on a normal run before the fix.
     const logMark = (): number => (LOG ? readFileSync(LOG, 'utf8').length : 0);
     const logClean = async (mark: number): Promise<boolean> => !LOG || (await logSince(mark), lparts.every((x) => !readFileSync(LOG, 'utf8').slice(mark).includes(x)));
-    const holdRole = async (): Promise<pg.Client> => { const h = new pg.Client({ connectionString: URL_ENV }); h.on('error', () => undefined); await h.connect(); await h.query('begin'); await h.query('alter role recruiter_app connection limit 3'); return h; };
+    const holdRole = async (): Promise<pg.Client> => { const h = open({ connectionString: URL_ENV }); h.on('error', () => undefined); await h.connect(); await h.query('begin'); await h.query('alter role recruiter_app connection limit 3'); return h; };
     for (const [label, settings, options] of [['debug_print_parse = on (per role)', ['debug_print_parse = on'], undefined], ['debug_print_rewritten = on (per role)', ['debug_print_rewritten = on'], undefined], ['debug_print_plan = on (per role)', ['debug_print_plan = on'], undefined],
       ['debug_print_parse = on as a client startup option', [], '-c debug_print_parse=on'], ['debug_print_parse and debug_print_rewritten on, with log_min_messages = debug1', ['debug_print_parse = on', 'debug_print_rewritten = on', 'log_min_messages = debug1'], undefined]] as [string, string[], string | undefined][]) {
       const mark = logMark();
@@ -696,8 +708,8 @@ async function main(): Promise<void> {
   }
   check('every event line printed during the real-PostgreSQL runs too is a fixed, verifier-free and password-free event', eventsClean());
   await admin.query('drop role if exists recruiter_maintenance');
-  await admin.end();
-  console.log(`role-password: ${n} checks passed (offline and real PostgreSQL)`);
+  } finally { await Promise.all(opened.map((c) => c.end().catch(() => undefined))); }
+  console.log(`role-password:${n} checks passed (offline and real PostgreSQL)`);
 }
 
 main().catch((e) => { console.error(e); process.exitCode = 1; });
