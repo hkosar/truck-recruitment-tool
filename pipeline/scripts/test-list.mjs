@@ -30,6 +30,7 @@ export const NOT_RUN = [
   ['src/first-manager-failure.test.ts', 'a helper imported by first-manager-bootstrap.test.ts, not a stand-alone run'],
   ['src/ledger-preflight-a3.test.ts', 'real PostgreSQL: scripts/run-real-db-suites.mjs'],
   ['src/load-location-tables.test.ts', 'needs external ZCTA / places data files that are not in the repo (npm run test:location-tables)'],
+  ['src/m1-supabase-runner-a3.test.ts', 'real PostgreSQL (own NOSUPERUSER cluster): scripts/run-real-db-suites.mjs'],
   ['src/owner-bootstrap-a3.test.ts', 'real PostgreSQL: scripts/run-real-db-suites.mjs'],
   ['src/prod-sql-a2-backouts-a3.test.ts', 'real PostgreSQL: scripts/run-real-db-suites.mjs'],
   ['src/prod-sql-a3.test.ts', 'real PostgreSQL: scripts/run-real-db-suites.mjs'],
