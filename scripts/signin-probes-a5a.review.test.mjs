@@ -235,6 +235,72 @@ test('review note 1: a long --app-origin host label with a digit is not a false 
   assert.equal(judge({ ...base, status: 200, body: `a@b.invalid ${app}` }, { status: [200] }, app), 'leak');
 });
 
+test('origin blanking applies only to the opaque-string rule: a user part glued to the origin is still a leak', () => {
+  const base = { ok: true, status: 200, headers: {}, cookies: [], body: '' };
+  const j = (body, app) => judge({ ...base, body }, { status: [200] }, app);
+  const long = 'https://twisted-nail-recruiter-app-staging-2.onrender.com';
+  assert.equal(j(`${long}@evil.example.com`, long), 'leak');
+  assert.equal(j('http://a@x.example.com', 'http://a'), 'leak');
+  assert.equal(j(`${long}%40evil.example.com`, long), 'leak');
+  assert.equal(judge({ ...base, headers: { location: 'http://a@x.example.com' } }, { status: [200] }, 'http://a'), 'leak');
+  // the long-label false alarm stays fixed
+  assert.equal(j(`see ${long}/signin`, long), null);
+});
+
+test('TRUCKRECRU-47: the app address in capitals, without the scheme, or percent-encoded is not a false leak', () => {
+  const base = { ok: true, status: 200, headers: {}, cookies: [], body: '' };
+  const j = (body, app, headers = {}) => judge({ ...base, body, headers }, { status: [200] }, app);
+  const long = 'https://twisted-nail-recruiter-app-staging-2.onrender.com';
+  const host = 'twisted-nail-recruiter-app-staging-2.onrender.com';
+  assert.equal(j(`go ${long.toUpperCase()}/signin`, long), null, 'capitals');
+  assert.equal(j('go https://Twisted-Nail-Recruiter-App-Staging-2.onrender.com/x', long), null, 'mixed case');
+  assert.equal(j(`host ${host}`, long), null, 'no scheme');
+  assert.equal(j(`host ${host.toUpperCase()}`, long), null, 'no scheme, capitals');
+  assert.equal(j(`next=${encodeURIComponent(`${long}/signin`)}`, long), null, 'percent-encoded');
+  assert.equal(j(`next=${encodeURIComponent(`${long}/signin`).toLowerCase()}`, long), null, 'percent-encoded, lower-case hex');
+  assert.equal(j('', long, { location: `/signin?next=${encodeURIComponent(`${long}/signin`)}` }), null, 'percent-encoded in a header');
+  // Without --app-origin the rule is unchanged.
+  assert.equal(j(`go ${long.toUpperCase()}/signin`), 'leak');
+  assert.equal(j(`host ${host}`), 'leak');
+});
+
+test('TRUCKRECRU-47: the wider recognition hides no real leak', () => {
+  const base = { ok: true, status: 200, headers: {}, cookies: [], body: '' };
+  const j = (body, app, headers = {}) => judge({ ...base, body, headers }, { status: [200] }, app);
+  const long = 'https://twisted-nail-recruiter-app-staging-2.onrender.com';
+  const host = 'twisted-nail-recruiter-app-staging-2.onrender.com';
+  const tok = 'abcdef0123456789abcdef0123456789zz';
+  const enc = encodeURIComponent(long);
+  assert.equal(j(`${long.toUpperCase()}@EVIL.EXAMPLE.COM`, long), 'leak', 'capitals + user part');
+  assert.equal(j(`${long.toUpperCase()}%40Evil.Example.COM`, long), 'leak', 'capitals + %40');
+  assert.equal(j(`${host}@evil.example.com`, long), 'leak', 'bare host + user part');
+  assert.equal(j(`${enc}@evil.example.com`, long), 'leak', 'encoded origin + user part');
+  assert.equal(j(`${enc}%40evil.example.com`, long), 'leak', 'encoded origin + %40');
+  assert.equal(j(`${long.toUpperCase()}/${tok}`, long), 'leak', 'capitals + token');
+  assert.equal(j(`${host}/${tok}`, long), 'leak', 'bare host + token');
+  assert.equal(j(`${host}${tok}`, long), 'leak', 'bare host glued to token');
+  assert.equal(j(`${tok}${host}`, long), 'leak', 'token glued before bare host');
+  assert.equal(j(`${enc}${tok}`, long), 'leak', 'encoded origin glued to token');
+  assert.equal(j(`${enc}/x?token=${'A'.repeat(20)}`, long), 'leak', 'encoded origin + token=');
+  assert.equal(j('', long, { location: `${long.toUpperCase()}@evil.example.com` }), 'leak', 'header, capitals + user part');
+  assert.equal(j('', long, { 'x-debug': tok }), 'leak', 'opaque string in another header');
+  // A short host must not eat letters out of a longer secret (bare host is blanked as a whole token only).
+  assert.equal(j('http://abcdef0123456789abcdef0123456789z', 'http://a'), 'leak', 'one-letter host inside a secret');
+  assert.equal(j('xxxxxxxx0123456789a0123456789xxxxxxxxxxxx', 'http://a'), 'leak', 'one-letter host inside a secret (2)');
+  // Boundary check itself (review of TRUCKRECRU-47): in each case the host is at the edge of a secret that is 32+ characters on its own.
+  const s30 = 'Qx7Lm2Pz9Rt4Vb6Nc8Wd1Ye3Hf5Gk0';
+  assert.equal(j(`id=${s30}Za/x`, 'http://a'), 'leak', 'secret ends in the host, then a slash');
+  assert.equal(j(`/x/aZ${s30}`, 'http://a'), 'leak', 'secret starts with the host, after a slash');
+  assert.equal(j(`${s30.slice(0, 16)}-a-${s30.slice(16)}`, 'http://a'), 'leak', 'host between hyphens inside a secret');
+  assert.equal(j('Qx7Lm2Pz9Rt4Vb6N_a_c8Wd1Ye3Hf5Gk0', 'http://a'), 'leak', 'host between underscores inside a secret');
+  assert.equal(j(`k=${s30.slice(0, 10)}${host}`, long), 'leak', 'real address: secret glued in front of the staging app host');
+  // Overlap: a secret that starts with the end of the app address, or ends with its scheme, glued on with no gap.
+  assert.equal(j('https://app.example.COMQx7Lm2Pz9Rt4Vb6Nc8Wd1Ye3Hf5Gk', 'https://app.example.com'), 'leak', 'secret starts with the last label, capitals');
+  assert.equal(j('https%3A%2F%2Fapp.example.comQx7Lm2Pz9Rt4Vb6Nc8Wd1Ye3Hf5Gk', 'https://app.example.com'), 'leak', 'secret starts with the last label, encoded');
+  assert.equal(j('https://app.example.comQx7Lm2Pz9Rt4Vb6Nc8Wd1Ye3Hf5Gk', 'https://app.example.com'), 'leak', 'secret starts with the last label, exact');
+  assert.equal(j(`${s30.slice(0, 28)}https://app.example.com`, 'https://app.example.com'), 'leak', 'secret ends with the scheme text, glued before the address');
+});
+
 test('review note 2: the usage example in the script header names --app-origin', async () => {
   const { readFileSync } = await import('node:fs');
   const text = readFileSync(join(dirname(fileURLToPath(import.meta.url)), 'signin-probes-a5a.mjs'), 'utf8');
