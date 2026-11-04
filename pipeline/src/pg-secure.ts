@@ -21,10 +21,12 @@ export interface PgTargetFields {
  * host, port and ssl (so `?sslmode=disable` would switch TLS off), and `ssl`, `host`, `port`, `stream`, `Client` and the like
  * replace the target or the checked transport. An allow-list, so an option pg adds later is refused until reviewed.
  */
-const ALLOWED_EXTRA_OPTIONS: ReadonlySet<string> = new Set(['max', 'idleTimeoutMillis', 'connectionTimeoutMillis', 'allowExitOnIdle', 'statement_timeout', 'query_timeout', 'application_name']);
+const ALLOWED_EXTRA_OPTIONS: ReadonlySet<string> = new Set(['max', 'idleTimeoutMillis', 'connectionTimeoutMillis', 'allowExitOnIdle', 'statement_timeout', 'query_timeout', 'application_name', 'keepAlive', 'keepAliveInitialDelayMillis']);
 
 /** `application_name` goes into the startup message unescaped: only a short plain label may pass, so it cannot add parameters. */
 const SAFE_APPLICATION_NAME = /^[A-Za-z0-9._-]{1,63}$/;
+/** TCP keep-alive (socket.setKeepAlive): a boolean switch and an initial delay that is a whole number of milliseconds, 0 to 10 minutes. */
+const MAX_KEEPALIVE_INITIAL_DELAY_MS = 600_000;
 
 function refuseOverride(): never {
   throw new DbTlsRefusal('connection_override', 'refusing: a caller option may not replace the database target or its TLS settings');
@@ -45,6 +47,8 @@ function checkedExtra<T extends object>(extra: T): T {
     const value: unknown = descriptor.value;
     if (typeof value !== 'string' && typeof value !== 'number' && typeof value !== 'boolean') refuseOverride();
     if (key === 'application_name' && (typeof value !== 'string' || !SAFE_APPLICATION_NAME.test(value))) refuseOverride();
+    if (key === 'keepAlive' && typeof value !== 'boolean') refuseOverride();
+    if (key === 'keepAliveInitialDelayMillis' && (typeof value !== 'number' || !Number.isSafeInteger(value) || value < 0 || value > MAX_KEEPALIVE_INITIAL_DELAY_MS)) refuseOverride();
     copy[key] = value;
   }
   return copy as unknown as T;

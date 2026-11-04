@@ -1,5 +1,5 @@
-import pg from 'pg';
 import { createHash, createHmac, pbkdf2Sync, randomBytes } from 'node:crypto';
+import { newSecurePgClient } from './pg-secure.js';
 import { RunnerRefusal } from './refusals.js';
 import { requireRecordedRebuiltRef, type RebuiltSqlClient } from './staging-rebuilt.js';
 import { roleOf } from './retention-step.js';
@@ -315,25 +315,23 @@ export async function runRolePassword(client: RebuiltSqlClient, plan: RolePasswo
   resultEvent(plan.role, 'committed');
 }
 
-/** Client options (exported for the test): connect and query limits on the client side as well as the server's, and TCP keep-alive. */
-export const rolePasswordClientOptions = (target: SupabaseDbTarget) => ({
-  host: target.host,
-  port: target.port,
-  user: target.user,
-  password: target.password,
-  database: target.database,
-  // Same relaxed pooler TLS setting as the other runner actions (see db.ts TODO(live-db)).
-  ssl: { rejectUnauthorized: false },
+/** Client tuning (exported for the test): connect and query limits on the client side as well as the server's, and TCP keep-alive. Plain values only (pg-secure.ts allow-list). */
+export const rolePasswordClientOptions = () => ({
   connectionTimeoutMillis: 10_000,
   query_timeout: CLIENT_QUERY_TIMEOUT_MS,
   keepAlive: true,
   keepAliveInitialDelayMillis: 10_000,
 });
 
-const defaultClientFactory = (target: SupabaseDbTarget): RebuiltSqlClient => new pg.Client(rolePasswordClientOptions(target));
+/**
+ * The real client (exported for the test): the target and its security come only from pg-secure.ts, as for the other staging actions.
+ * A hosted target gets verify-full TLS against the pinned root (refused here, before anything is dialled, when none is pinned) and
+ * SCRAM-SHA-256 only; a loopback test database gets no TLS and is still SCRAM-only. Nothing is sent before TLS is verified.
+ */
+export const newRolePasswordClient = (target: SupabaseDbTarget): RebuiltSqlClient => newSecurePgClient(target, rolePasswordClientOptions());
 
 /** Connects as the runner login (nothing is sent before the plan is verified) and runs the one transaction. */
-export async function executeRolePassword(plan: RolePasswordPlan, clientFactory: (target: SupabaseDbTarget) => RebuiltSqlClient = defaultClientFactory): Promise<void> {
+export async function executeRolePassword(plan: RolePasswordPlan, clientFactory: (target: SupabaseDbTarget) => RebuiltSqlClient = newRolePasswordClient): Promise<void> {
   const client = clientFactory(plan.target);
   client.on?.('error', () => undefined); // the query in flight (or the next one) rejects and is reported as server_or_driver_error
   await client.connect();

@@ -129,6 +129,9 @@ need(!noExternalInput.test(code(rootCa)) && !noExternalInput.test(code(dbTls)), 
 need(importsOf(rootCa) === '' && importsOf(dbTls) === ['./supabase-root-ca.js', 'node:crypto', 'node:net', 'node:tls'].sort().join(), 'supabase-root-ca.ts must import nothing, and db-tls.ts only node:crypto, node:net, node:tls and ./supabase-root-ca.js');
 const pgSecure = read('pipeline/src/pg-secure.ts');
 need(/ALLOWED_EXTRA_OPTIONS/.test(pgSecure) && /checkedExtra\(extra\)/.test(pgSecure) && (pgSecure.match(/checkedExtra\(extra\)/g) ?? []).length === 2 && !/\.\.\.extra\b/.test(pgSecure), 'pg-secure.ts must allow-list the extra options of both helpers (no connectionString, ssl, host or port override)');
+need(/'keepAlive', 'keepAliveInitialDelayMillis'\]/.test(pgSecure) && /key === 'keepAlive' && typeof value !== 'boolean'\) refuseOverride\(\)/.test(pgSecure)
+  && /key === 'keepAliveInitialDelayMillis' && \(typeof value !== 'number' \|\| !Number\.isSafeInteger\(value\) \|\| value < 0 \|\| value > MAX_KEEPALIVE_INITIAL_DELAY_MS\)\) refuseOverride\(\)/.test(pgSecure) && /MAX_KEEPALIVE_INITIAL_DELAY_MS = 600_000;/.test(pgSecure),
+  'pg-secure.ts must allow keepAlive only as a boolean and keepAliveInitialDelayMillis only as a whole number 0 to 600000');
 need(doc.includes(PIN_SHA) && doc.includes('Production has NOT been checked') && doc.includes('prod-ca-2021.crt') && !doc.includes('No root is pinned yet'), 'doc 19 must record the pinned fingerprint, its provenance and that production is unchecked');
 // Tests cover every refusal; the doc carries the names and the command.
 for (const phrase of ['only the staging Doppler scope', 'is missing or empty', 'production project', 'does not target the recorded staging-2', 'recruiter_app login', 'session-mode port', 'EMAIL_MODE must be test', 'HOST must be 127', 'SendGrid', '<masked>']) {

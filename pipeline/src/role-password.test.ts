@@ -12,10 +12,13 @@ import { resolve } from 'node:path';
 import { pathToFileURL } from 'node:url';
 import pg from 'pg';
 import {
-  CHECKED_SETTINGS, CLIENT_QUERY_TIMEOUT_MS, HARMLESS_LOGGING_SETTINGS, OTHER_KNOWN_SETTINGS, SENTINEL_SETTINGS, MUST_BE_OFF_SETTINGS, SESSION_SAFETY_SQL, LOCK_TIMEOUT_SQL, SEARCH_PATH_SQL, lockTimeoutSql, ROLE_PASSWORD_RESULTS, ROLE_PASSWORD_ACTIONS, ROLE_PASSWORD_ROLES, ROLE_PASSWORD_VARIABLES, SETTINGS_SQL, SET_VERIFIER_SQL, STATEMENT_TIMEOUT_SQL, doAlterSql, executeRolePassword, loggingProblem, passwordProblem, planRolePassword, rolePasswordClientOptions, runRolePassword, scramSha256Verifier,
+  CHECKED_SETTINGS, CLIENT_QUERY_TIMEOUT_MS, HARMLESS_LOGGING_SETTINGS, OTHER_KNOWN_SETTINGS, SENTINEL_SETTINGS, MUST_BE_OFF_SETTINGS, SESSION_SAFETY_SQL, LOCK_TIMEOUT_SQL, SEARCH_PATH_SQL, lockTimeoutSql, ROLE_PASSWORD_RESULTS, ROLE_PASSWORD_ACTIONS, ROLE_PASSWORD_ROLES, ROLE_PASSWORD_VARIABLES, SETTINGS_SQL, SET_VERIFIER_SQL, STATEMENT_TIMEOUT_SQL, doAlterSql, executeRolePassword, loggingProblem, passwordProblem, newRolePasswordClient, planRolePassword, rolePasswordClientOptions, runRolePassword, scramSha256Verifier,
 } from './role-password.js';
+import { DbTlsRefusal, isDbSecurityFailure, isLoopbackHost } from './db-tls.js';
+import { TEST_HOST, makeTestPki, redirectHosts, startFakePg, withRepoPins, type FakeAuth, type FakePgRecord, type TestCert } from './db-tls-testkit.js';
 import { REFUSAL_IDS, RunnerRefusal, classifyRunnerFailure } from './refusals.js';
 import { REPOSITORY_ROOT, type RebuiltSqlClient } from './staging-rebuilt.js';
+import type { PinnedRootCa } from './supabase-root-ca.js';
 import { RECORDED_PROJECT_REFS } from './target-guard.js';
 
 const REBUILT = RECORDED_PROJECT_REFS.stagingRebuilt as string;
@@ -247,8 +250,49 @@ async function main(): Promise<void> {
   const rWhere = await captured(() => runRolePassword({ ...fake(), query: async (q: string, a?: unknown[]) => { if (/^do \$\$/.test(q)) throw whereErr; return fake().query(q, a); } }, plan));
   check('a pg error whose where/detail/internalQuery hold the verifier is never printed: only the fixed event, no raw stdout/stderr write, and the classifier gives id plus SQLSTATE', !rWhere.lines.join('\n').includes(plan.verifier) && rawWrites.length === 0
     && JSON.stringify(classifyRunnerFailure(whereErr)) === JSON.stringify({ refusal: 'server_or_driver_error', err_code: '57P01' }) && JSON.parse(rWhere.lines[0]!).result === 'rolled_back');
-  const opts = rolePasswordClientOptions(plan.target);
-  check('the real client has a client-side query timeout above the 30s statement timeout, a connect timeout and TCP keep-alive', opts.query_timeout === CLIENT_QUERY_TIMEOUT_MS && CLIENT_QUERY_TIMEOUT_MS > 30_000 && opts.connectionTimeoutMillis === 10_000 && opts.keepAlive === true);
+  const opts = rolePasswordClientOptions();
+  check('the real client has a client-side query timeout above the 30s statement timeout, a connect timeout and TCP keep-alive', opts.query_timeout === CLIENT_QUERY_TIMEOUT_MS && CLIENT_QUERY_TIMEOUT_MS > 30_000 && opts.connectionTimeoutMillis === 10_000 && opts.keepAlive === true && opts.keepAliveInitialDelayMillis === 10_000);
+  {
+    // The client the executor really builds (pg-secure.ts) carries those limits: checked on the pg client itself, for a loopback target (no TLS needed to build it).
+    const real = newRolePasswordClient({ ...plan.target, host: '127.0.0.1' }) as unknown as { connectionParameters: Record<string, unknown>; _connectionTimeoutMillis: unknown; connection: { _keepAlive: unknown; _keepAliveInitialDelayMillis: unknown } };
+    check('the executor\'s real client is built by pg-secure.ts with the query timeout, connect timeout and keep-alive reaching the pg client', real.connectionParameters.query_timeout === CLIENT_QUERY_TIMEOUT_MS && real.connection._keepAlive === true && real.connection._keepAliveInitialDelayMillis === 10_000
+      && real._connectionTimeoutMillis === 10_000 && real.connectionParameters.ssl === false);
+  }
+  // ---- TLS: a hosted-looking target goes through the TLS-hardened client. A fake PostgreSQL server on 127.0.0.1 stands in for the host (socket redirect, no DNS, no network).
+  {
+    const pki = makeTestPki();
+    const rootPin = pki.pin(pki.root);
+    const RUNNER_PW = 'runner-pw-not-real';
+    const secrets = [RUNNER_PW, PW, plan.verifier, ...(/^SCRAM-SHA-256\$4096:([^$]+)\$([^:]+):(.+)$/.exec(plan.verifier)!.slice(1))].map((s) => Buffer.from(s, 'utf8'));
+    const leaked = (rec: FakePgRecord) => rec.afterStartup.some((b) => secrets.some((s) => b.includes(s)));
+    const viaFake = async (o: { tlsCert: TestCert | null; auth: FakeAuth; pins: PinnedRootCa[]; host: string }) => {
+      const server = await startFakePg({ tlsCert: o.tlsCert, auth: o.auth });
+      const undo = redirectHosts([o.host], server.port);
+      const p = { ...plan, target: { ...plan.target, host: o.host } };
+      let run: Awaited<ReturnType<typeof captured>>;
+      try { run = await withRepoPins(o.pins, () => captured(() => executeRolePassword(p))); } finally { undo(); await new Promise((r2) => setTimeout(r2, 50)); await server.close(); }
+      return { run, record: server.record };
+    };
+    const hostedHost = plan.target.host;
+    check('test setup: the plan target is a hosted-looking (non-loopback) host', !isLoopbackHost(hostedHost) && /pooler\.supabase\.com$/.test(hostedHost));
+    const noCa = await viaFake({ tlsCert: pki.server, auth: 'trust', pins: [], host: hostedHost });
+    check('hosted-looking target with NO pinned CA: refused (no_trusted_ca, db_tls_refused) before anything is dialled: 0 connections, 0 bytes, 0 password messages, no event printed',
+      noCa.run.error instanceof DbTlsRefusal && noCa.run.error.reason === 'no_trusted_ca' && JSON.stringify(classifyRunnerFailure(noCa.run.error)) === JSON.stringify({ refusal: 'db_tls_refused' })
+      && noCa.record.connections === 0 && noCa.record.afterStartup.length === 0 && noCa.record.passwordMessages === 0 && noCa.run.lines.length === 0);
+    const wrongCa = await viaFake({ tlsCert: pki.server, auth: 'trust', pins: [pki.pin(pki.otherRoot)], host: TEST_HOST });
+    check('hosted-looking target whose certificate chains to a different CA than the pin: refused by TLS (db_tls_refused) before the startup message; no password, runner password or verifier byte sent',
+      isDbSecurityFailure(wrongCa.run.error) && !(wrongCa.run.error instanceof DbTlsRefusal) && JSON.stringify(classifyRunnerFailure(wrongCa.run.error)) === JSON.stringify({ refusal: 'db_tls_refused' })
+      && wrongCa.record.connections === 1 && wrongCa.record.plaintextStartups === 0 && wrongCa.record.afterStartup.length === 0 && wrongCa.record.passwordMessages === 0 && !leaked(wrongCa.record) && wrongCa.run.lines.length === 0);
+    const wrongName = await viaFake({ tlsCert: pki.server, auth: 'trust', pins: [rootPin], host: hostedHost });
+    check('hosted-looking target presenting a valid certificate for another host name: refused (ERR_TLS_CERT_ALTNAME_INVALID, db_tls_refused) before the startup message; nothing sensitive sent',
+      (wrongName.run.error as { code?: string } | undefined)?.code === 'ERR_TLS_CERT_ALTNAME_INVALID' && JSON.stringify(classifyRunnerFailure(wrongName.run.error)) === JSON.stringify({ refusal: 'db_tls_refused' })
+      && wrongName.record.connections === 1 && wrongName.record.plaintextStartups === 0 && wrongName.record.afterStartup.length === 0 && !leaked(wrongName.record) && wrongName.run.lines.length === 0);
+    const control = await viaFake({ tlsCert: pki.server, auth: 'scram-no-final', pins: [rootPin], host: TEST_HOST });
+    check('control: with the right pinned CA and host name the client completes TLS and starts SCRAM (so the refusals above are TLS, not a dead server); the unfinished SCRAM is refused, and no password, runner password or verifier byte is sent',
+      control.record.tlsHandshakes === 1 && control.record.plaintextStartups === 0 && control.record.passwordMessages >= 1 && control.run.error instanceof DbTlsRefusal && control.run.error.reason === 'scram_incomplete' && !leaked(control.record));
+    const plain = await viaFake({ tlsCert: null, auth: 'trust', pins: [rootPin], host: TEST_HOST });
+    check('a hosted-looking server that refuses TLS gets no startup message and nothing sensitive', isDbSecurityFailure(plain.run.error) && plain.record.sslRequests === 1 && plain.record.plaintextStartups === 0 && plain.record.afterStartup.length === 0 && !leaked(plain.record));
+  }
   const bad = { ...plan, role: 'postgres' };
   sent.length = 0;
   r = await captured(() => runRolePassword(fake(), bad));
@@ -281,6 +325,8 @@ async function main(): Promise<void> {
     && /ROLE_PASSWORD_ROLES\.includes\(role\)/.test(eventFn) && /ROLE_PASSWORD_RESULTS/.test(eventFn) && !/\bline\(/.test(code));
   check('module never writes to process.stdout / process.stderr directly (console is used only in resultEvent), and no raw write happened in any captured run', !/process\.(stdout|stderr)/.test(code) && rawWrites.length === 0);
   check('module does not read process.env, never logs the password/verifier, has no drop/delete/grant/revoke SQL', !/process\.env/.test(src) && !/console\.(log|error)\([^)]*(password|verifier)/i.test(code.replace(/const resultEvent = [\s\S]*?\n\};/, '')) && !/\b(drop|delete from|truncate|grant|revoke)\b/i.test(src.replace(/\/\*[\s\S]*?\*\/|\/\/.*$/gm, '')));
+
+  check('module builds its connection only through newSecurePgClient (pg-secure.ts): no own pg client, no ssl option, no rejectUnauthorized', /newSecurePgClient\(target, rolePasswordClientOptions\(\)\)/.test(code) && !/new\s+pg\.Client|new\s+Client\s*\(|rejectUnauthorized|\bssl\s*:|from 'pg'/.test(code));
 
   const eventsClean = (): boolean => everyLine.length > 0 && everyLine.every((l) => {
     let o: Record<string, unknown>;
@@ -638,6 +684,13 @@ async function main(): Promise<void> {
     await admin.query(`alter role recruiter_app valid until '${new Date(Date.now() + 3 * 86400_000).toISOString()}'`);
     const later = await runAsRunner([], planRolePassword({ ...base, password: `${LPW}d` }));
     check('real server: a VALID UNTIL three days away is accepted', later!.error === undefined && (await loginAs('recruiter_app', `${LPW}d`)).ok);
+    {
+      // The executor's own client (no factory passed: newSecurePgClient via pg-secure.ts) reaches the loopback test database through the loopback exemption (no TLS, SCRAM-only).
+      const secPlan = planRolePassword({ ...base, password: `${LPW}e` });
+      const sec = await captured(() => executeRolePassword({ ...secPlan, target: { ...secPlan.target, host: u.hostname, port: Number(u.port), user: 'tr_runner', password: RUNNER_PW, database: dbName } }));
+      check('real server, the executor\'s default TLS-hardened client (loopback exemption) as the runner login: committed, the new password works and the previous one is refused',
+        sec.error === undefined && JSON.parse(sec.lines[0]!).result === 'committed' && (await loginAs('recruiter_app', `${LPW}e`)).ok && (await loginAs('recruiter_app', `${LPW}d`)).code === '28P01');
+    }
     await admin.query('drop role recruiter_app');
     await admin.query('drop role tr_runner');
   }

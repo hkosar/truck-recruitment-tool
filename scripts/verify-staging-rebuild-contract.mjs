@@ -213,6 +213,14 @@ else {
   for (const forbidden of [/process\.env/, /\bdrop\b/i, /delete\s+from/i, /\btruncate\b/i, /\bgrant\b/i, /\brevoke\b/i, /\b(createrole|superuser|createdb|bypassrls)\b/i, /password\s+'\$\{/, /\bline\(/, /process\.(stdout|stderr)/]) {
     if (forbidden.test(code)) failures.push(`role-password.ts must not contain ${forbidden}`);
   }
+  // The connection goes through the TLS-hardened client only (verify-full against the pinned root for a hosted target, SCRAM-only): no own pg client, no TLS override.
+  for (const forbidden of [/new\s+pg\.Client/, /new\s+Client\s*\(/, /rejectUnauthorized/, /\bssl\s*:/, /from 'pg'/]) {
+    if (forbidden.test(code)) failures.push(`role-password.ts must not contain ${forbidden} (use newSecurePgClient from pg-secure.ts)`);
+  }
+  if (!/import \{ newSecurePgClient \} from '\.\/pg-secure\.js';/.test(code) || !/newSecurePgClient\(target, rolePasswordClientOptions\(\)\)/.test(code) || !/clientFactory: \(target: SupabaseDbTarget\) => RebuiltSqlClient = newRolePasswordClient\)/.test(code)) {
+    failures.push('role-password.ts: the executor\'s default client must be newSecurePgClient(target, rolePasswordClientOptions()) from pg-secure.ts');
+  }
+  if (!rolePw.includes('keepAliveInitialDelayMillis: 10_000') || !rolePw.includes('connectionTimeoutMillis: 10_000')) failures.push('role-password.ts: the client keeps its connect timeout and keep-alive delay');
   if ((code.match(/alter role/gi) ?? []).length !== 1) failures.push('role-password.ts must contain exactly one ALTER ROLE statement');
   // The verifier is only ever a bind parameter, and no printed event can carry it: every event goes through resultEvent(role, result).
   const eventFn = /const resultEvent = [\s\S]*?\n\};/.exec(code)?.[0] ?? '';

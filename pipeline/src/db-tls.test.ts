@@ -330,6 +330,54 @@ await check('a caller option that can replace the connection target or TLS setti
   assert.equal(server.record.connections, 0, 'nothing may be dialled');
 });
 
+await check('TCP keep-alive options: a boolean keepAlive and a whole-number keepAliveInitialDelayMillis (0 to 600000) pass and reach the pg socket; any other type, range, getter or Proxy is refused', async () => {
+  const target = { host: '127.0.0.1', port: 5432, user: 'u', password: PASSWORD, database: 'x' };
+  for (const make of [newSecurePgClient, newSecurePgPool] as const) {
+    for (const good of [{ keepAlive: true }, { keepAlive: false }, { keepAliveInitialDelayMillis: 0 }, { keepAliveInitialDelayMillis: 10_000 }, { keepAliveInitialDelayMillis: 600_000 }, { keepAlive: true, keepAliveInitialDelayMillis: 1 }]) {
+      const c = make(target, good);
+      if (c instanceof pg.Pool) void c.end();
+    }
+    for (const bad of [{ keepAlive: 'true' }, { keepAlive: 1 }, { keepAlive: 0 }, { keepAlive: null }, { keepAlive: {} }, { keepAliveInitialDelayMillis: -1 }, { keepAliveInitialDelayMillis: 600_001 }, { keepAliveInitialDelayMillis: 1.5 },
+      { keepAliveInitialDelayMillis: Number.NaN }, { keepAliveInitialDelayMillis: Number.POSITIVE_INFINITY }, { keepAliveInitialDelayMillis: '10000' }, { keepAliveInitialDelayMillis: true }, { keepAliveInitialDelayMillis: 2 ** 53 }, { keepAliveInitialDelayMillis: { valueOf: () => 1 } }]) {
+      assert.throws(() => make(target, bad as never), refusal('connection_override'), JSON.stringify(bad));
+    }
+    let reads = 0;
+    assert.throws(() => make(target, Object.defineProperty({}, 'keepAlive', { get: () => { reads += 1; return true; }, enumerable: true }) as never), refusal('connection_override'));
+    assert.throws(() => make(target, Object.defineProperty({}, 'keepAliveInitialDelayMillis', { get: () => { reads += 1; return 1_000; }, enumerable: true }) as never), refusal('connection_override'));
+    assert.equal(reads, 0, 'a getter is never called');
+    let trapped = 0;
+    assert.throws(() => make(target, new Proxy({ keepAlive: true }, { ownKeys: (t) => { trapped += 1; return Reflect.ownKeys(t); } }) as never), refusal('connection_override'));
+    assert.equal(trapped, 0, 'no Proxy trap may run');
+  }
+  // Both settings reach the pg client's connection, and pg's pool hands them to every client it makes.
+  const kc = newSecurePgClient(target, { keepAlive: true, keepAliveInitialDelayMillis: 12_345 }) as unknown as { connection: { _keepAlive: unknown; _keepAliveInitialDelayMillis: unknown } };
+  assert.equal(kc.connection._keepAlive, true);
+  assert.equal(kc.connection._keepAliveInitialDelayMillis, 12_345);
+  const kp = newSecurePgPool(target, { keepAlive: true, keepAliveInitialDelayMillis: 23_456 }) as unknown as { options: Record<string, unknown>; end(): Promise<void> };
+  assert.equal(kp.options.keepAlive, true);
+  assert.equal(kp.options.keepAliveInitialDelayMillis, 23_456);
+  void kp.end();
+  // And on a real connect (fake server on loopback) the socket really gets setKeepAlive(true, delay); without the options it does not.
+  const net = await import('node:net');
+  const seen: unknown[][] = [];
+  const original = net.Socket.prototype.setKeepAlive;
+  net.Socket.prototype.setKeepAlive = function (this: unknown, ...args: unknown[]) { seen.push(args); return Reflect.apply(original, this, args); } as typeof original;
+  const server = await startFakePg({ tlsCert: null, auth: 'trust' });
+  try {
+    for (const [extra, expected] of [[{ keepAlive: true, keepAliveInitialDelayMillis: 34_567 }, [[true, 34_567]]], [{}, []]] as const) {
+      seen.length = 0;
+      const c = newSecurePgClient({ ...target, port: server.port }, { connectionTimeoutMillis: 5_000, ...extra });
+      c.on('error', () => undefined);
+      await c.connect();
+      await c.end();
+      assert.deepEqual(seen, expected, JSON.stringify(extra));
+    }
+  } finally {
+    net.Socket.prototype.setKeepAlive = original;
+    await server.close();
+  }
+});
+
 await check('runner reports: every refusal and TLS verification failure maps to the one fixed id db_tls_refused', () => {
   assert.deepEqual(classifyRunnerFailure(new DbTlsRefusal('no_trusted_ca', 'x')), { refusal: 'db_tls_refused' });
   assert.deepEqual(classifyRunnerFailure(Object.assign(new Error('Hostname/IP does not match'), { code: 'ERR_TLS_CERT_ALTNAME_INVALID' })), { refusal: 'db_tls_refused' });
