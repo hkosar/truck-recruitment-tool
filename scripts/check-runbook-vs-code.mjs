@@ -171,7 +171,8 @@ export function checkRunbook(markdown, { root, info } = {}) {
         if (path.toLowerCase().startsWith(`${top.toLowerCase()}/`)) { path = path.slice(top.length + 1); insideByDrive = true; }
         else { if (info) info.push(`OUTSIDE-REPO line=${n} not a repo file, not checked: ${tail(path)}`); continue; }
       }
-      let matches = src.files.filter((f) => f === path || f.endsWith(`/${path}`));
+      // a short relative path may stand for a deeper file (suffix match); a full drive path names its location, so only the exact file counts
+      let matches = src.files.filter((f) => f === path || (!insideByDrive && f.endsWith(`/${path}`)));
       const exact = matches.filter((f) => f === path);
       if (exact.length) matches = exact;
       if (!matches.length) {

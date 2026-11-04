@@ -268,6 +268,26 @@ test('a drive path inside the checked folder is never an unknown-folder INFO: a 
   assert.equal(info.length, 3);
 });
 
+test('a full drive path into the repo must be the exact repo-relative file: no suffix matching', () => {
+  mkdirSync(join(root, 'docs/build-plan'), { recursive: true });
+  mkdirSync(join(root, 'pipeline/src'), { recursive: true });
+  writeFileSync(join(root, 'docs/build-plan/14-design.md'), 'one\ntwo\n');
+  const fwd = root.replace(/\\/g, '/');
+  const bs = fwd.replace(/\//g, '\\');
+  const info = [];
+  const k = (md) => checkRunbook(md, { root, info }).map((f) => f.split(' ')[0]);
+  for (const base of [bs, fwd]) {
+    const s = base.includes('\\') ? '\\' : '/';
+    for (const bad of [`build-plan${s}14-design.md:2`, `14-design.md:2`, `src${s}refusals.ts:1`, `refusals.ts:1`]) {
+      assert.deepEqual(k(`see ${base}${s}${bad}\n`), ['CITATION'], `${base}${s}${bad}`);
+    }
+    assert.deepEqual(k(`see ${base}${s}docs${s}build-plan${s}14-design.md:2\n`), [], 'correct full path still passes');
+    assert.deepEqual(k(`see ${base}${s}pipeline${s}src${s}refusals.ts:1\n`), [], 'correct full path still passes');
+  }
+  assert.deepEqual(k('see build-plan/14-design.md:2 and refusals.ts:1\n'), [], 'short relative paths still suffix-match');
+  assert.deepEqual(info, []);
+});
+
 test('../ citations stay INFO; the repo-folder rule uses the first two folder levels and ignores case', () => {
   const info = [];
   const k = (md) => checkRunbook(md, { root, info }).map((f) => f.split(' ')[0]);
