@@ -9,6 +9,7 @@ import type { lookup } from 'node:dns';
 import { createServer, request } from 'node:http';
 import type { IncomingMessage, ServerResponse } from 'node:http';
 import { join } from 'node:path';
+import { types } from 'node:util';
 import { closeLoopbackAgent, loopbackAgent, loopbackFetch } from './loopback-fetch.js';
 import { createServer as createTcpServer, Socket } from 'node:net';
 import type { AddressInfo } from 'node:net';
@@ -102,20 +103,22 @@ try {
   {
     // Even if a refusal regressed, nothing reaches a network: the resolver is a stub that answers with a reserved
     // documentation address (192.0.2.x), and Socket.connect fails instead of connecting.
-    const realConnect = Socket.prototype.connect; let opened = 0;
+    // Like real net, the stub asks for ALL addresses ({ all: true }) unless askAll is false; in that mode the answer is a mixed list (a
+    // loopback address first, then the given one), so a check that accepts "some" loopback answers, or skips lists, is caught.
+    const realConnect = Socket.prototype.connect; let opened = 0; let askAll = true; let delivered: unknown[][] = [];
     Socket.prototype.connect = function (this: Socket, options: unknown) {
       // Stands in for net: resolve the host with the options' lookup (as net would), then "connect" by failing.
       opened++;
-      const o = (Array.isArray(options) ? options[0] : options) as { host?: string; lookup?: (name: string, opts: object, done: (err: Error | null) => void) => void };
+      const o = (Array.isArray(options) ? options[0] : options) as { host?: string; lookup?: (name: string, opts: object, done: (err: Error | null, ...rest: unknown[]) => void) => void };
       // Like net: mark the socket connecting, then resolve later (Node 22 attaches the request's error listener only after connect returns).
-      if (o.lookup && o.host) { (this as unknown as { connecting: boolean }).connecting = true; setImmediate(() => o.lookup!(o.host!, {}, (err) => { this.destroy(err ?? new Error('socket opened')); })); }
+      if (o.lookup && o.host) { (this as unknown as { connecting: boolean }).connecting = true; setImmediate(() => o.lookup!(o.host!, askAll ? { all: true } : {}, (err, ...rest) => { delivered.push(rest); this.destroy(err ?? new Error('socket opened')); })); }
       else this.destroy(new Error('socket opened'));
       return this;
     } as typeof Socket.prototype.connect;
     const answerWith = (address: string, calls: string[] = []) =>
       ((name: string, opts: { all?: boolean }, done: (err: null, a: unknown, f?: number) => void) => {
         calls.push(name);
-        if (opts.all) done(null, [{ address, family: 4 }]); else done(null, address, 4);
+        if (opts.all) done(null, [{ address: '127.0.0.1', family: 4 }, { address, family: 4 }]); else done(null, address, 4);
       }) as unknown as typeof lookup;
     const refusedRequest = (host: string, lookup: unknown) => new Promise((resolve, reject) => { request({ agent: loopbackAgent(), host, port: 9, lookup: lookup as typeof import('node:dns').lookup }, resolve).on('error', reject).end(); });
     try {
@@ -131,6 +134,28 @@ try {
       const localhostLookups: string[] = [];
       await assert.rejects(refusedRequest('localhost', answerWith('192.0.2.1', localhostLookups)), /refuses non-loopback address: localhost/);
       assert.deepEqual(localhostLookups, ['localhost']);
+      // The same in single-answer mode.
+      askAll = false;
+      await assert.rejects(refusedRequest('localhost', answerWith('192.0.2.1')), /refuses non-loopback address: localhost/);
+      askAll = true;
+      // A lookup error passes through unchanged; an empty answer list is refused.
+      await assert.rejects(refusedRequest('localhost', ((name: string, opts: object, done: (err: Error) => void) => done(new Error('stub ENOTFOUND'))) as unknown as typeof lookup), /stub ENOTFOUND/);
+      await assert.rejects(refusedRequest('localhost', ((name: string, opts: object, done: (err: null, a: unknown[]) => void) => done(null, [])) as unknown as typeof lookup), /refuses non-loopback address: localhost/);
+      // Copy contract: the answer handed to net is a plain copy that cannot change after the check.
+      const flipping = () => { let reads = 0; return { family: 4, get address() { return reads++ === 0 ? '127.0.0.1' : '127.0.0.3'; } }; };
+      const sneaky = ((name: string, opts: object, done: (err: null, a: unknown) => void) => done(null, [flipping()])) as unknown as typeof lookup;
+      const proxied = ((name: string, opts: object, done: (err: null, a: unknown) => void) => {
+        let reads = 0; const entry = { address: '127.0.0.1', family: 4 };
+        done(null, new Proxy([entry], { get: (t, k, r) => (k === '0' && reads++ > 0 ? { address: '127.0.0.3', family: 4 } : Reflect.get(t, k, r)) }));
+      }) as unknown as typeof lookup;
+      for (const l of [sneaky, proxied]) {
+        delivered = [];
+        await assert.rejects(refusedRequest('localhost', l), /socket opened/); // loopback answer: the stub "connects" (fails)
+        const list = delivered[0]?.[0] as Array<{ address: string }>;
+        assert.ok(Array.isArray(list));
+        assert.equal(types.isProxy(list), false);
+        assert.deepEqual(list.map((a) => [a.address, a.address, Object.getOwnPropertyDescriptor(a, 'address')?.value]), [['127.0.0.1', '127.0.0.1', '127.0.0.1']]);
+      }
     } finally { Socket.prototype.connect = realConnect; closeLoopbackAgent(); }
   }
 

@@ -45,9 +45,14 @@ function refuseOutsideConnections(agent: Agent): Agent {
       ...options,
       lookup: (name: string, opts: object, done: Parameters<Resolver>[2]) =>
         resolve(name, opts, (err, address, family) => {
-          const list = Array.isArray(address) ? address : [{ address: address as string }];
-          if (!err && !list.every((a) => LOOPBACK_ADDRESSES.has(a.address))) done(new Error(`loopback-fetch refuses non-loopback address: ${name}`));
-          else done(err, address, family);
+          if (err) { done(err, address, family); return; }
+          // Copy the answer into plain values before checking it, and hand the copy on: a getter or Proxy cannot show net one address now and another when it dials.
+          const answer = Array.isArray(address)
+            ? Array.from(address as Array<{ address?: unknown; family?: unknown }>, (a) => ({ address: String(a?.address), family: typeof a?.family === 'number' ? a.family : undefined }))
+            : typeof address === 'string' ? address : undefined;
+          const addresses = typeof answer === 'string' ? [answer] : answer?.map((a) => a.address);
+          if (addresses === undefined || addresses.length === 0 || !addresses.every((a) => LOOPBACK_ADDRESSES.has(a))) done(new Error(`loopback-fetch refuses non-loopback address: ${name}`));
+          else done(null, answer, typeof family === 'number' ? family : undefined);
         }),
     };
     return connect.call(this, guarded, callback);
