@@ -130,7 +130,7 @@ export const REFUSAL_IDS = [
   'plan_refused', 'ref_not_recorded', 'ref_invalid', 'db_url_required', 'production_refused', 'target_not_recorded_staging',
   'port_must_be_5432', 'confirmation_required', 'unknown_action', 'unknown_argument', 'bad_project_option', 'ledger_preflight_failed',
   'profiles_already_exist', 'ledger_not_empty', 'ledger_not_exact', 'm1c_state_unrecognised', 'm1c_postcondition_failed',
-  'retention_dry_run_failed', 'role_matrix_failed', 'role_matrix_result_missing', 'batch_delete_definition_mismatch', 'retention_run_refused', 'retire_backends_not_gone', 'retire_checks_failed', 'identity_alignment_failed', 'identity_alignment_result_missing', 'backout_window_not_expected', 'reapply_m1_not_backed_out', 'reapply_m1_still_applied', 'reapply_m1b_not_backed_out',
+  'retention_dry_run_failed', 'role_matrix_failed', 'role_matrix_result_missing', 'batch_delete_definition_mismatch', 'retention_run_refused', 'retire_backends_not_gone', 'retire_checks_failed', 'retire_privileges_missing', 'identity_alignment_failed', 'identity_alignment_result_missing', 'backout_window_not_expected', 'reapply_m1_not_backed_out', 'reapply_m1_still_applied', 'reapply_m1b_not_backed_out',
   'reapply_m1b_still_applied', 'reapply_m1c_not_backed_out', 'reapply_m1c_still_applied', 'owner_email_invalid',
   'owner_password_too_short', 'owner_auth_not_created', 'owner_auth_unknown_result', 'owner_promotion_refused',
   'role_password_refused', 'role_password_logging_refused', 'role_password_expiry_refused', 'role_password_server_version_unverified', 'owner_bootstrap_target_refused', 'bootstrap_target_required', 'target_not_recorded_production', 'first_manager_refused',
@@ -219,6 +219,9 @@ const EVENTS = {
   'staging-sql.batch_delete_compare': { match: bool, expected_hash: pat(/^[0-9a-f]{12}$/), live_hash: pat(/^([0-9a-f]{12}|absent|unrecognised)$/) },
   // Backout rehearsal (pipeline/src/backout-rehearsal.ts): counts, booleans and enumerated words only; never a pid, id, email or schema text.
   'staging-sql.backout_window': { action: oneOf(['window-on', 'window-off']), email_edits_paused: (v) => bool(v) || v === 'unknown', rows: int, ok: bool },
+  'staging-sql.retire_privilege': { check: oneOf(['login_superuser', 'login_createrole', 'login_signal_backend', 'login_app_role_privileges', 'login_app_role_admin_option', 'app_role_exists', 'app_role_superuser', 'app_role_replication', 'can_end_app_sessions', 'can_alter_app_role']), answer: oneOf(['yes', 'no']) },
+  'staging-sql.retire_privilege_precheck': { ok: bool },
+  'staging-sql.retire_partial_state': { app_login: oneOf(['off']), restore_with: oneOf(['set-app-password']) },
   'staging-sql.retire_terminate': { backends_signalled: int },
   'staging-sql.retire_backends': { ok: bool, polls: int, zero_reads_in_a_row: int, last_count: count },
   'staging-sql.retire_revoked': { sessions: int, links: int, recovery_sets: int, codes: int },

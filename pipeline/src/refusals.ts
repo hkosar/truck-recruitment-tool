@@ -34,6 +34,7 @@ export const REFUSAL_IDS = [
   'retention_run_refused',
   'retire_backends_not_gone',
   'retire_checks_failed',
+  'retire_privileges_missing',
   'identity_alignment_failed',
   'identity_alignment_result_missing',
   'backout_window_not_expected',
