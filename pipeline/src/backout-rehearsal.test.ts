@@ -179,6 +179,7 @@ for (const [name, over, end, alter] of [
   ['recruiter_app is a superuser (only a superuser may end its sessions or change it)', { app_role_superuser: true }, false, false],
   ['recruiter_app is a replication role', { app_role_replication: true }, true, false],
   ['recruiter_app does not exist', { app_role_exists: false, login_app_role_admin_option: false }, false, false],
+  ['a superuser login but recruiter_app does not exist (change login must still say no)', { ...SUPER_ONLY, app_role_exists: false }, false, false],
   ['a non-boolean answer ("t") counts as no', { login_createrole: 't' }, true, false],
   ['an unreadable app_role_superuser value counts as yes (never lets a non-superuser through)', { app_role_superuser: null }, false, false],
 ] as const) {
