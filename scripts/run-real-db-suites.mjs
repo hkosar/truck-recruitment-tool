@@ -1,10 +1,11 @@
 #!/usr/bin/env node
-// LOCAL ONLY: runs the real-PostgreSQL suites listed in SUITE_FILES (16 suites, see the "Not covered" list below) against throwaway
+// LOCAL ONLY: runs the real-PostgreSQL suites listed in SUITE_FILES (17 suites, see the "Not covered" list below) against throwaway
 // PostgreSQL 16 clusters that this script creates and always removes: one shared by 15 suites, a second one only for role-password
 // (it drops and recreates recruiter_app / recruiter_maintenance, which are cluster-wide, and needs pg_stat_statements preloaded and a
 // server log it can read), and a third one only for retention-secure's TLS scenario (ssl=on with a throwaway CA, recruiter_maintenance
-// allowed in over hostssl + scram-sha-256 only). It contacts no hosted or staging database, reads no secret store and uses no network
-// except 127.0.0.1.
+// allowed in over hostssl + scram-sha-256 only), and a fourth one only for m1-supabase-runner (it applies M1 as a NOSUPERUSER
+// CREATEROLE login, which needs the cluster-wide recruiter_* roles NOT to exist yet, and drops them after each case). It contacts no
+// hosted or staging database, reads no secret store and uses no network except 127.0.0.1.
 //
 // How to run (from the repository root; app/node_modules and pipeline/node_modules must already exist, nothing is installed):
 //   node scripts/run-real-db-suites.mjs
@@ -32,23 +33,24 @@
 //      preloaded, server log rp-server.log, one database tr_role_password with the "role-password-owned:" comment and the extension);
 //      then the TLS cluster (folder tls\data): pipeline/src/retention-secure-a3-make-pki.ts writes a throwaway root CA and a server
 //      certificate/key into the temp folder (tls-pki, deleted with it), and tlsClusterFiles() turns ssl on and replaces pg_hba.conf;
+//      then the m1-supabase-runner cluster (folder m1sr\data, with its own A3_TASK_OWNED);
 //   3. builds the test databases with scripts/a3-build-test-db.mjs, creates three empty owned databases for the suites that need one,
 //      and gives recruiter_maintenance / recruiter_app throwaway logins inside that cluster only;
 //   4. runs each suite with its own database and environment (a time limit per suite), and (for the app suite) one vite build into
 //      app/dist. vite and vitest write their caches under the temp folder, not under node_modules;
-//   5. ALWAYS (success, failure, Ctrl+C, unexpected error): pg_ctl -D <its own folder> stop for each of its three clusters, deletes the
+//   5. ALWAYS (success, failure, Ctrl+C, unexpected error): pg_ctl -D <its own folder> stop for each of its four clusters, deletes the
 //      folder (passwords and the throwaway TLS key included) and removes app/dist if this run built it. It never signals or stops any
 //      other process.
 // If this run is killed so hard that no handler runs (Task Manager, power loss), the folder rdb-suites-* in the temp directory and
 // the postgres processes of its data folders remain: stop them with pg_ctl -D <that folder>\data stop, pg_ctl -D <that folder>\rp-data
-// stop and pg_ctl -D <that folder>\tls\data stop, then delete the folder.
+// stop, pg_ctl -D <that folder>\tls\data stop and pg_ctl -D <that folder>\m1sr\data stop, then delete the folder.
 //
 // Test isolation: PostgreSQL roles belong to the whole cluster, not to one database. The prod-sql suites run production back-out steps
 // that take two things away from recruiter_app: supabase/backout/retire-app-credentials.sql:13 ("alter role recruiter_app nologin
 // password null": no login, no password) and, through prod-sql-a3.test.ts section 8, supabase/backout/M1-backout.sql:482 ("revoke
 // recruiter_api from recruiter_app": the role through which recruiter_app gets all its rights). So the script (a) puts the prod-sql
 // suites last and (b) after EVERY suite re-applies LOGIN, the password and the recruiter_api membership (restoreStatements), so no suite
-// depends on the order of the others; RDB_SUITES_FIRST=prod-sql proves it (16 of 16). Other cluster-wide changes (authenticator
+// depends on the order of the others; RDB_SUITES_FIRST=prod-sql proves it (17 of 17). Other cluster-wide changes (authenticator
 // settings, zz_ roles, recruiter_maintenance grants) are made and undone by the suites themselves; a suite that crashes half way can leave
 // them behind, which makes later suites FAIL (never a false PASS).
 
@@ -350,6 +352,7 @@ export const SUITE_FILES = [
   { id: 'ledger-preflight', kind: 'tsx', file: 'pipeline/src/ledger-preflight-a3.test.ts' },
   { id: 'role-password', kind: 'tsx', file: 'pipeline/src/role-password.test.ts' },
   { id: 'backout-rehearsal', kind: 'tsx', file: 'pipeline/src/backout-rehearsal-a3.test.ts' },
+  { id: 'm1-supabase-runner', kind: 'tsx', file: 'pipeline/src/m1-supabase-runner-a3.test.ts' },
   { id: 'prod-sql-stop-tables', kind: 'tsx', file: 'pipeline/src/prod-sql-stop-tables-pg.test.ts' },
   { id: 'prod-sql-a2-backouts', kind: 'tsx', file: 'pipeline/src/prod-sql-a2-backouts-a3.test.ts' },
   { id: 'prod-sql', kind: 'tsx', file: 'pipeline/src/prod-sql-a3.test.ts' },
@@ -389,7 +392,7 @@ function main() {
 async function run() {
   const results = []; // { id, status: 'PASS' | 'FAIL' | 'TIMEOUT' | 'SKIP', reason }
   let dir;
-  const dataDirs = []; // the clusters this run made (main, then role-password), each stopped by its own folder
+  const dataDirs = []; // the clusters this run made (main, role-password, tls, m1-supabase-runner), each stopped by its own folder
   let pgBin;
   let clusterTouched = false;
   let builtDist = false;
@@ -481,9 +484,12 @@ async function run() {
     const tlsDir = join(dir, 'tls'); // its own owner folder: a3-build-test-db.mjs checks the server's data_directory is <owner-dir>/data
     const tlsDataDir = join(tlsDir, 'data');
     const tlsPkiDir = join(dir, 'tls-pki');
+    const m1srDir = join(dir, 'm1sr'); // its own owner folder, like tls
+    const m1srDataDir = join(m1srDir, 'data');
     const cacheDir = join(dir, 'caches');
     mkdirSync(cacheDir);
     mkdirSync(tlsDir);
+    mkdirSync(m1srDir);
     const adminPw = token();
     const maintPw = token();
     const appPw = token();
@@ -494,6 +500,7 @@ async function run() {
     writeFileSync(join(dir, 'apppw.txt'), appPw);
     writeFileSync(join(dir, 'A3_TASK_OWNED'), ownerToken);
     writeFileSync(join(dir, 'tls', 'A3_TASK_OWNED'), ownerToken);
+    writeFileSync(join(dir, 'm1sr', 'A3_TASK_OWNED'), ownerToken);
 
     // All clusters: same admin login and password (masked), own folder, own random free port, own server log. `configure` runs after
     // initdb and before the start (the TLS cluster's settings).
@@ -528,6 +535,8 @@ async function run() {
       writeFileSync(join(dir, 'tls', 'data', 'postgresql.conf'), readFileSync(join(tlsDataDir, 'postgresql.conf'), 'utf8') + files.conf);
       writeFileSync(join(dir, 'tls', 'data', 'pg_hba.conf'), files.hba);
     });
+    // m1-supabase-runner: no recruiter_* role may exist when M1 is applied by the non-superuser login, so it gets a cluster of its own.
+    const m1srPort = await startCluster(m1srDataDir, join(dir, 'm1sr-server.log'), {}, 'm1-supabase-runner');
 
     const url = (user, pw, db, onPort = port) => `postgresql://${user}:${encodeURIComponent(pw)}@127.0.0.1:${onPort}/${db}`;
     const admin = (db) => url(ADMIN_USER, adminPw, db);
@@ -544,6 +553,13 @@ async function run() {
     for (const [db, kind, where] of [...DBS.map(([db, kind]) => [db, kind, {}]), ['tr_ret', 'm1', { ownerDir: tlsDir, onPort: tlsPort }]]) {
       const r = build(['--db', db, ...FLAGS[kind]], where);
       if (r.status !== 0) throw new Error(`building database ${db}${where.onPort ? ' (tls cluster)' : ''} failed (exit ${r.status}): ` + mask(`${r.stdout}${r.stderr}`).split('\n').filter(Boolean).slice(-4).join(' | '));
+      if (interrupted) throw new Error('interrupted');
+    }
+    // Baseline databases (no M1) for m1-supabase-runner on its own cluster: PostGIS in public, in extensions, and in extensions for the
+    // refused case.
+    for (const [db, extra] of [['tr_m1sr_pub', []], ['tr_m1sr_ext', ['--postgis-schema', 'extensions']], ['tr_m1sr_neg', ['--postgis-schema', 'extensions']]]) {
+      const r = build(['--db', db, ...FLAGS.base, ...extra], { ownerDir: m1srDir, onPort: m1srPort });
+      if (r.status !== 0) throw new Error(`building database ${db} (m1-supabase-runner cluster) failed (exit ${r.status}): ` + mask(`${r.stdout}${r.stderr}`).split('\n').filter(Boolean).slice(-4).join(' | '));
       if (interrupted) throw new Error('interrupted');
     }
     const sb = build(['--db', 'tr_signin_test', '--suites', '--run', RUN_ID]);
@@ -616,6 +632,13 @@ async function run() {
       { id: 'role-password', ...tsx('src/role-password.test.ts', { ROLE_PASSWORD_PG_URL: url(ADMIN_USER, adminPw, 'tr_role_password', rpPort), ROLE_PASSWORD_PG_LOG: rpLog }) },
       // Ends the cluster-wide recruiter_app login's connections and sets it NOLOGIN (restoreLogins gives it back), and runs the M1 backouts on its own database.
       { id: 'backout-rehearsal', ...tsx('src/backout-rehearsal-a3.test.ts', { BACKOUT_A3_ADMIN_URL: admin('tr_backout'), BACKOUT_A3_APP_URL: app('tr_backout') }) },
+      // On its own cluster: M1 applied by a NOSUPERUSER CREATEROLE login (PostGIS in public, in extensions, and a refused case).
+      {
+        id: 'm1-supabase-runner', ...tsx('src/m1-supabase-runner-a3.test.ts', {
+          M1SR_A3_PUBLIC_ADMIN_URL: url(ADMIN_USER, adminPw, 'tr_m1sr_pub', m1srPort), M1SR_A3_EXT_ADMIN_URL: url(ADMIN_USER, adminPw, 'tr_m1sr_ext', m1srPort),
+          M1SR_A3_NEG_ADMIN_URL: url(ADMIN_USER, adminPw, 'tr_m1sr_neg', m1srPort),
+        }),
+      },
       { id: 'prod-sql-stop-tables', ...tsx('src/prod-sql-stop-tables-pg.test.ts', { PROD_SQL_STOP_PG_URL: admin('tr_stop') }) },
       { id: 'prod-sql-a2-backouts', ...tsx('src/prod-sql-a2-backouts-a3.test.ts', { PROD_SQL_A3_ADMIN_URL: admin('tr_psql_a2') }) },
       { id: 'prod-sql', ...tsx('src/prod-sql-a3.test.ts', { PROD_SQL_A3_ADMIN_URL: admin('tr_psql') }) },
@@ -630,8 +653,8 @@ async function run() {
     }
 
     const only = process.env.RDB_SUITES_ONLY ? process.env.RDB_SUITES_ONLY.split(',').map((x) => x.trim()) : undefined;
-    // After a TIMEOUT: end the leftover sessions on this run's own three clusters (SQL on each cluster, no process is signalled by us).
-    const endStraySessions = () => endStrayOnPorts([port, rpPort, tlsPort], withAdmin);
+    // After a TIMEOUT: end the leftover sessions on this run's own four clusters (SQL on each cluster, no process is signalled by us).
+    const endStraySessions = () => endStrayOnPorts([port, rpPort, tlsPort, m1srPort], withAdmin);
     if (orderNotice(first)) console.log(orderNotice(first));
     await runSuites(orderSuites(SUITES, first), { results, only, injectedFail, injectedHang, sh, mask, baseEnv, timeoutMs, isInterrupted: () => interrupted, restore: restoreLogins, afterTimeout: endStraySessions });
   } catch (err) {

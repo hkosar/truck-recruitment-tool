@@ -92,7 +92,7 @@ export const PROD_SQL_ACTIONS: readonly ProdSqlAction[] = [
   // A3: the read-only permission snapshot. Each statement reports a digest so the before/after outputs can be compared without printing rows.
   { id: 'snapshot', step: 'A3, BO8', file: 'supabase/backout/pre-cutover-snapshot.sql', sha256: 'a8ef562db0047b4c58beb3ecd52bdfc0ae53385aa2dee40f30e153085dd04ece', mode: 'read_only', report: 'digest', phrase: 'RUN TNBS PRODUCTION SQL SNAPSHOT' },
   // B2-B5: M1, M1b, M1c.
-  { id: 'm1', step: 'B2', file: 'supabase/pending/M1_same_origin_signin.sql', sha256: 'ac5bc26385ec106e8f2f093d00e22a1ff8501b8ff8363bf0444e08b7ee504d19', mode: 'write', report: 'none', phrase: 'RUN TNBS PRODUCTION SQL M1' },
+  { id: 'm1', step: 'B2', file: 'supabase/pending/M1_same_origin_signin.sql', sha256: 'd98c33ed81429e9a93872197e0257d1194eb21445f61cd9ba81b546236801111', mode: 'write', report: 'none', phrase: 'RUN TNBS PRODUCTION SQL M1' },
   { id: 'm1b', step: 'B3', file: 'supabase/pending/M1b_add_person.sql', sha256: '82724e06f0393adf82bbe7222f2a9ae55dbe2443c2fffdf98a8bebabcbc44768', mode: 'write', report: 'none', phrase: 'RUN TNBS PRODUCTION SQL M1B' },
   { id: 'm1c', step: 'B4', file: 'supabase/pending/M1c_batch_delete_audit.sql', sha256: '86cd3de2ab4f1b2283c344088e31d05fbc8e719ebaa17318987a7082c42dfb26', mode: 'write', report: 'none', phrase: 'RUN TNBS PRODUCTION SQL M1C' },
   // B10: the backout window on (doc 16 section 3.1 / runbook B10): the two reviewed statements, verified inside the transaction before it commits.
