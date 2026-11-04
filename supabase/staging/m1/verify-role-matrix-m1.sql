@@ -17,6 +17,28 @@ begin
 end
 $gate$;
 
+-- SET ROLE recruiter_api needs the SET option (PG16+), not just membership: on PG16+ a
+-- non-superuser CREATEROLE runner (Supabase postgres) that created recruiter_api in M1 holds an
+-- ADMIN-only membership (inherit false, set false), and "set local role recruiter_api" below is
+-- refused with 42501 (TRUCKRECRU-126; same rule as M1's PostGIS self-check, TRUCKRECRU-125).
+-- Grant exactly the SET option (no INHERIT, so the runner never gains recruiter_api's rights).
+-- GRANT is transactional: the final rollback (or the aborted transaction on any error) takes it
+-- away again; this file never commits. A runner without ADMIN on recruiter_api gets 42501 here and
+-- the matrix fails. PG15 and older have no SET option: there, membership is what SET ROLE needs.
+-- anon and authenticated: hosted Supabase makes postgres a member of both with the SET option
+-- (assumed, not checked here); without it "set local role anon" below fails with 42501.
+do $set_option$
+begin
+  if current_setting('server_version_num')::int >= 160000 then
+    if not pg_has_role(current_user, 'recruiter_api', 'SET') then
+      execute format('grant recruiter_api to %I with set true, inherit false', current_user);
+    end if;
+  elsif not pg_has_role(current_user, 'recruiter_api', 'member') then
+    execute format('grant recruiter_api to %I', current_user);
+  end if;
+end
+$set_option$;
+
 create temporary table _results (
   actor text not null,
   test_name text not null,

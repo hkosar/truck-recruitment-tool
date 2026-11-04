@@ -1749,9 +1749,10 @@ grant usage on schema public, internal to recruiter_api;
 -- Fails closed.
 do $postgis_for_app$
 declare
-  v_ext    oid;
-  v_schema name;
-  r        record;
+  v_ext     oid;
+  v_schema  name;
+  v_missing text;
+  r         record;
 begin
   if (select count(distinct d.refobjid)
         from pg_depend d join pg_proc p on p.oid = d.objid
@@ -1775,6 +1776,14 @@ begin
        or has_schema_privilege('recruiter_app', v_schema, 'create') then
       raise exception 'M1: PostGIS schema % is writable by an app role; refusing to trust it', v_schema;
     end if;
+    -- A runner that holds USAGE without GRANT OPTION (another role owns the schema) gets only a
+    -- "no privileges were granted" warning from the grant below, and recruiter_api is left without
+    -- USAGE (TRUCKRECRU-125). Stop here with the real reason instead (unless recruiter_api already
+    -- has USAGE some other way, e.g. through PUBLIC; the fail-closed check below still applies).
+    if not has_schema_privilege(current_user, v_schema, 'usage with grant option')
+       and not has_schema_privilege('recruiter_api', v_schema, 'usage') then
+      raise exception 'M1: the runner cannot pass on USAGE on PostGIS schema % to recruiter_api (it needs USAGE WITH GRANT OPTION on that schema)', v_schema;
+    end if;
     execute format('grant usage on schema %I to recruiter_api', v_schema);
     execute format('alter role recruiter_app in database %I set search_path = public, %I', current_database(), v_schema);
   end if;
@@ -1786,6 +1795,17 @@ begin
   loop
     execute format('grant execute on routine %s to recruiter_api', r.fn);
   end loop;
+  -- Same for EXECUTE: a grant without GRANT OPTION only warns. Name the real reason for any routine
+  -- the app uses that recruiter_api still cannot run (TRUCKRECRU-125).
+  select string_agg(distinct p.proname, ', ' order by p.proname) into v_missing
+  from pg_proc p
+  where p.pronamespace = (select extnamespace from pg_extension where oid = v_ext)
+    and p.proname in ('st_x', 'st_y', 'st_dwithin', 'st_makepoint', 'st_setsrid', 'st_makeline', 'st_distance')
+    and not has_function_privilege('recruiter_api', p.oid, 'execute')
+    and not has_function_privilege(current_user, p.oid, 'execute with grant option');
+  if v_missing is not null then
+    raise exception 'M1: the runner cannot pass on EXECUTE on PostGIS routine(s) % to recruiter_api (it needs EXECUTE WITH GRANT OPTION, or PUBLIC must keep EXECUTE)', v_missing;
+  end if;
   -- Fail closed: every PostGIS routine the app's SQL names must now be callable by recruiter_api.
   if (select count(distinct p.proname) from pg_proc p
        where p.pronamespace = (select extnamespace from pg_extension where oid = v_ext)
@@ -1972,7 +1992,18 @@ begin
     raise exception 'M1: PostGIS self-check: no extension owns st_x';
   end if;
   begin
-    if not pg_has_role(current_user, 'recruiter_api', 'member') then
+    -- SET ROLE needs the SET option (PG16+), not just membership: on PG16+ a non-superuser
+    -- CREATEROLE runner (Supabase postgres) that created recruiter_api in section 0 holds an
+    -- ADMIN-only membership (inherit false, set false), which 'member' counts but SET ROLE refuses
+    -- (TRUCKRECRU-125). Grant exactly the SET option for the check (no INHERIT, so the runner never
+    -- gains recruiter_api's rights), and revoke exactly that grant afterwards. PG15 and older have
+    -- no SET option: there, membership is what SET ROLE needs.
+    if current_setting('server_version_num')::int >= 160000 then
+      if not pg_has_role(current_user, 'recruiter_api', 'SET') then
+        execute format('grant recruiter_api to %I with set true, inherit false', current_user);
+        v_granted := true;
+      end if;
+    elsif not pg_has_role(current_user, 'recruiter_api', 'member') then
       execute format('grant recruiter_api to %I', current_user);
       v_granted := true;
     end if;
@@ -1985,7 +2016,16 @@ begin
       into v_dummy;
     execute 'reset role';
     if v_granted then
+      -- Revokes only the grant made above (grantor = the runner); PostgreSQL's own ADMIN-only
+      -- membership from role creation (grantor = the bootstrap superuser) stays as it was.
       execute format('revoke recruiter_api from %I', current_user);
+      if current_setting('server_version_num')::int >= 160000 then
+        if pg_has_role(current_user, 'recruiter_api', 'SET') then
+          raise exception 'the runner still holds the recruiter_api SET option the self-check granted itself';
+        end if;
+      elsif pg_has_role(current_user, 'recruiter_api', 'member') then
+        raise exception 'the runner still holds the recruiter_api membership the self-check granted itself';
+      end if;
     end if;
   exception when others then
     raise exception 'M1: PostGIS self-check as recruiter_api failed: %', sqlerrm;
