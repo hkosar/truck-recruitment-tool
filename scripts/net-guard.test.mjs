@@ -231,20 +231,33 @@ test('C3b: replacing dns.lookup, then syncBuiltinESMExports(), does not change t
   assert.ok(r.delivered[0].length > 0 && r.delivered[0].every((a) => a.address === '127.0.0.1' || a.address === '::1'), JSON.stringify(r.delivered));
 });
 // Round 4 notes (TRUCKRECRU-88). Target 0.0.0.0 only; every builtin change is undone in finally.
-test('T2b: a replaced Array.prototype[Symbol.iterator] that shows the check a different list cannot change the answer check', () => {
+test('T2b: a replaced Array.prototype[Symbol.iterator] that shows every pass a different (loopback) list cannot change the answer check, and the list is never walked with the live iterator', () => {
   const r = run(`const real = Array.prototype[Symbol.iterator]; let calls = 0;
     const lookup = (n, o, done) => {
-      Array.prototype[Symbol.iterator] = function () { return ++calls === 2 ? [{ address: '127.0.0.1', family: 4 }].values() : Reflect.apply(real, this, []); };
+      Array.prototype[Symbol.iterator] = function () { calls++; return [{ address: '127.0.0.1', family: 4 }].values(); };
       done(null, [{ address: '0.0.0.0', family: 4 }]);
     };
-    try { return await attempt({ host: 'localhost', port: 9, lookup }); } finally { Array.prototype[Symbol.iterator] = real; }`);
-  assert.equal(r.out, 'net-guard blocked a non-loopback lookup answer for localhost');
+    try { const out = await attempt({ host: 'localhost', port: 9, lookup }); return [out, calls]; } finally { Array.prototype[Symbol.iterator] = real; }`);
+  assert.equal(r.out[0], 'net-guard blocked a non-loopback lookup answer for localhost');
+  assert.equal(r.out[1], 0); // no pass over the list used the live iterator
   assert.deepEqual(r.delivered, []); // the stub got an error and no addresses
 });
 test('T1: a replaced Function.prototype.call cannot rewrite the array handed to Node\'s connect', () => {
   const r = run(`const realCall = Function.prototype.call;
     Function.prototype.call = function (self, arr) { if (Array.isArray(arr)) arr[0] = { host: '0.0.0.0', port: 9 }; return Reflect.apply(realCall, this, arguments); };
     try { return await attempt({ host: '127.0.0.1', port: 9 }); } finally { Function.prototype.call = realCall; }`);
+  sawNoZero(r);
+});
+test('T1b: a replaced Function.prototype.apply cannot rewrite the array handed to Node\'s connect', () => {
+  const r = run(`const realApply = Function.prototype.apply;
+    Function.prototype.apply = function (self, arr) { if (Array.isArray(arr) && Array.isArray(arr[0]) && arr[0][0]?.port === 9) arr[0][0] = { host: '0.0.0.0', port: 9 }; return Reflect.apply(realApply, this, arguments); };
+    try { return await attempt({ host: '127.0.0.1', port: 9 }); } finally { Function.prototype.apply = realApply; }`);
+  sawNoZero(r);
+});
+test('T1c: a replaced Reflect.apply cannot rewrite the array handed to Node\'s connect', () => {
+  const r = run(`const realReflectApply = Reflect.apply;
+    Reflect.apply = function (fn, self, arr) { if (Array.isArray(arr) && Array.isArray(arr[0]) && arr[0][0]?.port === 9) arr[0][0] = { host: '0.0.0.0', port: 9 }; return realReflectApply(fn, self, arr); };
+    try { return await attempt({ host: '127.0.0.1', port: 9 }); } finally { Reflect.apply = realReflectApply; }`);
   sawNoZero(r);
 });
 test('blocked tls.connect and https.get fail with "net-guard blocked", not a setServername TypeError, and nothing connects', () => {
