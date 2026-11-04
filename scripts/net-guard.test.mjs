@@ -250,13 +250,13 @@ test('T1: a replaced Function.prototype.call cannot rewrite the array handed to 
 });
 test('T1b: a replaced Function.prototype.apply cannot rewrite the array handed to Node\'s connect', () => {
   const r = run(`const realApply = Function.prototype.apply;
-    Function.prototype.apply = function (self, arr) { if (Array.isArray(arr) && arr[0]?.port === 9) arr[0] = { host: '0.0.0.0', port: 9 }; return Reflect.apply(realApply, this, arguments); };
+    Function.prototype.apply = function (self, arr) { if (Array.isArray(arr) && Array.isArray(arr[0]) && arr[0][0]?.port === 9) arr[0][0] = { host: '0.0.0.0', port: 9 }; return Reflect.apply(realApply, this, arguments); };
     try { return await attempt({ host: '127.0.0.1', port: 9 }); } finally { Function.prototype.apply = realApply; }`);
   sawNoZero(r);
 });
 test('T1c: a replaced Reflect.apply cannot rewrite the array handed to Node\'s connect', () => {
   const r = run(`const realReflectApply = Reflect.apply;
-    Reflect.apply = function (fn, self, arr) { if (Array.isArray(arr) && arr[0]?.port === 9) arr[0] = { host: '0.0.0.0', port: 9 }; return realReflectApply(fn, self, arr); };
+    Reflect.apply = function (fn, self, arr) { if (Array.isArray(arr) && Array.isArray(arr[0]) && arr[0][0]?.port === 9) arr[0][0] = { host: '0.0.0.0', port: 9 }; return realReflectApply(fn, self, arr); };
     try { return await attempt({ host: '127.0.0.1', port: 9 }); } finally { Reflect.apply = realReflectApply; }`);
   sawNoZero(r);
 });
