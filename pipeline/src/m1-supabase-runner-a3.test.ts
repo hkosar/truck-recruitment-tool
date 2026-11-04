@@ -19,8 +19,9 @@
 // Before the passing role-matrix run, its failure paths (TRUCKRECRU-134, from Codex review thr_yb422uqwxk): a wrong gate, an error
 // right after its SET-option grant, an error mid-probe (both injected into the plan in memory, never into the file), and a second
 // login without ADMIN on recruiter_api. Each must fail closed and, once the executor has closed the connection, leave nothing behind:
-// the catalogue (memberships with grantor and options), every table's rows, and sequence counters (these never roll back, so only the
-// matrix's own measured counters may move forward). Not covered: other databases and cluster settings, statistics, WAL/xid counters.
+// the catalogue (memberships with grantor and options), every table's rows, and every sequence's settings and stored counter (counters
+// never roll back, so only the matrix's own measured counters may move forward; every other sequence must be byte-identical, and a
+// regression check proves a setval(..., false) on a never-called counter is caught, round 2 from Codex review thr_iygk8stb9p). Not covered: other databases and cluster settings, statistics, WAL/xid counters.
 // Needs its OWN throwaway cluster (roles are cluster-wide and no recruiter_* role may exist before a case) with three databases
 // built by scripts/a3-build-test-db.mjs --no-m1 --no-m1b --no-m1c (the two "extensions" ones with --postgis-schema extensions).
 // Each case drops its database and the roles it made afterwards. Skipped unless all three URLs are set; loopback tr_ only.
@@ -119,9 +120,15 @@ const DATA_SNAPSHOT_SQL = `select md5(string_agg(x, E'\\n' order by x)) as diges
    where c.relkind = 'r' and n.nspname not in ('pg_catalog', 'information_schema') and n.nspname not like 'pg\\_toast%' and n.nspname not like 'pg\\_temp%'
 ) s(x)`;
 
-/** Every sequence's counter (null = never called). PostgreSQL never rolls a counter back (nextval is not transactional), so a
- *  rolled-back run may only move counters forward; the snapshot above covers their definitions, owners and ACLs. */
-const SEQUENCE_STATE_SQL = `select schemaname || '.' || sequencename as s, last_value::text as v from pg_sequences order by 1`;
+/** Every sequence (temporary ones excluded) with its settings. Its stored counter (last_value, is_called, log_cnt) is then read from
+ *  the sequence relation itself: pg_sequences.last_value is null while is_called is false, so it misses a setval(..., false) on a
+ *  never-called counter (Codex review thr_iygk8stb9p). PostgreSQL never rolls a counter back (nextval is not transactional), so a
+ *  rolled-back run may only move the allow-listed counters forward; every other sequence must be byte-identical. The catalogue
+ *  snapshot above covers definitions, owners and ACLs as well. */
+const SEQUENCE_LIST_SQL = `select n.nspname || '.' || c.relname as s, c.oid::regclass::text as rel, q.seqincrement::text as inc,
+    q.seqtypid::regtype::text || ':' || q.seqstart || ':' || q.seqincrement || ':' || q.seqmin || ':' || q.seqmax || ':' || q.seqcache || ':' || q.seqcycle::text as settings
+  from pg_class c join pg_namespace n on n.oid = c.relnamespace join pg_sequence q on q.seqrelid = c.oid
+ where c.relkind = 'S' and n.nspname not like 'pg\\_temp%' and n.nspname not like 'pg\\_toast\\_temp%' order by 1`;
 /** The only counters the role matrix may move (measured on this suite's databases; any other counter moving is a failure): its
  *  fixture rows in public.batch_activity and public.contact_suppressions, inserted before the probes, and in a full run also the
  *  rows M1's own functions write to internal.auth_events during the probes. */
@@ -218,26 +225,45 @@ async function main(): Promise<void> {
   };
   const describe = (e: (Error & { code?: string; id?: string }) | undefined) => `error=${e?.id ?? ''} ${e?.code ?? ''} ${e?.message ?? ''}`;
 
+  type SequenceState = { settings: string; inc: string; lastValue: string; isCalled: boolean; logCnt: string };
+  /** Every sequence's settings and stored counter, read by the superuser admin from the sequence relation itself. */
+  const sequenceStates = async (admin: pg.Client) => {
+    const out = new Map<string, SequenceState>();
+    for (const r of (await admin.query(SEQUENCE_LIST_SQL)).rows) {
+      const v = (await admin.query(`select last_value::text as v, is_called, log_cnt::text as l from ${r.rel as string}`)).rows[0];
+      out.set(r.s as string, { settings: r.settings as string, inc: r.inc as string, lastValue: v.v as string, isCalled: v.is_called as boolean, logCnt: v.l as string });
+    }
+    return out;
+  };
   /** What a rolled-back role matrix run must not change: the catalogue snapshot (memberships with grantor and options included), every
-   *  table's rows, and the sequence counters (read separately: they may only move forward). */
+   *  table's rows, and every sequence's settings and stored counter (read separately: only allow-listed counters may move forward). */
   const stateOf = async (admin: pg.Client) => ({
     catalogue: (await admin.query(SNAPSHOT_SQL)).rows[0] as { digest: string; n: number },
     data: (await admin.query(DATA_SNAPSHOT_SQL)).rows[0] as { digest: string; n: number },
-    sequences: new Map((await admin.query(SEQUENCE_STATE_SQL)).rows.map((r) => [r.s as string, r.v as string | null])),
+    sequences: await sequenceStates(admin),
   });
   type State = Awaited<ReturnType<typeof stateOf>>;
-  /** Empty when nothing was left behind; otherwise what differs. Sequence counters that moved forward are returned separately. */
-  const compareStates = (before: State, after: State) => {
+  /** True if `a` is where nextval calls can take a counter that was at `b` (same settings, called, never back past b). */
+  const movedForward = (b: SequenceState, a: SequenceState) => {
+    if (a.settings !== b.settings || !a.isCalled) return false;
+    const up = BigInt(b.inc) > 0n, bv = BigInt(b.lastValue), av = BigInt(a.lastValue);
+    // An uncalled counter's next nextval returns last_value itself, so it may stay equal; a called one must have moved past it.
+    return b.isCalled ? (up ? av > bv : av < bv) : (up ? av >= bv : av <= bv);
+  };
+  /** Empty problems when nothing was left behind; otherwise what differs. Only the `allowed` counters may differ, and only by moving
+   *  forward; every other sequence must be byte-identical (settings, last_value, is_called, log_cnt). The counters that moved are
+   *  returned separately, so the caller can require exactly the expected set. */
+  const compareStates = (before: State, after: State, allowed: readonly string[]) => {
     const problems: string[] = [];
     if (before.catalogue.digest !== after.catalogue.digest || before.catalogue.n !== after.catalogue.n) problems.push(`catalogue ${before.catalogue.n}->${after.catalogue.n}`);
     if (before.data.digest !== after.data.digest || before.data.n !== after.data.n) problems.push(`table rows (${before.data.n}->${after.data.n} tables)`);
     const advanced: string[] = [];
     for (const name of new Set([...before.sequences.keys(), ...after.sequences.keys()])) {
       const b = before.sequences.get(name), a = after.sequences.get(name);
-      if (!before.sequences.has(name) || !after.sequences.has(name)) problems.push(`sequence ${name} appeared or vanished`);
-      else if (a === b) continue;
-      else if (a !== null && a !== undefined && (b === null || BigInt(a) > BigInt(b as string))) advanced.push(name);
-      else problems.push(`sequence ${name} moved back or was reset`);
+      if (!b || !a) { problems.push(`sequence ${name} appeared or vanished`); continue; }
+      if (JSON.stringify(a) === JSON.stringify(b)) continue;
+      if (allowed.includes(name) && movedForward(b, a)) advanced.push(name);
+      else problems.push(`sequence ${name} changed${allowed.includes(name) ? ' other than forward' : ' (not allow-listed)'}: ${JSON.stringify(b)} -> ${JSON.stringify(a)}`);
     }
     return { problems, advanced: advanced.sort() };
   };
@@ -288,14 +314,14 @@ async function main(): Promise<void> {
       };
       // Failure paths of role-matrix-m1 as the runner (Codex review thr_yb422uqwxk, TRUCKRECRU-134), before the passing run. Each must fail
       // closed (the error, step_failed, no step_done), and after the executor has closed the failed connection nothing may be left
-      // behind: catalogue (memberships with grantor and options), every table's rows, sequences only moved forward, and the runner's
+      // behind: catalogue (memberships with grantor and options), every table's rows, sequences byte-identical but for allow-listed counters moving forward, and the runner's
       // recruiter_api membership again the ADMIN-only grant (so the matrix's SET-option grant was undone, not kept).
       const failsClosed = async (name: string, expect: { code: string; message: (m: string) => boolean }, opts: Parameters<typeof runAsRunner>[2], allowedAdvance: string[]) => {
         const before = await stateOf(o.admin);
         const s = await runAsRunner(dbUrl, 'role-matrix-m1', opts);
         check(`${label}: ${name} fails closed with ${expect.code} (step_failed, no step_done, no matrix counts)`, s.error?.code === expect.code && expect.message(s.error?.message ?? '')
           && s.events.some((e) => e.msg === 'staging-sql.step_failed') && !s.events.some((e) => e.msg === 'staging-sql.step_done' || e.msg === 'staging-sql.role_matrix'), describe(s.error));
-        const cmp = compareStates(before, await stateOf(o.admin));
+        const cmp = compareStates(before, await stateOf(o.admin), allowedAdvance);
         const mem = await adminOnlyMembership();
         check(`${label}: ${name} left nothing behind once the executor closed the failed connection (catalogue incl. membership grantor/options, table rows, sequences${allowedAdvance.length ? ` only ${allowedAdvance.join(', ')} moved forward` : ' unmoved'})`,
           cmp.problems.length === 0 && JSON.stringify(cmp.advanced) === JSON.stringify(allowedAdvance) && mem.ok, `${cmp.problems.join('; ')} advanced=${cmp.advanced.join(',')} membership=${mem.detail}`);
@@ -307,6 +333,26 @@ async function main(): Promise<void> {
         assert.equal(text.split(anchor).length, 2, `injection anchor must occur exactly once: ${anchor}`);
         return { ...p, steps: [{ ...p.steps[0]!, sql: text.replace(anchor, `${anchor}\n${sql}\n`) }] };
       };
+      // Regression (Codex review thr_iygk8stb9p): between two snapshots the superuser moves a never-called counter outside the allow-list
+      // with setval(..., false), which pg_sequences.last_value (null while is_called is false) does not show. The comparison must report
+      // it; with the counter put back, every sequence must be byte-identical again.
+      {
+        const pick = (await q(`select schemaname || '.' || sequencename as s, format('%I.%I', schemaname, sequencename) as rel from pg_sequences
+            where last_value is null and not (schemaname || '.' || sequencename) = any($1)
+            order by (schemaname || '.' || sequencename) <> 'internal.batch_delete_audit_id_seq', 1 limit 1`, [MATRIX_FULL_RUN_SEQUENCES]))[0];
+        assert.ok(pick, 'a never-called sequence outside the allow-list must exist for the regression check');
+        const old = (await q(`select last_value::text as v, is_called from ${pick.rel as string}`))[0];
+        assert.equal(old.is_called, false, `${pick.s} must be never-called`);
+        const before = await stateOf(o.admin);
+        await o.admin.query(`select setval($1::regclass, $2::bigint + 1000, false)`, [pick.rel, old.v]);
+        const moved = compareStates(before, await stateOf(o.admin), MATRIX_FULL_RUN_SEQUENCES);
+        check(`${label}: regression: setval(${pick.s}, ${old.v} -> ${BigInt(old.v) + 1000n}, false) on a never-called, not allow-listed counter is reported`,
+          moved.problems.some((p) => p.includes(`sequence ${pick.s} `)), `${moved.problems.join('; ')} advanced=${moved.advanced.join(',')}`);
+        await o.admin.query(`select setval($1::regclass, $2::bigint, false)`, [pick.rel, old.v]);
+        const back = compareStates(before, await stateOf(o.admin), MATRIX_FULL_RUN_SEQUENCES);
+        check(`${label}: regression: with ${pick.s} put back, every sequence is byte-identical again`, back.problems.length === 0 && back.advanced.length === 0,
+          `${back.problems.join('; ')} advanced=${back.advanced.join(',')}`);
+      }
       await failsClosed('wrong gate (the runner verified a different project ref)', { code: 'P0001', message: (m) => m.startsWith('role matrix refused:') },
         { alter: (p) => ({ ...p, settings: p.settings.map(([k, v]) => (k === 'app.staging_runner_verified_ref' ? [k, 'zzzzzzzzzzzzzzzzzzzz'] as const : [k, v] as const)) }) }, []);
       // P0098 instead of 22012 would mean the SET option was not there yet, i.e. the injection did not land after the grant.
@@ -331,7 +377,7 @@ async function main(): Promise<void> {
         const ev = s.events.find((e) => e.msg === 'staging-sql.role_matrix');
         check(`${label}: role-matrix-m1 as the runner passes 62/62`, s.error === undefined && JSON.stringify(ev) === '{"msg":"staging-sql.role_matrix","ok":true,"total":62,"passed":62,"failed":0}'
           && s.events.some((e) => e.msg === 'staging-sql.step_done'), `${describe(s.error)} ${JSON.stringify(ev)}`);
-        const cmp = compareStates(before, await stateOf(o.admin));
+        const cmp = compareStates(before, await stateOf(o.admin), MATRIX_FULL_RUN_SEQUENCES);
         check(`${label}: the role matrix left nothing behind (catalogue snapshot incl. membership grantor/options identical, every table's rows identical, sequences only ${MATRIX_FULL_RUN_SEQUENCES.join(', ')} moved forward)`,
           cmp.problems.length === 0 && JSON.stringify(cmp.advanced) === JSON.stringify(MATRIX_FULL_RUN_SEQUENCES), `${cmp.problems.join('; ')} advanced=${cmp.advanced.join(',')}`);
         const mem = await adminOnlyMembership();
