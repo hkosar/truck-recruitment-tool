@@ -614,6 +614,33 @@ describe('POST /api/contact-logs outcome check', () => {
     expect(env.data.calls.length).toBe(before);
   });
 
+  it('answers 400 bad_channel for an unknown, wrong-case or missing channel, and never reaches the store', async () => {
+    const env = setup();
+    const who = signedIn(env);
+    const before = env.data.calls.length;
+    const seen = new Set<string>();
+    for (const extra of [{ channel: 'CALL' }, { channel: 'fax' }, { channel: '__proto__' }, { channel: 'constructor' }, { channel: '' }, { channel: ' call' }, { channel: null }, { channel: undefined }]) {
+      const res = await post(env, who, { disposition: 'connected', ...extra });
+      expect(res.status, JSON.stringify(extra)).toBe(400);
+      expect(String(res.body)).toContain('bad_channel');
+      seen.add(String(res.body));
+    }
+    expect(seen.size).toBe(1);
+    expect([...seen][0]).toContain('Choose a contact channel: call, text, email or mail.');
+    expect(env.data.calls.length).toBe(before);
+  });
+
+  it('mail with a missing or empty outcome answers 400 before the store; mail with an enum outcome is still passed on', async () => {
+    const env = setup();
+    const who = signedIn(env);
+    const before = env.data.calls.length;
+    for (const extra of [{}, { disposition: '' }, { disposition: null }]) {
+      expect((await post(env, who, { channel: 'mail', ...extra })).status, JSON.stringify(extra)).toBe(400);
+    }
+    expect(env.data.calls.length).toBe(before);
+    expect((await post(env, who, { channel: 'mail', disposition: 'sent' })).status).toBe(200);
+  });
+
   it('passes every allowed outcome through unchanged', async () => {
     const env = setup();
     const who = signedIn(env);

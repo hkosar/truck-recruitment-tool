@@ -21,10 +21,13 @@ export interface SessionPayload {
 
 /** A fixed, user-presentable error. `code` comes from the server's fixed vocabulary. */
 export class ApiError extends Error {
-  constructor(readonly status: number, readonly code: string) {
-    super(messageFor(status, code));
+  constructor(readonly status: number, readonly code: string, serverMessage?: string) {
+    super(serverMessage && SERVER_MESSAGE_CODES.includes(code) ? serverMessage : messageFor(status, code));
   }
 }
+
+/** Codes whose server `message` is a fixed, user-presentable sentence worth showing as is. */
+const SERVER_MESSAGE_CODES = ['bad_disposition', 'bad_channel'];
 
 export const DNC_BLOCKED_CODE = 'dnc_blocked';
 
@@ -55,7 +58,8 @@ async function parse(response: Response): Promise<unknown> {
   const body = await response.json().catch(() => null);
   if (!response.ok) {
     const code = body && typeof body === 'object' && 'error' in body ? String((body as { error: unknown }).error) : 'error';
-    throw new ApiError(response.status, code);
+    const message = body && typeof body === 'object' && 'message' in body && typeof (body as { message: unknown }).message === 'string' ? (body as { message: string }).message : undefined;
+    throw new ApiError(response.status, code, message);
   }
   return body;
 }

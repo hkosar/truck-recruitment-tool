@@ -7,7 +7,14 @@ export const CONTACT_DISPOSITIONS_BY_CHANNEL: Readonly<Record<string, readonly s
   email: ['sent', 'replied', 'bounced', 'no_response'],
 };
 
-/** True when the outcome is non-empty and, for a channel with a list, allowed there. Channels with no list (e.g. mail) are left to the database. */
+/** The channels the contact_channel enum holds (migration 20260720000200_enums.sql). Exact, case-sensitive match only. */
+const CONTACT_CHANNELS: readonly string[] = ['call', 'text', 'email', 'mail'];
+
+export function contactChannelKnown(channel: string): boolean {
+  return CONTACT_CHANNELS.includes(channel);
+}
+
+/** True when the outcome is non-empty and, for a channel with a list, allowed there. Channels with no list (mail) are left to the database, but still need a non-empty outcome (the enum cast refuses '' anyway). */
 export function contactDispositionAllowed(channel: string, disposition: string): boolean {
   if (!disposition) return false;
   const allowed = Object.hasOwn(CONTACT_DISPOSITIONS_BY_CHANNEL, channel) ? CONTACT_DISPOSITIONS_BY_CHANNEL[channel] : undefined;
