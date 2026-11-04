@@ -7,6 +7,7 @@ import { readdirSync, readFileSync } from 'node:fs';
 import { createServer, request } from 'node:http';
 import { createServer as createTcpServer, Socket, type AddressInfo, type Server } from 'node:net';
 import { join } from 'node:path';
+import { types } from 'node:util';
 import { fileURLToPath } from 'node:url';
 import { afterAll, beforeAll, describe, expect, it, vi } from 'vitest';
 import { closeLoopbackAgent, loopbackAgent, loopbackFetch } from './loopback-fetch';
@@ -99,16 +100,20 @@ describe('the shared agent refuses non-loopback addresses at connect time', () =
   afterAll(() => closeLoopbackAgent());
   // Even if a refusal regressed, these tests cannot reach a network: the resolver is a stub that answers with a
   // reserved documentation address (192.0.2.x), and Socket.connect is stubbed to fail instead of connecting.
+  // Like real net, the stub asks for ALL addresses ({ all: true }); in that mode the answer is a mixed list (a loopback address first, then
+  // the given one), so a check that accepts "some" loopback answers, or skips lists, is caught. noRealConnect(delivered, false) makes the stub ask the other way (single answer).
+  type Answer = (name: string, opts: { all?: boolean }, done: (err: Error | null, a?: unknown, f?: number) => void) => void;
   const answerWith = (address: string, calls: string[] = []) =>
-    ((name: string, opts: { all?: boolean }, done: (err: null, a: unknown, f?: number) => void) => {
+    ((name: string, opts: { all?: boolean }, done: Parameters<Answer>[2]) => {
       calls.push(name);
-      if (opts.all) done(null, [{ address, family: 4 }]); else done(null, address, 4);
+      if (opts.all) done(null, [{ address: '127.0.0.1', family: 4 }, { address, family: 4 }]); else done(null, address, 4);
     }) as unknown as typeof import('node:dns').lookup;
   const refusedRequest = (host: string, lookup: unknown) => new Promise((resolve, reject) => { request({ agent: loopbackAgent(), host, port: 9, lookup: lookup as typeof import('node:dns').lookup }, resolve).on('error', reject).end(); });
-  const noRealConnect = () => vi.spyOn(Socket.prototype, 'connect').mockImplementation(function (this: Socket, options: unknown) {
+  // `delivered` collects what the agent hands on to net (the arguments after the error), each read twice, as net reads an answer.
+  const noRealConnect = (delivered: unknown[][] = [], all = true) => vi.spyOn(Socket.prototype, 'connect').mockImplementation(function (this: Socket, options: unknown) {
     // Stands in for net: resolve the host with the options' lookup (as net would), then "connect" by failing.
-    const o = (Array.isArray(options) ? options[0] : options) as { host?: string; lookup?: (name: string, opts: object, done: (err: Error | null) => void) => void };
-    if (o.lookup && o.host) o.lookup(o.host, {}, (err) => { this.destroy(err ?? new Error('socket opened')); });
+    const o = (Array.isArray(options) ? options[0] : options) as { host?: string; lookup?: (name: string, opts: object, done: (err: Error | null, ...rest: unknown[]) => void) => void };
+    if (o.lookup && o.host) o.lookup(o.host, all ? { all: true } : {}, (err, ...rest) => { delivered.push(rest); this.destroy(err ?? new Error('socket opened')); });
     else this.destroy(new Error('socket opened'));
     return this;
   });
@@ -136,13 +141,54 @@ describe('the shared agent refuses non-loopback addresses at connect time', () =
     }
   });
 
-  it('localhost may only resolve to loopback addresses', async () => {
+  it('localhost may only resolve to loopback addresses (a mixed list is refused, whichever mode asks)', async () => {
     const opened = noRealConnect();
     const lookups: string[] = [];
     try {
       await expect(refusedRequest('localhost', answerWith('192.0.2.1', lookups))).rejects.toThrow(/refuses non-loopback address: localhost/);
       expect(lookups).toEqual(['localhost']);
       // Not asserted: connect is entered for localhost (the lookup runs inside it); only a 'socket opened' error would mean a regression.
+    } finally {
+      opened.mockRestore();
+    }
+    const single = noRealConnect([], false);
+    try {
+      await expect(refusedRequest('localhost', answerWith('192.0.2.1'))).rejects.toThrow(/refuses non-loopback address: localhost/);
+    } finally {
+      single.mockRestore();
+    }
+  });
+
+  it('a lookup error passes through unchanged, and an empty answer list is refused', async () => {
+    const opened = noRealConnect();
+    try {
+      const failing = ((_name: string, _opts: object, done: (err: Error) => void) => done(new Error('stub ENOTFOUND'))) as unknown as typeof import('node:dns').lookup;
+      await expect(refusedRequest('localhost', failing)).rejects.toThrow(/stub ENOTFOUND/);
+      const empty = ((_name: string, _opts: object, done: (err: null, a: unknown[]) => void) => done(null, [])) as unknown as typeof import('node:dns').lookup;
+      await expect(refusedRequest('localhost', empty)).rejects.toThrow(/refuses non-loopback address: localhost/);
+    } finally {
+      opened.mockRestore();
+    }
+  });
+
+  it('copy contract: the answer handed to net is a plain copy that cannot change after the check', async () => {
+    const delivered: unknown[][] = [];
+    const opened = noRealConnect(delivered);
+    const flipping = () => { let reads = 0; return { family: 4, get address() { return reads++ === 0 ? '127.0.0.1' : '127.0.0.3'; } }; };
+    const sneaky = ((_name: string, _opts: object, done: (err: null, a: unknown) => void) => done(null, [flipping()])) as unknown as typeof import('node:dns').lookup;
+    const proxied = ((_name: string, _opts: object, done: (err: null, a: unknown) => void) => {
+      let reads = 0; const entry = { address: '127.0.0.1', family: 4 };
+      done(null, new Proxy([entry], { get: (t, k, r) => (k === '0' && reads++ > 0 ? { address: '127.0.0.3', family: 4 } : Reflect.get(t, k, r)) }));
+    }) as unknown as typeof import('node:dns').lookup;
+    try {
+      for (const lookup of [sneaky, proxied]) {
+        delivered.length = 0;
+        await expect(refusedRequest('localhost', lookup)).rejects.toThrow(/socket opened/); // loopback answer: the stub "connects" (fails)
+        const list = delivered[0]?.[0] as Array<{ address: string }>;
+        expect(Array.isArray(list)).toBe(true);
+        expect(types.isProxy(list)).toBe(false);
+        expect(list.map((a) => [a.address, a.address, Object.getOwnPropertyDescriptor(a, 'address')?.value])).toEqual([['127.0.0.1', '127.0.0.1', '127.0.0.1']]);
+      }
     } finally {
       opened.mockRestore();
     }
