@@ -6,8 +6,11 @@
 //   1. lock the five ledgers in SHARE ROW EXCLUSIVE mode (DELETE privilege is enough), so no other session can
 //      insert or change a row between the checks and the delete; then run the same least-privilege checks as the
 //      dry run (any failed check refuses the run before any delete). The lock is taken with NOWAIT: the run never
-//      WAITS for a lock, so it can never be one side of a wait cycle (deadlock) and the app's transaction can never
-//      be the one PostgreSQL cancels. A busy lock (55P03) rolls back, waits a short time and tries again, a small
+//      WAITS for a TABLE lock, so a table-lock wait cycle (deadlock) cannot form and the app's transaction is never the one
+//      PostgreSQL cancels because of it. ROW locks are not covered: the run only has SELECT and DELETE, and SELECT ... FOR UPDATE
+//      needs UPDATE, so it cannot row-lock the fixture rows. If someone holds a row lock on a fixture row by hand, the delete may
+//      wait (up to the lock_timeout below) and then the run fails and rolls back, or, in a deadlock, either side may be cancelled;
+//      the run never partly commits (it commits only after every check passes). A busy lock (55P03) rolls back, waits a short time and tries again, a small
 //      bounded number of times; if the ledgers stay busy the run gives up with the fixed refusal
 //      `lock_busy_nothing_deleted` (nothing deleted, nothing sent but the lock attempts);
 //   2. identity pre-check: per ledger, the rows the retention rule would delete are EXACTLY the one tagged aged
@@ -115,7 +118,7 @@ export async function runRetentionFixtureRun(client: RunClient, expectedRole: st
       await client.query('begin');
       open = true;
       await client.query("set local statement_timeout = '30s'");
-      await client.query("set local lock_timeout = '500ms'"); // belt and braces: no later statement waits longer than the deadlock check
+      await client.query("set local lock_timeout = '500ms'"); // bounds any wait on a row lock held by another session (a wait the run cannot avoid, see the header); it does not rule out a deadlock cancelling either side
       try {
         await client.query(`lock table ${RETENTION_RULES.map((r) => r.table).join(', ')} in share row exclusive mode nowait`);
         locked = true;
