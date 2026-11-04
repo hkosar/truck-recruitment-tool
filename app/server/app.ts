@@ -22,6 +22,7 @@ import { keyedHash, randomSecret, type AuthKeys } from './auth/keys';
 import { decideMint } from './auth/ladder';
 import { admitRequest, INVALID_EMAIL_SENTINEL, ipBucketKey } from './auth/rate';
 import type { AuthStore, DataStore, SessionInfo } from './core/stores';
+import { contactChannelKnown, contactDispositionAllowed } from './core/contact-dispositions';
 import { RPC_SPECS, validateRpcArgs } from './core/rpc-spec';
 import type { Lifecycle } from './core/lifecycle';
 import {
@@ -481,11 +482,15 @@ export function createApp(deps: AppDeps): (req: AppRequest) => Promise<AppRespon
     }
     if (method === 'POST' && path === '/api/contact-logs') {
       const body = obj(await readJson(req));
+      const channel = text(body.channel, 20) ?? '';
+      const disposition = text(body.disposition, 40) ?? '';
+      if (!contactChannelKnown(channel)) return json(400, { error: 'bad_channel', message: 'Choose a contact channel: call, text, email or mail.' });
+      if (!contactDispositionAllowed(channel, disposition)) return json(400, { error: 'bad_disposition', message: 'Choose an outcome that fits the contact channel.' });
       await data.logContact(s, {
         dot_number: int(body.dot_number),
         batch_id: body.batch_id === null || body.batch_id === undefined ? null : uuid(body.batch_id),
-        channel: text(body.channel, 20) ?? '',
-        disposition: text(body.disposition, 40) ?? '',
+        channel,
+        disposition,
         notes: text(body.notes),
         next_steps: text(body.next_steps),
       });
