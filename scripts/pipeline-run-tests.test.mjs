@@ -31,12 +31,12 @@ function fixture(files) {
 const capture = () => { const out = []; const errs = []; return { out, errs, log: (s) => out.push(s), err: (s) => errs.push(s) }; };
 const ok = 'process.exit(0);\n';
 
-test('the real list matches the disk, and TESTS is exactly the 13 files npm test ran before (smoke + 12)', () => {
+test('the real list matches the disk, and TESTS is exactly the 14 files npm test ran before (smoke + 13)', () => {
   assert.deepEqual(checkLists({ dir: pipeline, smoke: SMOKE, tests: TESTS, notRun: NOT_RUN, discovered: discoverTests(pipeline) }), []);
   assert.equal(SMOKE, 'src/smoke-tests.ts');
   assert.deepEqual([...TESTS].sort(), [
     'src/backout-rehearsal.test.ts', 'src/batch-delete-compare.test.ts', 'src/db-tls.test.ts', 'src/first-manager-bootstrap.test.ts',
-    'src/loopback-fetch.test.ts', 'src/prod-sql.test.ts', 'src/retention-secure-a3-pki-guard.test.ts', 'src/role-matrix-a3.test.ts',
+    'src/loopback-fetch.test.ts', 'src/m1-check-ids.test.ts', 'src/prod-sql.test.ts', 'src/retention-secure-a3-pki-guard.test.ts', 'src/role-matrix-a3.test.ts',
     'src/role-password.test.ts', 'src/server-major.test.ts', 'src/staging2-pooler-guard.test.ts', 'src/target-guard-messages.test.ts',
   ]);
   assert.deepEqual([...TESTS], [...TESTS].sort(), 'TESTS is kept sorted');

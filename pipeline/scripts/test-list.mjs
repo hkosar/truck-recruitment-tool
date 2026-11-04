@@ -13,6 +13,7 @@ export const TESTS = [
   'src/db-tls.test.ts',
   'src/first-manager-bootstrap.test.ts',
   'src/loopback-fetch.test.ts',
+  'src/m1-check-ids.test.ts',
   'src/prod-sql.test.ts',
   'src/retention-secure-a3-pki-guard.test.ts',
   'src/role-matrix-a3.test.ts',

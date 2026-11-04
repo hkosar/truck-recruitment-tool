@@ -137,6 +137,8 @@ export const REFUSAL_IDS = [
   'prod_sql_target_refused', 'prod_sql_action_not_built', 'prod_sql_action_do_not_use', 'prod_sql_file_unreadable', 'prod_sql_hash_mismatch', 'prod_sql_shape_refused', 'prod_sql_commit_rolled_back', 'prod_sql_l1_shape_not_ok', 'prod_sql_flag_not_expected', 'prod_sql_l1_stop_table_populated', 'prod_sql_l1_stop_table_lock_failed', 'prod_sql_l1_statement_timeout', 'db_tls_refused', 'staging2_pooler_required', 'server_or_driver_error',
 ];
 
+/** Keep equal to the ids of pipeline/src/refusals.ts M1_CHECKS (a test compares them): fixed names of M1's own P0001 checks, never the message. */
+export const M1_CHECK_IDS = ['m1_postgis_extension_not_unique', 'm1_postgis_schema_writable', 'm1_postgis_schema_usage_no_grant_option', 'm1_postgis_execute_no_grant_option', 'm1_postgis_not_callable', 'm1_postgis_self_check_no_extension', 'm1_postgis_self_check_set_option_kept', 'm1_postgis_self_check_membership_kept'];
 /** Keep equal to pipeline/src/refusals.ts DRIVER_CODES (a test compares them). */
 export const DRIVER_CODES = ['ECONNREFUSED', 'ECONNRESET', 'ECONNABORTED', 'ETIMEDOUT', 'ENOTFOUND', 'EAI_AGAIN', 'EPIPE', 'EHOSTUNREACH', 'ENETUNREACH', 'ENETDOWN', 'EADDRNOTAVAIL'];
 /** Keep equal to the action tables in pipeline/src/staging-sql-runner.ts and staging-rebuilt.ts plus owner-auth-create (a test compares them). */
@@ -206,7 +208,7 @@ const EVENTS = {
   'staging-sql.verified': { action, steps: int, target: oneOf(['recorded rebuilt staging project', 'recorded staging project']) },
   'staging-sql.plan_only': { hint: oneOf(['add --execute to run']) },
   'staging-sql.done': { action },
-  'staging-sql.refused': { refusal: oneOf(REFUSAL_IDS), err_code: code },
+  'staging-sql.refused': { refusal: oneOf(REFUSAL_IDS), err_code: code, m1_check: oneOf(M1_CHECK_IDS) },
   'staging-sql.step_done': { step },
   'staging-sql.step_failed': { step },
   'staging-sql.ledger_verified': { expected: int, found: int, exact_match: bool },
@@ -267,7 +269,7 @@ const EVENTS = {
   'first-manager.checks': { phase, ok: bool, checks: int, failed: int },
   'first-manager.result': { result: oneOf(['committed', 'rolled_back', 'rollback_not_confirmed', 'unknown']), path: oneOf(['insert', 'promote']) },
   'first-manager.done': { action: oneOf(FIRST_MANAGER_ACTIONS), target: oneOf(['staging', 'production']) },
-  'first-manager.refused': { refusal: oneOf(REFUSAL_IDS), err_code: code },
+  'first-manager.refused': { refusal: oneOf(REFUSAL_IDS), err_code: code, m1_check: oneOf(M1_CHECK_IDS) },
   // Guarded production SQL runner (pipeline/src/prod-sql.ts): the pinned file hash (public repository content), counts and enumerated words only.
   'prod-sql.verified': { action: oneOf(PROD_SQL_ACTIONS), target: oneOf(['production']), statements: int, wrap: oneOf(PROD_SQL_WRAPS), sha256: pat(/^[0-9a-f]{64}$/) },
   'prod-sql.plan_only': { hint: oneOf(['add --execute to run']) },
@@ -280,7 +282,7 @@ const EVENTS = {
   'prod-sql.warning': { action: oneOf(PROD_SQL_IRREVERSIBLE_ACTIONS), warning: oneOf(Object.keys(PROD_SQL_WARNINGS)), notice: oneOf(Object.values(PROD_SQL_WARNINGS)) },
   'prod-sql.result': { action: oneOf(PROD_SQL_ACTIONS), result: oneOf(PROD_SQL_RESULTS), statements: int },
   'prod-sql.done': { action: oneOf(PROD_SQL_ACTIONS), target: oneOf(['production']) },
-  'prod-sql.refused': { refusal: oneOf(REFUSAL_IDS), err_code: code },
+  'prod-sql.refused': { refusal: oneOf(REFUSAL_IDS), err_code: code, m1_check: oneOf(M1_CHECK_IDS) },
 };
 
 const SEED_LINES = [

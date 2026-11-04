@@ -5,7 +5,7 @@ import assert from 'node:assert/strict';
 import { PassThrough } from 'node:stream';
 import { test } from 'node:test';
 import { readFileSync } from 'node:fs';
-import { ALLOWED, FROM_ENV_BASE_NAMES, PROMPT_ONLY, PROMPT_PROOF_PREFIX, REFUSAL_IDS, allowListLine, main, maskTargets, parseArgs, promptProof, readHidden, scrub } from './run-with-secrets.mjs';
+import { ALLOWED, FROM_ENV_BASE_NAMES, M1_CHECK_IDS, PROMPT_ONLY, PROMPT_PROOF_PREFIX, REFUSAL_IDS, allowListLine, main, maskTargets, parseArgs, promptProof, readHidden, scrub } from './run-with-secrets.mjs';
 
 function fakeTty() {
   const s = new PassThrough();
@@ -142,6 +142,30 @@ test('allow-list: only enumerated events with their own keys; every value fits i
   assert.equal(allowListLine('created manager fixture for run tnbs-stg2-a5b-01'), 'created manager fixture for run tnbs-stg2-a5b-01');
   assert.equal(allowListLine('created 6 fictional users; expires 2026-11-26T00:00:00.000Z'), 'created 6 fictional users; expires 2026-11-26T00:00:00.000Z');
   for (const bad of ['', 'plain text', 'Error: connect ECONNREFUSED 10.0.0.5:5432', '    at Object.<anonymous> (file.js:1:1)', '{"msg":"other.event"}', '{"msg":"staging-sql.x"}', '{"msg":"staging-sql.done"} trailing', '[1,2]', 'null', '{"msg":5}', 'created x fixture for run ;rm -rf', 'created owner fixture for run r1', 'created 6 fictional users; expires tomorrow', '{"msg":"staging-sql.__proto__"}', '{"msg":"staging-sql.constructor"}']) assert.equal(allowListLine(bad), null, `should be withheld: ${bad}`);
+});
+
+test('m1_check (TRUCKRECRU-127): only a listed M1 check id is shown on a refused line; anything else is withheld', () => {
+  for (const msg of ['staging-sql.refused', 'prod-sql.refused', 'first-manager.refused']) {
+    const counter = { fields: 0 };
+    const line = { msg, refusal: 'server_or_driver_error', err_code: 'P0001', m1_check: 'm1_postgis_schema_usage_no_grant_option' };
+    assert.equal(allowListLine(JSON.stringify(line), counter), JSON.stringify(line));
+    assert.equal(counter.fields, 0);
+    for (const bad of ['M1: the runner cannot pass on USAGE on PostGIS schema extensions to recruiter_api', 'm1_not_a_listed_id', 5, null, ['m1_postgis_not_callable']]) {
+      const c = { fields: 0 };
+      assert.equal(JSON.parse(allowListLine(JSON.stringify({ ...line, m1_check: bad }), c)).m1_check, '<withheld>');
+      assert.equal(c.fields, 1);
+    }
+  }
+  assert.equal(new Set(M1_CHECK_IDS).size, M1_CHECK_IDS.length);
+  for (const id of M1_CHECK_IDS) assert.match(id, /^m1_[a-z0-9_]{1,60}$/);
+});
+
+test('the M1 check ids in the wrapper equal the runner table (pipeline/src/refusals.ts M1_CHECKS)', () => {
+  const src = readFileSync(new URL('../pipeline/src/refusals.ts', import.meta.url), 'utf8');
+  const block = /export const M1_CHECKS[^=]*= \[([\s\S]*?)\n\];/.exec(src)[1];
+  const runnerIds = [...block.matchAll(/\{ id: '([a-z0-9_]+)'/g)].map((m) => m[1]);
+  assert.ok(runnerIds.length > 0);
+  assert.deepEqual([...M1_CHECK_IDS].sort(), [...runnerIds].sort());
 });
 
 test('the refusal identifiers in the wrapper equal the runner list (pipeline/src/refusals.ts)', () => {
