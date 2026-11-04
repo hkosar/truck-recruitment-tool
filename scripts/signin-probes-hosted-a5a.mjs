@@ -270,12 +270,19 @@ export async function runProbes({ baseUrl, key, phase = 'after', realtimeSeconds
   const buckets = await send('GET', '/storage/v1/bucket');
   record('storage:bucket-list', classify(buckets));
   let names = [];
+  let skippedOdd = 0;
   if (buckets.status === 200) {
     try {
       const parsed = JSON.parse(buckets.text);
-      if (Array.isArray(parsed)) names = parsed.map((b) => b && b.name).filter((n) => typeof n === 'string' && BUCKET_NAME.test(n) && survivesNormalisation(`/storage/v1/object/list/${n}`));
+      if (Array.isArray(parsed)) {
+        const all = parsed.map((b) => b && b.name);
+        names = all.filter((n) => typeof n === 'string' && BUCKET_NAME.test(n) && survivesNormalisation(`/storage/v1/object/list/${n}`));
+        skippedOdd = all.length - names.length;
+      }
     } catch { /* classified above */ }
   }
+  // Fixed text and a count only: an odd bucket name is never printed.
+  if (skippedOdd > 0) emit(`EVENT probe=storage:object-list note=skipped-odd-bucket-names count=${skippedOdd}`);
   if (names.length === 0) {
     emit('EVENT probe=storage:object-list expected=n/a observed=no-buckets-found result=SKIPPED');
   } else {

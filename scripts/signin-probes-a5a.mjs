@@ -137,10 +137,15 @@ function decodeAt(text) {
   }
   return t;
 }
-// The --app-origin text is the one host name a redirect may carry; a long host label (hyphens + a digit) must not trip the opaque-string rule.
-// Only that exact origin text is blanked out: anything after it (a path, a token) is still scanned.
+// The --app-origin text is the one host name a redirect may name; a long host label (hyphens + a digit) must not trip the opaque-string rule.
+// So the exact origin text is blanked out for the opaque-string rule (the last shape) ONLY. Every other shape (token=, cookie, email, UUID, JWT,
+// bearer) is scanned on the raw text, so a secret that starts inside the origin text (for example "<origin>@evil.example") is still caught.
 const withoutOrigin = (text, appOrigin) => (appOrigin === undefined ? text : text.split(appOrigin).join(' '));
-const leaks = (text) => LEAK_SHAPES.some((re) => re.test(text)) || LEAK_SHAPES.some((re) => re.test(decodeAt(text)));
+const OPAQUE_SHAPE = LEAK_SHAPES[LEAK_SHAPES.length - 1];
+const leaks = (text, appOrigin) => {
+  const scan = (t) => LEAK_SHAPES.slice(0, -1).some((re) => re.test(t)) || OPAQUE_SHAPE.test(withoutOrigin(t, appOrigin));
+  return scan(text) || scan(decodeAt(text));
+};
 const headerText = (headers) => Object.entries(headers ?? {}).map(([k, v]) => `${k}: ${[].concat(v).join(', ')}`).join('\n');
 
 /** The path of a redirect target if it stays on the app (one leading "/", or exactly `appOrigin` + path), else null. */
@@ -154,8 +159,8 @@ function localPath(loc, appOrigin) {
 export function judge(res, exp, appOrigin) {
   if (!res.ok) return 'network';
   if (res.cookies.some((c) => !isClearing(c))) return 'cookie';
-  const scanBody = withoutOrigin(exp.allowPlaceholder ? res.body.replaceAll(PLACEHOLDER_ATTR, '') : res.body, appOrigin);
-  if (leaks(scanBody) || leaks(withoutOrigin(headerText(res.headers), appOrigin))) return 'leak';
+  const scanBody = exp.allowPlaceholder ? res.body.replaceAll(PLACEHOLDER_ATTR, '') : res.body;
+  if (leaks(scanBody, appOrigin) || leaks(headerText(res.headers), appOrigin)) return 'leak';
   if (res.tooBig) return 'body';
   if (!exp.status.includes(res.status)) return 'status';
   if (exp.location !== undefined) {

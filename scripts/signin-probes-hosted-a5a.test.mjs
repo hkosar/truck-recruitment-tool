@@ -308,7 +308,7 @@ test('request allow-list: reads only; every write verb, rpc outside the list and
   assert.equal(isAllowedRequest('POST', '/rest/v1/rpc/search_carriers'), true);
   assert.equal(isAllowedRequest('POST', '/storage/v1/object/list/../x'), false);
   // a path that URL normalisation would rewrite is refused, so the path checked is the path sent
-  for (const n of ['.', '..', 'a%2Fb', 'a\b']) assert.equal(isAllowedRequest('POST', `/storage/v1/object/list/${n}`), false, n);
+  for (const n of ['.', '..', 'a%2Fb', 'a\\b', 'a\b']) assert.equal(isAllowedRequest('POST', `/storage/v1/object/list/${n}`), false, n);
   assert.equal(isAllowedRequest('POST', '/storage/v1/object/list/docs'), true);
 });
 
@@ -319,6 +319,20 @@ test('listed buckets named "." or ".." are never requested', async () => {
     const lists = srv.seen.filter((s) => s.method === 'POST' && s.path.startsWith('/storage/'));
     assert.deepEqual(lists.map((s) => s.path), ['/storage/v1/object/list/docs']);
   } finally { await srv.close(); }
+});
+
+test('skipped odd bucket names print one fixed line with a count, never the names', async () => {
+  const srv = await fakeServer('open', { buckets: [{ name: '.' }, { name: '..' }, { name: 'a%2Fb' }, { name: 'docs' }] });
+  try {
+    const r = await runCli(['--execute', '--realtime-seconds=1'], GOOD_ENV, { testBaseUrl: srv.url });
+    assert.equal(r.text.split('\n').filter((l) => l === 'EVENT probe=storage:object-list note=skipped-odd-bucket-names count=3').length, 1);
+    assert.ok(!r.text.includes('a%2Fb'));
+  } finally { await srv.close(); }
+  const srv2 = await fakeServer('open', { buckets: [{ name: 'docs' }] });
+  try {
+    const r = await runCli(['--execute', '--realtime-seconds=1'], GOOD_ENV, { testBaseUrl: srv2.url });
+    assert.ok(!r.text.includes('skipped-odd-bucket-names'));
+  } finally { await srv2.close(); }
 });
 
 /**

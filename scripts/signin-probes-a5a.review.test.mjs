@@ -235,6 +235,18 @@ test('review note 1: a long --app-origin host label with a digit is not a false 
   assert.equal(judge({ ...base, status: 200, body: `a@b.invalid ${app}` }, { status: [200] }, app), 'leak');
 });
 
+test('origin blanking applies only to the opaque-string rule: a user part glued to the origin is still a leak', () => {
+  const base = { ok: true, status: 200, headers: {}, cookies: [], body: '' };
+  const j = (body, app) => judge({ ...base, body }, { status: [200] }, app);
+  const long = 'https://twisted-nail-recruiter-app-staging-2.onrender.com';
+  assert.equal(j(`${long}@evil.example.com`, long), 'leak');
+  assert.equal(j('http://a@x.example.com', 'http://a'), 'leak');
+  assert.equal(j(`${long}%40evil.example.com`, long), 'leak');
+  assert.equal(judge({ ...base, headers: { location: 'http://a@x.example.com' } }, { status: [200] }, 'http://a'), 'leak');
+  // the long-label false alarm stays fixed
+  assert.equal(j(`see ${long}/signin`, long), null);
+});
+
 test('review note 2: the usage example in the script header names --app-origin', async () => {
   const { readFileSync } = await import('node:fs');
   const text = readFileSync(join(dirname(fileURLToPath(import.meta.url)), 'signin-probes-a5a.mjs'), 'utf8');
