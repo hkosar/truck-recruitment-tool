@@ -4,6 +4,8 @@
 //   - checks the answers of every resolver, the system one (for localhost) and caller-supplied ones (test stubs): an answer that is
 //     empty, not an address or not loopback is refused, and what net receives is a plain copy of the checked answer. A hook on
 //     connect alone cannot do this, because net dials AFTER the lookup without coming back through connect.
+// NOT covered: dns.lookup / dns.resolve* called directly, UDP (dgram), and a caller-supplied resolver is run for whatever name net
+// passes it (only its answers are checked). Anyone who needs "no name lookups at all" must not rely on this guard alone.
 // A blocked connect fails the socket with "net-guard blocked ..." and adds one line to the log (stderr, or the file in NET_GUARD_LOG).
 //
 // How reviewers load it (from the repository root; nothing is installed):
@@ -35,7 +37,7 @@ const guardLookup = (resolve) => (name, opts, done) => {
   resolve(name, options, (err, address, family) => {
     if (err) { callback(err, address, family); return; }
     const answer = Array.isArray(address)
-      ? Array.from(address, (a) => ({ address: String(a?.address), family: typeof a?.family === 'number' ? a.family : undefined }))
+      ? Array.from(address, (a) => { const family = a?.family; return { address: String(a?.address), family: typeof family === 'number' ? family : undefined }; })
       : typeof address === 'string' ? address : undefined;
     const addresses = typeof answer === 'string' ? [answer] : answer?.map((a) => a.address);
     if (addresses === undefined || addresses.length === 0 || !addresses.every(isLoopbackAddress)) {
@@ -45,27 +47,39 @@ const guardLookup = (resolve) => (name, opts, done) => {
   });
 };
 
+// Node's own rules (lib/net.js): a string is a pipe path only when it is not a number (Number(s) >= 0 makes it a port).
+const isPipeName = (s) => typeof s === 'string' && !(Number(s) >= 0);
+// The array net.connect/createConnection hand to socket.connect carries an internal symbol; without it Node reads the array as options.
+const isNormalizedArgs = (a) => Array.isArray(a) && Object.getOwnPropertySymbols(a).some((s) => s.description === 'normalizedArgs');
+
 const realConnect = Socket.prototype.connect;
 Socket.prototype.connect = function (...args) {
-  // Same argument shapes as net: ([options, cb]), (options, cb), (port, host, cb), (path, cb).
-  const wrapped = Array.isArray(args[0]);
-  const first = wrapped ? args[0][0] : args[0];
-  let options;
-  if (first !== null && typeof first === 'object') options = first;
-  else if (typeof first === 'string' && !/^\d+$/.test(first)) return realConnect.apply(this, args); // a pipe or Unix socket path: not the network
-  else options = { host: typeof args[1] === 'string' ? args[1] : 'localhost', port: first };
-  if (options.path) return realConnect.apply(this, args);
-  const host = String(options.host ?? options.hostname ?? 'localhost').replace(/^\[|\]$/g, '');
-  const supplied = typeof options.lookup === 'function';
-  const allowed = isIP(host) ? isLoopbackAddress(host) : host.toLowerCase() === 'localhost' || supplied;
+  // Same argument shapes as net: ([options, cb]) from net.connect and http, (options, cb), (port, host, cb), (path, cb).
+  const normalized = isNormalizedArgs(args[0]);
+  if (Array.isArray(args[0]) && !normalized) return realConnect.apply(this, args); // Node reads a plain array as options with no port or path: it throws
+  const first = normalized ? args[0][0] : args[0];
+  const given = first !== null && typeof first === 'object';
+  if (!given && isPipeName(first)) return realConnect.apply(this, args); // a pipe or Unix socket path: not the network
+  // Read each option Node uses to choose a destination ONCE, and hand Node a copy holding exactly those values.
+  const source = given ? first : { host: typeof args[1] === 'string' ? args[1] : undefined, port: first };
+  const path = source.path;
+  const rawHost = source.host;
+  const rawLookup = source.lookup;
+  const options = { ...source, path, host: rawHost, lookup: rawLookup };
+  const callback = args.at(-1);
+  const send = () => {
+    if (normalized) { args[0][0] = options; return realConnect.apply(this, args); } // keep Node's own array (and its mark)
+    return typeof callback === 'function' && args.length > 1 ? realConnect.call(this, options, callback) : realConnect.call(this, options);
+  };
+  if (path) return send();
+  const host = rawHost || 'localhost'; // the text Node uses: brackets are NOT stripped ("[::1]" is a name to Node, not an address)
+  const supplied = typeof rawLookup === 'function';
+  const allowed = typeof host !== 'string' ? true /* Node throws on a non-string host before any connect */ : isIP(host) ? isLoopbackAddress(host) : host.toLowerCase() === 'localhost' || supplied;
   if (!allowed) {
     record(`blocked connect to ${host}:${options.port}`);
     this.destroy(new Error(`net-guard blocked a connect to ${host}`));
     return this;
   }
-  if (isIP(host)) return realConnect.apply(this, args); // net does not look an address up
-  const guarded = { ...options, lookup: guardLookup(supplied ? options.lookup : systemLookup) };
-  if (wrapped) return realConnect.call(this, [guarded, ...args[0].slice(1)], ...args.slice(1));
-  const callback = args.find((a) => typeof a === 'function');
-  return callback ? realConnect.call(this, guarded, callback) : realConnect.call(this, guarded);
+  if (typeof host === 'string' && !isIP(host)) options.lookup = guardLookup(supplied ? rawLookup : systemLookup); // net looks a name up; an address it does not
+  return send();
 };
