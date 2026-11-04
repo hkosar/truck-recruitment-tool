@@ -120,6 +120,10 @@ test('allow-list: only enumerated events with their own keys; every value fits i
   assert.equal(run({ msg: 'staging-sql.role_matrix', ok: 'yes', total: 62, passed: 62, failed: 0 }).shown.ok, '<withheld>');
   assert.equal(run({ msg: 'staging-sql.role_matrix', ok: true, total: '62', passed: 62, failed: 0 }).shown.total, '<withheld>');
   for (const id of ['role_matrix_failed', 'role_matrix_result_missing']) assert.deepEqual(run({ msg: 'staging-sql.refused', refusal: id }).shown, { msg: 'staging-sql.refused', refusal: id });
+  // server major version (TRUCKRECRU-108): one key, four fixed words; a bad value is withheld and any other key is dropped
+  for (const major of ['15', '16', '17', 'other']) assert.deepEqual(run({ msg: 'staging-sql.server_major', major }).shown, { msg: 'staging-sql.server_major', major });
+  for (const bad of ['14', '18', '16.6', '160006', 16, '', 'PostgreSQL 16.6 on db.example.com', 'Other', null]) assert.equal(run({ msg: 'staging-sql.server_major', major: bad }).shown.major, '<withheld>');
+  assert.deepEqual(run({ msg: 'staging-sql.server_major', major: '16', version: 'PostgreSQL 16.6 on db.example.com', host: 'db.example.com' }), { shown: { msg: 'staging-sql.server_major', major: '16' }, fields: 2 });
   // refusal: an identifier from the fixed list, never text
   assert.deepEqual(run({ msg: 'staging-sql.refused', refusal: 'ledger_preflight_failed' }).shown, { msg: 'staging-sql.refused', refusal: 'ledger_preflight_failed' });
   assert.deepEqual(run({ msg: 'staging-sql.refused', refusal: 're-apply M1c refused: the retained audit table is missing; fragment-Zq9981' }), { shown: { msg: 'staging-sql.refused', refusal: '<withheld>' }, fields: 1 });

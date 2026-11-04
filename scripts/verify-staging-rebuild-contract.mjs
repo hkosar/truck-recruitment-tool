@@ -131,6 +131,20 @@ if (runner) {
   if (!wrapperSrc.includes("'staging-sql.role_matrix': { ok: bool, total: int, passed: int, failed: int }")) failures.push('run-with-secrets.mjs must allow-list staging-sql.role_matrix with exactly ok, total, passed, failed');
 }
 
+// environment-preflight server major version (TRUCKRECRU-108): one fixed line, four fixed words, from server_version_num only.
+const envPre = read('pipeline/src/environment-preflight.ts');
+if (!envPre) failures.push('environment-preflight.ts is missing');
+else {
+  for (const required of ["select current_setting('server_version_num') as server_version_num", 'export function serverMajor(', "line({ msg: 'staging-sql.server_major', major: serverMajor(r.serverVersionNum) });", "/^[0-9]{6}$/.test(text)", "major === '15' || major === '16' || major === '17' ? major : 'other'"]) {
+    if (!envPre.includes(required)) failures.push(`environment-preflight.ts is missing: ${required}`);
+  }
+  const envPreCode = envPre.replace(/\/\*[\s\S]*?\*\//g, '').split('\n').map((l) => l.replace(/^\s*\/\/.*$/, '')).join('\n');
+  if (/version\(\)|current_setting\('server_version'\)/.test(envPreCode)) failures.push('environment-preflight.ts must read only server_version_num and never query a full version string');
+  if ((envPreCode.match(/serverVersionNum/g) ?? []).length !== 4) failures.push('environment-preflight.ts: serverVersionNum must be read, stored, passed to serverMajor and nowhere else');
+  if ((envPre.match(/staging-sql.server_major/g) ?? []).length !== 1) failures.push('environment-preflight.ts must print staging-sql.server_major from exactly one place');
+  if (!(read('scripts/run-with-secrets.mjs') ?? '').includes("'staging-sql.server_major': { major: oneOf(['15', '16', '17', 'other']) },")) failures.push("run-with-secrets.mjs must allow-list staging-sql.server_major with exactly the key major and the values 15, 16, 17, other");
+}
+
 // batch-delete-compare (doc 16 section 3.3): read-only, pinned file, fixed event, fixed refusal, never prints the definition.
 const compare = read('pipeline/src/batch-delete-compare.ts');
 if (!compare) failures.push('batch-delete-compare.ts is missing');

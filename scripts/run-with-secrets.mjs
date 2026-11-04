@@ -245,6 +245,7 @@ const EVENTS = {
   'staging-sql.environment_authenticator_setting': {
     authenticator_exists: bool, role_wide_entries: int, this_database_entries: int, names_public: (v) => bool(v) || v === 'unknown', is_the_data_api_switch: bool,
   },
+  'staging-sql.server_major': { major: oneOf(['15', '16', '17', 'other']) },
   'staging-sql.environment_preflight': { scope: oneOf(['catalogue_facts_only_owner_checks_the_three_dashboard_switches']) },
   'staging-sql.owner_auth_create': { result: oneOf(['created', 'not_created', 'unknown']), http_status: int, email_matches: bool, id_present: bool },
   'staging-sql.owner_state': {
