@@ -7,7 +7,10 @@
 //   1. negative: PostGIS in "extensions", the login has USAGE there WITHOUT grant option: M1 must stop with the specific
 //      message, and the database (catalogue snapshot) and the cluster's roles must be exactly as before;
 //   2. PostGIS in public (PUBLIC keeps EXECUTE on the PostGIS routines, as on hosted Supabase): M1 must apply;
-//   3. PostGIS in "extensions", USAGE WITH GRANT OPTION: M1 must apply.
+//   3. PostGIS in "extensions", USAGE WITH GRANT OPTION: M1 must apply;
+//   4. negative: PostGIS in "extensions", USAGE WITH GRANT OPTION, but PUBLIC EXECUTE removed from the PostGIS stand-ins and the login
+//      has EXECUTE on them WITHOUT grant option: M1 must stop with the specific EXECUTE message and leave nothing behind (case 4 runs
+//      on a copy of the pristine negative database, made at the start with CREATE DATABASE ... TEMPLATE, so no fourth URL is needed).
 // After an apply: recruiter_api works for spatial calls, and the login's recruiter_api membership is again only the ADMIN-only
 // grant PostgreSQL made (the self-check revoked exactly what it granted). Then, as the same login and through the real runner
 // plans, runbook v3.3 sections 3.2-3.6 (TRUCKRECRU-126): apply-m1b, apply-m1c, batch-delete-compare (match true), role-matrix-m1
@@ -28,6 +31,7 @@ const REF = 'abcdefghijklmnopqrst';
 const FAKE_URL = `postgresql://postgres.${REF}:redacted-pw@aws-0-us-east-2.pooler.supabase.com:5432/postgres`;
 const RUNNER = 'tr_m1_runner';
 const M1_ROLES = ['recruiter_api', 'recruiter_app', 'recruiter_maintenance'];
+const NEG_EXEC_MESSAGE = 'M1: the runner cannot pass on EXECUTE on PostGIS routine(s) st_distance, st_dwithin, st_makeline, st_makepoint, st_setsrid, st_x, st_y to recruiter_api (it needs EXECUTE WITH GRANT OPTION, or PUBLIC must keep EXECUTE)';
 const NEG_MESSAGE = 'M1: the runner cannot pass on USAGE on PostGIS schema extensions to recruiter_api (it needs USAGE WITH GRANT OPTION on that schema)';
 
 /** Gives the runner login what Supabase's postgres has: the database, schema internal and every non-extension object of public and
@@ -70,6 +74,15 @@ const PUBLIC_EXECUTE_SQL = `do $p$ declare r record; begin
   end loop;
 end $p$`;
 
+/** Hosted-like worst case for EXECUTE: PUBLIC has none on the PostGIS stand-ins, the runner has it without grant option. */
+const NO_PUBLIC_EXECUTE_SQL = `do $p$ declare r record; begin
+  for r in select d.objid::regprocedure as fn from pg_depend d join pg_extension e on e.oid = d.refobjid
+           where d.classid = 'pg_proc'::regclass and d.refclassid = 'pg_extension'::regclass and d.deptype = 'e' and e.extname = 'test_ext5' loop
+    execute format('revoke execute on routine %s from public', r.fn);
+    execute format('grant execute on routine %s to ${RUNNER}', r.fn);
+  end loop;
+end $p$`;
+
 /** Everything M1 creates or changes in a database (relations, routines and their settings and ACLs, policies, triggers, schema ACLs,
  *  role settings, memberships, publication tables), as one digest. */
 const SNAPSHOT_SQL = `select md5(string_agg(x, E'\\n' order by x)) as digest, count(*)::int as n from (
@@ -85,6 +98,7 @@ const SNAPSHOT_SQL = `select md5(string_agg(x, E'\\n' order by x)) as digest, co
   union all select 'nsp:' || nspname || ':' || coalesce(nspacl::text, '') || ':' || pg_get_userbyid(nspowner) from pg_namespace
   union all select 'set:' || setdatabase::text || ':' || setrole::text || ':' || setconfig::text from pg_db_role_setting
   union all select 'mem:' || roleid::regrole::text || '>' || member::regrole::text || ':' || admin_option::text || inherit_option::text || set_option::text from pg_auth_members
+  union all select 'defacl:' || defaclrole::regrole::text || ':' || defaclnamespace::text || ':' || defaclobjtype::text || ':' || defaclacl::text from pg_default_acl
   union all select 'pubrel:' || prpubid::text || ':' || prrelid::regclass::text from pg_publication_rel
 ) s(x)`;
 
@@ -109,6 +123,8 @@ async function main(): Promise<void> {
     await c.connect();
     try { return await fn(c); } finally { await c.end(); }
   };
+  // Case 4's database: a copy of the pristine negative database (taken before case 1 touches it; nobody is connected to it yet).
+  const negCopyUrl = (() => { const u = new URL(URLS.neg as string); u.pathname = `${u.pathname}_exec`; return u.toString(); })();
   const existingM1Roles = () => onCluster(async (c) => (await c.query("select rolname from pg_roles where rolname = any($1) or rolname = $2 order by rolname", [M1_ROLES, RUNNER])).rows.map((r) => r.rolname as string));
 
   /** Drops the case's database (only if it carries a task ownership comment) and every role the case made. */
@@ -237,6 +253,16 @@ async function main(): Promise<void> {
   };
 
   try {
+    {
+      const src = new URL(URLS.neg as string).pathname.slice(1);
+      const copy = new URL(negCopyUrl).pathname.slice(1);
+      await onCluster(async (c) => {
+        const comment = (await c.query("select shobj_description(oid, 'pg_database') as c from pg_database where datname = $1", [src])).rows[0]?.c as string | undefined;
+        assert.match(comment ?? '', /^a3-task-owned:/, `refusing: ${src} is not task-owned`);
+        await c.query(`create database ${copy} template ${src}`);
+        await c.query(`comment on database ${copy} is '${comment!.replace(/'/g, "''")}'`);
+      });
+    }
     // 1. Negative: PostGIS in extensions, USAGE without grant option, PUBLIC has none there (the shim grants anon/authenticated/
     //    service_role only). M1 must stop with the specific message and leave nothing behind.
     {
@@ -253,13 +279,29 @@ async function main(): Promise<void> {
       }
       await dropCase(URLS.neg);
     }
+    // 4. Negative: USAGE WITH GRANT OPTION, but no EXECUTE to pass on (PUBLIC has none, the runner has it without grant option).
+    {
+      const o = await applyAsRunner(negCopyUrl, async (a) => { await a.query(`grant usage on schema extensions to ${RUNNER} with grant option`); await a.query(NO_PUBLIC_EXECUTE_SQL); });
+      try {
+        check('negative EXECUTE: the runner has EXECUTE on the PostGIS stand-ins without grant option and PUBLIC has none',
+          (await o.admin.query(`select count(*)::int as n, bool_and(has_function_privilege($1, p.oid, 'execute') and not has_function_privilege($1, p.oid, 'execute with grant option') and not has_function_privilege('public', p.oid, 'execute')) as ok
+             from pg_proc p join pg_depend d on d.objid = p.oid and d.classid = 'pg_proc'::regclass and d.deptype = 'e' join pg_extension e on e.oid = d.refobjid where e.extname = 'test_ext5'`, [RUNNER])).rows[0].ok === true);
+        check('negative EXECUTE: M1 stops with P0001 and the specific EXECUTE grant-option message', o.error?.code === 'P0001' && o.error?.message === NEG_EXEC_MESSAGE, `error=${o.error?.code ?? ''} ${o.error?.message ?? ''}`);
+        check('negative EXECUTE: the runner reported the failed step and no step_done', o.events.some((e) => e.msg === 'staging-sql.step_failed') && !o.events.some((e) => e.msg === 'staging-sql.step_done'));
+        check('negative EXECUTE: nothing was applied (catalogue snapshot incl. default privileges identical, no recruiter_* role)', o.before.digest === o.after.digest && o.before.n === o.after.n
+          && (await o.admin.query("select count(*)::int as n from pg_roles where rolname like 'recruiter\\_%'")).rows[0].n === 0, `before=${o.before.n} after=${o.after.n}`);
+      } finally {
+        await o.admin.end();
+      }
+      await dropCase(negCopyUrl);
+    }
     // 2. PostGIS in public.
     await assertApplied('public', URLS.public, 'public', async (a) => { await a.query(PUBLIC_EXECUTE_SQL); });
     // 3. PostGIS in extensions, USAGE WITH GRANT OPTION (what Supabase is believed to give postgres; not verified on hosted).
     await assertApplied('extensions', URLS.ext, 'extensions', async (a) => { await a.query(`grant usage on schema extensions to ${RUNNER} with grant option`); });
   } finally {
     // Leaves the cluster without the case roles even after a failed check (later cases and reruns need them absent).
-    for (const v of Object.values(URLS)) await dropCase(v as string).catch(() => undefined);
+    for (const v of [...Object.values(URLS), negCopyUrl]) await dropCase(v as string).catch(() => undefined);
   }
   console.log(`PASS m1-supabase-runner: ${n} checks passed`);
 }
