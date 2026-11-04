@@ -7,6 +7,8 @@
 //   node scripts/check-runbook-vs-code.mjs <runbook.md> [--root <dir>]
 //
 // --root <dir> reads plain files from <dir> instead of `git HEAD` (used by the tests; the default is the repo at HEAD).
+// Windows drive paths (C:\...) are matched against the checkout this script lives in (or --root): inside it they are repo paths
+// (a missing file is a finding), elsewhere INFO. Run it from the checkout the runbook cites, or cite repo-relative paths.
 //
 // What is checked (finding names in capitals):
 //  REFUSAL   An id in `"refusal":"<id>"` or `refusal=<id>` must be in REFUSAL_IDS (pipeline/src/refusals.ts). A bare
@@ -30,7 +32,7 @@
 //            somewhere in the runbook (catches a line the code prints that the runbook never mentions, e.g. SKIPPED).
 import { execFileSync } from 'node:child_process';
 import { readFileSync, readdirSync, statSync } from 'node:fs';
-import { join, resolve } from 'node:path';
+import { join, posix, resolve } from 'node:path';
 import { fileURLToPath } from 'node:url';
 
 const CODE_EXT = /\.(?:ts|tsx|mjs|js|cjs)$/;
@@ -162,16 +164,18 @@ export function checkRunbook(markdown, { root, info } = {}) {
     for (const m of raw.matchAll(re)) {
       if (m[2]) continue; // older commit
       let path = normalizePath(m[3]);
+      let insideByDrive = false;
       if (/^[A-Za-z]:\//.test(path)) { // Windows drive path: a repo path when inside the folder being checked, otherwise INFO
-        const top = normalizePath(src.top).replace(/\/+$/, '');
-        if (path.toLowerCase().startsWith(`${top.toLowerCase()}/`)) path = path.slice(top.length + 1);
+        const top = posix.normalize(normalizePath(src.top)).replace(/\/+$/, '');
+        path = posix.normalize(path); // drops `.` segments and resolves `..`; a path that climbs above the drive root loses its drive and is INFO
+        if (path.toLowerCase().startsWith(`${top.toLowerCase()}/`)) { path = path.slice(top.length + 1); insideByDrive = true; }
         else { if (info) info.push(`OUTSIDE-REPO line=${n} not a repo file, not checked: ${tail(path)}`); continue; }
       }
       let matches = src.files.filter((f) => f === path || f.endsWith(`/${path}`));
       const exact = matches.filter((f) => f === path);
       if (exact.length) matches = exact;
       if (!matches.length) {
-        if (isOutsideRepo(path, repoDirs)) { if (info) info.push(`OUTSIDE-REPO line=${n} not a repo file, not checked: ${tail(path)}`); continue; }
+        if (!insideByDrive && isOutsideRepo(path, repoDirs)) { if (info) info.push(`OUTSIDE-REPO line=${n} not a repo file, not checked: ${tail(path)}`); continue; }
         add('CITATION', n, `file not found: ${tail(path)}`); continue;
       }
       const counts = matches.map((f) => lineCount(read(f)));

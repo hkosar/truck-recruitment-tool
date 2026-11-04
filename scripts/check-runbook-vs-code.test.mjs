@@ -237,6 +237,35 @@ test('Windows drive paths: inside the checked folder they are repo paths, anywhe
   info.length = 0;
   assert.deepEqual(k(`see (${bs}x\\docs\\build-plan\\14-design.md:2)\n`), [], 'a sibling folder with the same prefix is outside');
   assert.equal(info.length, 1);
+  // a code file in a sibling: if the sibling counted as inside this would be a CITATION finding
+  info.length = 0;
+  assert.deepEqual(k(`see ${bs}-old\\scripts\\nothere.mjs:1 and ${fwd}x/scripts/nothere.mjs:1\n`), []);
+  assert.equal(info.length, 2);
+});
+
+test('a drive path inside the checked folder is never an unknown-folder INFO: a missing file is a finding; . and .. are normalised', () => {
+  mkdirSync(join(root, 'docs/build-plan'), { recursive: true });
+  writeFileSync(join(root, 'docs/build-plan/14-design.md'), 'one\ntwo\n');
+  writeFileSync(join(root, 'README.md'), 'r\n');
+  const fwd = root.replace(/\\/g, '/');
+  const bs = fwd.replace(/\//g, '\\');
+  const info = [];
+  const k = (md) => checkRunbook(md, { root, info }).map((f) => f.split(' ')[0]);
+  for (const base of [bs, fwd]) {
+    const s = base.includes('\\') ? '\\' : '/';
+    for (const bad of [`doc${s}build-plan${s}14-design.md:2`, `READNE.md:3`, `notes${s}x.md:1`, `.${s}docs${s}build-plan${s}14-desing.md:1`, `docs${s}.${s}build-plan${s}14-desing.md:1`]) {
+      assert.deepEqual(k(`see ${base}${s}${bad}\n`), ['CITATION'], `${base}${s}${bad}`);
+    }
+    assert.deepEqual(k(`see ${base}${s}.${s}docs${s}build-plan${s}14-design.md:2\n`), [], 'real file behind a . segment');
+    assert.deepEqual(k(`see ${base}${s}.${s}docs${s}build-plan${s}14-design.md:99\n`), ['CITATION'], 'real file behind a . segment, wrong line');
+    assert.deepEqual(k(`see ${base}${s}README.md:1\n`), []);
+    assert.deepEqual(k(`see ${base}${s}docs${s}..${s}docs${s}build-plan${s}14-design.md:2\n`), [], '.. that stays inside is resolved');
+    assert.deepEqual(k(`see ${base}${s}docs${s}..${s}docs${s}build-plan${s}14-desing.md:2\n`), ['CITATION'], '.. that stays inside, typo');
+  }
+  assert.deepEqual(info, []);
+  // a path that climbs out of the repo after normalising is INFO, like ../ in a relative path
+  assert.deepEqual(k(`see ${bs}\\..\\other\\scripts\\nothere.mjs:1 and ${fwd}/../x/note.md:2 and C:/../x/note.md:1\n`), []);
+  assert.equal(info.length, 3);
 });
 
 test('../ citations stay INFO; the repo-folder rule uses the first two folder levels and ignores case', () => {
