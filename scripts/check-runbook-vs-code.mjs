@@ -65,14 +65,18 @@ const tail = (s) => (s.length > 70 ? `${s.slice(0, 67)}...` : s);
 // (such as handoff-2026-11-04.md), or a .md path whose first folder is not a top-level folder of the repo. A path under a real
 // top-level folder (docs/, scripts/, pipeline/, app/ ...) is always checked. Skipped ones are pushed to the `info` array
 // (when given) as `OUTSIDE-REPO line=N <path>`.
-const isOutsideRepo = (path, topDirs) => /^thr_[a-z0-9]+\//.test(path)
-  || (/\.md$/.test(path) && !(path.includes('/') && topDirs.has(path.split('/')[0])));
+// Path forms are normalised first: backslashes become /, a leading ./ is dropped. The first folder is compared without case, and
+// a first folder that is a known sub-folder of a top-level folder (build-plan/x.md for docs/build-plan/x.md) also counts as a repo
+// path, so a missing file is a finding in all those forms. thr_<id>/ stays info-only.
+const normalizePath = (p) => p.replace(/\\/g, '/').replace(/^(?:\.\/)+/, '');
+const isOutsideRepo = (path, repoDirs) => /^thr_[a-z0-9]+\//.test(path)
+  || (/\.md$/.test(path) && !(path.includes('/') && repoDirs.has(path.split('/')[0].toLowerCase())));
 
 export function checkRunbook(markdown, { root, info } = {}) {
   const src = makeSource(root);
   const cache = new Map();
   const read = (f) => { if (!cache.has(f)) cache.set(f, src.read(f)); return cache.get(f); };
-  const topDirs = new Set(src.files.filter((f) => f.includes('/')).map((f) => f.split('/')[0]));
+  const repoDirs = new Set(src.files.filter((f) => f.includes('/')).flatMap((f) => f.split('/').slice(0, -1).slice(0, 2)).map((d) => d.toLowerCase()));
   const findings = [];
   const add =(check, line, msg) => findings.push(`${check} line=${line} ${msg}`);
 
@@ -154,15 +158,15 @@ export function checkRunbook(markdown, { root, info } = {}) {
     }
 
     // CITATION
-    const re = new RegExp(`(^|[^A-Za-z0-9_./-])((?:[0-9a-f]{7,40}:)?)((?:[A-Za-z0-9_.-]+/)*[A-Za-z0-9_.-]+\\.${CITE_EXT}):(\\d+(?:-\\d+)?(?:, ?\\d+(?:-\\d+)?)*)`, 'g');
+    const re = new RegExp(`(^|[^A-Za-z0-9_./\\\\-])((?:[0-9a-f]{7,40}:)?)((?:[A-Za-z0-9_.-]+[/\\\\])*[A-Za-z0-9_.-]+\\.${CITE_EXT}):(\\d+(?:-\\d+)?(?:, ?\\d+(?:-\\d+)?)*)`, 'g');
     for (const m of raw.matchAll(re)) {
       if (m[2]) continue; // older commit
-      const path = m[3];
+      const path = normalizePath(m[3]);
       let matches = src.files.filter((f) => f === path || f.endsWith(`/${path}`));
       const exact = matches.filter((f) => f === path);
       if (exact.length) matches = exact;
       if (!matches.length) {
-        if (isOutsideRepo(path, topDirs)) { if (info) info.push(`OUTSIDE-REPO line=${n} not a repo file, not checked: ${tail(path)}`); continue; }
+        if (isOutsideRepo(path, repoDirs)) { if (info) info.push(`OUTSIDE-REPO line=${n} not a repo file, not checked: ${tail(path)}`); continue; }
         add('CITATION', n, `file not found: ${tail(path)}`); continue;
       }
       const counts = matches.map((f) => lineCount(read(f)));
