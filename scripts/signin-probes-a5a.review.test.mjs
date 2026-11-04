@@ -292,6 +292,7 @@ test('TRUCKRECRU-47: the wider recognition hides no real leak', () => {
   assert.equal(j(`id=${s30}Za/x`, 'http://a'), 'leak', 'secret ends in the host, then a slash');
   assert.equal(j(`/x/aZ${s30}`, 'http://a'), 'leak', 'secret starts with the host, after a slash');
   assert.equal(j(`${s30.slice(0, 16)}-a-${s30.slice(16)}`, 'http://a'), 'leak', 'host between hyphens inside a secret');
+  assert.equal(j('Qx7Lm2Pz9Rt4Vb6N_a_c8Wd1Ye3Hf5Gk0', 'http://a'), 'leak', 'host between underscores inside a secret');
   assert.equal(j(`k=${s30.slice(0, 10)}${host}`, long), 'leak', 'real address: secret glued in front of the staging app host');
   // Overlap: a secret that starts with the end of the app address, or ends with its scheme, glued on with no gap.
   assert.equal(j('https://app.example.COMQx7Lm2Pz9Rt4Vb6Nc8Wd1Ye3Hf5Gk', 'https://app.example.com'), 'leak', 'secret starts with the last label, capitals');
