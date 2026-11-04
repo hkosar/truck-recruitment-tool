@@ -10,7 +10,7 @@
   "scripts": {
     "build": "npm test && tsc -p tsconfig.json",
     "typecheck": "tsc --noEmit",
-    "test": "tsx src/smoke-tests.ts && tsx src/first-manager-bootstrap.test.ts && tsx src/prod-sql.test.ts && tsx src/role-matrix-a3.test.ts && tsx src/batch-delete-compare.test.ts && tsx src/backout-rehearsal.test.ts && tsx src/db-tls.test.ts && tsx src/loopback-fetch.test.ts && tsx src/role-password.test.ts && tsx src/retention-secure-a3-pki-guard.test.ts && tsx src/staging2-pooler-guard.test.ts",
+    "test": "tsx src/smoke-tests.ts && tsx src/first-manager-bootstrap.test.ts && tsx src/prod-sql.test.ts && tsx src/role-matrix-a3.test.ts && tsx src/batch-delete-compare.test.ts && tsx src/backout-rehearsal.test.ts && tsx src/db-tls.test.ts && tsx src/loopback-fetch.test.ts && tsx src/role-password.test.ts && tsx src/retention-secure-a3-pki-guard.test.ts && tsx src/staging2-pooler-guard.test.ts && tsx src/target-guard-messages.test.ts",
     "test:db-tls": "tsx src/db-tls.test.ts",
     "verify": "npm run typecheck && npm run build",
     "start": "tsx src/run.ts nightly",
