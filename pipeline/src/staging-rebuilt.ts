@@ -11,6 +11,7 @@ import { MAINTENANCE_ROLE, roleOf } from './retention-step.js';
 import { runRetentionDryRun, type DryRunReport } from './retention-dry-run.js';
 import { runRetentionFixtureRun } from './retention-run.js';
 import { RunnerRefusal } from './refusals.js';
+import { IDENTITY_ALIGNMENT_SHA256, POSTGIS_PLACEMENT_SQL, RETIRE_FILE, RETIRE_STAGES, classifyPostgisPlacement, readBackoutWindowFlag, readIdentityAlignment, reportIdentityAlignment, runRetireAppCredentials, splitRetireFile, type RetireOptions, type RetireStages } from './backout-rehearsal.js';
 import { RECORDED_PROJECT_REFS, parseSupabaseDbTarget, type SupabaseDbTarget } from './target-guard.js';
 
 /**
@@ -28,7 +29,7 @@ import { RECORDED_PROJECT_REFS, parseSupabaseDbTarget, type SupabaseDbTarget } f
 export const REPOSITORY_ROOT = resolve(import.meta.dirname, '..', '..');
 const REBUILT_REF_PATTERN = /^[a-z]{20}$/;
 
-type RebuiltKind = 'file' | 'migrations' | 'inline' | 'snapshot' | 'retention' | 'retention-run' | 'ledger-preflight' | 'environment-preflight' | 'owner-check' | 'owner-promote' | 'batch-delete-compare';
+type RebuiltKind = 'file' | 'migrations' | 'inline' | 'snapshot' | 'retention' | 'retention-run' | 'ledger-preflight' | 'environment-preflight' | 'owner-check' | 'owner-promote' | 'batch-delete-compare' | 'retire' | 'identity-alignment' | 'postgis-placement';
 
 interface RebuiltActionSpec {
   kind: RebuiltKind;
@@ -46,6 +47,8 @@ interface RebuiltActionSpec {
   sha256?: string;
   /** The file is the rollback-only role matrix: its final row is read, reported as fixed counts, and any failed probe refuses the run. */
   roleMatrix?: true;
+  /** window-on / window-off: the verify select's flag must read this value inside the transaction; it is printed as one fixed line. */
+  windowExpect?: boolean;
 }
 
 export const REBUILT_STAGING_SQL_ACTIONS: Readonly<Record<string, RebuiltActionSpec>> = {
@@ -88,13 +91,23 @@ export const REBUILT_STAGING_SQL_ACTIONS: Readonly<Record<string, RebuiltActionS
     sql: 'update internal.backout_window set email_edits_paused = true; select email_edits_paused from internal.backout_window;',
     confirmation: 'TURN ON TNBS BACKOUT WINDOW',
     pinned: false,
+    windowExpect: true,
   },
   'window-off': {
     kind: 'inline',
     sql: 'update internal.backout_window set email_edits_paused = false; select email_edits_paused from internal.backout_window;',
     confirmation: 'TURN OFF TNBS BACKOUT WINDOW',
     pinned: false,
+    windowExpect: false,
   },
+  // Backout rehearsal (doc 16 section 3.3, approval 15; backout-rehearsal.ts). Runs the file's steps 2-6 in order: NOLOGIN, end the app role's
+  // connections (cannot be undone) and poll until 0 three times in a row, revoke every live app credential, then the checks (all 0). Required
+  // before backout-m1c / backout-m1b / backout-m1 (M1-backout.sql header). File and stage pins equal the production runner's retire-* actions.
+  'retire-app-credentials': { kind: 'retire', file: 'supabase/backout/retire-app-credentials.sql', sha256: '3e716371979ffb876bb54f7ab91753eced9b89df15276c9d6d4ba7cc0ef7fa15', confirmation: 'RETIRE TNBS STAGING APP CREDENTIALS', pinned: false },
+  // Read-only identity-alignment check (profiles.email = auth.users.email for every approved profile), before and after the backouts; prints five counts only.
+  'identity-alignment-check': { kind: 'identity-alignment', file: 'supabase/rollout/read-only-inventory.sql', sha256: '50e6cd622a4d34fe9d50c53ef95205f517af82e8b365878a29a878d4b73d48e1', confirmation: 'RUN TNBS IDENTITY ALIGNMENT CHECK', pinned: false },
+  // Read-only record of the PostGIS extension's schema after M1 (doc 16 section 1.4 step 5), as one enumerated word.
+  'postgis-placement': { kind: 'postgis-placement', confirmation: 'RECORD TNBS POSTGIS PLACEMENT', pinned: false },
   'backout-m1c': { kind: 'file', file: 'supabase/backout/M1c-backout.sql', confirmation: 'RUN TNBS M1C BACKOUT', pinned: false },
   'backout-m1b': { kind: 'file', file: 'supabase/backout/M1b-backout.sql', confirmation: 'RUN TNBS M1B BACKOUT', pinned: false },
   'backout-m1': { kind: 'file', file: 'supabase/backout/M1-backout.sql', confirmation: 'RUN TNBS M1 BACKOUT', pinned: false },
@@ -131,6 +144,10 @@ export interface RebuiltSqlPlan {
   m1cRecoveryStep?: number;
   /** role-matrix-m1 only: the executor reports the matrix counts and refuses on any failed probe. */
   roleMatrix?: true;
+  /** window-on / window-off only: the value the read-back must show before the transaction commits. */
+  windowExpect?: boolean;
+  /** retire-app-credentials only: the verified statements of the file's six stages. */
+  retireStages?: RetireStages;
 }
 
 /** Re-pin the old staging ref literal in a reviewed SQL file to the rebuilt ref, in memory only. */
@@ -229,6 +246,7 @@ export function planRebuiltSqlRun(input: {
 
   let steps: RebuiltSqlStep[];
   let expectedFunction: string | undefined;
+  let retireStages: RetireStages | undefined;
   if (spec.kind === 'retention' || spec.kind === 'retention-run') {
     steps = [{ label: input.action, sql: '', transaction: false }];
   } else if (spec.kind === 'ledger-preflight' || spec.kind === 'environment-preflight' || spec.kind === 'owner-check' || spec.kind === 'owner-promote') {
@@ -239,6 +257,18 @@ export function planRebuiltSqlRun(input: {
     expectedFunction = extractBatchDeleteFromFile(bytes.toString('utf8')) ?? undefined;
     if (expectedFunction === undefined) throw new Error('the pinned M1c file does not hold exactly one public.batch_delete definition; refusing');
     steps = [{ label: 'batch-delete-compare', sql: '', transaction: false }];
+  } else if (spec.kind === 'retire') {
+    const bytes = readFileSync(resolve(REPOSITORY_ROOT, spec.file as string));
+    if (spec.file !== RETIRE_FILE || spec.sha256 === undefined || createHash('sha256').update(bytes).digest('hex') !== spec.sha256) throw new Error(`${spec.file} does not match its pinned SHA-256; refusing`);
+    retargetSqlToRebuiltRef(bytes.toString('utf8'), rebuiltRef, false); // refuses a production ref; the file pins no ref
+    retireStages = splitRetireFile(bytes);
+    steps = RETIRE_STAGES.map((s) => ({ label: s.label, sql: retireStages![s.name].map((st) => st.raw).join(';\n'), transaction: false }));
+  } else if (spec.kind === 'identity-alignment') {
+    const bytes = readFileSync(resolve(REPOSITORY_ROOT, spec.file as string));
+    if (spec.sha256 !== IDENTITY_ALIGNMENT_SHA256 || createHash('sha256').update(bytes).digest('hex') !== spec.sha256) throw new Error(`${spec.file} does not match its pinned SHA-256; refusing`);
+    steps = [{ label: 'identity-alignment-check', sql: retargetSqlToRebuiltRef(bytes.toString('utf8'), rebuiltRef, false), transaction: false }];
+  } else if (spec.kind === 'postgis-placement') {
+    steps = [{ label: 'postgis-placement', sql: POSTGIS_PLACEMENT_SQL, transaction: false }];
   } else if (spec.kind === 'migrations') {
     steps = verifiedMigrationSteps();
   } else if (spec.kind === 'inline') {
@@ -261,7 +291,7 @@ export function planRebuiltSqlRun(input: {
     ['app.staging_project_ref', target.projectRef],
   ];
   if (spec.confirmationSetting) settings.push([spec.confirmationSetting, spec.confirmation]);
-  return { action: input.action, kind: spec.kind, target, settings, steps, ...(outPath ? { outPath } : {}), ...(expectedFunction !== undefined ? { expectedFunction } : {}), ...(spec.roleMatrix ? { roleMatrix: true as const } : {}), ...(spec.reapply === 'm1c' ? { m1cRecoveryStep: steps.length - 1 } : {}) };
+  return { action: input.action, kind: spec.kind, target, settings, steps, ...(outPath ? { outPath } : {}), ...(expectedFunction !== undefined ? { expectedFunction } : {}), ...(spec.roleMatrix ? { roleMatrix: true as const } : {}), ...(spec.windowExpect !== undefined ? { windowExpect: spec.windowExpect } : {}), ...(retireStages ? { retireStages } : {}), ...(spec.reapply === 'm1c' ? { m1cRecoveryStep: steps.length - 1 } : {}) };
 }
 
 /** The part of pg.Client the executor uses; tests (and the local-database proof) inject their own. */
@@ -301,7 +331,7 @@ export function readRoleMatrixCounts(result: unknown): RoleMatrixCounts | null {
   return null;
 }
 
-export async function executeRebuiltSqlPlan(plan: RebuiltSqlPlan, clientFactory: (target: SupabaseDbTarget) => RebuiltSqlClient = defaultClientFactory): Promise<void> {
+export async function executeRebuiltSqlPlan(plan: RebuiltSqlPlan, clientFactory: (target: SupabaseDbTarget) => RebuiltSqlClient = defaultClientFactory, retireOptions: RetireOptions = {}): Promise<void> {
   const client = clientFactory(plan.target);
   client.on?.('error', () => undefined); // the query in flight (or the next one) rejects and is reported as server_or_driver_error
   await client.connect();
@@ -362,6 +392,28 @@ export async function executeRebuiltSqlPlan(plan: RebuiltSqlPlan, clientFactory:
       }
       return;
     }
+    if (plan.kind === 'identity-alignment') {
+      await client.query('begin read only');
+      try {
+        reportIdentityAlignment(readIdentityAlignment(await client.query(plan.steps[0]!.sql)));
+      } finally {
+        await client.query('rollback');
+      }
+      return;
+    }
+    if (plan.kind === 'postgis-placement') {
+      await client.query('begin read only');
+      try {
+        console.log(JSON.stringify({ msg: 'staging-sql.postgis_placement', schema: classifyPostgisPlacement(await client.query(plan.steps[0]!.sql)) }));
+      } finally {
+        await client.query('rollback');
+      }
+      return;
+    }
+    if (plan.kind === 'retire') {
+      await runRetireAppCredentials(client, plan.retireStages as RetireStages, retireOptions);
+      return;
+    }
     if (plan.kind === 'owner-promote') {
       await runOwnerPromotion(client, plan.target.projectRef);
       return;
@@ -417,6 +469,12 @@ export async function executeRebuiltSqlPlan(plan: RebuiltSqlPlan, clientFactory:
       try {
         const result = await client.query(step.sql);
         if (plan.roleMatrix) matrixCounts = readRoleMatrixCounts(result);
+        if (plan.windowExpect !== undefined) {
+          // doc 16 section 3.1 "Verify": the flag as read inside this transaction, before the commit; a wrong value rolls the change back.
+          const flag = readBackoutWindowFlag(result);
+          console.log(JSON.stringify({ msg: 'staging-sql.backout_window', action: plan.action, email_edits_paused: flag.value, rows: flag.rows, ok: flag.value === plan.windowExpect }));
+          if (flag.value !== plan.windowExpect) throw new RunnerRefusal('backout_window_not_expected', `${plan.action}: the backout window flag did not read ${plan.windowExpect} inside the transaction; rolled back`);
+        }
         if (step.ledger) await client.query(LEDGER_INSERT_SQL, [step.ledger.version, step.ledger.name]);
         if (step.transaction) await client.query('commit');
       } catch (err) {

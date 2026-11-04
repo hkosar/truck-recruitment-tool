@@ -1,6 +1,6 @@
 #!/usr/bin/env node
-// LOCAL ONLY: runs the real-PostgreSQL suites listed in SUITE_FILES (15 suites, see the "Not covered" list below) against throwaway
-// PostgreSQL 16 clusters that this script creates and always removes: one shared by 14 suites, a second one only for role-password
+// LOCAL ONLY: runs the real-PostgreSQL suites listed in SUITE_FILES (16 suites, see the "Not covered" list below) against throwaway
+// PostgreSQL 16 clusters that this script creates and always removes: one shared by 15 suites, a second one only for role-password
 // (it drops and recreates recruiter_app / recruiter_maintenance, which are cluster-wide, and needs pg_stat_statements preloaded and a
 // server log it can read), and a third one only for retention-secure's TLS scenario (ssl=on with a throwaway CA, recruiter_maintenance
 // allowed in over hostssl + scram-sha-256 only). It contacts no hosted or staging database, reads no secret store and uses no network
@@ -349,6 +349,7 @@ export const SUITE_FILES = [
   { id: 'environment-preflight', kind: 'tsx', file: 'pipeline/src/environment-preflight-a3.test.ts' },
   { id: 'ledger-preflight', kind: 'tsx', file: 'pipeline/src/ledger-preflight-a3.test.ts' },
   { id: 'role-password', kind: 'tsx', file: 'pipeline/src/role-password.test.ts' },
+  { id: 'backout-rehearsal', kind: 'tsx', file: 'pipeline/src/backout-rehearsal-a3.test.ts' },
   { id: 'prod-sql-stop-tables', kind: 'tsx', file: 'pipeline/src/prod-sql-stop-tables-pg.test.ts' },
   { id: 'prod-sql-a2-backouts', kind: 'tsx', file: 'pipeline/src/prod-sql-a2-backouts-a3.test.ts' },
   { id: 'prod-sql', kind: 'tsx', file: 'pipeline/src/prod-sql-a3.test.ts' },
@@ -537,7 +538,7 @@ async function run() {
     const FLAGS = { full: [], m1: ['--no-m1b', '--no-m1c'], base: ['--no-m1', '--no-m1b', '--no-m1c'] };
     const DBS = [
       ['tr_rm', 'm1'], ['tr_ret', 'm1'], ['tr_bdc', 'full'], ['tr_reapply', 'full'], ['tr_fm', 'full'],
-      ['tr_owner', 'base'], ['tr_envpre', 'base'], ['tr_psql', 'base'], ['tr_rbt', 'full'], ['tr_ret_sec', 'm1'],
+      ['tr_owner', 'base'], ['tr_envpre', 'base'], ['tr_psql', 'base'], ['tr_rbt', 'full'], ['tr_ret_sec', 'm1'], ['tr_backout', 'full'],
     ];
     const build = (extra, { ownerDir = dir, onPort = port } = {}) => sh(process.execPath, [join(root, 'scripts', 'a3-build-test-db.mjs'), '--owner-dir', ownerDir, '--port', String(onPort), ...extra], { cwd: root, env: { ...baseEnv, A3_PGPASSWORD: adminPw } });
     for (const [db, kind, where] of [...DBS.map(([db, kind]) => [db, kind, {}]), ['tr_ret', 'm1', { ownerDir: tlsDir, onPort: tlsPort }]]) {
@@ -613,6 +614,8 @@ async function run() {
       { id: 'environment-preflight', ...tsx('src/environment-preflight-a3.test.ts', { ENVPRE_A3_ADMIN_URL: admin('tr_envpre') }) },
       { id: 'ledger-preflight', ...tsx('src/ledger-preflight-a3.test.ts', { LEDGER_A3_ADMIN_URL: admin('tr_ledger') }) },
       { id: 'role-password', ...tsx('src/role-password.test.ts', { ROLE_PASSWORD_PG_URL: url(ADMIN_USER, adminPw, 'tr_role_password', rpPort), ROLE_PASSWORD_PG_LOG: rpLog }) },
+      // Ends the cluster-wide recruiter_app login's connections and sets it NOLOGIN (restoreLogins gives it back), and runs the M1 backouts on its own database.
+      { id: 'backout-rehearsal', ...tsx('src/backout-rehearsal-a3.test.ts', { BACKOUT_A3_ADMIN_URL: admin('tr_backout'), BACKOUT_A3_APP_URL: app('tr_backout') }) },
       { id: 'prod-sql-stop-tables', ...tsx('src/prod-sql-stop-tables-pg.test.ts', { PROD_SQL_STOP_PG_URL: admin('tr_stop') }) },
       { id: 'prod-sql-a2-backouts', ...tsx('src/prod-sql-a2-backouts-a3.test.ts', { PROD_SQL_A3_ADMIN_URL: admin('tr_psql_a2') }) },
       { id: 'prod-sql', ...tsx('src/prod-sql-a3.test.ts', { PROD_SQL_A3_ADMIN_URL: admin('tr_psql') }) },

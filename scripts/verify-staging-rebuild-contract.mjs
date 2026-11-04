@@ -165,6 +165,70 @@ if (runner) {
 const refusalList = read('pipeline/src/refusals.ts');
 if (!refusalList || !refusalList.includes("'batch_delete_definition_mismatch'")) failures.push('refusals.ts must list batch_delete_definition_mismatch');
 
+// Backout rehearsal (doc 16 section 3.3, approval 15; manager runbook v3 section 7 gaps): retire-app-credentials, identity-alignment-check,
+// postgis-placement and the window read-back line. Each goes through the same planner (target guard, typed phrase) and the same executor
+// client (newSecurePgClient); every printed line is a fixed event; the wrapper allow-lists exactly those events and refusal ids.
+const rehearsal = read('pipeline/src/backout-rehearsal.ts');
+if (!rehearsal) failures.push('pipeline/src/backout-rehearsal.ts is missing');
+if (runner && rehearsal) {
+  const entry = (name) => new RegExp(`'${name}': \\{([^}]*)\\}`).exec(runner)?.[1] ?? '';
+  for (const [name, required] of [
+    ['retire-app-credentials', ["kind: 'retire'", "file: 'supabase/backout/retire-app-credentials.sql'", "sha256: '3e716371979ffb876bb54f7ab91753eced9b89df15276c9d6d4ba7cc0ef7fa15'", "confirmation: 'RETIRE TNBS STAGING APP CREDENTIALS'"]],
+    ['identity-alignment-check', ["kind: 'identity-alignment'", "file: 'supabase/rollout/read-only-inventory.sql'", "sha256: '50e6cd622a4d34fe9d50c53ef95205f517af82e8b365878a29a878d4b73d48e1'", "confirmation: 'RUN TNBS IDENTITY ALIGNMENT CHECK'"]],
+    ['postgis-placement', ["kind: 'postgis-placement'", "confirmation: 'RECORD TNBS POSTGIS PLACEMENT'"]],
+  ]) {
+    const e = entry(name);
+    for (const r of required) if (!e.includes(r)) failures.push(`${name} action is missing: ${r}`);
+  }
+  if (!/'window-on': \{[^}]*windowExpect: true,/.test(runner) || !/'window-off': \{[^}]*windowExpect: false,/.test(runner)) failures.push('window-on / window-off must carry windowExpect true / false');
+  const execBlock = (kind) => new RegExp(`if \\(plan\\.kind === '${kind}'\\) \\{([\\s\\S]*?)\\n    \\}\\n`).exec(runner)?.[1] ?? '';
+  for (const kind of ['identity-alignment', 'postgis-placement']) {
+    const block = execBlock(kind);
+    if (!block.includes("'begin read only'") || !block.includes("'rollback'") || /query\('commit'\)/.test(block)) failures.push(`${kind} executor must run in begin read only ... rollback and never commit`);
+  }
+  if (!execBlock('retire').includes('runRetireAppCredentials(client, plan.retireStages as RetireStages, retireOptions)')) failures.push('retire executor must call runRetireAppCredentials with the verified stages');
+  // The window read-back is printed and checked inside the step's try (so a wrong value rolls back) and before step_done.
+  const readBackAt = runner.indexOf("msg: 'staging-sql.backout_window'");
+  const windowRefuseAt = runner.indexOf("new RunnerRefusal('backout_window_not_expected'");
+  const stepDoneAt = runner.indexOf("msg: 'staging-sql.step_done'");
+  const commitAt = runner.indexOf("if (step.transaction) await client.query('commit');");
+  if (readBackAt < 0 || windowRefuseAt < readBackAt || commitAt < windowRefuseAt || stepDoneAt < commitAt) failures.push('rebuilt runner: the window read-back line and its refusal must come before the commit and before step_done');
+  // The new code sends nothing it did not verify: the retire stages are pinned (same pins as prod-sql.ts), no other SQL text in the module writes.
+  for (const required of ["RETIRE_FILE_SHA256 = '3e716371979ffb876bb54f7ab91753eced9b89df15276c9d6d4ba7cc0ef7fa15'", 'retireStageDigest(statements) !== stage.sha256', 'RETIRE_ZERO_READS_REQUIRED = 3', 'RETIRE_MAX_WAIT_MS = 60_000', 'RETIRE_POLL_INTERVAL_MS = 1000',
+    "new RunnerRefusal('retire_backends_not_gone'", "new RunnerRefusal('retire_checks_failed'", "new RunnerRefusal('identity_alignment_failed'", "new RunnerRefusal('identity_alignment_result_missing'", "await client.query('rollback')", "IDENTITY_ALIGNMENT_SHA256 = '50e6cd622a4d34fe9d50c53ef95205f517af82e8b365878a29a878d4b73d48e1'"]) {
+    if (!rehearsal.includes(required)) failures.push(`backout-rehearsal.ts is missing: ${required}`);
+  }
+  const rehearsalCode = rehearsal.replace(/\/\*[\s\S]*?\*\/|\/\/.*$/gm, '');
+  for (const forbidden of [/process\.env/, /new\s+pg\.Client/, /from 'pg'/, /rejectUnauthorized/, /\bssl\s*:/, /\binsert\s+into\b/i, /\bupdate\s+\w+\s+set\b/i, /\bdelete\s+from\b/i, /\bdrop\s+\w+/i, /\balter\s+role\b/i, /\bgrant\b/i]) {
+    if (forbidden.test(rehearsalCode)) failures.push(`backout-rehearsal.ts must not contain ${forbidden} (its only SQL is the pinned files and one catalogue select; the client comes from the runner)`);
+  }
+  // Every console line in the module is a fixed event: an object literal with msg and named fields (never a row, an error or SQL text).
+  for (const m of rehearsalCode.matchAll(/console\.(log|error)\(([^;]*)\);/g)) {
+    if (!/^JSON\.stringify\(\{ msg: 'staging-sql\.[a-z_]+'/.test(m[2]) && !/^(event|JSON\.stringify\(event\))$/.test(m[2].trim())) failures.push(`backout-rehearsal.ts prints something that is not a fixed event: ${m[2].slice(0, 60)}`);
+    if (/\b(err|error|message|stack)\b|\.raw\b|\.clean\b|rows\[/.test(m[2])) failures.push(`backout-rehearsal.ts must not print an error, SQL text or a row: ${m[2].slice(0, 60)}`);
+  }
+  const refusalsSrc = read('pipeline/src/refusals.ts') ?? '';
+  const wrapperSrc = read('scripts/run-with-secrets.mjs') ?? '';
+  for (const id of ['retire_backends_not_gone', 'retire_checks_failed', 'identity_alignment_failed', 'identity_alignment_result_missing', 'backout_window_not_expected']) {
+    if (!refusalsSrc.includes(`'${id}'`)) failures.push(`refusals.ts REFUSAL_IDS is missing ${id}`);
+    if (!wrapperSrc.includes(`'${id}'`)) failures.push(`run-with-secrets.mjs REFUSAL_IDS is missing ${id}`);
+  }
+  for (const line of [
+    "'staging-sql.backout_window': { action: oneOf(['window-on', 'window-off']), email_edits_paused: (v) => bool(v) || v === 'unknown', rows: int, ok: bool }",
+    "'staging-sql.retire_terminate': { backends_signalled: int }",
+    "'staging-sql.retire_checks': { ok: bool, backends: count, live_sessions: count, live_links: count, live_codes: count, email_mismatches: count }",
+    "'staging-sql.identity_alignment': { ok: bool, approved_profiles: count, email_mismatches: count, approved_profiles_without_auth_user: count, approved_auth_email_null: count }",
+    "'staging-sql.postgis_placement': { schema: oneOf(['public', 'extensions', 'other', 'absent']) }",
+    "'retire-app-credentials', 'identity-alignment-check', 'postgis-placement'",
+  ]) {
+    if (!wrapperSrc.includes(line)) failures.push(`run-with-secrets.mjs is missing: ${line}`);
+  }
+  const doc16text = (read('docs/build-plan/16-staging-and-hosting-plan.md') ?? '').replace(/\s+/g, ' ');
+  for (const phrase of ['`retire-app-credentials`', 'RETIRE TNBS STAGING APP CREDENTIALS', '`identity-alignment-check`', 'RUN TNBS IDENTITY ALIGNMENT CHECK', '`postgis-placement`', 'RECORD TNBS POSTGIS PLACEMENT', 'staging-sql.backout_window']) {
+    if (!doc16text.includes(phrase)) failures.push(`doc 16 must list the backout-rehearsal action/phrase/event: ${phrase}`);
+  }
+}
+
 // The recorded rebuilt staging ref (doc 16 R1 step 2): exactly one 20-letter literal, not the production or old staging ref.
 const guard = read('pipeline/src/target-guard.ts');
 const recordedRef = guard && /const REBUILT_STAGING_PROJECT_REF: string \| null = '([a-z]{20})';/.exec(guard);

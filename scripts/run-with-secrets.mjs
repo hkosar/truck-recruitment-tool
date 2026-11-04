@@ -130,7 +130,7 @@ export const REFUSAL_IDS = [
   'plan_refused', 'ref_not_recorded', 'ref_invalid', 'db_url_required', 'production_refused', 'target_not_recorded_staging',
   'port_must_be_5432', 'confirmation_required', 'unknown_action', 'unknown_argument', 'bad_project_option', 'ledger_preflight_failed',
   'profiles_already_exist', 'ledger_not_empty', 'ledger_not_exact', 'm1c_state_unrecognised', 'm1c_postcondition_failed',
-  'retention_dry_run_failed', 'role_matrix_failed', 'role_matrix_result_missing', 'batch_delete_definition_mismatch', 'retention_run_refused', 'reapply_m1_not_backed_out', 'reapply_m1_still_applied', 'reapply_m1b_not_backed_out',
+  'retention_dry_run_failed', 'role_matrix_failed', 'role_matrix_result_missing', 'batch_delete_definition_mismatch', 'retention_run_refused', 'retire_backends_not_gone', 'retire_checks_failed', 'identity_alignment_failed', 'identity_alignment_result_missing', 'backout_window_not_expected', 'reapply_m1_not_backed_out', 'reapply_m1_still_applied', 'reapply_m1b_not_backed_out',
   'reapply_m1b_still_applied', 'reapply_m1c_not_backed_out', 'reapply_m1c_still_applied', 'owner_email_invalid',
   'owner_password_too_short', 'owner_auth_not_created', 'owner_auth_unknown_result', 'owner_promotion_refused',
   'role_password_refused', 'role_password_logging_refused', 'role_password_expiry_refused', 'role_password_server_version_unverified', 'owner_bootstrap_target_refused', 'bootstrap_target_required', 'target_not_recorded_production', 'first_manager_refused',
@@ -140,7 +140,7 @@ export const REFUSAL_IDS = [
 /** Keep equal to pipeline/src/refusals.ts DRIVER_CODES (a test compares them). */
 export const DRIVER_CODES = ['ECONNREFUSED', 'ECONNRESET', 'ECONNABORTED', 'ETIMEDOUT', 'ENOTFOUND', 'EAI_AGAIN', 'EPIPE', 'EHOSTUNREACH', 'ENETUNREACH', 'ENETDOWN', 'EADDRNOTAVAIL'];
 /** Keep equal to the action tables in pipeline/src/staging-sql-runner.ts and staging-rebuilt.ts plus owner-auth-create (a test compares them). */
-export const ACTIONS = ['install-marker', 'reset', 'cleanup', 'apply-migrations', 'ledger-preflight', 'environment-preflight', 'batch-delete-compare', 'owner-login-check', 'owner-promote', 'retention-dry-run', 'retention-run', 'install-retention-fixtures', 'remove-retention-fixtures', 'profile-fixtures', 'install-shutdown-fixtures', 'remove-shutdown-fixtures', 'cleanup-ledgers-m1', 'apply-m1', 'apply-m1b', 'apply-m1c', 'reapply-m1', 'reapply-m1b', 'reapply-m1c', 'role-matrix-m1', 'snapshot', 'auth-schema-inventory', 'window-on', 'window-off', 'backout-m1c', 'backout-m1b', 'backout-m1', 'owner-auth-create', 'set-app-password', 'set-maintenance-password'];
+export const ACTIONS = ['install-marker', 'reset', 'cleanup', 'apply-migrations', 'ledger-preflight', 'environment-preflight', 'batch-delete-compare', 'owner-login-check', 'owner-promote', 'retention-dry-run', 'retention-run', 'install-retention-fixtures', 'remove-retention-fixtures', 'profile-fixtures', 'install-shutdown-fixtures', 'remove-shutdown-fixtures', 'cleanup-ledgers-m1', 'apply-m1', 'apply-m1b', 'apply-m1c', 'reapply-m1', 'reapply-m1b', 'reapply-m1c', 'role-matrix-m1', 'snapshot', 'auth-schema-inventory', 'window-on', 'window-off', 'retire-app-credentials', 'identity-alignment-check', 'postgis-placement', 'backout-m1c', 'backout-m1b', 'backout-m1', 'owner-auth-create', 'set-app-password', 'set-maintenance-password'];
 /** Keep equal to pipeline/src/environment-preflight.ts REVIEWED_EVENT_TRIGGER_* (a test compares them). */
 export const EVENT_TRIGGER_NAMES = ['issue_graphql_placeholder', 'issue_pg_cron_access', 'issue_pg_graphql_access', 'issue_pg_net_access', 'pgrst_ddl_watch', 'pgrst_drop_watch', 'ensure_rls'];
 export const EVENT_TRIGGER_FUNCTIONS = ['set_graphql_placeholder', 'grant_pg_cron_access', 'grant_pg_graphql_access', 'grant_pg_net_access', 'pgrst_ddl_watch', 'pgrst_drop_watch', 'rls_auto_enable'];
@@ -197,6 +197,7 @@ const code = (v) => typeof v === 'string' && (/^[0-9A-Z]{5}$/.test(v) || DRIVER_
 const ownerCheck = (v) => typeof v === 'string' && OWNER_CHECK_IDS.includes(v);
 const wouldDelete = (v) => typeof v === 'object' && v !== null && !Array.isArray(v) && Object.keys(v).every((k) => RETENTION_RULE_NAMES.includes(k) && int(v[k]));
 const detail = pat(/^(\d{1,9}|unreadable)$/);
+const count = (v) => int(v) || v === 'unreadable';
 const privs = listOf(oneOf(PRIVILEGES), 12);
 const phase = oneOf(['before', 'after']);
 
@@ -216,6 +217,14 @@ const EVENTS = {
   'staging-sql.role_matrix': { ok: bool, total: int, passed: int, failed: int },
   // Fixed event of the read-only batch-delete-compare action (pipeline/src/batch-delete-compare.ts): a boolean and two 12-character hash prefixes, or the words absent/unrecognised in place of the live hash; never the definition.
   'staging-sql.batch_delete_compare': { match: bool, expected_hash: pat(/^[0-9a-f]{12}$/), live_hash: pat(/^([0-9a-f]{12}|absent|unrecognised)$/) },
+  // Backout rehearsal (pipeline/src/backout-rehearsal.ts): counts, booleans and enumerated words only; never a pid, id, email or schema text.
+  'staging-sql.backout_window': { action: oneOf(['window-on', 'window-off']), email_edits_paused: (v) => bool(v) || v === 'unknown', rows: int, ok: bool },
+  'staging-sql.retire_terminate': { backends_signalled: int },
+  'staging-sql.retire_backends': { ok: bool, polls: int, zero_reads_in_a_row: int, last_count: count },
+  'staging-sql.retire_revoked': { sessions: int, links: int, recovery_sets: int, codes: int },
+  'staging-sql.retire_checks': { ok: bool, backends: count, live_sessions: count, live_links: count, live_codes: count, email_mismatches: count },
+  'staging-sql.identity_alignment': { ok: bool, approved_profiles: count, email_mismatches: count, approved_profiles_without_auth_user: count, approved_auth_email_null: count },
+  'staging-sql.postgis_placement': { schema: oneOf(['public', 'extensions', 'other', 'absent']) },
   'staging-sql.m1c_interrupted_run_detected': {},
   'staging-sql.m1c_partial_state_refused': { failed_checks: listOf(ident, 40) },
   'staging-sql.m1c_postcondition_ok': {},

@@ -540,6 +540,26 @@ Worker; production: the recorded pre-cutover frontend) → smoke test → tell t
 preserved (people added stay; batch-delete records stay). Sessions closed by L1 stay closed;
 people sign in again with their passwords.
 
+**Staging runner actions for the rehearsal** (rebuilt project only, `--project=rebuilt`; same target guard,
+typed phrase, plan-only default and TLS-pinned client as every other action; production and every other
+ref are refused; `pipeline/src/backout-rehearsal.ts`). Every line printed is a fixed event of counts,
+booleans and enumerated words, never a URL, password, id, email, pid or row text:
+
+| Action | Confirmation phrase | What it does | Printed / refusal |
+|---|---|---|---|
+| `retire-app-credentials` | `RETIRE TNBS STAGING APP CREDENTIALS` | `supabase/backout/retire-app-credentials.sql` (pinned; same file and stage pins as the production runner's `retire-*` actions), its steps 2-6 in order on one connection: NOLOGIN (commits on its own); end the `recruiter_app` connections (**cannot be undone**); poll once a second until the count reads 0 three times in a row (60 s limit); the revoke transaction (rolled back on any failure); the checks. Step 1 (stop the pool / app service) is outside SQL and stays the operator's. | `staging-sql.retire_terminate` (`backends_signalled`), `staging-sql.retire_backends`, `staging-sql.retire_revoked` (four row counts), `staging-sql.retire_checks` (`backends`, `live_sessions`, `live_links`, `live_codes`, `email_mismatches`, all must be 0), one `step_done` per stage (`retire-step-2-nologin` ... `retire-step-6-email`). Refusals `retire_backends_not_gone` (nothing after step 3 ran) and `retire_checks_failed`. |
+| `identity-alignment-check` | `RUN TNBS IDENTITY ALIGNMENT CHECK` | Read-only (`begin read only` ... `rollback`): `supabase/rollout/read-only-inventory.sql` (pinned). It references no M1 object, so it runs before and after the backouts. | `staging-sql.identity_alignment` with `ok`, `approved_profiles`, `email_mismatches`, `approved_profiles_without_auth_user`, `approved_auth_email_null`. Passes only when `email_mismatches` and `approved_auth_email_null` are 0 (doc 17 BO3); `approved_profiles_without_auth_user` is printed, not judged (its expected staging value is not pinned by a reviewed doc). Refusals `identity_alignment_failed`, `identity_alignment_result_missing`. |
+| `postgis-placement` | `RECORD TNBS POSTGIS PLACEMENT` | Read-only: the schema of the `postgis` extension (§1.4 step 5). | `staging-sql.postgis_placement` with `schema` one of `public`, `extensions`, `other`, `absent` (the name itself is not printed). |
+| `window-on` / `window-off` | `TURN ON TNBS BACKOUT WINDOW` / `TURN OFF TNBS BACKOUT WINDOW` | Unchanged update + verify select, now with the read-back (§3.1 "Verify") taken inside the transaction before the commit. | `staging-sql.backout_window` with `action`, `email_edits_paused` (`true`, `false` or `unknown`), `rows`, `ok`, then `step_done`. A read-back that is not exactly one row with the expected value rolls back: refusal `backout_window_not_expected`. |
+
+Proved locally on a real PostgreSQL 16 database (`pipeline/src/backout-rehearsal-a3.test.ts`, suite
+`backout-rehearsal` of `scripts/run-real-db-suites.mjs`: an open `recruiter_app` connection is ended and
+cannot log in again, seeded live credentials are revoked, the checks read 0, then the three backouts and
+the identity check again) and offline (`pipeline/src/backout-rehearsal.test.ts`). The hosted half is not
+proved: whether the staging runner login may end `recruiter_app` connections on Supabase (it is not a
+superuser) is **not verified**; a refusal there shows as `server_or_driver_error` with its SQLSTATE after
+NOLOGIN has already committed.
+
 **Re-applying after a backout** uses three runner actions, not the plain apply files (the
 backouts keep the sign-in ledgers, added people and batch-delete record, so the plain files fail
 on the first retained object): `reapply-m1`, `reapply-m1b`, `reapply-m1c`, in that order. Each
