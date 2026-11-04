@@ -48,7 +48,7 @@
 // password null": no login, no password) and, through prod-sql-a3.test.ts section 8, supabase/backout/M1-backout.sql:482 ("revoke
 // recruiter_api from recruiter_app": the role through which recruiter_app gets all its rights). So the script (a) puts the prod-sql
 // suites last and (b) after EVERY suite re-applies LOGIN, the password and the recruiter_api membership (restoreStatements), so no suite
-// depends on the order of the others; RDB_SUITES_FIRST=prod-sql proves it (15 of 15). Other cluster-wide changes (authenticator
+// depends on the order of the others; RDB_SUITES_FIRST=prod-sql proves it (16 of 16). Other cluster-wide changes (authenticator
 // settings, zz_ roles, recruiter_maintenance grants) are made and undone by the suites themselves; a suite that crashes half way can leave
 // them behind, which makes later suites FAIL (never a false PASS).
 

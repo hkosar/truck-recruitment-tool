@@ -709,7 +709,7 @@ async function main(): Promise<void> {
   check('every event line printed during the real-PostgreSQL runs too is a fixed, verifier-free and password-free event', eventsClean());
   await admin.query('drop role if exists recruiter_maintenance');
   } finally { await Promise.all(opened.map((c) => c.end().catch(() => undefined))); }
-  console.log(`role-password:${n} checks passed (offline and real PostgreSQL)`);
+  console.log(`role-password: ${n} checks passed (offline and real PostgreSQL)`);
 }
 
 main().catch((e) => { console.error(e); process.exitCode = 1; });
