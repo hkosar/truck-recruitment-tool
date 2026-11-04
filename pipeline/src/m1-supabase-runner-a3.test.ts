@@ -22,6 +22,7 @@ import assert from 'node:assert/strict';
 import { randomBytes } from 'node:crypto';
 import pg from 'pg';
 import { executeRebuiltSqlPlan, planRebuiltSqlRun, REBUILT_STAGING_SQL_ACTIONS } from './staging-rebuilt.js';
+import { classifyRunnerFailure } from './refusals.js';
 
 const URLS = { public: process.env.M1SR_A3_PUBLIC_ADMIN_URL, ext: process.env.M1SR_A3_EXT_ADMIN_URL, neg: process.env.M1SR_A3_NEG_ADMIN_URL };
 const REF = 'abcdefghijklmnopqrst';
@@ -245,6 +246,7 @@ async function main(): Promise<void> {
         check('negative: the runner has USAGE on extensions without grant option and PUBLIC has no USAGE there',
           (await o.admin.query(`select has_schema_privilege($1, 'extensions', 'usage') and not has_schema_privilege($1, 'extensions', 'usage with grant option') and not has_schema_privilege('public', 'extensions', 'usage') as ok`, [RUNNER])).rows[0].ok === true);
         check('negative: M1 stops with P0001 and the specific grant-option message', o.error?.code === 'P0001' && o.error?.message === NEG_MESSAGE, `error=${o.error?.code ?? ''} ${o.error?.message ?? ''}`);
+        check('negative: the refusal carries only the fixed M1 check id (TRUCKRECRU-127), never the message', JSON.stringify(classifyRunnerFailure(o.error)) === '{"refusal":"server_or_driver_error","err_code":"P0001","m1_check":"m1_postgis_schema_usage_no_grant_option"}', JSON.stringify(classifyRunnerFailure(o.error)));
         check('negative: the runner reported the failed step and no step_done', o.events.some((e) => e.msg === 'staging-sql.step_failed') && !o.events.some((e) => e.msg === 'staging-sql.step_done'));
         check('negative: nothing was applied (catalogue snapshot identical, no recruiter_* role)', o.before.digest === o.after.digest && o.before.n === o.after.n
           && (await o.admin.query("select count(*)::int as n from pg_roles where rolname like 'recruiter\\_%'")).rows[0].n === 0, `before=${o.before.n} after=${o.after.n}`);
