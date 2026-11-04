@@ -113,6 +113,9 @@ try {
       assert.throws(() => assertOutsideRepository(`${sandbox.replace(/\\/g, '/')}/${name}/x`, REPOSITORY_ROOT), /ends in a dot or a space/, `forward-slash segment "${name}" must be refused`);
       assert.throws(() => assertOutsideRepository(`${sandbox}\\a/${name}\\x`, REPOSITORY_ROOT), /ends in a dot or a space/, `mixed-slash segment "${name}" must be refused`);
     }
+    // Device names too (T67 item 3): a split on backslash only would miss the forward-slash case.
+    assert.throws(() => assertOutsideRepository(`${sandbox.replace(/\\/g, '/')}/con/x`, REPOSITORY_ROOT), /reserved device name/, 'forward-slash device name segment must be refused');
+    assert.throws(() => assertOutsideRepository(`${sandbox}\\a/nul.txt\\x`, REPOSITORY_ROOT), /reserved device name/, 'mixed-slash device name segment must be refused');
     assert.doesNotThrow(() => assertOutsideRepository(`${sandbox}\\.\\ok\\..\\fine`, REPOSITORY_ROOT), '"." and ".." segments are navigation, not names');
     assert.doesNotThrow(() => assertOutsideRepository(join(sandbox, 'console', 'connect', 'nullx'), REPOSITORY_ROOT), 'names that only start like a device name are fine');
   }

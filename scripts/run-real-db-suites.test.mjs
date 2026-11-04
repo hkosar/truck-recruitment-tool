@@ -6,7 +6,7 @@ import { join, parse, resolve } from 'node:path';
 import { test } from 'node:test';
 import {
   ADMIN_CONNECT_TIMEOUT_MS, CHILD_COLOR_OFF, DEFAULT_TIMEOUT_MS, ENV_ALLOW, EXCLUDED_FILES, SUITE_FILES, SUITE_IDS, adminClientConfig, classifyOutcome, describePkiFailure, endStrayOnPorts, executeSuite, formatLimit, findSkipLines, isSafeToDelete, makeSh, maskSecrets,
-  nonLoopbackConnectionVars, orderNotice, orderSuites, pgServerOptions, resolveTimeoutMs, restoreStatements, runSuites, scrubbedEnv, stripAnsi, summarize, terminateStrayBackends, tlsClusterFiles, vitestArgs,
+  nonLoopbackConnectionVars, orderNotice, orderSuites, pgServerOptions, resolveTimeoutMs, restoreStatements, runSuites, scrubbedEnv, STRAY_BACKENDS_SQL, STRAY_COUNT_SQL, stripAnsi, summarize, terminateStrayBackends, tlsClusterFiles, vitestArgs,
 } from './run-real-db-suites.mjs';
 
 const ok = { status: 0 };
@@ -383,6 +383,17 @@ test('endStrayOnPorts: visits every port through withAdmin, and FAILS when sessi
   await assert.rejects(endStrayOnPorts([1, 2], withAdmin, async () => 2), /2 session\(s\) still open on port 1/);
   seen.length = 0;
   await assert.rejects(endStrayOnPorts([1, 2, 3], withAdmin, async () => (seen.length === 2 ? 1 : 0)), /1 session\(s\) still open on port 2/);
+});
+
+test('endStrayOnPorts: by default really ends the sessions of each port (no third argument), and a withAdmin error propagates (T67 items 1, 2)', async () => {
+  const sqls = [];
+  const withAdmin = async (fn, { onPort }) => { await fn({ query: async (sql) => { sqls.push([onPort, sql]); return { rows: [{ n: 0 }] }; } }); };
+  await endStrayOnPorts([7, 8], withAdmin);
+  assert.deepEqual(sqls.map(([p, s]) => [p, s]), [[7, STRAY_BACKENDS_SQL], [7, STRAY_COUNT_SQL], [8, STRAY_BACKENDS_SQL], [8, STRAY_COUNT_SQL]]);
+  const visited = [];
+  const failing = async (fn, { onPort }) => { visited.push(onPort); throw new Error('connect timeout'); };
+  await assert.rejects(endStrayOnPorts([1, 2], failing), /connect timeout/);
+  assert.deepEqual(visited, [1], 'stops at the first failing port');
 });
 
 test('admin client settings: loopback host, the admin user, and a finite connect time limit (T53 item 3)', () => {
