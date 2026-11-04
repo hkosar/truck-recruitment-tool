@@ -1,6 +1,8 @@
-﻿#!/usr/bin/env node
+#!/usr/bin/env node
 // Read-only check of a runbook (markdown) against this repo at HEAD. Offline: reads only repo files and the given
-// markdown file; runs only `git ls-tree` / `git show` (read-only). Prints one line per finding, exits 1 on any finding.
+// markdown file; runs only `git rev-parse` / `git ls-tree` / `git show` (read-only) in the repo this script lives in, so it
+// works from any current folder. Prints one line per finding. Exit codes: 0 no findings, 1 findings, 2 bad usage or an
+// unreadable runbook, 3 the check itself crashed (for example git failed). INFO lines (outside-repo citations) never change the exit code.
 //
 //   node scripts/check-runbook-vs-code.mjs <runbook.md> [--root <dir>]
 //
@@ -12,9 +14,9 @@
 //            some non-test source file.
 //  ACTION    `--action=<name>` must be a key of the staging action registry, or at least appear quoted in the code.
 //  CONFIRM   `--confirm=<PHRASE>` must be a quoted literal in the code; when the same line also has --action and the
-//            registry (pipeline/src/staging-rebuilt.ts) has that action, the phrase must be that action's phrase.
+//            registry (pipeline/src/staging-rebuilt.ts and pipeline/src/role-password.ts) has that action, the phrase must be that action's phrase.
 //  EXPECTED  Expected-output lines. Two styles are read:
-//              1. A fenced block directly after a line that is just `expected:` (any case): every non-empty line.
+//              1. A fenced block directly after a line that is just `expected:`, `**Expected:**` or `Expected output:` (any case): every non-empty line.
 //              2. The existing runbook style: code spans on lines that start with `PASS`, that are JSON (`{"msg":...}`)
 //                 or start with an upper-case word such as EVENT / RUN / SUMMARY / PLAN / ABORTED / REFUSED.
 //            `<placeholder>` and `...` match anything. A JSON span must have its "msg" value as a quoted literal in the
@@ -48,15 +50,22 @@ function makeSource(root) {
     walk(root, '');
     return { files, read: (f) => readFileSync(join(root, f), 'utf8') };
   }
-  const git = (...a) => execFileSync('git', a, { encoding: 'utf8', maxBuffer: 256 * 1024 * 1024, stdio: ['ignore', 'pipe', 'pipe'] });
-  const files = git('ls-tree', '-r', '--name-only', 'HEAD').split('\n').filter(Boolean);
+  // The repo is the one this script lives in (found with git), whatever the current folder is.
+  const run = (cwd, ...a) => execFileSync('git', a, { cwd, encoding: 'utf8', maxBuffer: 256 * 1024 * 1024, stdio: ['ignore', 'pipe', 'pipe'] });
+  const top = run(fileURLToPath(new URL('.', import.meta.url)), 'rev-parse', '--show-toplevel').trim();
+  const git = (...a) => run(top, ...a);
+  const files = git('ls-tree', '-r', '--name-only', '--full-tree', '-z', 'HEAD').split('\0').filter(Boolean);
   return { files, read: (f) => git('show', `HEAD:${f}`) };
 }
 
 const lineCount = (text) => (text === '' ? 0 : text.split('\n').length - (text.endsWith('\n') ? 1 : 0));
 const tail = (s) => (s.length > 70 ? `${s.slice(0, 67)}...` : s);
 
-export function checkRunbook(markdown, { root } = {}) {
+// Citations of files outside the repo (a `thr_<id>/...` thread-storage note, or a .md file that is not in the repo, such as
+// handoff-2026-11-04.md) are not findings. They are pushed to the `info` array (when given) as `OUTSIDE-REPO line=N <path>`.
+const OUTSIDE_REPO = /^thr_[a-z0-9]+\/|\.md$/;
+
+export function checkRunbook(markdown, { root, info } = {}) {
   const src = makeSource(root);
   const cache = new Map();
   const read = (f) => { if (!cache.has(f)) cache.set(f, src.read(f)); return cache.get(f); };
@@ -70,7 +79,8 @@ export function checkRunbook(markdown, { root } = {}) {
   const refusalBlock = /REFUSAL_IDS\s*=\s*\[([\s\S]*?)\]\s*as const/.exec(refusalsText);
   const refusalIds = new Set(refusalBlock ? [...refusalBlock[1].matchAll(/'([a-z0-9_]+)'/g)].map((m) => m[1]) : []);
 
-  const registryText = src.files.includes('pipeline/src/staging-rebuilt.ts') ? read('pipeline/src/staging-rebuilt.ts') : '';
+  // Action registries: staging-rebuilt.ts, and the role-password actions in role-password.ts.
+  const registryText = ['pipeline/src/staging-rebuilt.ts', 'pipeline/src/role-password.ts'].filter((f) => src.files.includes(f)).map(read).join('\n');
   const registry = new Map();
   for (const m of registryText.matchAll(/['"]?([A-Za-z0-9-]+)['"]?:\s*\{[^{}]*?confirmation:\s*'([^']+)'/g)) registry.set(m[1], m[2]);
 
@@ -86,7 +96,7 @@ export function checkRunbook(markdown, { root } = {}) {
   lines.forEach((raw, i) => {
     const n = i + 1;
     if (/^\s*```/.test(raw)) {
-      if (!inFence) { inFence = true; fenceIsExpected = /^\s*expected:?\s*$/i.test(prevNonEmpty); } else { inFence = false; fenceIsExpected = false; }
+      if (!inFence) { inFence = true; fenceIsExpected = /^\s*[*_]*expected(?:\s+output)?\s*:?\s*[*_]*\s*:?\s*$/i.test(prevNonEmpty); } else { inFence = false; fenceIsExpected = false; }
       fenceLines.add(n);
       return;
     }
@@ -147,7 +157,10 @@ export function checkRunbook(markdown, { root } = {}) {
       let matches = src.files.filter((f) => f === path || f.endsWith(`/${path}`));
       const exact = matches.filter((f) => f === path);
       if (exact.length) matches = exact;
-      if (!matches.length) { add('CITATION', n, `file not found: ${tail(path)}`); continue; }
+      if (!matches.length) {
+        if (OUTSIDE_REPO.test(path)) { if (info) info.push(`OUTSIDE-REPO line=${n} not a repo file, not checked: ${tail(path)}`); continue; }
+        add('CITATION', n, `file not found: ${tail(path)}`); continue;
+      }
       const counts = matches.map((f) => lineCount(read(f)));
       const max = Math.max(...counts);
       let ok = true;
@@ -163,7 +176,7 @@ export function checkRunbook(markdown, { root } = {}) {
   // EXPECTED checks
   const words = (t) => t.split(/[^A-Za-z0-9_.\-/]+/).filter((w) => w.length >= 3 && !/^[.\-/]+$/.test(w));
   for (const { line, text } of expectedLines) {
-    const bare = text.replace(/<[^>]*>/g, ' ').replace(/\.\.\.|â€¦/g, ' ');
+    const bare = text.replace(/<[^>]*>/g, ' ').replace(/\.\.\.|…/g, ' ');
     let json = null;
     if (text.startsWith('{')) { try { json = JSON.parse(text); } catch { json = null; } }
     const missing = [];
@@ -202,8 +215,14 @@ if (process.argv[1] && fileURLToPath(import.meta.url) === process.argv[1]) {
   }
   let md;
   try { md = readFileSync(rest[0], 'utf8'); } catch { console.error('cannot read the runbook file'); process.exit(2); }
-  const findings = checkRunbook(md, { root });
+  let findings;
+  const info = [];
+  try { findings = checkRunbook(md, { root, info }); } catch (e) {
+    console.error(`INTERNAL ERROR (the check itself crashed; this is not a finding): ${String(e && e.message).split('\n')[0]}`);
+    process.exit(3);
+  }
   for (const f of findings) console.log(`FINDING ${f}`);
+  for (const i of info) console.log(`INFO ${i}`);
   console.log(`SUMMARY findings=${findings.length}`);
   process.exit(findings.length ? 1 : 0);
 }
