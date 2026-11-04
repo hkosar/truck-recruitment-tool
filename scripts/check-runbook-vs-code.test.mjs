@@ -110,6 +110,18 @@ test('role-password actions: the phrase must be that action\'s phrase', () => {
   assert.deepEqual(kinds("`--action=set-app-password '--confirm=APPLY TNBS M1'`\n"), ['CONFIRM']);
 });
 
+test('a .md citation under a real top-level folder is checked; thr_ notes and bare names are INFO only', () => {
+  mkdirSync(join(root, 'docs/build-plan'), { recursive: true });
+  writeFileSync(join(root, 'docs/build-plan/14-design.md'), 'one\ntwo\n');
+  const info = [];
+  assert.deepEqual(checkRunbook('see docs/build-plan/14-desing.md:1\n', { root, info }).map((f) => f.split(' ')[0]), ['CITATION']); // typo
+  assert.deepEqual(checkRunbook('see docs/14-design.md:1\n', { root, info }).map((f) => f.split(' ')[0]), ['CITATION']); // wrong folder
+  assert.deepEqual(checkRunbook('see docs/build-plan/14-design.md:2\n', { root, info }), []);
+  assert.deepEqual(info, []);
+  assert.deepEqual(checkRunbook('see thr_abc123/note.md:5 and handoff.md:3\n', { root, info }), []);
+  assert.equal(info.length, 2);
+});
+
 test('citation line 0 is flagged', () => {
   assert.deepEqual(kinds('see scripts/probe.mjs:0\n'), ['CITATION']);
 });
@@ -142,7 +154,7 @@ test('the pair check is skipped when the registry files are absent', () => {
 });
 
 test('words that only occur in test files do not count; bare refusal spans inside fences are not checked', () => {
-  assert.deepEqual(kinds('PASS: `SUMMARY zzonlytestword=<n>`\n'), ['EXPECTED']);
+  assert.deepEqual(kinds('PASS: `EVENT zzonlytestword`\n'), ['EXPECTED']);
   assert.deepEqual(kinds('```\nA refusal `plan_refusd` happens.\n```\n'), []);
 });
 

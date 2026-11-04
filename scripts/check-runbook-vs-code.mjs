@@ -61,16 +61,20 @@ function makeSource(root) {
 const lineCount = (text) => (text === '' ? 0 : text.split('\n').length - (text.endsWith('\n') ? 1 : 0));
 const tail = (s) => (s.length > 70 ? `${s.slice(0, 67)}...` : s);
 
-// Citations of files outside the repo (a `thr_<id>/...` thread-storage note, or a .md file that is not in the repo, such as
-// handoff-2026-11-04.md) are not findings. They are pushed to the `info` array (when given) as `OUTSIDE-REPO line=N <path>`.
-const OUTSIDE_REPO = /^thr_[a-z0-9]+\/|\.md$/;
+// Citations of files outside the repo are not findings: a `thr_<id>/...` thread-storage note, or a bare .md name with no folder
+// (such as handoff-2026-11-04.md), or a .md path whose first folder is not a top-level folder of the repo. A path under a real
+// top-level folder (docs/, scripts/, pipeline/, app/ ...) is always checked. Skipped ones are pushed to the `info` array
+// (when given) as `OUTSIDE-REPO line=N <path>`.
+const isOutsideRepo = (path, topDirs) => /^thr_[a-z0-9]+\//.test(path)
+  || (/\.md$/.test(path) && !(path.includes('/') && topDirs.has(path.split('/')[0])));
 
 export function checkRunbook(markdown, { root, info } = {}) {
   const src = makeSource(root);
   const cache = new Map();
   const read = (f) => { if (!cache.has(f)) cache.set(f, src.read(f)); return cache.get(f); };
+  const topDirs = new Set(src.files.filter((f) => f.includes('/')).map((f) => f.split('/')[0]));
   const findings = [];
-  const add = (check, line, msg) => findings.push(`${check} line=${line} ${msg}`);
+  const add =(check, line, msg) => findings.push(`${check} line=${line} ${msg}`);
 
   const codeFiles = src.files.filter((f) => CODE_EXT.test(f) && !/\.test\.|(^|\/)(node_modules|dist)\//.test(f) && /^(pipeline\/src|scripts)\//.test(f));
   const corpus = codeFiles.map(read).join('\n');
@@ -158,7 +162,7 @@ export function checkRunbook(markdown, { root, info } = {}) {
       const exact = matches.filter((f) => f === path);
       if (exact.length) matches = exact;
       if (!matches.length) {
-        if (OUTSIDE_REPO.test(path)) { if (info) info.push(`OUTSIDE-REPO line=${n} not a repo file, not checked: ${tail(path)}`); continue; }
+        if (isOutsideRepo(path, topDirs)) { if (info) info.push(`OUTSIDE-REPO line=${n} not a repo file, not checked: ${tail(path)}`); continue; }
         add('CITATION', n, `file not found: ${tail(path)}`); continue;
       }
       const counts = matches.map((f) => lineCount(read(f)));
@@ -223,6 +227,6 @@ if (process.argv[1] && fileURLToPath(import.meta.url) === process.argv[1]) {
   }
   for (const f of findings) console.log(`FINDING ${f}`);
   for (const i of info) console.log(`INFO ${i}`);
-  console.log(`SUMMARY findings=${findings.length}`);
+  console.log(`SUMMARY findings=${findings.length} info=${info.length}`);
   process.exit(findings.length ? 1 : 0);
 }
