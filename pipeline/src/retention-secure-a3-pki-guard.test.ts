@@ -108,6 +108,11 @@ try {
       assert.throws(() => assertOutsideRepository(`${sandbox}\\x\\${name}`, REPOSITORY_ROOT), /ends in a dot or a space/, `last segment "${name}" must be refused`);
     }
     assert.throws(() => assertOutsideRepository(`${REPOSITORY_ROOT}.\\x`, REPOSITORY_ROOT), /ends in a dot or a space/, 'the repository folder name plus a dot');
+    // Forward slashes are separators on Windows too (T53 item 2): a split on backslash only would miss these.
+    for (const name of ['keys.', 'keys ']) {
+      assert.throws(() => assertOutsideRepository(`${sandbox.replace(/\\/g, '/')}/${name}/x`, REPOSITORY_ROOT), /ends in a dot or a space/, `forward-slash segment "${name}" must be refused`);
+      assert.throws(() => assertOutsideRepository(`${sandbox}\\a/${name}\\x`, REPOSITORY_ROOT), /ends in a dot or a space/, `mixed-slash segment "${name}" must be refused`);
+    }
     assert.doesNotThrow(() => assertOutsideRepository(`${sandbox}\\.\\ok\\..\\fine`, REPOSITORY_ROOT), '"." and ".." segments are navigation, not names');
     assert.doesNotThrow(() => assertOutsideRepository(join(sandbox, 'console', 'connect', 'nullx'), REPOSITORY_ROOT), 'names that only start like a device name are fine');
   }

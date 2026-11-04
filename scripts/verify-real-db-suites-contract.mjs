@@ -61,8 +61,10 @@ check('test switches for a failing and a hanging suite exist', /RDB_SUITES_INJEC
 check('the exit code comes from summarize() and nothing sets it to 0 afterwards', /process\.exitCode = s\.exitCode;/.test(code) && !/process\.exitCode\s*=\s*0\b/.test(code));
 check('every suite goes through executeSuite with the scrubbed base environment and a time limit', /executeSuite\(s, \{ sh, mask, baseEnv, timeoutMs, isInterrupted \}\)/.test(code) && /await runSuites\(orderSuites\(SUITES, first\), \{ results, only, injectedFail, injectedHang, sh, mask, baseEnv, timeoutMs, isInterrupted: \(\) => interrupted, restore: restoreLogins, afterTimeout: endStraySessions \}\);/.test(code));
 check('after a TIMEOUT the leftover sessions of all three own clusters are ended by SQL (no process is signalled), and RDB_SUITES_FIRST prints which suite moved',
-  /for \(const onPort of \[port, rpPort, tlsPort\]\) \{/.test(code) && /terminateStrayBackends\(async \(sql\) => \(await c\.query\(sql\)\)\.rows\)/.test(code) && /\{ onPort \}\);/.test(code)
+  /const endStraySessions = \(\) => endStrayOnPorts\(\[port, rpPort, tlsPort\], withAdmin\);/.test(code) && /for \(const onPort of ports\) \{/.test(code) && /terminate\(async \(sql\) => \(await c\.query\(sql\)\)\.rows\)/.test(code) && /\{ onPort \}\);/.test(code)
+  && /if \(left\) throw new Error\(`\$\{left\} session\(s\) still open on port \$\{onPort\}`\);/.test(code)
   && /if \(orderNotice\(first\)\) console\.log\(orderNotice\(first\)\);/.test(code) && /if \(outcome\.status === 'TIMEOUT' && afterTimeout\)/.test(code));
+check('the runner\'s own admin client has a connect time limit and loopback host (adminClientConfig)', /new pg\.Client\(adminClientConfig\(\{ port: onPort, password: adminPw, database \}\)\)/.test(code) && /connectionTimeoutMillis: ADMIN_CONNECT_TIMEOUT_MS/.test(code) && /host: '127\.0\.0\.1', port, user: ADMIN_USER/.test(code));
 check('the stray-session SQL touches only client sessions other than its own', /where backend_type = 'client backend' and pid <> pg_backend_pid\(\)"/.test(code) && (code.match(/pg_terminate_backend/g) ?? []).length === 1);
 // The PKI-guard test needs no database, so it is not run here; it must stay in the pipeline npm test chain (review t40, N5).
 const pipelineTest = JSON.parse(readFileSync(resolve(root, 'pipeline/package.json'), 'utf8')).scripts?.test ?? '';

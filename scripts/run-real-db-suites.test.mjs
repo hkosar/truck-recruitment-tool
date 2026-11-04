@@ -5,7 +5,7 @@ import { tmpdir } from 'node:os';
 import { join, parse, resolve } from 'node:path';
 import { test } from 'node:test';
 import {
-  CHILD_COLOR_OFF, DEFAULT_TIMEOUT_MS, ENV_ALLOW, EXCLUDED_FILES, SUITE_FILES, SUITE_IDS, classifyOutcome, describePkiFailure, executeSuite, findSkipLines, isSafeToDelete, makeSh, maskSecrets,
+  ADMIN_CONNECT_TIMEOUT_MS, CHILD_COLOR_OFF, DEFAULT_TIMEOUT_MS, ENV_ALLOW, EXCLUDED_FILES, SUITE_FILES, SUITE_IDS, adminClientConfig, classifyOutcome, describePkiFailure, endStrayOnPorts, executeSuite, formatLimit, findSkipLines, isSafeToDelete, makeSh, maskSecrets,
   nonLoopbackConnectionVars, orderNotice, orderSuites, pgServerOptions, resolveTimeoutMs, restoreStatements, runSuites, scrubbedEnv, stripAnsi, summarize, terminateStrayBackends, tlsClusterFiles, vitestArgs,
 } from './run-real-db-suites.mjs';
 
@@ -373,4 +373,42 @@ test('certificate step failure: the helper\'s own refusing/usage line is shown, 
   assert.match(describePkiFailure({ r: { error: { code: 'ETIMEDOUT' }, status: null }, out: '', timeoutMs: 90000 }), /exceeded the 90 s time limit/);
   assert.match(describePkiFailure({ r: { error: { code: 'ENOENT' } }, out: '', timeoutMs: 1 }), /could not start: ENOENT/);
   assert.equal(describePkiFailure({ r: { status: 1 }, out: '1\n2\n3\n4\n5\n6', timeoutMs: 1 }), '3 | 4 | 5 | 6');
+});
+
+test('endStrayOnPorts: visits every port through withAdmin, and FAILS when sessions cannot be cleared (T53 item 1)', async () => {
+  const seen = [];
+  const withAdmin = async (fn, { onPort }) => { seen.push(onPort); await fn({ query: async () => ({ rows: [] }) }); };
+  await endStrayOnPorts([1, 2, 3], withAdmin, async () => 0);
+  assert.deepEqual(seen, [1, 2, 3]);
+  await assert.rejects(endStrayOnPorts([1, 2], withAdmin, async () => 2), /2 session\(s\) still open on port 1/);
+  seen.length = 0;
+  await assert.rejects(endStrayOnPorts([1, 2, 3], withAdmin, async () => (seen.length === 2 ? 1 : 0)), /1 session\(s\) still open on port 2/);
+});
+
+test('admin client settings: loopback host, the admin user, and a finite connect time limit (T53 item 3)', () => {
+  const c = adminClientConfig({ port: 5555, password: 'pw', database: 'd' });
+  assert.deepEqual({ host: c.host, port: c.port, database: c.database, user: c.user }, { host: '127.0.0.1', port: 5555, database: 'd', user: 'tr_test_admin' });
+  assert.equal(c.connectionTimeoutMillis, ADMIN_CONNECT_TIMEOUT_MS);
+  assert.ok(Number.isFinite(c.connectionTimeoutMillis) && c.connectionTimeoutMillis > 0 && c.connectionTimeoutMillis <= 120000);
+  assert.equal(adminClientConfig({ port: 1, password: 'x' }).database, 'postgres');
+});
+
+test('certificate step failure: tsx prints the helper\'s source line too; only the Error/refusing line is shown (T53 item 4)', () => {
+  const out = "C:\\x\\make-pki.ts:56\n  if (bad) throw new Error('refusing: a path segment ends in a dot or a space');\n                 ^\n\nError: refusing: a path segment ends in a dot or a space\n    at assertOutsideRepository (x.ts:56:3)\n\nNode.js v24";
+  const msg = describePkiFailure({ r: { status: 1 }, out, timeoutMs: 1000 });
+  assert.equal(msg, 'Error: refusing: a path segment ends in a dot or a space');
+  assert.ok(!/throw new Error|\bif \(/.test(msg), 'no line of source code');
+  assert.equal(describePkiFailure({ r: { status: 1 }, out: "if (x) throw new Error('usage: make-pki <dir>');\nError: usage: make-pki <dir>", timeoutMs: 1 }), 'Error: usage: make-pki <dir>');
+});
+
+test('time limit text: under 1 second is shown in ms, never "0 s" (T53 item 5)', () => {
+  assert.equal(formatLimit(50), '50 ms');
+  assert.equal(formatLimit(999), '999 ms');
+  assert.equal(formatLimit(1000), '1 s');
+  assert.equal(formatLimit(90000), '90 s');
+  assert.equal(formatLimit(1500), '1.5 s');
+  assert.match(describePkiFailure({ r: { error: { code: 'ETIMEDOUT' }, status: null }, out: '', timeoutMs: 50 }), /exceeded the 50 ms time limit/);
+  const o = classifyOutcome({ kind: 'tsx', r: { error: { code: 'ETIMEDOUT' }, status: null }, out: '', timeoutMs: 50 });
+  assert.match(o.reason, /exceeded the 50 ms time limit/);
+  assert.ok(!/\b0 s\b/.test(o.reason));
 });

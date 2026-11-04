@@ -75,6 +75,11 @@ export function resolveTimeoutMs(value) {
   return Number.isFinite(n) && n > 0 ? n : DEFAULT_TIMEOUT_MS;
 }
 
+/** A time limit for messages: under 1 second in ms (never "0 s"), otherwise in seconds (one decimal only when needed). Pure. */
+export function formatLimit(ms) {
+  return ms < 1000 ? `${Math.round(ms)} ms` : `${Number((ms / 1000).toFixed(1))} s`;
+}
+
 /** Removes ANSI escape sequences (colour, cursor) from child output. Pure. */
 export function stripAnsi(text) {
   return String(text).replace(/\x1b\[[0-9;?]*[\x20-\x2f]*[\x40-\x7e]/g, '');
@@ -149,7 +154,7 @@ export function isSafeToDelete(dir, tmp) {
 /** Turns one finished child process into { status: 'PASS' | 'FAIL' | 'TIMEOUT', reason }. `out` must already be masked. Pure. */
 export function classifyOutcome({ kind, r, out, interrupted = false, allowedSkips = [], timeoutMs = DEFAULT_TIMEOUT_MS }) {
   if (interrupted) return { status: 'FAIL', reason: 'interrupted' };
-  if (r.error?.code === 'ETIMEDOUT') return { status: 'TIMEOUT', reason: `exceeded the ${Math.round(timeoutMs / 1000)} s time limit and was ended` };
+  if (r.error?.code === 'ETIMEDOUT') return { status: 'TIMEOUT', reason: `exceeded the ${formatLimit(timeoutMs)} time limit and was ended` };
   if (r.error) return { status: 'FAIL', reason: `could not start: ${r.error.code ?? 'error'}` };
   if (r.status !== 0) {
     const lines = out.split('\n').filter((l) => l.trim());
@@ -252,6 +257,23 @@ export async function terminateStrayBackends(query, { tries = 20, sleep = (ms) =
   return n;
 }
 
+/** How long the runner's own admin client waits to connect to a throwaway cluster (a stuck local server must not hang the run). */
+export const ADMIN_CONNECT_TIMEOUT_MS = 30000;
+
+/** The connection settings of the runner's own admin client: loopback only, with a connect time limit. Pure. */
+export function adminClientConfig({ port, password, database = 'postgres' }) {
+  return { host: '127.0.0.1', port, user: ADMIN_USER, password, database, connectionTimeoutMillis: ADMIN_CONNECT_TIMEOUT_MS };
+}
+
+/** Ends the stray sessions on each given port through withAdmin(fn, { onPort }); throws if any session cannot be cleared. */
+export async function endStrayOnPorts(ports, withAdmin, terminate = terminateStrayBackends) {
+  for (const onPort of ports) {
+    let left = 0;
+    await withAdmin(async (c) => { left = await terminate(async (sql) => (await c.query(sql)).rows); }, { onPort });
+    if (left) throw new Error(`${left} session(s) still open on port ${onPort}`);
+  }
+}
+
 /** The line that says which suite RDB_SUITES_FIRST moved to the front (so a misspelt switch cannot go unnoticed). Pure. */
 export function orderNotice(first) {
   return first ? `order: ${first} moved first (RDB_SUITES_FIRST)` : undefined;
@@ -260,10 +282,10 @@ export function orderNotice(first) {
 /** Why the throwaway-certificate step failed: the time limit, or the helper's own refusing/usage line, or else its last lines.
  *  `out` must already be masked. Pure. */
 export function describePkiFailure({ r, out, timeoutMs }) {
-  if (r.error?.code === 'ETIMEDOUT') return `the certificate step exceeded the ${Math.round(timeoutMs / 1000)} s time limit and was ended`;
+  if (r.error?.code === 'ETIMEDOUT') return `the certificate step exceeded the ${formatLimit(timeoutMs)} time limit and was ended`;
   if (r.error) return `the certificate step could not start: ${r.error.code ?? 'error'}`;
   const lines = out.split('\n').map((l) => l.trim()).filter(Boolean);
-  const why = lines.filter((l) => /\b(refusing|usage)\b/i.test(l));
+  const why = lines.filter((l) => /^(Error:\s*)?(refusing|usage)\b/i.test(l)); // anchored: tsx also prints the helper's source line, which contains the word
   return (why.length ? why : lines.slice(-4)).join(' | ').slice(0, 600);
 }
 
@@ -530,7 +552,7 @@ async function run() {
     const require = createRequire(join(root, 'app', 'package.json'));
     const pg = require('pg');
     const withAdmin = async (fn, { onPort = port, database = 'postgres' } = {}) => {
-      const c = new pg.Client({ host: '127.0.0.1', port: onPort, user: ADMIN_USER, password: adminPw, database });
+      const c = new pg.Client(adminClientConfig({ port: onPort, password: adminPw, database }));
       await c.connect();
       try { await fn(c); } finally { await c.end(); }
     };
@@ -606,13 +628,7 @@ async function run() {
 
     const only = process.env.RDB_SUITES_ONLY ? process.env.RDB_SUITES_ONLY.split(',').map((x) => x.trim()) : undefined;
     // After a TIMEOUT: end the leftover sessions on this run's own three clusters (SQL on each cluster, no process is signalled by us).
-    const endStraySessions = async () => {
-      for (const onPort of [port, rpPort, tlsPort]) {
-        let left = 0;
-        await withAdmin(async (c) => { left = await terminateStrayBackends(async (sql) => (await c.query(sql)).rows); }, { onPort });
-        if (left) throw new Error(`${left} session(s) still open on port ${onPort}`);
-      }
-    };
+    const endStraySessions = () => endStrayOnPorts([port, rpPort, tlsPort], withAdmin);
     if (orderNotice(first)) console.log(orderNotice(first));
     await runSuites(orderSuites(SUITES, first), { results, only, injectedFail, injectedHang, sh, mask, baseEnv, timeoutMs, isInterrupted: () => interrupted, restore: restoreLogins, afterTimeout: endStraySessions });
   } catch (err) {
