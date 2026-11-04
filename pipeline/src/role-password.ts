@@ -1,5 +1,6 @@
 import { createHash, createHmac, pbkdf2Sync, randomBytes } from 'node:crypto';
-import { newSecurePgClient, refuseStaging2UnlessPooler } from './pg-secure.js';
+import { newSecurePgClient } from './pg-secure.js';
+import { refuseStaging2UnlessPooler } from './pg-secure.js';
 import { RunnerRefusal } from './refusals.js';
 import { requireRecordedRebuiltRef, type RebuiltSqlClient } from './staging-rebuilt.js';
 import { roleOf } from './retention-step.js';
