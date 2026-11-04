@@ -211,4 +211,49 @@ test('command line prints INFO lines without changing the exit code', () => {
   assert.match(r.stdout, /^SUMMARY findings=0 info=1$/m);
 });
 
-test('cleanup',() => { rmSync(root, { recursive: true, force: true }); });
+test('Windows drive paths: inside the checked folder they are repo paths, anywhere else INFO', () => {
+  mkdirSync(join(root, 'docs/build-plan'), { recursive: true });
+  writeFileSync(join(root, 'docs/build-plan/14-design.md'), 'one\ntwo\n');
+  const fwd = root.replace(/\\/g, '/');
+  const bs = fwd.replace(/\//g, '\\');
+  const info = [];
+  const k = (md) => checkRunbook(md, { root, info }).map((f) => f.split(' ')[0]);
+  for (const base of [bs, fwd, bs.toLowerCase()]) {
+    const sep = base.includes('\\') ? '\\' : '/';
+    assert.deepEqual(k(`see ${base}${sep}docs${sep}build-plan${sep}14-design.md:2\n`), [], base);
+    assert.deepEqual(k(`see ${base}${sep}docs${sep}build-plan${sep}14-design.md:99\n`), ['CITATION'], base);
+    assert.deepEqual(k(`see ${base}${sep}scripts${sep}nothere.mjs:1\n`), ['CITATION'], base);
+  }
+  assert.deepEqual(info, []);
+  // a citation never starts in the middle of a path after a backslash: a UNC path is not read at all (no finding, no INFO)
+  assert.deepEqual(k('see \\\\srv\\share\\scripts\\nothere.mjs:1\n'), []);
+  assert.deepEqual(info, []);
+  for (const outside of ['C:\\Users\\hunte\\.bb\\thread-storage\\thr_x\\note.md:5', 'C:/Users/hunte/.bb/thread-storage/thr_x/note.md:5', 'D:\\other\\scripts\\nothere.mjs:1', 'C:/other/scripts/nothere.mjs:1']) {
+    info.length = 0;
+    assert.deepEqual(k(`see ${outside}\n`), [], outside);
+    assert.equal(info.length, 1, outside);
+    assert.match(info[0], /^OUTSIDE-REPO line=1 /, outside);
+  }
+  info.length = 0;
+  assert.deepEqual(k(`see (${bs}x\\docs\\build-plan\\14-design.md:2)\n`), [], 'a sibling folder with the same prefix is outside');
+  assert.equal(info.length, 1);
+});
+
+test('../ citations stay INFO; the repo-folder rule uses the first two folder levels and ignores case', () => {
+  const info = [];
+  const k = (md) => checkRunbook(md, { root, info }).map((f) => f.split(' ')[0]);
+  assert.deepEqual(k('see ../docs/build-plan/14-desing.md:1 and ../x/note.md:2\n'), []);
+  assert.equal(info.length, 2);
+  // second-level folder (build-plan) counts, case-insensitively; a third-level folder name does not
+  mkdirSync(join(root, 'docs/build-plan/deep'), { recursive: true });
+  writeFileSync(join(root, 'docs/build-plan/deep/z.md'), 'z\n');
+  info.length = 0;
+  assert.deepEqual(k('see BUILD-PLAN/nothere.md:1\n'), ['CITATION']);
+  assert.deepEqual(k('see deep/nothere.md:1\n'), []);
+  assert.equal(info.length, 1);
+  mkdirSync(join(root, 'MixedDir'), { recursive: true }); // repo folder names are lower-cased too
+  writeFileSync(join(root, 'MixedDir/a.md'), 'a\n');
+  assert.deepEqual(k('see mixeddir/nothere.md:1\n'), ['CITATION']);
+});
+
+test('cleanup', () => { rmSync(root, { recursive: true, force: true }); });

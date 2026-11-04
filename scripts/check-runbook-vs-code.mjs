@@ -30,7 +30,7 @@
 //            somewhere in the runbook (catches a line the code prints that the runbook never mentions, e.g. SKIPPED).
 import { execFileSync } from 'node:child_process';
 import { readFileSync, readdirSync, statSync } from 'node:fs';
-import { join } from 'node:path';
+import { join, resolve } from 'node:path';
 import { fileURLToPath } from 'node:url';
 
 const CODE_EXT = /\.(?:ts|tsx|mjs|js|cjs)$/;
@@ -48,14 +48,14 @@ function makeSource(root) {
       }
     };
     walk(root, '');
-    return { files, read: (f) => readFileSync(join(root, f), 'utf8') };
+    return { top: resolve(root), files, read: (f) => readFileSync(join(root, f), 'utf8') };
   }
   // The repo is the one this script lives in (found with git), whatever the current folder is.
   const run = (cwd, ...a) => execFileSync('git', a, { cwd, encoding: 'utf8', maxBuffer: 256 * 1024 * 1024, stdio: ['ignore', 'pipe', 'pipe'] });
   const top = run(fileURLToPath(new URL('.', import.meta.url)), 'rev-parse', '--show-toplevel').trim();
   const git = (...a) => run(top, ...a);
   const files = git('ls-tree', '-r', '--name-only', '--full-tree', '-z', 'HEAD').split('\0').filter(Boolean);
-  return { files, read: (f) => git('show', `HEAD:${f}`) };
+  return { top, files, read: (f) => git('show', `HEAD:${f}`) };
 }
 
 const lineCount = (text) => (text === '' ? 0 : text.split('\n').length - (text.endsWith('\n') ? 1 : 0));
@@ -78,7 +78,7 @@ export function checkRunbook(markdown, { root, info } = {}) {
   const read = (f) => { if (!cache.has(f)) cache.set(f, src.read(f)); return cache.get(f); };
   const repoDirs = new Set(src.files.filter((f) => f.includes('/')).flatMap((f) => f.split('/').slice(0, -1).slice(0, 2)).map((d) => d.toLowerCase()));
   const findings = [];
-  const add =(check, line, msg) => findings.push(`${check} line=${line} ${msg}`);
+  const add = (check, line, msg) => findings.push(`${check} line=${line} ${msg}`);
 
   const codeFiles = src.files.filter((f) => CODE_EXT.test(f) && !/\.test\.|(^|\/)(node_modules|dist)\//.test(f) && /^(pipeline\/src|scripts)\//.test(f));
   const corpus = codeFiles.map(read).join('\n');
@@ -158,10 +158,15 @@ export function checkRunbook(markdown, { root, info } = {}) {
     }
 
     // CITATION
-    const re = new RegExp(`(^|[^A-Za-z0-9_./\\\\-])((?:[0-9a-f]{7,40}:)?)((?:[A-Za-z0-9_.-]+[/\\\\])*[A-Za-z0-9_.-]+\\.${CITE_EXT}):(\\d+(?:-\\d+)?(?:, ?\\d+(?:-\\d+)?)*)`, 'g');
+    const re = new RegExp(`(^|[^A-Za-z0-9_./\\\\-])((?:[0-9a-f]{7,40}:)?)((?:[A-Za-z]:[/\\\\])?(?:[A-Za-z0-9_.-]+[/\\\\])*[A-Za-z0-9_.-]+\\.${CITE_EXT}):(\\d+(?:-\\d+)?(?:, ?\\d+(?:-\\d+)?)*)`, 'g');
     for (const m of raw.matchAll(re)) {
       if (m[2]) continue; // older commit
-      const path = normalizePath(m[3]);
+      let path = normalizePath(m[3]);
+      if (/^[A-Za-z]:\//.test(path)) { // Windows drive path: a repo path when inside the folder being checked, otherwise INFO
+        const top = normalizePath(src.top).replace(/\/+$/, '');
+        if (path.toLowerCase().startsWith(`${top.toLowerCase()}/`)) path = path.slice(top.length + 1);
+        else { if (info) info.push(`OUTSIDE-REPO line=${n} not a repo file, not checked: ${tail(path)}`); continue; }
+      }
       let matches = src.files.filter((f) => f === path || f.endsWith(`/${path}`));
       const exact = matches.filter((f) => f === path);
       if (exact.length) matches = exact;
