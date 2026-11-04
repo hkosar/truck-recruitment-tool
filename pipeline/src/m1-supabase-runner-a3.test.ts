@@ -16,6 +16,11 @@
 // plans, runbook v3.3 sections 3.2-3.6 (TRUCKRECRU-126): apply-m1b, apply-m1c, batch-delete-compare (match true), role-matrix-m1
 // (62/62, catalogue unchanged afterwards, membership still ADMIN-only) and postgis-placement. Like hosted Supabase (assumed, not
 // verified), the login is made a member of anon, authenticated and service_role by the superuser.
+// Before the passing role-matrix run, its failure paths (TRUCKRECRU-134, from Codex review thr_yb422uqwxk): a wrong gate, an error
+// right after its SET-option grant, an error mid-probe (both injected into the plan in memory, never into the file), and a second
+// login without ADMIN on recruiter_api. Each must fail closed and, once the executor has closed the connection, leave nothing behind:
+// the catalogue (memberships with grantor and options), every table's rows, and sequence counters (these never roll back, so only the
+// matrix's own measured counters may move forward). Not covered: other databases and cluster settings, statistics, WAL/xid counters.
 // Needs its OWN throwaway cluster (roles are cluster-wide and no recruiter_* role may exist before a case) with three databases
 // built by scripts/a3-build-test-db.mjs --no-m1 --no-m1b --no-m1c (the two "extensions" ones with --postgis-schema extensions).
 // Each case drops its database and the roles it made afterwards. Skipped unless all three URLs are set; loopback tr_ only.
@@ -24,13 +29,15 @@
 import assert from 'node:assert/strict';
 import { randomBytes } from 'node:crypto';
 import pg from 'pg';
-import { executeRebuiltSqlPlan, planRebuiltSqlRun, REBUILT_STAGING_SQL_ACTIONS } from './staging-rebuilt.js';
+import { executeRebuiltSqlPlan, planRebuiltSqlRun, REBUILT_STAGING_SQL_ACTIONS, type RebuiltSqlPlan } from './staging-rebuilt.js';
 import { classifyRunnerFailure } from './refusals.js';
 
 const URLS = { public: process.env.M1SR_A3_PUBLIC_ADMIN_URL, ext: process.env.M1SR_A3_EXT_ADMIN_URL, neg: process.env.M1SR_A3_NEG_ADMIN_URL };
 const REF = 'abcdefghijklmnopqrst';
 const FAKE_URL = `postgresql://postgres.${REF}:redacted-pw@aws-0-us-east-2.pooler.supabase.com:5432/postgres`;
 const RUNNER = 'tr_m1_runner';
+/** A second Supabase-like login that did not create recruiter_api, so it has no ADMIN on it (the role matrix's missing-ADMIN case). */
+const NO_ADMIN_RUNNER = 'tr_m1_runner_noadmin';
 const M1_ROLES = ['recruiter_api', 'recruiter_app', 'recruiter_maintenance'];
 const NEG_EXEC_MESSAGE = 'M1: the runner cannot pass on EXECUTE on PostGIS routine(s) st_distance, st_dwithin, st_makeline, st_makepoint, st_setsrid, st_x, st_y to recruiter_api (it needs EXECUTE WITH GRANT OPTION, or PUBLIC must keep EXECUTE)';
 const NEG_MESSAGE = 'M1: the runner cannot pass on USAGE on PostGIS schema extensions to recruiter_api (it needs USAGE WITH GRANT OPTION on that schema)';
@@ -98,10 +105,28 @@ const SNAPSHOT_SQL = `select md5(string_agg(x, E'\\n' order by x)) as digest, co
   union all select 'trg:' || tgrelid::regclass::text || '.' || tgname from pg_trigger where not tgisinternal
   union all select 'nsp:' || nspname || ':' || coalesce(nspacl::text, '') || ':' || pg_get_userbyid(nspowner) from pg_namespace
   union all select 'set:' || setdatabase::text || ':' || setrole::text || ':' || setconfig::text from pg_db_role_setting
-  union all select 'mem:' || roleid::regrole::text || '>' || member::regrole::text || ':' || admin_option::text || inherit_option::text || set_option::text from pg_auth_members
+  union all select 'mem:' || roleid::regrole::text || '>' || member::regrole::text || ':' || admin_option::text || inherit_option::text || set_option::text || ':by:' || grantor::regrole::text from pg_auth_members
   union all select 'defacl:' || defaclrole::regrole::text || ':' || defaclnamespace::text || ':' || defaclobjtype::text || ':' || defaclacl::text from pg_default_acl
   union all select 'pubrel:' || prpubid::text || ':' || prrelid::regclass::text from pg_publication_rel
+  union all select 'seqdef:' || seqrelid::regclass::text || ':' || seqtypid::regtype::text || ':' || seqstart || ':' || seqincrement || ':' || seqmin || ':' || seqmax || ':' || seqcache || ':' || seqcycle::text from pg_sequence
 ) s(x)`;
+
+/** Every row of every ordinary table outside the system schemas (application data, the auth shim, the ledgers), as one digest:
+ *  per table its row count and an md5 over its rows as text. Read by the superuser admin, so row-level security hides nothing. */
+const DATA_SNAPSHOT_SQL = `select md5(string_agg(x, E'\\n' order by x)) as digest, count(*)::int as n from (
+  select c.oid::regclass::text || ':' || query_to_xml(format('select count(*) as n, md5(coalesce(string_agg(t::text, %L order by t::text), %L)) as h from %s t', E'\\n', '', c.oid::regclass), false, true, '')::text
+    from pg_class c join pg_namespace n on n.oid = c.relnamespace
+   where c.relkind = 'r' and n.nspname not in ('pg_catalog', 'information_schema') and n.nspname not like 'pg\\_toast%' and n.nspname not like 'pg\\_temp%'
+) s(x)`;
+
+/** Every sequence's counter (null = never called). PostgreSQL never rolls a counter back (nextval is not transactional), so a
+ *  rolled-back run may only move counters forward; the snapshot above covers their definitions, owners and ACLs. */
+const SEQUENCE_STATE_SQL = `select schemaname || '.' || sequencename as s, last_value::text as v from pg_sequences order by 1`;
+/** The only counters the role matrix may move (measured on this suite's databases; any other counter moving is a failure): its
+ *  fixture rows in public.batch_activity and public.contact_suppressions, inserted before the probes, and in a full run also the
+ *  rows M1's own functions write to internal.auth_events during the probes. */
+const MATRIX_FIXTURE_SEQUENCES = ['public.batch_activity_id_seq', 'public.contact_suppressions_id_seq'];
+const MATRIX_FULL_RUN_SEQUENCES = ['internal.auth_events_id_seq', ...MATRIX_FIXTURE_SEQUENCES];
 
 async function main(): Promise<void> {
   if (!URLS.public || !URLS.ext || !URLS.neg) {
@@ -126,7 +151,7 @@ async function main(): Promise<void> {
   };
   // Case 4's database: a copy of the pristine negative database (taken before case 1 touches it; nobody is connected to it yet).
   const negCopyUrl = (() => { const u = new URL(URLS.neg as string); u.pathname = `${u.pathname}_exec`; return u.toString(); })();
-  const existingM1Roles = () => onCluster(async (c) => (await c.query("select rolname from pg_roles where rolname = any($1) or rolname = $2 order by rolname", [M1_ROLES, RUNNER])).rows.map((r) => r.rolname as string));
+  const existingM1Roles = () => onCluster(async (c) => (await c.query("select rolname from pg_roles where rolname = any($1) order by rolname", [[...M1_ROLES, RUNNER, NO_ADMIN_RUNNER]])).rows.map((r) => r.rolname as string));
 
   /** Drops the case's database (only if it carries a task ownership comment) and every role the case made. */
   const dropCase = async (dbUrl: string) => {
@@ -137,7 +162,7 @@ async function main(): Promise<void> {
         assert.match(comment ?? '', /^a3-task-owned:/, `refusing: ${db} is not task-owned`);
         await c.query(`drop database ${db}`);
       }
-      for (const r of [...M1_ROLES, RUNNER]) await c.query(`drop role if exists ${r}`);
+      for (const r of [...M1_ROLES, RUNNER, NO_ADMIN_RUNNER]) await c.query(`drop role if exists ${r}`);
     });
   };
 
@@ -167,13 +192,15 @@ async function main(): Promise<void> {
     }
   };
 
-  /** One staging-runner action (its real plan and executor) as the runner login, on its own connection. */
-  const runAsRunner = async (dbUrl: string, action: string) => {
+  /** One staging-runner action (its real plan and executor) as the runner login (or `login`), on its own connection. `alter` changes
+   *  the real plan in memory only, for the injected failure cases; the SQL files are never touched. */
+  const runAsRunner = async (dbUrl: string, action: string, opts: { login?: string; alter?: (p: RebuiltSqlPlan) => RebuiltSqlPlan } = {}) => {
     const runnerUrl = new URL(dbUrl);
-    runnerUrl.username = RUNNER;
+    runnerUrl.username = opts.login ?? RUNNER;
     runnerUrl.password = runnerPw;
     const client = new pg.Client({ connectionString: runnerUrl.toString() });
-    const plan = planRebuiltSqlRun({ action, dbUrl: FAKE_URL, confirm: REBUILT_STAGING_SQL_ACTIONS[action]!.confirmation, recordedRebuiltRef: REF });
+    const real = planRebuiltSqlRun({ action, dbUrl: FAKE_URL, confirm: REBUILT_STAGING_SQL_ACTIONS[action]!.confirmation, recordedRebuiltRef: REF });
+    const plan = opts.alter ? opts.alter(real) : real;
     const log = console.log; const err = console.error;
     const events: Array<Record<string, unknown>> = [];
     console.log = (...a: unknown[]) => { try { events.push(JSON.parse(String(a[0]))); } catch { /* not an event */ } };
@@ -190,6 +217,30 @@ async function main(): Promise<void> {
     return { error, events, plan };
   };
   const describe = (e: (Error & { code?: string; id?: string }) | undefined) => `error=${e?.id ?? ''} ${e?.code ?? ''} ${e?.message ?? ''}`;
+
+  /** What a rolled-back role matrix run must not change: the catalogue snapshot (memberships with grantor and options included), every
+   *  table's rows, and the sequence counters (read separately: they may only move forward). */
+  const stateOf = async (admin: pg.Client) => ({
+    catalogue: (await admin.query(SNAPSHOT_SQL)).rows[0] as { digest: string; n: number },
+    data: (await admin.query(DATA_SNAPSHOT_SQL)).rows[0] as { digest: string; n: number },
+    sequences: new Map((await admin.query(SEQUENCE_STATE_SQL)).rows.map((r) => [r.s as string, r.v as string | null])),
+  });
+  type State = Awaited<ReturnType<typeof stateOf>>;
+  /** Empty when nothing was left behind; otherwise what differs. Sequence counters that moved forward are returned separately. */
+  const compareStates = (before: State, after: State) => {
+    const problems: string[] = [];
+    if (before.catalogue.digest !== after.catalogue.digest || before.catalogue.n !== after.catalogue.n) problems.push(`catalogue ${before.catalogue.n}->${after.catalogue.n}`);
+    if (before.data.digest !== after.data.digest || before.data.n !== after.data.n) problems.push(`table rows (${before.data.n}->${after.data.n} tables)`);
+    const advanced: string[] = [];
+    for (const name of new Set([...before.sequences.keys(), ...after.sequences.keys()])) {
+      const b = before.sequences.get(name), a = after.sequences.get(name);
+      if (!before.sequences.has(name) || !after.sequences.has(name)) problems.push(`sequence ${name} appeared or vanished`);
+      else if (a === b) continue;
+      else if (a !== null && a !== undefined && (b === null || BigInt(a) > BigInt(b as string))) advanced.push(name);
+      else problems.push(`sequence ${name} moved back or was reset`);
+    }
+    return { problems, advanced: advanced.sort() };
+  };
 
   const assertApplied = async (label: string, dbUrl: string, schema: string, setup: (admin: pg.Client) => Promise<void>) => {
     const o = await applyAsRunner(dbUrl, setup);
@@ -227,17 +278,64 @@ async function main(): Promise<void> {
         const ev = s.events.find((e) => e.msg === 'staging-sql.batch_delete_compare');
         check(`${label}: batch-delete-compare as the runner reports match true`, s.error === undefined && ev?.match === true, `${describe(s.error)} ${JSON.stringify(ev)}`);
       }
+      // PostgreSQL records the bootstrap superuser as grantor of the ADMIN-only membership it gives a CREATEROLE creator (PG16).
+      const runnerGrantor = (await q(`select grantor::regrole::text as g from pg_auth_members where roleid = 'recruiter_api'::regrole and member = $1::regrole`, [RUNNER]))[0]?.g as string;
+      check(`${label}: the runner's ADMIN-only recruiter_api membership was granted by the bootstrap superuser`,
+        runnerGrantor === (await q(`select rolname from pg_roles where oid = 10`))[0]?.rolname, String(runnerGrantor));
+      const adminOnlyMembership = async () => {
+        const mem = (await o.admin.query(`select admin_option, inherit_option, set_option, grantor::regrole::text as grantor from pg_auth_members where roleid = 'recruiter_api'::regrole and member = $1::regrole`, [RUNNER])).rows;
+        return { ok: JSON.stringify(mem) === `[{"admin_option":true,"inherit_option":false,"set_option":false,"grantor":"${runnerGrantor}"}]`, detail: JSON.stringify(mem) };
+      };
+      // Failure paths of role-matrix-m1 as the runner (Codex review thr_yb422uqwxk, TRUCKRECRU-134), before the passing run. Each must fail
+      // closed (the error, step_failed, no step_done), and after the executor has closed the failed connection nothing may be left
+      // behind: catalogue (memberships with grantor and options), every table's rows, sequences only moved forward, and the runner's
+      // recruiter_api membership again the ADMIN-only grant (so the matrix's SET-option grant was undone, not kept).
+      const failsClosed = async (name: string, expect: { code: string; message: (m: string) => boolean }, opts: Parameters<typeof runAsRunner>[2], allowedAdvance: string[]) => {
+        const before = await stateOf(o.admin);
+        const s = await runAsRunner(dbUrl, 'role-matrix-m1', opts);
+        check(`${label}: ${name} fails closed with ${expect.code} (step_failed, no step_done, no matrix counts)`, s.error?.code === expect.code && expect.message(s.error?.message ?? '')
+          && s.events.some((e) => e.msg === 'staging-sql.step_failed') && !s.events.some((e) => e.msg === 'staging-sql.step_done' || e.msg === 'staging-sql.role_matrix'), describe(s.error));
+        const cmp = compareStates(before, await stateOf(o.admin));
+        const mem = await adminOnlyMembership();
+        check(`${label}: ${name} left nothing behind once the executor closed the failed connection (catalogue incl. membership grantor/options, table rows, sequences${allowedAdvance.length ? ` only ${allowedAdvance.join(', ')} moved forward` : ' unmoved'})`,
+          cmp.problems.length === 0 && JSON.stringify(cmp.advanced) === JSON.stringify(allowedAdvance) && mem.ok, `${cmp.problems.join('; ')} advanced=${cmp.advanced.join(',')} membership=${mem.detail}`);
+      };
+      /** Inserts `sql` once after the only match of `anchor` in the matrix step, in memory; refuses if the anchor is not exactly once there. */
+      const inject = (anchor: string, sql: string) => (p: RebuiltSqlPlan): RebuiltSqlPlan => {
+        assert.equal(p.steps.length, 1, 'role-matrix-m1 is one step');
+        const text = p.steps[0]!.sql;
+        assert.equal(text.split(anchor).length, 2, `injection anchor must occur exactly once: ${anchor}`);
+        return { ...p, steps: [{ ...p.steps[0]!, sql: text.replace(anchor, `${anchor}\n${sql}\n`) }] };
+      };
+      await failsClosed('wrong gate (the runner verified a different project ref)', { code: 'P0001', message: (m) => m.startsWith('role matrix refused:') },
+        { alter: (p) => ({ ...p, settings: p.settings.map(([k, v]) => (k === 'app.staging_runner_verified_ref' ? [k, 'zzzzzzzzzzzzzzzzzzzz'] as const : [k, v] as const)) }) }, []);
+      // P0098 instead of 22012 would mean the SET option was not there yet, i.e. the injection did not land after the grant.
+      await failsClosed('error right after the SET-option grant', { code: '22012', message: () => true },
+        { alter: inject('$set_option$;', `do $inj$ begin if not pg_has_role(current_user, 'recruiter_api', 'SET') then raise exception using errcode = 'P0098', message = 'injected: no SET option yet'; end if; perform 1/0; end $inj$;`) }, []);
+      await failsClosed('error mid-probe (after SET ROLE recruiter_api and earlier probes recorded)', { code: '22012', message: () => true },
+        { alter: inject('select pg_temp.as_session(null);', `do $inj$ begin if current_user <> 'recruiter_api' or (select count(*) from _results) = 0 then raise exception using errcode = 'P0098', message = 'injected: not mid-probe'; end if; perform 1/0; end $inj$;`) }, MATRIX_FIXTURE_SEQUENCES);
       {
-        const before = (await o.admin.query(SNAPSHOT_SQL)).rows[0];
+        // A second Supabase-like login with no ADMIN on recruiter_api (it did not create it): the matrix's grant is refused.
+        await o.admin.query(`create role ${NO_ADMIN_RUNNER} login nosuperuser createrole inherit password '${runnerPw.replace(/'/g, "''")}'`);
+        try {
+          check(`${label}: the second login has no ADMIN, SET or membership on recruiter_api`,
+            (await q(`select not pg_has_role($1, 'recruiter_api', 'MEMBER') and not exists (select 1 from pg_auth_members where roleid = 'recruiter_api'::regrole and member = $1::regrole) as ok`, [NO_ADMIN_RUNNER]))[0]?.ok === true);
+          await failsClosed('a runner without ADMIN on recruiter_api', { code: '42501', message: (m) => m === 'permission denied to grant role "recruiter_api"' }, { login: NO_ADMIN_RUNNER }, []);
+        } finally {
+          await o.admin.query(`drop role ${NO_ADMIN_RUNNER}`);
+        }
+      }
+      {
+        const before = await stateOf(o.admin);
         const s = await runAsRunner(dbUrl, 'role-matrix-m1');
         const ev = s.events.find((e) => e.msg === 'staging-sql.role_matrix');
         check(`${label}: role-matrix-m1 as the runner passes 62/62`, s.error === undefined && JSON.stringify(ev) === '{"msg":"staging-sql.role_matrix","ok":true,"total":62,"passed":62,"failed":0}'
           && s.events.some((e) => e.msg === 'staging-sql.step_done'), `${describe(s.error)} ${JSON.stringify(ev)}`);
-        const after = (await o.admin.query(SNAPSHOT_SQL)).rows[0];
-        check(`${label}: the role matrix left nothing behind (catalogue snapshot identical, so the runner's memberships too)`, before.digest === after.digest && before.n === after.n, `before=${before.n} after=${after.n}`);
-        const mem = (await o.admin.query(`select admin_option, inherit_option, set_option from pg_auth_members where roleid = 'recruiter_api'::regrole and member = $1::regrole`, [RUNNER])).rows;
-        check(`${label}: after the role matrix the runner's recruiter_api membership is still only the ADMIN-only grant`,
-          JSON.stringify(mem) === '[{"admin_option":true,"inherit_option":false,"set_option":false}]', JSON.stringify(mem));
+        const cmp = compareStates(before, await stateOf(o.admin));
+        check(`${label}: the role matrix left nothing behind (catalogue snapshot incl. membership grantor/options identical, every table's rows identical, sequences only ${MATRIX_FULL_RUN_SEQUENCES.join(', ')} moved forward)`,
+          cmp.problems.length === 0 && JSON.stringify(cmp.advanced) === JSON.stringify(MATRIX_FULL_RUN_SEQUENCES), `${cmp.problems.join('; ')} advanced=${cmp.advanced.join(',')}`);
+        const mem = await adminOnlyMembership();
+        check(`${label}: after the role matrix the runner's recruiter_api membership is still only the ADMIN-only grant (same grantor)`, mem.ok, mem.detail);
       }
       {
         const s = await runAsRunner(dbUrl, 'postgis-placement');
