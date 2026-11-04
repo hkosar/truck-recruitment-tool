@@ -27,9 +27,9 @@
 
 import { builtinModules } from 'node:module';
 import { spawnSync } from 'node:child_process';
-import { existsSync, lstatSync, mkdtempSync, readFileSync, readdirSync, rmSync, rmdirSync, unlinkSync, writeFileSync } from 'node:fs';
+import { existsSync, lstatSync, mkdtempSync, readFileSync, readdirSync, realpathSync, rmSync, rmdirSync, unlinkSync, writeFileSync } from 'node:fs';
 import { tmpdir } from 'node:os';
-import { dirname, join, posix, resolve } from 'node:path';
+import { dirname, isAbsolute, join, posix, relative, resolve } from 'node:path';
 import { fileURLToPath, pathToFileURL } from 'node:url';
 
 export class SimError extends Error {}
@@ -439,6 +439,11 @@ export function findBash() {
   return 'bash';
 }
 
+/** True when p exists (after realpath) strictly inside base, or is base itself. */
+function isInside(base, p) {
+  try { const rel = relative(realpathSync(base), realpathSync(p)); return rel !== '..' && !rel.startsWith('..\\') && !rel.startsWith('../') && !isAbsolute(rel); } catch { return false; }
+}
+
 function removeLink(p) {
   try { rmdirSync(p); } catch { unlinkSync(p); }
 }
@@ -446,21 +451,32 @@ function removeLink(p) {
 // `npm ci|install|i` inside a --run step is replaced by this shim: it junctions <borrow>/<folder>/node_modules into the clone AT THAT MOMENT
 // (so earlier commands, and earlier steps, cannot see it) and exits 0; every other npm command goes to the real npm. The rest of the step's
 // script runs unchanged in bash -e, so a failing command after (or before) the install fails the step.
-const SHIM_JS = `import { appendFileSync, existsSync, realpathSync, symlinkSync } from 'node:fs';
-import { join, relative, resolve } from 'node:path';
+// The target folder is resolved with realpath and must be inside the clone (the clone root itself is fine); a node_modules link that is
+// already there is accepted only when it points at the same borrowed folder, like a repeated real `npm ci`.
+const SHIM_JS = `import { appendFileSync, existsSync, lstatSync, realpathSync, symlinkSync } from 'node:fs';
+import { isAbsolute, join, relative, resolve } from 'node:path';
 const args = process.argv.slice(2);
 const p = args.indexOf('--prefix');
 let dir = resolve(process.cwd(), p >= 0 ? args[p + 1] ?? '' : '.');
 if (!existsSync(join(dir, 'package.json'))) { console.error('ci-sim npm shim: no package.json in ' + dir); process.exit(1); }
 dir = realpathSync(dir);
-const pkg = relative(realpathSync(process.env.CI_SIM_ROOT), dir).replace(/\\\\/g, '/') || '.';
+const root = realpathSync(process.env.CI_SIM_ROOT);
+const rel = relative(root, dir);
+if (rel === '..' || rel.startsWith('..\\\\') || rel.startsWith('../') || isAbsolute(rel)) { console.error('ci-sim npm shim: refusing to install in ' + dir + ', which is outside the clone ' + root); process.exit(1); }
+const pkg = rel.replace(/\\\\/g, '/') || '.';
 const from = join(process.env.CI_SIM_BORROW, pkg, 'node_modules');
 const to = join(dir, 'node_modules');
 if (!existsSync(from)) { console.error('ci-sim npm shim: --borrow has no ' + pkg + '/node_modules to link'); process.exit(1); }
-if (existsSync(to)) { console.error('ci-sim npm shim: ' + to + ' already exists'); process.exit(1); }
-symlinkSync(from, to, 'junction');
-appendFileSync(process.env.CI_SIM_LINKS_LOG, to + '\\n');
-console.log('ci-sim npm shim: linked ' + pkg + '/node_modules (replaces npm ' + args.join(' ') + ')');
+let st = null;
+try { st = lstatSync(to); } catch (e) { if (e.code !== 'ENOENT') throw e; }
+if (st && !st.isSymbolicLink()) { console.error('ci-sim npm shim: ' + to + ' already exists'); process.exit(1); }
+if (st) {
+  if (!existsSync(to) || realpathSync(to) !== realpathSync(from)) { console.error('ci-sim npm shim: ' + to + ' already exists and points somewhere else'); process.exit(1); }
+} else {
+  symlinkSync(from, to, 'junction');
+  appendFileSync(process.env.CI_SIM_LINKS_LOG, to + '\\n');
+}
+console.log('ci-sim npm shim: ' + pkg + '/node_modules is linked (replaces npm ' + args.join(' ') + ')');
 `;
 const SHIM_SH = `#!/bin/sh
 case "$1" in ci|install|i) exec "$CI_SIM_NODE" "$CI_SIM_SHIM_JS" "$@";; esac
@@ -485,6 +501,7 @@ export function runJob({ repo, sha, job, result, nodeExe, borrow, timeoutMs, wor
     if (co.status !== 0) fail(`git checkout ${sha} failed: ${co.stderr}`);
     if (existsSync(join(dir, 'node_modules')) || result.installedAll.some((p) => existsSync(join(dir, p, 'node_modules')))) fail('the clone already has a node_modules');
     for (const pkg of result.installedAll) {
+      if (pkg === '..' || pkg.startsWith('../') || isAbsolute(pkg)) fail(`install folder "${pkg}" is outside the clone`);
       const from = join(borrow, pkg, 'node_modules');
       if (!existsSync(from)) fail(`--borrow has no ${pkg}/node_modules to link`);
     }
@@ -500,7 +517,9 @@ export function runJob({ repo, sha, job, result, nodeExe, borrow, timeoutMs, wor
     for (const step of job.steps) {
       if (step.run === null) { steps.push({ name: step.name, status: 'skipped (uses: action)', output: '' }); continue; }
       if (!ok) { steps.push({ name: step.name, status: 'not run (earlier step failed)', output: '' }); continue; }
-      const r = spawnSync(findBash(), ['-e', '-c', step.run], { cwd: join(dir, step.cwd), env, encoding: 'utf8', timeout: timeoutMs, maxBuffer: 256 * 1024 * 1024 });
+      const cwd = join(dir, step.cwd);
+      if (!isInside(dir, cwd)) fail(`step "${step.name}": working-directory "${step.cwd}" is not a folder inside the clone`);
+      const r = spawnSync(findBash(), ['-e', '-c', step.run], { cwd, env, encoding: 'utf8', timeout: timeoutMs, maxBuffer: 256 * 1024 * 1024 });
       for (const l of readFileSync(linksLog, 'utf8').split('\n').filter(Boolean)) if (!links.includes(l)) links.push(l);
       const output = `${r.stdout ?? ''}${r.stderr ?? ''}${r.error ? `\n${r.error.message}` : ''}`;
       const pass = r.status === 0 && !r.error;
@@ -511,7 +530,7 @@ export function runJob({ repo, sha, job, result, nodeExe, borrow, timeoutMs, wor
   } finally {
     // A junction the shim made may be missing from `links` if bash died before the log was read; read it once more.
     try { for (const l of readFileSync(join(shimDir, 'links.log'), 'utf8').split('\n').filter(Boolean)) if (!links.includes(l)) links.push(l); } catch { /* no shim yet */ }
-    for (const l of links) { try { removeLink(l); } catch { /* reported below */ } }
+    for (const l of links) { try { if (lstatSync(l).isSymbolicLink() && isInside(dir, dirname(l))) removeLink(l); } catch { /* reported below */ } }
     const leftover = links.filter((l) => { try { lstatSync(l); return true; } catch { return false; } });
     if (leftover.length) process.stderr.write(`NOT deleting ${dir}: a junction could not be removed (${leftover.join(', ')})\n`);
     else { rmSync(dir, { recursive: true, force: true }); rmSync(shimDir, { recursive: true, force: true }); }

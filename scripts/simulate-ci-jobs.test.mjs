@@ -213,7 +213,7 @@ test('parseWorkflow: a step with an empty or non-text value is rejected, never d
 });
 
 /** A repo with a workflow, a pipeline/ package and (optionally) more files, committed; runs --run against it and returns { code, text }. */
-function runFixture(t, workflow, files = {}) {
+function runFixture(t, workflow, files = {}, { owned = false } = {}) {
   let bash;
   try { bash = findBash(); } catch { t.skip('no bash'); return null; }
   if (process.platform === 'win32' && !existsSync(bash)) { t.skip('no bash'); return null; }
@@ -230,7 +230,17 @@ function runFixture(t, workflow, files = {}) {
   git(repo, 'add', '-A');
   git(repo, 'commit', '-q', '-m', 'x');
   const lines = [];
-  const code = main(['--run', '--borrow', borrow, '--node', `${process.versions.node.split('.')[0]}=${process.execPath}`], repo, { out: (s) => lines.push(s) });
+  // owned: the clone's parent folder is an owned folder with its own package.json, so an escape would find something to write into
+  const runs = join(tmp, 'runs');
+  const saved = { TMPDIR: process.env.TMPDIR, TEMP: process.env.TEMP, TMP: process.env.TMP };
+  if (owned) { mkdirSync(runs); writeFileSync(join(runs, 'package.json'), '{}'); Object.assign(process.env, { TMPDIR: runs, TEMP: runs, TMP: runs }); }
+  let code;
+  try { code = main(['--run', '--borrow', borrow, '--node', `${process.versions.node.split('.')[0]}=${process.execPath}`], repo, { out: (s) => lines.push(s) }); } catch (e) {
+    if (!owned) throw e;
+    code = e;
+  } finally { for (const [k, v] of Object.entries(saved)) { if (v === undefined) delete process.env[k]; else process.env[k] = v; } }
+  if (owned) assert.deepEqual(readdirSync(runs).filter((n) => n !== 'package.json'), [], 'nothing was written outside the clone and the clones are gone');
+  if (owned) return { code, text: lines.join('\n'), runs };
   const leftovers = readdirSync(tmpdir()).filter((n) => n.startsWith('ci-sim-j-') || n.startsWith('ci-sim-shim-j-'));
   assert.deepEqual(leftovers, [], 'clones and shim folders are deleted');
   assert.ok(existsSync(join(borrow, 'pipeline', NM, 'marker')), 'the borrowed folder is untouched');
@@ -276,4 +286,47 @@ test('--run: a folder is junctioned only from its install step on; an earlier st
 test('--run: an install of a folder the borrow does not have fails the step', (t) => {
   // the static pass accepts it; the borrow has no app/node_modules, which --run reports before running anything
   assert.throws(() => runFixture(t, ONE_JOB('      - name: Install\n        working-directory: app\n        run: npm ci\n'), { 'app/package.json': '{}' }), /--borrow has no app\/node_modules/);
+});
+
+// ---- Round 3 regressions (Codex review of bf0d49a, findings 1-2) ----
+// "owned" runs put the clone in a folder that has its own package.json, so an escaping install would find something to link into.
+
+test('--run: a working-directory outside the clone is refused and nothing is written outside it (finding 1)', (t) => {
+  const r = runFixture(t, ONE_JOB('      - name: Escape\n        working-directory: ..\n        run: |\n          npm ci\n'), { '../package.json': '{}' }, { owned: true });
+  if (!r) return;
+  assert.notEqual(r.code, 0, r.text);
+  assert.match(String(r.code?.message ?? r.text), /outside the clone|not a folder inside the clone/);
+});
+
+test('--run: npm ci --prefix .. is refused before any step runs (finding 1)', (t) => {
+  const r = runFixture(t, ONE_JOB('      - name: Escape\n        run: npm ci --prefix ..\n'), { '../package.json': '{}' }, { owned: true });
+  if (!r) return;
+  assert.ok(r.code instanceof Error, String(r.code));
+  assert.match(r.code.message, /outside the clone/);
+});
+
+test('--run: a junction inside the clone that points outside it is not an allowed install folder (finding 1)', (t) => {
+  const mk = 'node -e "require(\'fs\').rmSync(\'pipeline\',{recursive:true});require(\'fs\').symlinkSync(\'..\',\'pipeline\',\'junction\')"';
+  const r = runFixture(t, ONE_JOB(`      - name: Escape\n        run: |\n          ${mk}\n          npm ci --prefix pipeline\n`), {}, { owned: true });
+  if (!r) return;
+  assert.equal(r.code, 1, r.text);
+  assert.match(r.text, /outside the clone/);
+});
+
+test('--run: repeated installs in one block and across steps succeed, like real npm (finding 2)', (t) => {
+  const same = runFixture(t, ONE_JOB(`      - name: Twice\n        working-directory: pipeline\n        run: |\n          npm install\n          npm install\n          node -e "require('fs').accessSync('${NM}/marker')"\n`));
+  if (!same) return;
+  assert.equal(same.code, 0, same.text);
+  const across = runFixture(t, ONE_JOB('      - name: One\n        working-directory: pipeline\n        run: npm i\n      - name: Two\n        working-directory: pipeline\n        run: npm install\n      - name: Three\n        run: npm ci --prefix pipeline\n'));
+  assert.equal(across.code, 0, across.text);
+});
+
+test('--run: a node_modules link that points elsewhere, or a real folder, is still refused (finding 2)', (t) => {
+  const elsewhere = runFixture(t, ONE_JOB(`      - name: Odd\n        working-directory: pipeline\n        run: |\n          node -e "require('fs').mkdirSync('../other');require('fs').symlinkSync('../other','${NM}','junction')"\n          npm ci\n`));
+  if (!elsewhere) return;
+  assert.equal(elsewhere.code, 1, elsewhere.text);
+  assert.match(elsewhere.text, /points somewhere else/);
+  const real = runFixture(t, ONE_JOB(`      - name: Odd\n        working-directory: pipeline\n        run: |\n          node -e "require('fs').mkdirSync('${NM}')"\n          npm ci\n`));
+  assert.equal(real.code, 1, real.text);
+  assert.match(real.text, /already exists/);
 });
