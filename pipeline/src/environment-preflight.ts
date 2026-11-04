@@ -41,6 +41,9 @@ export const EVENT_TRIGGERS_SQL = `select e.evtname::text as name, e.evtevent::t
   from pg_event_trigger e join pg_proc p on p.oid = e.evtfoid
  order by e.evtname limit ${LIST_LIMIT}`;
 
+/** The server's version as a number (for example 160006); only its major part is ever printed (see serverMajor). */
+export const SERVER_VERSION_SQL = "select current_setting('server_version_num') as server_version_num";
+
 export const EVENT_TRIGGER_COUNT_SQL = 'select count(*)::int as total from pg_event_trigger';
 
 /** One row per explicit default-ACL entry of the connected login: who, which object kind, which scope, which privilege. */
@@ -73,6 +76,7 @@ export type PrivilegeCells = Record<`${ObjKind}_${Scope}`, string[]>;
 export interface DefaultAclRow { grantee: string | null; objtype: string; scope: string; privilege: string; grantable: boolean }
 
 export interface EnvironmentReport {
+  serverVersionNum: unknown;
   eventTriggers: { total: number; listed: Array<{ name: string; event: string; enabled: string; function: string }> };
   rolesPresent: string[];
   defaults: { rows: DefaultAclRow[] };
@@ -80,13 +84,26 @@ export interface EnvironmentReport {
 }
 
 export async function runEnvironmentPreflight(client: RebuiltSqlClient): Promise<EnvironmentReport> {
+  const serverVersionNum = ((await client.query(SERVER_VERSION_SQL)).rows[0] as { server_version_num?: unknown } | undefined)?.server_version_num;
   const triggerRows = (await client.query(EVENT_TRIGGERS_SQL)).rows as Array<{ name: string; event: string; enabled: string; function: string }>;
   // Counted separately from the (capped) list so that zero is an observed zero and a cut-off list is visible.
   const total = ((await client.query(EVENT_TRIGGER_COUNT_SQL)).rows[0] as { total: number }).total;
   const rolesPresent = ((await client.query(ROLES_PRESENT_SQL)).rows as Array<{ role: string }>).map((r) => r.role);
   const rows = (await client.query(DEFAULT_PRIVILEGES_SQL)).rows as DefaultAclRow[];
   const authenticator = (await client.query(AUTHENTICATOR_SETTING_SQL)).rows[0] as EnvironmentReport['authenticator'];
-  return { eventTriggers: { total, listed: triggerRows }, rolesPresent, defaults: { rows }, authenticator };
+  return { serverVersionNum, eventTriggers: { total, listed: triggerRows }, rolesPresent, defaults: { rows }, authenticator };
+}
+
+/**
+ * The PostgreSQL major version as one of four fixed words. The input is `server_version_num` (six digits from version 10 on:
+ * 160006 is 16.6). Anything that is not exactly six digits, or whose major is not 15, 16 or 17, is `other`: no full version,
+ * no text from the server is ever passed through. Doc 16 and the role-password tool need PG16 (the M1 runbook step 7.2 STOP rule).
+ */
+export function serverMajor(v: unknown): '15' | '16' | '17' | 'other' {
+  const text = typeof v === 'string' ? v : typeof v === 'number' && Number.isSafeInteger(v) ? String(v) : '';
+  if (!/^[0-9]{6}$/.test(text)) return 'other';
+  const major = text.slice(0, 2);
+  return major === '15' || major === '16' || major === '17' ? major : 'other';
 }
 
 const listed = (v: unknown, reviewed: readonly string[], fallback: string): string => (typeof v === 'string' && reviewed.includes(v) ? v : fallback);
@@ -114,6 +131,7 @@ export function summariseDefaults(rows: readonly DefaultAclRow[]): { byGrantee: 
 /** Prints identifiers (checked), enumerated words, booleans and counts only; the manager reads these lines. */
 export function reportEnvironmentPreflight(r: EnvironmentReport): void {
   const line = (o: Record<string, unknown>) => console.log(JSON.stringify(o));
+  line({ msg: 'staging-sql.server_major', major: serverMajor(r.serverVersionNum) });
   const total = Number.isSafeInteger(r.eventTriggers.total) ? r.eventTriggers.total : -1;
   line({ msg: 'staging-sql.environment_event_triggers', count: total, listed: r.eventTriggers.listed.length, truncated: total > r.eventTriggers.listed.length });
   r.eventTriggers.listed.forEach((e, i) => line({

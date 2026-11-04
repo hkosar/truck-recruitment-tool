@@ -17,6 +17,7 @@ export const TESTS = [
   'src/retention-secure-a3-pki-guard.test.ts',
   'src/role-matrix-a3.test.ts',
   'src/role-password.test.ts',
+  'src/server-major.test.ts',
   'src/staging2-pooler-guard.test.ts',
   'src/target-guard-messages.test.ts',
 ];

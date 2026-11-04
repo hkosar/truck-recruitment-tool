@@ -6,7 +6,7 @@
 
 import assert from 'node:assert/strict';
 import pg from 'pg';
-import { LIST_LIMIT, reportEnvironmentPreflight, runEnvironmentPreflight, summariseDefaults } from './environment-preflight.js';
+import { LIST_LIMIT, serverMajor, reportEnvironmentPreflight, runEnvironmentPreflight, summariseDefaults } from './environment-preflight.js';
 
 const ADMIN = process.env.ENVPRE_A3_ADMIN_URL;
 
@@ -47,6 +47,13 @@ async function main(): Promise<void> {
     check('baseline: all four API-related roles are seen as present', ['anon', 'authenticated', 'service_role', 'authenticator'].every((r) => base.rolesPresent.includes(r)));
     check('baseline: zero event triggers is a valid, observed zero', base.eventTriggers.total === 0 && base.eventTriggers.listed.length === 0);
     check('baseline: no pgrst.db_schemas setting on authenticator', base.authenticator.authenticator_exists === true && base.authenticator.role_wide_entries === 0 && base.authenticator.this_database_entries === 0 && base.authenticator.names_public_if_single === null);
+
+    check('server major: the real cluster is PostgreSQL 16 (the local runner cluster), as version number and as printed line', serverMajor(base.serverVersionNum) === '16' && /^16[0-9]{4}$/.test(String(base.serverVersionNum)));
+    const majorOut: string[] = [];
+    const lm = console.log;
+    console.log = (...a: unknown[]) => { majorOut.push(String(a[0])); };
+    try { reportEnvironmentPreflight(base); } finally { console.log = lm; }
+    check('server major: the report prints exactly one staging-sql.server_major line and it says "16"', majorOut.filter((x) => x.includes('staging-sql.server_major')).length === 1 && majorOut.includes('{"msg":"staging-sql.server_major","major":"16"}'));
 
     // ---- partial grants are told apart from full ones (the review's counterexample)
     await c.query('alter default privileges in schema public grant select on tables to authenticated; alter default privileges in schema public grant select on sequences to authenticated;');

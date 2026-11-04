@@ -101,6 +101,7 @@ when needed, $0; (c) transfer it to a Free organization and pause it, $0, restor
    many `pgrst.db_schemas` settings exist on the `authenticator` role (role-wide and for this database) and,
    only when exactly one exists, whether it names `public`, otherwise `"unknown"`; this is a fact about that
    setting and is explicitly not the Data API switch or the exposed-schema list the running API uses.
+   It also prints one fixed line, `{"msg":"staging-sql.server_major","major":"16"}`, with the server's PostgreSQL major version as `15`, `16`, `17` or `other` (from `server_version_num`; no full version string): the M1 runbook step 7.2 STOP rule and the role-password tool need `16`.
    Expected values, from the reviewed migrations, for the manager's comparison only:
    `20260720001500_service_role_pipeline_grants.sql` grants `service_role` table DML, sequence USAGE+SELECT and
    function EXECUTE by default in `public` for the executing creator (explicit entries need not exist before
