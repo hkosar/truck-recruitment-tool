@@ -9,7 +9,10 @@
 //   2. PostGIS in public (PUBLIC keeps EXECUTE on the PostGIS routines, as on hosted Supabase): M1 must apply;
 //   3. PostGIS in "extensions", USAGE WITH GRANT OPTION: M1 must apply.
 // After an apply: recruiter_api works for spatial calls, and the login's recruiter_api membership is again only the ADMIN-only
-// grant PostgreSQL made (the self-check revoked exactly what it granted).
+// grant PostgreSQL made (the self-check revoked exactly what it granted). Then, as the same login and through the real runner
+// plans, runbook v3.3 sections 3.2-3.6 (TRUCKRECRU-126): apply-m1b, apply-m1c, batch-delete-compare (match true), role-matrix-m1
+// (62/62, catalogue unchanged afterwards, membership still ADMIN-only) and postgis-placement. Like hosted Supabase (assumed, not
+// verified), the login is made a member of anon, authenticated and service_role by the superuser.
 // Needs its OWN throwaway cluster (roles are cluster-wide and no recruiter_* role may exist before a case) with three databases
 // built by scripts/a3-build-test-db.mjs --no-m1 --no-m1b --no-m1c (the two "extensions" ones with --postgis-schema extensions).
 // Each case drops its database and the roles it made afterwards. Skipped unless all three URLs are set; loopback tr_ only.
@@ -18,7 +21,7 @@
 import assert from 'node:assert/strict';
 import { randomBytes } from 'node:crypto';
 import pg from 'pg';
-import { executeRebuiltSqlPlan, planRebuiltSqlRun } from './staging-rebuilt.js';
+import { executeRebuiltSqlPlan, planRebuiltSqlRun, REBUILT_STAGING_SQL_ACTIONS } from './staging-rebuilt.js';
 
 const URLS = { public: process.env.M1SR_A3_PUBLIC_ADMIN_URL, ext: process.env.M1SR_A3_EXT_ADMIN_URL, neg: process.env.M1SR_A3_NEG_ADMIN_URL };
 const REF = 'abcdefghijklmnopqrst';
@@ -130,29 +133,15 @@ async function main(): Promise<void> {
       const pwLiteral = `'${runnerPw.replace(/'/g, "''")}'`;
       await admin.query(`create role ${RUNNER} login nosuperuser createrole inherit password ${pwLiteral}`);
       await admin.query(HANDOVER_SQL);
+      // Hosted Supabase makes postgres a member of anon, authenticated and service_role (granted by the superuser, so with the SET
+      // option); the role matrix switches to anon and authenticated. Assumed from Supabase's role setup, not verified on staging-2.
+      await admin.query(`grant anon, authenticated, service_role to ${RUNNER}`);
       await setup(admin);
       const runnerFacts = (await admin.query(`select rolsuper, rolcreaterole, rolinherit, current_setting('server_version_num')::int >= 160000 as pg16 from pg_roles where rolname = $1`, [RUNNER])).rows[0];
       check(`${new URL(dbUrl).pathname.slice(1)}: the runner login is NOSUPERUSER CREATEROLE INHERIT on PostgreSQL 16+`, runnerFacts.rolsuper === false && runnerFacts.rolcreaterole === true && runnerFacts.rolinherit === true && runnerFacts.pg16 === true);
       const before = (await admin.query(SNAPSHOT_SQL)).rows[0];
 
-      const runnerUrl = new URL(dbUrl);
-      runnerUrl.username = RUNNER;
-      runnerUrl.password = runnerPw;
-      const client = new pg.Client({ connectionString: runnerUrl.toString() });
-      const plan = planRebuiltSqlRun({ action: 'apply-m1', dbUrl: FAKE_URL, confirm: 'APPLY TNBS M1', recordedRebuiltRef: REF });
-      const log = console.log; const err = console.error;
-      const events: Array<Record<string, unknown>> = [];
-      console.log = (...a: unknown[]) => { try { events.push(JSON.parse(String(a[0]))); } catch { /* not an event */ } };
-      console.error = console.log;
-      let error: (Error & { code?: string }) | undefined;
-      try {
-        await executeRebuiltSqlPlan(plan, () => client as never);
-      } catch (e) {
-        error = e as Error & { code?: string };
-      } finally {
-        console.log = log; console.error = err;
-        await client.end().catch(() => undefined);
-      }
+      const { error, events, plan } = await runAsRunner(dbUrl, 'apply-m1');
       const after = (await admin.query(SNAPSHOT_SQL)).rows[0];
       return { admin, error, events, before, after, plan };
     } catch (e) {
@@ -160,6 +149,30 @@ async function main(): Promise<void> {
       throw e;
     }
   };
+
+  /** One staging-runner action (its real plan and executor) as the runner login, on its own connection. */
+  const runAsRunner = async (dbUrl: string, action: string) => {
+    const runnerUrl = new URL(dbUrl);
+    runnerUrl.username = RUNNER;
+    runnerUrl.password = runnerPw;
+    const client = new pg.Client({ connectionString: runnerUrl.toString() });
+    const plan = planRebuiltSqlRun({ action, dbUrl: FAKE_URL, confirm: REBUILT_STAGING_SQL_ACTIONS[action]!.confirmation, recordedRebuiltRef: REF });
+    const log = console.log; const err = console.error;
+    const events: Array<Record<string, unknown>> = [];
+    console.log = (...a: unknown[]) => { try { events.push(JSON.parse(String(a[0]))); } catch { /* not an event */ } };
+    console.error = console.log;
+    let error: (Error & { code?: string; id?: string }) | undefined;
+    try {
+      await executeRebuiltSqlPlan(plan, () => client as never);
+    } catch (e) {
+      error = e as Error & { code?: string; id?: string };
+    } finally {
+      console.log = log; console.error = err;
+      await client.end().catch(() => undefined);
+    }
+    return { error, events, plan };
+  };
+  const describe = (e: (Error & { code?: string; id?: string }) | undefined) => `error=${e?.id ?? ''} ${e?.code ?? ''} ${e?.message ?? ''}`;
 
   const assertApplied = async (label: string, dbUrl: string, schema: string, setup: (admin: pg.Client) => Promise<void>) => {
     const o = await applyAsRunner(dbUrl, setup);
@@ -186,6 +199,35 @@ async function main(): Promise<void> {
         check(`${label}: recruiter_api can run the spatial matcher`, typeof r.n === 'number');
       } finally {
         await o.admin.query('rollback');
+      }
+      // Runbook v3.3 sections 3.2-3.6 after M1, as the same runner login, through the real runner plans (TRUCKRECRU-126).
+      for (const action of ['apply-m1b', 'apply-m1c']) {
+        const s = await runAsRunner(dbUrl, action);
+        check(`${label}: ${action} applies as the Supabase-like runner`, s.error === undefined && s.events.some((e) => e.msg === 'staging-sql.step_done'), describe(s.error));
+      }
+      {
+        const s = await runAsRunner(dbUrl, 'batch-delete-compare');
+        const ev = s.events.find((e) => e.msg === 'staging-sql.batch_delete_compare');
+        check(`${label}: batch-delete-compare as the runner reports match true`, s.error === undefined && ev?.match === true, `${describe(s.error)} ${JSON.stringify(ev)}`);
+      }
+      {
+        const before = (await o.admin.query(SNAPSHOT_SQL)).rows[0];
+        const s = await runAsRunner(dbUrl, 'role-matrix-m1');
+        const ev = s.events.find((e) => e.msg === 'staging-sql.role_matrix');
+        check(`${label}: role-matrix-m1 as the runner passes 62/62`, s.error === undefined && JSON.stringify(ev) === '{"msg":"staging-sql.role_matrix","ok":true,"total":62,"passed":62,"failed":0}'
+          && s.events.some((e) => e.msg === 'staging-sql.step_done'), `${describe(s.error)} ${JSON.stringify(ev)}`);
+        const after = (await o.admin.query(SNAPSHOT_SQL)).rows[0];
+        check(`${label}: the role matrix left nothing behind (catalogue snapshot identical, so the runner's memberships too)`, before.digest === after.digest && before.n === after.n, `before=${before.n} after=${after.n}`);
+        const mem = (await o.admin.query(`select admin_option, inherit_option, set_option from pg_auth_members where roleid = 'recruiter_api'::regrole and member = $1::regrole`, [RUNNER])).rows;
+        check(`${label}: after the role matrix the runner's recruiter_api membership is still only the ADMIN-only grant`,
+          JSON.stringify(mem) === '[{"admin_option":true,"inherit_option":false,"set_option":false}]', JSON.stringify(mem));
+      }
+      {
+        const s = await runAsRunner(dbUrl, 'postgis-placement');
+        const ev = s.events.find((e) => e.msg === 'staging-sql.postgis_placement');
+        // The shim's PostGIS stand-ins belong to test_ext5, not an extension named postgis, so the true answer here is "absent"
+        // (as in backout-rehearsal-a3.test.ts); this proves only that the read runs for the runner login.
+        check(`${label}: postgis-placement runs as the runner (stand-in extension: "absent")`, s.error === undefined && ev?.schema === 'absent', `${describe(s.error)} ${JSON.stringify(ev)}`);
       }
     } finally {
       await o.admin.end();
