@@ -1,11 +1,12 @@
 // Behaviour tests for the pure helpers of scripts/run-real-db-suites.mjs. No database, no network, no child process of its own.
 import assert from 'node:assert/strict';
+import { readdirSync } from 'node:fs';
 import { tmpdir } from 'node:os';
-import { join, parse } from 'node:path';
+import { join, parse, resolve } from 'node:path';
 import { test } from 'node:test';
 import {
-  CHILD_COLOR_OFF, DEFAULT_TIMEOUT_MS, ENV_ALLOW, SUITE_IDS, classifyOutcome, executeSuite, findSkipLines, isSafeToDelete, makeSh, maskSecrets,
-  nonLoopbackConnectionVars, orderSuites, pgServerOptions, resolveTimeoutMs, restoreStatements, runSuites, scrubbedEnv, stripAnsi, summarize, vitestArgs,
+  CHILD_COLOR_OFF, DEFAULT_TIMEOUT_MS, ENV_ALLOW, EXCLUDED_FILES, SUITE_FILES, SUITE_IDS, classifyOutcome, executeSuite, findSkipLines, isSafeToDelete, makeSh, maskSecrets,
+  nonLoopbackConnectionVars, orderSuites, pgServerOptions, resolveTimeoutMs, restoreStatements, runSuites, scrubbedEnv, stripAnsi, summarize, tlsClusterFiles, vitestArgs,
 } from './run-real-db-suites.mjs';
 
 const ok = { status: 0 };
@@ -108,8 +109,9 @@ test('summary and exit code: skipped, missing and timed-out suites are failures;
   assert.equal(summarize([pass('a'), pass('b'), pass('c')], { expectedIds: ids, priorExitCode: 1 }).exitCode, 1);
   assert.equal(summarize([pass('a'), pass('b'), { id: 'c', status: 'FAIL' }], { expectedIds: ids, priorExitCode: 2 }).exitCode, 2);
   assert.deepEqual(summarize([], { expectedIds: [], priorExitCode: 2 }), { line: '', exitCode: 2, failed: [] });
-  assert.ok(SUITE_IDS.length >= 14);
+  assert.ok(SUITE_IDS.length >= 15);
   assert.ok(SUITE_IDS.includes('role-password'));
+  assert.ok(SUITE_IDS.includes('retention-secure'));
 });
 
 test('server options: loopback only, own port; only the role-password cluster preloads pg_stat_statements and logs failed statements', () => {
@@ -296,4 +298,30 @@ test('executeSuite: a failing "before" step is a FAIL and the suite is not start
   assert.equal(executeSuite({ kind: 'tsx', before: () => 'vite build failed', env: {} }, common).status, 'FAIL');
   assert.equal(ran, false);
   assert.equal(executeSuite({ kind: 'tsx', env: {} }, common).status, 'FAIL');
+});
+
+test('TLS cluster files: ssl on with the throwaway certificate; recruiter_maintenance only over TLS + scram; admin over scram; loopback only', () => {
+  const f = tlsClusterFiles({ certFile: 'C:\\Temp\\rdb-suites-x\\tls-pki\\server.crt', keyFile: '/tmp/rdb-suites-x/tls-pki/server.key' });
+  assert.match(f.conf, /\nssl = on\n/);
+  assert.ok(f.conf.includes("ssl_cert_file = 'C:/Temp/rdb-suites-x/tls-pki/server.crt'"));
+  assert.ok(f.conf.includes("ssl_key_file = '/tmp/rdb-suites-x/tls-pki/server.key'"));
+  assert.deepEqual(f.hba.split('\n').filter(Boolean).map((l) => l.split(/\s+/)), [
+    ['hostssl', 'all', 'recruiter_maintenance', '127.0.0.1/32', 'scram-sha-256'],
+    ['hostnossl', 'all', 'recruiter_maintenance', '127.0.0.1/32', 'reject'],
+    ['host', 'all', 'tr_test_admin', '127.0.0.1/32', 'scram-sha-256'],
+  ]);
+  assert.doesNotMatch(f.hba, /trust|md5|password\b|0\.0\.0\.0|::/);
+  for (const bad of ["C:\\a'b\\server.crt", 'C:\\a\nssl = off', '']) {
+    assert.throws(() => tlsClusterFiles({ certFile: bad, keyFile: 'k' }), /refusing/, JSON.stringify(bad));
+    assert.throws(() => tlsClusterFiles({ certFile: 'c', keyFile: bad }), /refusing/, JSON.stringify(bad));
+  }
+});
+
+test('suite list: every SUITE_FILES entry is a real file; the retention-secure test and its PKI-guard test are both on disk', () => {
+  const root = resolve(import.meta.dirname, '..');
+  const src = readdirSync(join(root, 'pipeline', 'src'));
+  for (const f of SUITE_FILES) assert.ok(readdirSync(join(root, ...f.file.split('/').slice(0, -1))).includes(f.file.split('/').pop()), f.file);
+  assert.ok(SUITE_FILES.some((f) => f.id === 'retention-secure' && f.file === 'pipeline/src/retention-secure-a3.test.ts'));
+  assert.ok(src.includes('retention-secure-a3-pki-guard.test.ts') && !SUITE_FILES.some((f) => /pki-guard/.test(f.file)), 'the PKI-guard test needs no database: it runs in pipeline npm test, not here');
+  assert.ok(EXCLUDED_FILES.every((f) => !/retention-secure/.test(f.file)));
 });

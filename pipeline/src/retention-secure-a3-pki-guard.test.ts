@@ -33,7 +33,6 @@ try {
   refuses('relative/folder', 'a relative path');
   refuses(join(REPOSITORY_ROOT, 'pipeline', 'x'), 'a folder under pipeline');
   refuses(REPOSITORY_ROOT, 'the repository root itself');
-  refuses(REPOSITORY_ROOT.toUpperCase(), 'the repository path in upper case (refused on a case-insensitive file system, a missing outside path elsewhere)');
   refuses(join(REPOSITORY_ROOT, 'pipeline', '..', 'x-' + process.pid), 'a path reaching into the repository through .. segments');
   const nonEmpty = join(sandbox, 'nonempty');
   mkdirSync(nonEmpty);
@@ -68,9 +67,41 @@ try {
 
   // Case differences (Windows file systems are case-insensitive; elsewhere the differently-cased path is simply another, outside, path).
   if (process.platform === 'win32') {
+    refuses(REPOSITORY_ROOT.toUpperCase(), 'the repository path in upper case');
     const swapped = REPOSITORY_ROOT.replace(/[a-z]/g, (c) => c.toUpperCase());
     refuses(join(swapped, 'PIPELINE', 'X'), 'a case-changed path inside the repository');
     refuses(join(swapped.charAt(0).toLowerCase() + swapped.slice(1), '..keys'), 'a case-changed drive letter with ..keys');
+  }
+
+  // UNC, network-share and device paths are refused before the file system is touched (review t33 r2, N1: \\localhost\C$\<repo>
+  // reached the repository). Built from the repository path so the share would really point at it; nothing is dialled.
+  const drive = /^[A-Za-z]:/.test(REPOSITORY_ROOT) ? REPOSITORY_ROOT.charAt(0) : 'C';
+  const tail = REPOSITORY_ROOT.replace(/^[A-Za-z]:[\\/]?/, '').replace(/^[\\/]+/, '');
+  const pid = String(process.pid);
+  const unc = [
+    `\\\\host\\share\\keys-${pid}`,
+    `\\\\localhost\\${drive}$\\${tail}\\unc-${pid}`,
+    `\\\\127.0.0.1\\${drive.toLowerCase()}$\\${tail}\\unc-${pid}`,
+    `\\\\?\\UNC\\localhost\\${drive}$\\${tail}\\unc-${pid}`,
+    `\\\\?\\${drive}:\\${tail}\\dev-${pid}`,
+    `\\\\.\\${drive}:\\${tail}\\dev-${pid}`,
+    `//localhost/${drive}$/${tail.replace(/\\/g, '/')}/unc-${pid}`,
+    `\\\\.\\pipe\\keys-${pid}`,
+    `\\\\.\\PhysicalDrive0`,
+  ];
+  for (const p of unc) {
+    refuses(p, `the UNC / device path ${p}`);
+    if (process.platform === 'win32') assert.throws(() => assertOutsideRepository(p, REPOSITORY_ROOT), /UNC, network-share and device/, `${p}: refused as UNC/device`);
+  }
+  const viaShare = runHelper(unc[1]);
+  assert.equal(viaShare.status, 1, 'admin share: exit 1');
+  assert.match(viaShare.out, /refusing|usage/);
+  assert.equal(existsSync(join(REPOSITORY_ROOT, 'unc-' + pid)), false, 'admin share: nothing written into the repository');
+  if (process.platform === 'win32') {
+    for (const name of ['CON', 'nul', 'NUL.txt', 'com1', 'LPT9.key', 'aux ']) {
+      assert.throws(() => assertOutsideRepository(join(sandbox, name, 'x'), REPOSITORY_ROOT), /reserved device name/, `device name ${name} must be refused`);
+    }
+    assert.doesNotThrow(() => assertOutsideRepository(join(sandbox, 'console', 'connect', 'nullx'), REPOSITORY_ROOT), 'names that only start like a device name are fine');
   }
 
   // Outside folders are accepted (existing or not).
@@ -81,7 +112,7 @@ try {
   assert.equal(good.status, 0, 'outside folder: exit 0 ' + good.out);
   assert.deepEqual(readdirSync(ok).sort(), ['root.crt', 'server.crt', 'server.key']);
   made.push(ok);
-  console.log('PASS pki guard: in-repo (incl. ..name, link, case) refused; outside accepted; helper writes nothing on refusal');
+  console.log('PASS pki guard: in-repo (incl. ..name, link, case on Windows) and UNC / network-share / device paths refused; outside accepted; helper writes nothing on refusal');
 } catch (err) {
   console.error('FAIL pki guard:', err instanceof Error ? err.stack : String(err));
   process.exitCode = 1;

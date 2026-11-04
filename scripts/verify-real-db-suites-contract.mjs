@@ -5,7 +5,7 @@
 
 import { existsSync, readFileSync, readdirSync } from 'node:fs';
 import { resolve } from 'node:path';
-import { EXCLUDED_FILES, SUITE_FILES, SUITE_IDS, nonLoopbackConnectionVars, pgServerOptions, scrubbedEnv } from './run-real-db-suites.mjs';
+import { EXCLUDED_FILES, SUITE_FILES, SUITE_IDS, nonLoopbackConnectionVars, pgServerOptions, scrubbedEnv, tlsClusterFiles } from './run-real-db-suites.mjs';
 
 const root = resolve(import.meta.dirname, '..');
 const src = readFileSync(resolve(root, 'scripts/run-real-db-suites.mjs'), 'utf8').replace(/\r\n/g, '\n');
@@ -33,10 +33,19 @@ check('no spawn call is given process.env as env', !/env:\s*process\.env|\.\.\.p
 const fin = code.match(/\}\s*finally\s*\{([\s\S]*?)\n  \}\n\}/);
 check('a finally block exists and calls cleanup()', Boolean(fin) && /\bcleanup\(\)/.test(fin[1]));
 check('cleanup stops only its own data folders (pg_ctl -D <dataDir> stop, for every cluster this run started)', /\['-D', dataDir, 'stop', '-m', 'fast', '-w'\]/.test(code) && /for \(const dataDir of dataDirs\) \{/.test(code) && /clusterTouched = true;\n\s*dataDirs\.push\(clusterDir\);\n\s*const start = sh\(/.test(code));
-check('both clusters are made inside the temp folder and started through pgServerOptions (loopback only)', /const dataDir = join\(dir, 'data'\);/.test(code) && /const rpDataDir = join\(dir, 'rp-data'\);/.test(code) && /const rpLog = join\(dir, 'rp-server\.log'\);/.test(code)
+check('all three clusters are made inside the temp folder and started through pgServerOptions (loopback only)', /const dataDir = join\(dir, 'data'\);/.test(code) && /const rpDataDir = join\(dir, 'rp-data'\);/.test(code) && /const rpLog = join\(dir, 'rp-server\.log'\);/.test(code)
+  && /const tlsDir = join\(dir, 'tls'\);/.test(code) && /const tlsDataDir = join\(tlsDir, 'data'\);/.test(code) && /startCluster\(tlsDataDir, join\(dir, 'tls-server\.log'\), \{\}, 'tls', \(\) => \{/.test(code)
   && /'-o', pgServerOptions\(p, opts\)/.test(code) && (code.match(/'-o',/g) ?? []).length === 1 && /startCluster\(dataDir, join\(dir, 'server\.log'\), \{\}, 'main'\)/.test(code) && /startCluster\(rpDataDir, rpLog, \{ rolePassword: true \}, 'role-password'\)/.test(code));
 check('role-password runs on its own cluster with its owned database, its server log and pg_stat_statements', /id: 'role-password', \.\.\.tsx\('src\/role-password\.test\.ts', \{ ROLE_PASSWORD_PG_URL: url\(ADMIN_USER, adminPw, 'tr_role_password', rpPort\), ROLE_PASSWORD_PG_LOG: rpLog \}\) \}/.test(code)
   && /comment on database tr_role_password is 'role-password-owned:\$\{ownerToken\}'/.test(code) && /c\.query\('create extension pg_stat_statements'\), \{ onPort: rpPort, database: 'tr_role_password' \}/.test(code));
+check('retention-secure runs BOTH scenarios: the plain one on the main cluster and the TLS one on the TLS cluster with the throwaway root', /id: 'retention-secure', \.\.\.tsx\('src\/retention-secure-a3\.test\.ts', \{\n\s*RETENTION_SECURE_A3_ADMIN_URL: admin\('tr_ret_sec'\), RETENTION_SECURE_A3_MAINT_URL: maint\('tr_ret_sec'\),\n\s*RETENTION_SECURE_A3_TLS_ADMIN_URL: url\(ADMIN_USER, adminPw, 'tr_ret', tlsPort\), RETENTION_SECURE_A3_TLS_MAINT_URL: url\('recruiter_maintenance', maintPw, 'tr_ret', tlsPort\),\n\s*RETENTION_SECURE_A3_TLS_ROOT_CRT: tlsRootCrt,\n\s*\}\),/.test(code)
+  && /\['tr_ret', 'm1', \{ ownerDir: tlsDir, onPort: tlsPort \}\]/.test(code) && /\['tr_ret_sec', 'm1'\]/.test(code));
+check('the TLS cluster: certificates made by the repository helper into the temp folder, its files from tlsClusterFiles, written only inside its own data folder', /const tlsPkiDir = join\(dir, 'tls-pki'\);/.test(code)
+  && /'src\/retention-secure-a3-make-pki\.ts', tlsPkiDir\], \{ cwd: join\(root, 'pipeline'\) \}\)/.test(code) && /const tlsRootCrt = join\(tlsPkiDir, 'root\.crt'\);/.test(code)
+  && /tlsClusterFiles\(\{ certFile: join\(tlsPkiDir, 'server\.crt'\), keyFile: join\(tlsPkiDir, 'server\.key'\) \}\)/.test(code)
+  && /writeFileSync\(join\(dir, 'tls', 'data', 'postgresql\.conf'\), /.test(code) && /writeFileSync\(join\(dir, 'tls', 'data', 'pg_hba\.conf'\), files\.hba\);/.test(code)
+  && /writeFileSync\(join\(dir, 'tls', 'A3_TASK_OWNED'\), ownerToken\);/.test(code) && /if \(configure\) configure\(\);\n\s*let p = await freePort\(\);/.test(code));
+check('the TLS cluster\'s recruiter_maintenance login is given back after every suite too', /restoreStatements\(\{ maintPw, appPw \}\)\.filter\(\(s\) => s\.startsWith\('alter role recruiter_maintenance '\)\)\) await c\.query\(sql\);\n\s*\}, \{ onPort: tlsPort \}\);/.test(code));
 check('cleanup is idempotent and also runs on exit', /if \(cleaned\) return;/.test(code) && /process\.on\('exit', cleanup\)/.test(code));
 check('signals are caught (SIGINT, SIGTERM, SIGBREAK, SIGHUP) and only set a flag', /\['SIGINT', 'SIGTERM', 'SIGBREAK', 'SIGHUP'\]/.test(code) && /const onSignal = \(\) => \{ interrupted = true; \};/.test(code));
 check('deletes only a folder it made (isSafeToDelete guard, made by mkdtempSync in the temp folder)', /if \(isSafeToDelete\(dir, tmpdir\(\)\)\)/.test(code) && /mkdtempSync\(join\(tmpdir\(\), 'rdb-suites-'\)\)/.test(code));
@@ -103,8 +112,16 @@ check('scrubbed environment keeps PATH and drops every connection and secret var
 check('server options: loopback only; only the role-password cluster preloads pg_stat_statements', pgServerOptions(5999) === '-p 5999 -c listen_addresses=127.0.0.1'
   && pgServerOptions(5999, { rolePassword: true }).startsWith('-p 5999 -c listen_addresses=127.0.0.1 ') && /shared_preload_libraries=pg_stat_statements/.test(pgServerOptions(5999, { rolePassword: true })) && !/\*|0\.0\.0\.0/.test(pgServerOptions(5999, { rolePassword: true })));
 
+const tlsf = tlsClusterFiles({ certFile: 'C:\\t\\tls-pki\\server.crt', keyFile: 'C:\\t\\tls-pki\\server.key' });
+const hbaLines = tlsf.hba.split('\n').filter(Boolean);
+check('TLS cluster files: ssl on, forward-slash quoted key paths; recruiter_maintenance only over hostssl + scram (plain rejected); loopback only; no trust',
+  /\nssl = on\n/.test(tlsf.conf) && tlsf.conf.includes("ssl_cert_file = 'C:/t/tls-pki/server.crt'") && tlsf.conf.includes("ssl_key_file = 'C:/t/tls-pki/server.key'")
+  && hbaLines.length === 3 && hbaLines.every((l) => / 127\.0\.0\.1\/32 /.test(l)) && !/trust|0\.0\.0\.0|::|samenet|samehost|all\s+all/.test(tlsf.hba)
+  && /^hostssl\s+all recruiter_maintenance 127\.0\.0\.1\/32 scram-sha-256$/.test(hbaLines[0]) && /^hostnossl all recruiter_maintenance 127\.0\.0\.1\/32 reject$/.test(hbaLines[1])
+  && (() => { try { tlsClusterFiles({ certFile: "C:\\x'y", keyFile: 'k' }); return false; } catch { return true; } })());
+
 if (failures.length) {
   console.error(`FAIL real-database suite runner contract: ${failures.length} check(s) failed:\n- ${failures.join('\n- ')}`);
   process.exit(1);
 }
-console.log(`PASS real-database suite runner contract: loopback-only, refuses non-loopback connection variables, no network or secret store, no process killed, cleanup in finally (each cluster stopped by its own folder, temp folder and app/dist removed), allow-listed child environment, failures, skips and timeouts give a non-zero exit, suite list matches the ${gated.length} env-gated real-PostgreSQL test files on disk (${EXCLUDED_FILES.length} excluded with a reason)`);
+console.log(`PASS real-database suite runner contract: loopback-only, refuses non-loopback connection variables, no network or secret store, no process killed, cleanup in finally (each of the three clusters stopped by its own folder, temp folder with the throwaway TLS key and app/dist removed), retention-secure runs its TLS scenario, allow-listed child environment, failures, skips and timeouts give a non-zero exit, suite list matches the ${gated.length} env-gated real-PostgreSQL test files on disk (${EXCLUDED_FILES.length} excluded with a reason)`);

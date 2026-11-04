@@ -1,8 +1,10 @@
 #!/usr/bin/env node
-// LOCAL ONLY: runs the real-PostgreSQL suites listed in SUITE_FILES (14 suites, see the "Not covered" list below) against throwaway
-// PostgreSQL 16 clusters that this script creates and always removes: one shared by 13 suites, and a second one only for role-password
+// LOCAL ONLY: runs the real-PostgreSQL suites listed in SUITE_FILES (15 suites, see the "Not covered" list below) against throwaway
+// PostgreSQL 16 clusters that this script creates and always removes: one shared by 14 suites, a second one only for role-password
 // (it drops and recreates recruiter_app / recruiter_maintenance, which are cluster-wide, and needs pg_stat_statements preloaded and a
-// server log it can read). It contacts no hosted or staging database, reads no secret store and uses no network except 127.0.0.1.
+// server log it can read), and a third one only for retention-secure's TLS scenario (ssl=on with a throwaway CA, recruiter_maintenance
+// allowed in over hostssl + scram-sha-256 only). It contacts no hosted or staging database, reads no secret store and uses no network
+// except 127.0.0.1.
 //
 // How to run (from the repository root; app/node_modules and pipeline/node_modules must already exist, nothing is installed):
 //   node scripts/run-real-db-suites.mjs
@@ -28,22 +30,25 @@
 //   2. creates a fresh temp folder, runs initdb (scram-sha-256, random passwords kept only in files inside that folder) and starts the
 //      cluster on 127.0.0.1 at a random free port; then the same for the role-password cluster (folder rp-data, pg_stat_statements
 //      preloaded, server log rp-server.log, one database tr_role_password with the "role-password-owned:" comment and the extension);
+//      then the TLS cluster (folder tls\data): pipeline/src/retention-secure-a3-make-pki.ts writes a throwaway root CA and a server
+//      certificate/key into the temp folder (tls-pki, deleted with it), and tlsClusterFiles() turns ssl on and replaces pg_hba.conf;
 //   3. builds the test databases with scripts/a3-build-test-db.mjs, creates three empty owned databases for the suites that need one,
 //      and gives recruiter_maintenance / recruiter_app throwaway logins inside that cluster only;
 //   4. runs each suite with its own database and environment (a time limit per suite), and (for the app suite) one vite build into
 //      app/dist. vite and vitest write their caches under the temp folder, not under node_modules;
-//   5. ALWAYS (success, failure, Ctrl+C, unexpected error): pg_ctl -D <its own folder> stop for each of its two clusters, deletes the
-//      folder (passwords included) and removes app/dist if this run built it. It never signals or stops any other process.
+//   5. ALWAYS (success, failure, Ctrl+C, unexpected error): pg_ctl -D <its own folder> stop for each of its three clusters, deletes the
+//      folder (passwords and the throwaway TLS key included) and removes app/dist if this run built it. It never signals or stops any
+//      other process.
 // If this run is killed so hard that no handler runs (Task Manager, power loss), the folder rdb-suites-* in the temp directory and
-// the postgres processes of its data folders remain: stop them with pg_ctl -D <that folder>\data stop and pg_ctl -D <that folder>\rp-data
-// stop, then delete the folder.
+// the postgres processes of its data folders remain: stop them with pg_ctl -D <that folder>\data stop, pg_ctl -D <that folder>\rp-data
+// stop and pg_ctl -D <that folder>\tls\data stop, then delete the folder.
 //
 // Test isolation: PostgreSQL roles belong to the whole cluster, not to one database. The prod-sql suites run production back-out steps
 // that take two things away from recruiter_app: supabase/backout/retire-app-credentials.sql:13 ("alter role recruiter_app nologin
 // password null": no login, no password) and, through prod-sql-a3.test.ts section 8, supabase/backout/M1-backout.sql:482 ("revoke
 // recruiter_api from recruiter_app": the role through which recruiter_app gets all its rights). So the script (a) puts the prod-sql
 // suites last and (b) after EVERY suite re-applies LOGIN, the password and the recruiter_api membership (restoreStatements), so no suite
-// depends on the order of the others; RDB_SUITES_FIRST=prod-sql proves it (14 of 14). Other cluster-wide changes (authenticator
+// depends on the order of the others; RDB_SUITES_FIRST=prod-sql proves it (15 of 15). Other cluster-wide changes (authenticator
 // settings, zz_ roles, recruiter_maintenance grants) are made and undone by the suites themselves; a suite that crashes half way can leave
 // them behind, which makes later suites FAIL (never a false PASS).
 
@@ -201,6 +206,27 @@ export function pgServerOptions(port, { rolePassword = false } = {}) {
   return rolePassword ? `${base} -c shared_preload_libraries=pg_stat_statements -c log_min_error_statement=error -c logging_collector=off` : base;
 }
 
+/** The two files that make a throwaway cluster the TLS cluster of retention-secure-a3.test.ts: `conf` is appended to postgresql.conf
+ *  (ssl on, the throwaway server certificate and key), `hba` replaces pg_hba.conf: recruiter_maintenance only over TLS with
+ *  scram-sha-256 (a plain connection is rejected), the admin login over scram-sha-256, 127.0.0.1 only; nothing else matches (refused).
+ *  A path with a quote or a line break is refused. Pure. */
+export function tlsClusterFiles({ certFile, keyFile }) {
+  const q = (p) => {
+    const s = String(p).replace(/\\/g, '/');
+    if (!s || /['\r\n]/.test(s)) throw new Error('refusing: a TLS file path that is empty or has a quote or a line break');
+    return `'${s}'`;
+  };
+  return {
+    conf: `\n# run-real-db-suites: TLS cluster for retention-secure\nssl = on\nssl_cert_file = ${q(certFile)}\nssl_key_file = ${q(keyFile)}\n`,
+    hba: [
+      'hostssl   all recruiter_maintenance 127.0.0.1/32 scram-sha-256',
+      'hostnossl all recruiter_maintenance 127.0.0.1/32 reject',
+      `host      all ${ADMIN_USER} 127.0.0.1/32 scram-sha-256`,
+      '',
+    ].join('\n'),
+  };
+}
+
 /** Moves the suite named `first` (if any) to the front; everything else keeps its order. Pure. */
 export function orderSuites(suites, first) {
   if (!first) return suites;
@@ -258,6 +284,7 @@ export const SUITE_FILES = [
   { id: 'reapply-m1c', kind: 'tsx', file: 'pipeline/src/reapply-m1c-a3.test.ts' },
   { id: 'retention-run', kind: 'tsx', file: 'pipeline/src/retention-run-a3.test.ts' },
   { id: 'retention-dry-run', kind: 'tsx', file: 'pipeline/src/retention-a3.test.ts' },
+  { id: 'retention-secure', kind: 'tsx', file: 'pipeline/src/retention-secure-a3.test.ts' },
   { id: 'first-manager', kind: 'tsx', file: 'pipeline/src/first-manager-bootstrap-a3.test.ts' },
   { id: 'owner-bootstrap', kind: 'tsx', file: 'pipeline/src/owner-bootstrap-a3.test.ts' },
   { id: 'environment-preflight', kind: 'tsx', file: 'pipeline/src/environment-preflight-a3.test.ts' },
@@ -391,8 +418,12 @@ async function run() {
     const dataDir = join(dir, 'data');
     const rpDataDir = join(dir, 'rp-data');
     const rpLog = join(dir, 'rp-server.log');
+    const tlsDir = join(dir, 'tls'); // its own owner folder: a3-build-test-db.mjs checks the server's data_directory is <owner-dir>/data
+    const tlsDataDir = join(tlsDir, 'data');
+    const tlsPkiDir = join(dir, 'tls-pki');
     const cacheDir = join(dir, 'caches');
     mkdirSync(cacheDir);
+    mkdirSync(tlsDir);
     const adminPw = token();
     const maintPw = token();
     const appPw = token();
@@ -402,11 +433,14 @@ async function run() {
     writeFileSync(join(dir, 'maintpw.txt'), maintPw);
     writeFileSync(join(dir, 'apppw.txt'), appPw);
     writeFileSync(join(dir, 'A3_TASK_OWNED'), ownerToken);
+    writeFileSync(join(dir, 'tls', 'A3_TASK_OWNED'), ownerToken);
 
-    // Both clusters: same admin login and password (masked), own folder, own random free port, own server log.
-    const startCluster = async (clusterDir, logFile, opts, label) => {
+    // All clusters: same admin login and password (masked), own folder, own random free port, own server log. `configure` runs after
+    // initdb and before the start (the TLS cluster's settings).
+    const startCluster = async (clusterDir, logFile, opts, label, configure) => {
       const init = sh(exe(pgBin, 'initdb'), ['-D', clusterDir, '-U', ADMIN_USER, '-A', 'scram-sha-256', `--pwfile=${join(dir, 'pw.txt')}`, '-E', 'UTF8']);
       if (init.status !== 0) throw new Error(`initdb (${label}) failed: ` + mask(`${init.stdout}${init.stderr}`).split('\n').slice(-6).join(' | '));
+      if (configure) configure();
       let p = await freePort();
       while (p === 5432 || p === 6543) p = await freePort();
       clusterTouched = true;
@@ -424,6 +458,16 @@ async function run() {
     };
     const port = await startCluster(dataDir, join(dir, 'server.log'), {}, 'main');
     const rpPort = await startCluster(rpDataDir, rpLog, { rolePassword: true }, 'role-password');
+    // The TLS cluster: a throwaway CA and server certificate/key from the repository's own helper (it refuses any folder inside the
+    // repository), written into this run's temp folder and deleted with it.
+    const pki = sh(process.execPath, [join(root, 'pipeline', 'node_modules', 'tsx', 'dist', 'cli.mjs'), 'src/retention-secure-a3-make-pki.ts', tlsPkiDir], { cwd: join(root, 'pipeline') });
+    if (pki.status !== 0 || !/wrote root\.crt, server\.crt, server\.key/.test(pki.stdout ?? '')) throw new Error('making the throwaway TLS certificates failed: ' + mask(`${pki.stdout}${pki.stderr}`).split('\n').filter(Boolean).slice(-4).join(' | '));
+    const tlsRootCrt = join(tlsPkiDir, 'root.crt');
+    const tlsPort = await startCluster(tlsDataDir, join(dir, 'tls-server.log'), {}, 'tls', () => {
+      const files = tlsClusterFiles({ certFile: join(tlsPkiDir, 'server.crt'), keyFile: join(tlsPkiDir, 'server.key') });
+      writeFileSync(join(dir, 'tls', 'data', 'postgresql.conf'), readFileSync(join(tlsDataDir, 'postgresql.conf'), 'utf8') + files.conf);
+      writeFileSync(join(dir, 'tls', 'data', 'pg_hba.conf'), files.hba);
+    });
 
     const url = (user, pw, db, onPort = port) => `postgresql://${user}:${encodeURIComponent(pw)}@127.0.0.1:${onPort}/${db}`;
     const admin = (db) => url(ADMIN_USER, adminPw, db);
@@ -434,12 +478,12 @@ async function run() {
     const FLAGS = { full: [], m1: ['--no-m1b', '--no-m1c'], base: ['--no-m1', '--no-m1b', '--no-m1c'] };
     const DBS = [
       ['tr_rm', 'm1'], ['tr_ret', 'm1'], ['tr_bdc', 'full'], ['tr_reapply', 'full'], ['tr_fm', 'full'],
-      ['tr_owner', 'base'], ['tr_envpre', 'base'], ['tr_psql', 'base'], ['tr_rbt', 'full'],
+      ['tr_owner', 'base'], ['tr_envpre', 'base'], ['tr_psql', 'base'], ['tr_rbt', 'full'], ['tr_ret_sec', 'm1'],
     ];
-    const build = (extra) => sh(process.execPath, [join(root, 'scripts', 'a3-build-test-db.mjs'), '--owner-dir', dir, '--port', String(port), ...extra], { cwd: root, env: { ...baseEnv, A3_PGPASSWORD: adminPw } });
-    for (const [db, kind] of DBS) {
-      const r = build(['--db', db, ...FLAGS[kind]]);
-      if (r.status !== 0) throw new Error(`building database ${db} failed (exit ${r.status}): ` + mask(`${r.stdout}${r.stderr}`).split('\n').filter(Boolean).slice(-4).join(' | '));
+    const build = (extra, { ownerDir = dir, onPort = port } = {}) => sh(process.execPath, [join(root, 'scripts', 'a3-build-test-db.mjs'), '--owner-dir', ownerDir, '--port', String(onPort), ...extra], { cwd: root, env: { ...baseEnv, A3_PGPASSWORD: adminPw } });
+    for (const [db, kind, where] of [...DBS.map(([db, kind]) => [db, kind, {}]), ['tr_ret', 'm1', { ownerDir: tlsDir, onPort: tlsPort }]]) {
+      const r = build(['--db', db, ...FLAGS[kind]], where);
+      if (r.status !== 0) throw new Error(`building database ${db}${where.onPort ? ' (tls cluster)' : ''} failed (exit ${r.status}): ` + mask(`${r.stdout}${r.stderr}`).split('\n').filter(Boolean).slice(-4).join(' | '));
       if (interrupted) throw new Error('interrupted');
     }
     const sb = build(['--db', 'tr_signin_test', '--suites', '--run', RUN_ID]);
@@ -453,9 +497,15 @@ async function run() {
       await c.connect();
       try { await fn(c); } finally { await c.end(); }
     };
-    const restoreLogins = () => withAdmin(async (c) => {
-      for (const sql of restoreStatements({ maintPw, appPw })) await c.query(sql);
-    });
+    // On the TLS cluster only recruiter_maintenance logs in (retention-secure); its login is given back after every suite too.
+    const restoreLogins = async () => {
+      await withAdmin(async (c) => {
+        for (const sql of restoreStatements({ maintPw, appPw })) await c.query(sql);
+      });
+      await withAdmin(async (c) => {
+        for (const sql of restoreStatements({ maintPw, appPw }).filter((s) => s.startsWith('alter role recruiter_maintenance '))) await c.query(sql);
+      }, { onPort: tlsPort });
+    };
     await restoreLogins();
     // Three suites need an EMPTY tr_ database carrying an ownership comment; each gets its own.
     await withAdmin(async (c) => {
@@ -489,6 +539,15 @@ async function run() {
       { id: 'reapply-m1c', ...tsx('src/reapply-m1c-a3.test.ts', { REAPPLY_A3_ADMIN_URL: admin('tr_reapply') }) },
       { id: 'retention-run', ...tsx('src/retention-run-a3.test.ts', { RETENTION_A3_ADMIN_URL: admin('tr_ret'), RETENTION_A3_MAINT_URL: maint('tr_ret') }) },
       { id: 'retention-dry-run', ...tsx('src/retention-a3.test.ts', { RETENTION_A3_ADMIN_URL: admin('tr_ret'), RETENTION_A3_MAINT_URL: maint('tr_ret') }) },
+      // Both scenarios: the plain (loopback-exemption) run on the main cluster, and the verify-full TLS + SCRAM-SHA-256-PLUS run on the
+      // TLS cluster. No skip line is allowed, so a missing TLS scenario is a FAIL.
+      {
+        id: 'retention-secure', ...tsx('src/retention-secure-a3.test.ts', {
+          RETENTION_SECURE_A3_ADMIN_URL: admin('tr_ret_sec'), RETENTION_SECURE_A3_MAINT_URL: maint('tr_ret_sec'),
+          RETENTION_SECURE_A3_TLS_ADMIN_URL: url(ADMIN_USER, adminPw, 'tr_ret', tlsPort), RETENTION_SECURE_A3_TLS_MAINT_URL: url('recruiter_maintenance', maintPw, 'tr_ret', tlsPort),
+          RETENTION_SECURE_A3_TLS_ROOT_CRT: tlsRootCrt,
+        }),
+      },
       // The one legitimate "skip:" line: the schema's roster control table allows only one row, so that branch cannot run.
       { id: 'first-manager', ...tsx('src/first-manager-bootstrap-a3.test.ts', { FIRST_MANAGER_A3_ADMIN_URL: admin('tr_fm'), FIRST_MANAGER_A3_APP_URL: app('tr_fm') }, { allowedSkips: ['skip: the roster control table does not allow a second row'] }) },
       { id: 'owner-bootstrap', ...tsx('src/owner-bootstrap-a3.test.ts', { OWNER_A3_ADMIN_URL: admin('tr_owner') }) },
