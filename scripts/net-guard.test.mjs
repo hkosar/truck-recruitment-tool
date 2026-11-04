@@ -212,10 +212,46 @@ test('C2: an inherited setter for Node\'s mark on Array.prototype neither sees n
   sawNoZero({ ...r, out: r.out[0] });
   assert.equal(r.out[1], 1); // only Node's own normalisation touched the setter; the guard's own array never did
 });
-test('C3: replacing net.isIP, net._normalizeArgs and dns.lookup, then syncBuiltinESMExports(), does not change the guard\'s decisions (restored in finally)', () => {
+test('C3: replacing net.isIP and net._normalizeArgs (the caller supplies its own lookup here), then syncBuiltinESMExports(), does not change the guard\'s decisions (restored in finally)', () => {
   blockedZero(run(arrayCase(`const dns = (await import('node:dns')).default; const cjs = net.default; const { syncBuiltinESMExports } = await import('node:module');
     const saved = { isIP: cjs.isIP, normalize: cjs._normalizeArgs, lookup: dns.lookup }; const arg = { host: '0.0.0.0', port, lookup: () => {} };`, `try {
       cjs.isIP = () => 0; cjs._normalizeArgs = () => [{ host: '127.0.0.1', port }, undefined]; dns.lookup = () => {}; syncBuiltinESMExports();
       return await attempt(arg);
     } finally { cjs.isIP = saved.isIP; cjs._normalizeArgs = saved.normalize; dns.lookup = saved.lookup; syncBuiltinESMExports(); }`)));
+});
+test('C3b: replacing dns.lookup, then syncBuiltinESMExports(), does not change the system resolver the guard uses for localhost (restored in finally)', () => {
+  const r = run(`const dns = (await import('node:dns')).default; const { syncBuiltinESMExports } = await import('node:module');
+    const saved = dns.lookup;
+    try {
+      dns.lookup = (n, o, done) => done(null, [{ address: '0.0.0.0', family: 4 }]); syncBuiltinESMExports();
+      return await attempt({ host: 'localhost', port: 9 });
+    } finally { dns.lookup = saved; syncBuiltinESMExports(); }`);
+  assert.equal(r.out, 'stub: reached the real connect');
+  assert.equal(r.reached, 1);
+  assert.ok(r.delivered[0].length > 0 && r.delivered[0].every((a) => a.address === '127.0.0.1' || a.address === '::1'), JSON.stringify(r.delivered));
+});
+// Round 4 notes (TRUCKRECRU-88). Target 0.0.0.0 only; every builtin change is undone in finally.
+test('T2b: a replaced Array.prototype[Symbol.iterator] that shows the check a different list cannot change the answer check', () => {
+  const r = run(`const real = Array.prototype[Symbol.iterator]; let calls = 0;
+    const lookup = (n, o, done) => {
+      Array.prototype[Symbol.iterator] = function () { return ++calls === 2 ? [{ address: '127.0.0.1', family: 4 }].values() : Reflect.apply(real, this, []); };
+      done(null, [{ address: '0.0.0.0', family: 4 }]);
+    };
+    try { return await attempt({ host: 'localhost', port: 9, lookup }); } finally { Array.prototype[Symbol.iterator] = real; }`);
+  assert.equal(r.out, 'net-guard blocked a non-loopback lookup answer for localhost');
+  assert.deepEqual(r.delivered, []); // the stub got an error and no addresses
+});
+test('T1: a replaced Function.prototype.call cannot rewrite the array handed to Node\'s connect', () => {
+  const r = run(`const realCall = Function.prototype.call;
+    Function.prototype.call = function (self, arr) { if (Array.isArray(arr)) arr[0] = { host: '0.0.0.0', port: 9 }; return Reflect.apply(realCall, this, arguments); };
+    try { return await attempt({ host: '127.0.0.1', port: 9 }); } finally { Function.prototype.call = realCall; }`);
+  sawNoZero(r);
+});
+test('blocked tls.connect and https.get fail with "net-guard blocked", not a setServername TypeError, and nothing connects', () => {
+  const r = run(`const tls = await import('node:tls'); const https = await import('node:https');
+    const viaTls = await new Promise((res) => { try { tls.connect({ host: '0.0.0.0', port: 9, servername: 'x.invalid' }).on('error', (e) => res(e.message)); } catch (e) { res('threw: ' + e.message); } });
+    const viaHttps = await new Promise((res) => { try { https.get({ host: 'x.invalid', port: 9, agent: false }, () => {}).on('error', (e) => res(e.message)); } catch (e) { res('threw: ' + e.message); } });
+    return [viaTls, viaHttps];`);
+  assert.deepEqual(r.out, ['net-guard blocked a connect to 0.0.0.0', 'net-guard blocked a connect to x.invalid']);
+  assert.equal(r.reached, 0);
 });

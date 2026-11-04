@@ -24,9 +24,10 @@ import net from 'node:net';
 const { _normalizeArgs, isIP, Socket } = net;
 const systemLookup = dns.lookup;
 const appendFileSync = fs.appendFileSync;
-const { isArray, from: arrayFrom } = Array;
+const { isArray } = Array;
 const { create, defineProperty, getOwnPropertySymbols } = Object;
 const { apply } = Reflect;
+const { nextTick } = process;
 const { stringify } = JSON;
 const lowerFn = String.prototype.toLowerCase;
 const startsFn = String.prototype.startsWith;
@@ -51,10 +52,15 @@ const guardLookup = (resolve) => (name, opts, done) => {
   const options = typeof opts === 'function' ? {} : opts;
   resolve(name, options, (err, address, family) => {
     if (err) { callback(err, address, family); return; }
-    const answer = isArray(address)
-      ? arrayFrom(address, (a) => { const family = a?.family; return { address: String(a?.address), family: typeof family === 'number' ? family : undefined }; })
-      : typeof address === 'string' ? address : undefined;
-    const addresses = typeof answer === 'string' ? [answer] : answer === undefined ? undefined : arrayFrom(answer, (a) => a.address);
+    // Plain index loops over guard-made copies: a replaced Array.prototype[Symbol.iterator] (Array.from, spread) cannot change what is checked.
+    let answer;
+    if (isArray(address)) {
+      answer = [];
+      for (let i = 0; i < address.length; i++) { const a = address[i]; const family = a?.family; answer[i] = { address: String(a?.address), family: typeof family === 'number' ? family : undefined }; }
+    } else answer = typeof address === 'string' ? address : undefined;
+    let addresses;
+    if (typeof answer === 'string') addresses = [answer];
+    else if (answer !== undefined) { addresses = []; for (let i = 0; i < answer.length; i++) addresses[i] = answer[i].address; }
     let loopbackOnly = addresses !== undefined && addresses.length > 0;
     if (addresses !== undefined) for (let i = 0; i < addresses.length; i++) if (!isLoopbackAddress(addresses[i])) loopbackOnly = false;
     if (!loopbackOnly) {
@@ -71,6 +77,10 @@ if (typeof kNormalized !== 'symbol' || kNormalized.description !== 'normalizedAr
 const markDescriptor = create(null);
 markDescriptor.value = true;
 
+// The refusal is delivered on the next tick, not inside connect: tls.connect and https touch the socket's handle right after connect returns
+// (setServername), and a socket destroyed synchronously has no handle, which turned the refusal into a TypeError. Nothing connects in between.
+const refuse = (socket, message) => { nextTick(() => socket.destroy(new Error(message))); };
+
 const realConnect = Socket.prototype.connect;
 Socket.prototype.connect = function (...args) {
   // Decide exactly as Node does: an array is Node's own pre-normalised [options, cb] only when args[0][mark] is truthy (an inherited
@@ -80,11 +90,11 @@ Socket.prototype.connect = function (...args) {
   const callback = norm[1];
   // Whatever happens next, Node gets a fresh array built here with Node's mark; the caller's array is never written to or reused.
   // The mark is defined (never assigned, so no inherited setter runs) with a descriptor that has no prototype (so no inherited get/set can join it).
-  const send = (options) => { const out = [options, callback]; defineProperty(out, kNormalized, markDescriptor); return realConnect.call(this, out); };
-  if (first === null || first === undefined) return send(first); // Node throws on this by itself (it reads .path)
+  const send = (options) => { const out = [options, callback]; defineProperty(out, kNormalized, markDescriptor); return apply(realConnect, this, [out]); };
+  if (first === null || first === undefined) return send(first); // Node throws on this by itself (it reads .port)
   if (typeof first !== 'object' && typeof first !== 'function') { // a number, string, boolean...: Node would read host/port through the primitive's prototype chain, so it is never passed on
     record(`blocked connect with a non-object options value (${typeof first})`);
-    this.destroy(new Error(`net-guard blocked a connect with a ${typeof first} where options were expected`));
+    refuse(this, `net-guard blocked a connect with a ${typeof first} where options were expected`);
     return this;
   }
   // Read each option Node uses to choose a destination ONCE, and hand Node a copy holding exactly those values.
@@ -98,7 +108,7 @@ Socket.prototype.connect = function (...args) {
   const allowed = typeof host !== 'string' ? true /* Node throws on a non-string host before any connect */ : isIP(host) ? isLoopbackAddress(host) : toLower(host) === 'localhost' || supplied;
   if (!allowed) {
     record(`blocked connect to ${host}:${options.port}`);
-    this.destroy(new Error(`net-guard blocked a connect to ${host}`));
+    refuse(this, `net-guard blocked a connect to ${host}`);
     return this;
   }
   if (typeof host === 'string' && !isIP(host)) options.lookup = guardLookup(supplied ? rawLookup : systemLookup); // net looks a name up; an address it does not
