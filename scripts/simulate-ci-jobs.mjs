@@ -315,7 +315,8 @@ export function needsOfFile(src, file, seen = new Set(), follow = false) {
     if (m) out.push({ pkg: m[1], file: f, line: k + 1, text: t, why: `uses ${m[1]}/node_modules` });
     for (const re of BARE_IMPORT) {
       const b = re.exec(t);
-      if (b && !b[1].startsWith('.') && !b[1].startsWith('/') && !BUILTINS.has(b[1])) {
+      // `node:`-prefixed names are always built in (builtinModules on Node 22 omits prefix-only ones such as node:test).
+      if (b && !b[1].startsWith('.') && !b[1].startsWith('/') && !b[1].startsWith('node:') && !BUILTINS.has(b[1])) {
         const pkg = ownerPackage(src, f);
         out.push({ pkg, file: f, line: k + 1, text: t, why: `imports the package "${b[1]}", installed under ${pkg === '.' ? 'the repository root (no job installs there)' : `${pkg}/node_modules`}` });
       }

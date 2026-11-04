@@ -104,7 +104,7 @@ test('static: path styles for app/pipeline node_modules, comments ignored', () =
 });
 
 test('static: bare imports resolve from the nearest package folder, the repository root is never installed', () => {
-  assert.equal(flagsOf({ 'scripts/x.test.mjs': "import { join } from 'node:path';\nimport fs from 'fs';\n" }, wf(job(STEPS_NODE)))[0].flagged, false);
+  assert.equal(flagsOf({ 'scripts/x.test.mjs': "import { join } from 'node:path';\nimport fs from 'fs';\nimport test from 'node:test';\nimport sqlite from 'node:sqlite';\n" }, wf(job(STEPS_NODE)))[0].flagged, false);
   const r = flagsOf({ 'scripts/x.test.mjs': "import pg from 'pg';\n" }, wf(job(INSTALL('pipeline') + STEPS_NODE)));
   assert.equal(r[0].flagged, true);
   assert.equal(r[0].steps.at(-1).flags[0].pkg, '.');
