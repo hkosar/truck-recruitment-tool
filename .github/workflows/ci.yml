@@ -158,7 +158,7 @@ jobs:
       - name: Build
         run: npm run build
 
-  # Repo-level offline checks that need no install, no secrets and no network. Not run in app/ or pipeline/ because they read files across the whole repo.
+  # Repo-level offline checks that need no secrets and no network (only the pipeline packages are installed, for the script tests). Not run in app/ or pipeline/ because they read files across the whole repo.
   repo-checks:
     name: repo checks
     runs-on: ubuntu-latest
@@ -173,6 +173,25 @@ jobs:
         uses: actions/setup-node@v4
         with:
           node-version: 22
+
+      # The script tests include scripts/pipeline-run-tests.test.mjs, which launches pipeline/node_modules/tsx, so this job needs the pipeline packages (same cache and install as the pipeline job). Still no secrets and no network use beyond the npm registry.
+      - name: Cache npm dependencies
+        uses: actions/cache@v4
+        with:
+          path: ~/.npm
+          key: ${{ runner.os }}-npm-pipeline-${{ hashFiles('pipeline/package-lock.json') }}
+          restore-keys: |
+            ${{ runner.os }}-npm-pipeline-
+
+      - name: Install pipeline dependencies
+        working-directory: pipeline
+        run: |
+          if [ -f package-lock.json ]; then
+            npm ci
+          else
+            echo "::warning::pipeline/package-lock.json not found - falling back to 'npm install'. Commit a lockfile and this step will prefer 'npm ci' automatically."
+            npm install
+          fi
 
       # Every scripts/verify-*.mjs contract check (text-level checks of SQL, runbooks and source; none connects anywhere). bash -e stops at the first failure.
       - name: Contract checks (scripts/verify-*.mjs)
