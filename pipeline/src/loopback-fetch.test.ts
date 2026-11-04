@@ -52,9 +52,13 @@ await new Promise<void>((done) => proxyServer.listen(0, '127.0.0.1', done));
 const proxy = { server: proxyServer, port: (proxyServer.address() as AddressInfo).port };
 const target = await listen(() => { targetHits++; }, 'FROM-TARGET');
 const targetUrl = `http://127.0.0.1:${target.port}/auth/v1/admin/users`;
-const proxyEnv = (extra: Record<string, string>) => ({ HTTP_PROXY: `http://127.0.0.1:${proxy.port}`, HTTPS_PROXY: `http://127.0.0.1:${proxy.port}`, ...extra });
+// Both spellings: Node reads http_proxy ?? HTTP_PROXY, so on Linux (case-sensitive env) the blank lowercase name from runChild would win.
+const proxyEnv = (extra: Record<string, string>) => ({ HTTP_PROXY: `http://127.0.0.1:${proxy.port}`, HTTPS_PROXY: `http://127.0.0.1:${proxy.port}`, http_proxy: `http://127.0.0.1:${proxy.port}`, https_proxy: `http://127.0.0.1:${proxy.port}`, ...extra });
+// A Node without env-proxy support (no --use-env-proxy flag) cannot redirect fetch, so the proxy cases have nothing to prove there.
+const envProxySupported = process.allowedNodeEnvironmentFlags.has('--use-env-proxy');
+if (!envProxySupported) console.log(`SKIP env-proxy cases: Node ${process.version} has no --use-env-proxy / NODE_USE_ENV_PROXY support`);
 try {
-  for (const [label, extra] of [['NODE_USE_ENV_PROXY=1', { NODE_USE_ENV_PROXY: '1' }], ['NODE_OPTIONS=--use-env-proxy', { NODE_OPTIONS: '--use-env-proxy' }]] as const) {
+  for (const [label, extra] of envProxySupported ? [['NODE_USE_ENV_PROXY=1', { NODE_USE_ENV_PROXY: '1' }], ['NODE_OPTIONS=--use-env-proxy', { NODE_OPTIONS: '--use-env-proxy' }]] as const : []) {
     // Control: the plain global fetch IS redirected under this setting, so the setup really exercises the proxy.
     proxyHits = 0; targetHits = 0;
     const plain = await runChild('plain', proxyEnv(extra), targetUrl);
@@ -103,7 +107,8 @@ try {
       // Stands in for net: resolve the host with the options' lookup (as net would), then "connect" by failing.
       opened++;
       const o = (Array.isArray(options) ? options[0] : options) as { host?: string; lookup?: (name: string, opts: object, done: (err: Error | null) => void) => void };
-      if (o.lookup && o.host) o.lookup(o.host, {}, (err) => { this.destroy(err ?? new Error('socket opened')); });
+      // Like net: mark the socket connecting, then resolve later (Node 22 attaches the request's error listener only after connect returns).
+      if (o.lookup && o.host) { (this as unknown as { connecting: boolean }).connecting = true; setImmediate(() => o.lookup!(o.host!, {}, (err) => { this.destroy(err ?? new Error('socket opened')); })); }
       else this.destroy(new Error('socket opened'));
       return this;
     } as typeof Socket.prototype.connect;
