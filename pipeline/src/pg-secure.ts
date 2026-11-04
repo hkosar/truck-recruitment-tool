@@ -1,8 +1,10 @@
 import { types } from 'node:util';
 import pg from 'pg';
-import { DbTlsRefusal, dbSecurityFields, isLoopbackHost, scramOnlyClient } from './db-tls.js';
-import { RunnerRefusal } from './refusals.js';
-import { isStaging2PoolerAddress, namesRebuiltStaging } from './target-guard.js';
+import { DbTlsRefusal, dbSecurityFields, scramOnlyClient } from './db-tls.js';
+import { refuseStaging2UnlessPooler } from './staging2-pooler.js';
+
+/** Re-exported: staging2-pooler.ts holds the one copy (no pg import, so the app server uses it too). */
+export { refuseStaging2UnlessPooler };
 
 /**
  * pg clients and pools for the pipeline and its runners, with the hosted-database policy of db-tls.ts: a hosted target
@@ -56,23 +58,7 @@ function checkedExtra<T extends object>(extra: T): T {
   return copy as unknown as T;
 }
 
-/**
- * Staging-2 is reached only through the session pooler (target-guard.ts STAGING2_POOLER_ADDRESS): a target that points at
- * staging-2 by any other host or port is refused here, before a client exists. Every pg client and pool in the pipeline is
- * configured through securePgConfig, so this is the one choke point; the staging-2 planners also call it so a plan-only run
- * refuses too. Fixed text only: never the host, user, password or project ref. Other projects are not affected.
- * Local test databases are not the hosted project: a loopback host, or a name under the reserved `.invalid` top-level domain
- * (RFC 6761: never resolves; the TLS test kit redirects it to a local fake server), is left to db-tls.ts. The planners still
- * refuse both, because parseSupabaseDbTarget accepts only Supabase hosts.
- */
-export function refuseStaging2UnlessPooler(target: { host: string; port: number; user: string; projectRef?: string }): void {
-  const host = String(target.host).toLowerCase();
-  if (isLoopbackHost(host) || host.endsWith('.invalid')) return;
-  if (namesRebuiltStaging(target) && !isStaging2PoolerAddress(target)) {
-    throw new RunnerRefusal('staging2_pooler_required', 'refusing: staging-2 is reached only through the Supabase session pooler (pooler host, port 5432)');
-  }
-}
-
+/** Every pg client and pool in the pipeline is configured here, so the staging-2 pooler check (staging2-pooler.ts) runs before any client exists. */
 export function securePgConfig(target: PgTargetFields): pg.ClientConfig {
   refuseStaging2UnlessPooler(target);
   const { ssl, enableChannelBinding } = dbSecurityFields(target.host);

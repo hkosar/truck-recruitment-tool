@@ -56,6 +56,8 @@ npm run first-manager -- --target=<staging|production> --action=<first-manager-c
 - **Target pinning.** `staging` → the one recorded rebuilt staging project (`target-guard.ts`), the production project is
   `production_refused`, anything else `target_not_recorded_staging`. `production` → exactly the recorded production project
   (`target_not_recorded_production` otherwise); session port 5432 only.
+  A `staging` URL that is not the Supabase session pooler host (`<one label>.pooler.supabase.com`, port 5432), for example
+  the direct `db.<ref>.supabase.co` host, is refused with `staging2_pooler_required` (doc 16 section 2.6), also plan-only.
 - **Typed confirmations** (per target and action, compared exactly):
   - `RUN TNBS FIRST MANAGER CHECK` — read-only report, both targets.
   - `CREATE TNBS STAGING FIRST MANAGER` — staging create.

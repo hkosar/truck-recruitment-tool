@@ -11,7 +11,8 @@
 //  - exactly the four names DATABASE_URL, KEY_LINKS, KEY_SESSIONS, KEY_RATE are present and non-empty;
 //  - DATABASE_URL targets the recorded staging-2 project (pipeline/src/target-guard.ts parseSupabaseDbTarget + RECORDED_PROJECT_REFS),
 //    as the least-privilege login recruiter_app on the session-mode port 5432 (never production, never the old staging project,
-//    never the runner or maintenance login);
+//    never the runner or maintenance login), through the Supabase session pooler host only (target-guard.ts isStaging2PoolerAddress,
+//    refusal staging2_pooler_required; never the direct host db.<ref>.supabase.co);
 //  - EMAIL_MODE is unset or `test`, HOST is unset or 127.0.0.1, and no SENDGRID_* name is present.
 // The child gets ONLY: the base names below, the four secrets, and values this launcher forces (APP_ORIGIN=http://localhost:<port>,
 // EMAIL_MODE=test, HOST=127.0.0.1, PORT, TRUSTED_PROXY_HOPS=0, STAGING_BANNER=true). Every other parent variable (all other Doppler
@@ -28,7 +29,7 @@ import { existsSync } from 'node:fs';
 import { resolve } from 'node:path';
 import { StringDecoder } from 'node:string_decoder';
 import { fileURLToPath } from 'node:url';
-import { RECORDED_PROJECT_REFS, parseSupabaseDbTarget } from '../pipeline/src/target-guard.ts';
+import { RECORDED_PROJECT_REFS, isStaging2PoolerAddress, parseSupabaseDbTarget } from '../pipeline/src/target-guard.ts';
 import { scrub } from './run-with-secrets.mjs';
 
 export const APP_STAGING_PROJECT = 'truck-recruitment-tool';
@@ -82,6 +83,9 @@ export function buildAppEnv(env, port) {
   if (recorded === null || target.projectRef !== recorded) throw new Error('refusing: DATABASE_URL does not target the recorded staging-2 project');
   if (target.user.slice(0, target.user.lastIndexOf('.')) !== APP_ROLE) throw new Error(`refusing: DATABASE_URL must use the ${APP_ROLE} login (<role>.<project-ref>), not another login`);
   if (target.port !== APP_DB_PORT) throw new Error(`refusing: DATABASE_URL must use the session-mode port ${APP_DB_PORT}`);
+  // The shared staging-2 rule (target-guard.ts STAGING2_POOLER_ADDRESS, the same one pipeline/src/staging2-pooler.ts enforces):
+  // only the session pooler host <label>.pooler.supabase.com, never the direct host. Fixed text, same refusal id.
+  if (!isStaging2PoolerAddress(target)) throw new Error('refusing (staging2_pooler_required): DATABASE_URL must use the Supabase session pooler host on port 5432, not the direct database host');
   const child = {};
   for (const [k, v] of Object.entries(env)) if (APP_BASE_NAMES.includes(upper(k)) && typeof v === 'string') child[k] = v;
   for (const name of APP_SECRET_NAMES) child[name] = env[name];

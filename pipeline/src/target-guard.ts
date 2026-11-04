@@ -156,7 +156,8 @@ export function verifyPipelineTarget(input: TargetGuardInput): VerifiedTarget {
  * the direct host db.<ref>.supabase.co was never checked (and is IPv6-only without the add-on, doc 16 section 2.7). Session
  * mode is port 5432 (doc 16 section 2.6). The host must be one plain label followed by the suffix; the exact real label
  * (aws-<n>-<region>, as in this repository's fake test URLs) is (not verified) from the repository, so only its shape is
- * checked. Enforced before any connection by pg-secure.ts refuseStaging2UnlessPooler (refusal staging2_pooler_required).
+ * checked. Enforced before any connection by staging2-pooler.ts refuseStaging2UnlessPooler (refusal staging2_pooler_required;
+ * pipeline clients and pools, staging-2 planners, the app server's Database) and by scripts/run-app-staging.mjs.
  */
 export const STAGING2_POOLER_ADDRESS = { hostSuffix: '.pooler.supabase.com', hostLabel: /^[a-z0-9-]+$/, port: 5432 } as const;
 

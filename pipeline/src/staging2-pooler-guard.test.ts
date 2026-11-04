@@ -8,7 +8,7 @@ import assert from 'node:assert/strict';
 import { spawnSync } from 'node:child_process';
 import { resolve } from 'node:path';
 import { planFirstManager, FIRST_MANAGER_CHECK_CONFIRMATION } from './first-manager-bootstrap.js';
-import { newSecurePgClient, newSecurePgPool, securePgConfig } from './pg-secure.js';
+import { newSecurePgClient, newSecurePgPool, refuseStaging2UnlessPooler, securePgConfig } from './pg-secure.js';
 import { REFUSAL_IDS, RunnerRefusal, classifyRunnerFailure } from './refusals.js';
 import { ROLE_PASSWORD_ACTIONS, planRolePassword } from './role-password.js';
 import { REBUILT_STAGING_SQL_ACTIONS, planRebuiltSqlRun } from './staging-rebuilt.js';
@@ -100,6 +100,17 @@ async function main(): Promise<void> {
   check(`local test hosts (regression guard): a staging-2 target on loopback or a reserved .invalid name is built by the client builders (local tests) but refused by every planner (only Supabase hosts parse)`,
     BUILDERS.every(([, build]) => ['127.0.0.1', 'localhost', '::1', 'db.tls-test.invalid'].every((h) => refusalOf(() => build(fields(h, 5432))) === undefined))
     && PLANNERS.every(([, plan]) => ['127.0.0.1', 'localhost', 'db.tls-test.invalid'].every((h) => refusalOf(plan(`postgresql://postgres.${REBUILT}:${PW}@${h}:5432/postgres`)) !== undefined)));
+
+  // Review t49 note 7: the four mutants that survived (M3, M8, M9, M10). Each check below fails on its mutant.
+  check(`M3: only a name that ENDS in .invalid is exempt; a staging-2 user on x.invalid.example or db.invalid-name.example is refused with ${ID} by every builder`,
+    BUILDERS.every(([, build]) => ['x.invalid.example', 'db.invalid-name.example'].every((h) => refusalOf(() => build(fields(h, 5432))) === ID)));
+  check(`M8: a target that names staging-2 only through its parsed projectRef (IP host, plain user) is refused with ${ID}`,
+    refusalOf(() => refuseStaging2UnlessPooler({ host: '10.0.0.5', port: 5432, user: 'postgres', projectRef: REBUILT })) === ID
+    && refusalOf(() => refuseStaging2UnlessPooler({ host: '10.0.0.5', port: 5432, user: 'postgres', projectRef: OTHER_DEV })) === undefined);
+  check(`M9: the pooler host is compared case-insensitively: an upper-case pooler host with a staging-2 user is not refused with ${ID}`,
+    BUILDERS.every(([, build]) => refusalOf(() => build(fields(POOLER_HOST.toUpperCase(), 5432))) !== ID));
+  check(`M10: an upper-case staging-2 ref in the user alone (IP host) is refused with ${ID} by every builder`,
+    BUILDERS.every(([, build]) => refusalOf(() => build(fields('10.0.0.5', 5432, `postgres.${REBUILT.toUpperCase()}`))) === ID));
 
   // 6. Nothing about the URL is ever printed: the refusal text, the classified report, and the real command line.
   check(`the ${ID} refusal message and its report carry no part of the URL; the report is exactly { refusal: "${ID}" }`,
