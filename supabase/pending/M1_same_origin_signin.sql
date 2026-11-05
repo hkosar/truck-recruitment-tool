@@ -1741,15 +1741,27 @@ alter default privileges in schema internal revoke execute on functions from pub
 -- The loop revokes everything from those three on every table, view and sequence in internal whose
 -- ACL names one of them, whatever default ACL put it there (relations without such an entry are left
 -- as they are, so a clean database and a re-apply after the backouts are unchanged by it). It acts
--- only on relations the runner owns, directly or through a role whose privileges it has
--- (pg_has_role USAGE, the same test PostgreSQL uses for ownership): the owner always holds every
--- grant option, so that revoke cannot fail. On a relation another role owns, a revoke by the runner
--- can raise 42501 (measured on PostgreSQL 16 and 17 when anon holds only a table-level right such as
--- TRUNCATE or MAINTAIN) and would abort the whole file, so such relations are left untouched. The default-privilege revokes stop the runner's schema-internal entry
+-- only where its REVOKE (no CASCADE) cannot raise, all checked in the catalogue beforehand, so it
+-- never aborts the file and never takes a privilege from any other role:
+--   * the runner owns the relation, directly or through a role whose privileges it has (pg_has_role
+--     USAGE, the same test PostgreSQL uses for ownership). On a relation another role owns, a revoke
+--     by the runner can raise 42501 (measured on PostgreSQL 16 and 17 when anon holds only a
+--     table-level right such as TRUNCATE or MAINTAIN);
+--   * neither anon nor authenticated owns it (a revoke would strip the owner's own rights);
+--   * neither anon nor authenticated is the grantor of any entry in its ACL or in a column's ACL.
+--     If one of them passed on a right it holds WITH GRANT OPTION (to service_role, or anon to
+--     authenticated), removing that grant option raises 2BP01 "dependent privileges exist"
+--     (TRUCKRECRU-143 round 3, measured on PostgreSQL 16 and 17 for tables, columns, views,
+--     materialized views, partitioned and foreign tables and sequences); CASCADE would take the
+--     dependent grant from service_role too, so such relations are left untouched. PUBLIC can
+--     never hold a grant option, so it cannot be such a grantor.
+-- The owner revokes as the owner: grants that another grantor made to anon, authenticated or PUBLIC
+-- stay (no error). The default-privilege revokes stop the runner's schema-internal entry
 -- from handing out later tables (M1b and M1c revoke on their own tables too). Not covered here:
--- relations owned by a role the runner does not inherit, the runner's global default privileges (a
--- per-schema revoke cannot remove a global grant), other roles' default privileges, grants made by
--- another grantor, and rights anon or authenticated inherit through another role. The role matrix
+-- the relations skipped above, grants made by another grantor, privileges granted only on columns
+-- (a relation is picked by its table ACL), the runner's global default privileges (a per-schema
+-- revoke cannot remove a global grant), other roles' default privileges, and rights anon or
+-- authenticated inherit through another role. The role matrix
 -- probes the effective privileges of anon and authenticated on every existing non-extension relation
 -- in public and internal (whoever granted them), so anything left here stops the run there; it does not audit
 -- default privileges that no existing relation has used yet.
@@ -1764,9 +1776,16 @@ begin
     where n.nspname = 'internal'
       and c.relkind in ('r', 'p', 'v', 'm', 'f', 'S')
       and pg_has_role(current_user, c.relowner, 'USAGE')
+      and c.relowner not in ('anon'::regrole, 'authenticated'::regrole)
       and exists (
         select 1 from aclexplode(c.relacl) a
         where a.grantee in (0, 'anon'::regrole, 'authenticated'::regrole))
+      and not exists (
+        select 1 from aclexplode(c.relacl) a
+        where a.grantor in ('anon'::regrole, 'authenticated'::regrole))
+      and not exists (
+        select 1 from pg_attribute t, aclexplode(t.attacl) a
+        where t.attrelid = c.oid and a.grantor in ('anon'::regrole, 'authenticated'::regrole))
       and not exists (
         select 1 from pg_depend d
         where d.classid = 'pg_class'::regclass and d.objid = c.oid
