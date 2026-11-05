@@ -356,4 +356,56 @@ test('a checked root that itself contains the sentinel keeps its text (spaced or
   }
 });
 
+// Path matrix: checked-root spelling x slash style x case x tail. Outcomes: ok = no finding, no info; miss = CITATION finding; outside = no finding, one INFO.
+const MATRIX_TAILS = [
+  ['', 'scripts/plain.mjs:2', 'ok'],
+  ['', 'scripts/plain.mjs:99', 'miss'],
+  ['', 'scripts/gone.mjs:1', 'miss'],
+  ['x', 'scripts/gone.mjs:1', 'outside'],
+  ['-old', 'scripts/gone.mjs:1', 'outside'],
+  ['.old', 'scripts/gone.mjs:1', 'outside'],
+];
+const MATRIX_ROOTS = ['plainroot', 'spaced root', 'meta (a+b) [c] $d ^e.f', 'meta.x'];
+
+test('path matrix: root with/without spaces and regex metacharacters x slash x case x sibling folder', () => {
+  for (const name of MATRIX_ROOTS) {
+    withRoot(name, { 'scripts/plain.mjs': 'a\nb\n' }, (r) => {
+      const fwd = r.replace(/\\/g, '/');
+      const bs = fwd.replace(/\//g, '\\');
+      for (const [spell, s] of [[fwd, '/'], [bs, '\\'], [fwd.toUpperCase(), '/'], [bs.toLowerCase(), '\\']]) {
+        for (const [suffix, tail, want] of MATRIX_TAILS) {
+          const info = [];
+          const got = spKinds(`see ${spell}${suffix}${s}${tail.replace(/\//g, s)}\n`, r, info);
+          const label = `${name} | ${spell}${suffix} | ${tail} -> ${want}`;
+          assert.deepEqual(got, want === 'miss' ? ['CITATION'] : [], label);
+          assert.equal(info.length, want === 'outside' ? 1 : 0, label);
+        }
+      }
+    });
+  }
+});
+
+test('the checked root appearing mid-token is not a repo citation', () => {
+  for (const name of ['checked root', 'checkedroot']) {
+    withRoot(name, { 'scripts/plain.mjs': 'a\nb\n' }, (r) => {
+      const fwd = r.replace(/\\/g, '/');
+      const bs = fwd.replace(/\//g, '\\');
+      assert.deepEqual(spKinds(`see x${bs}\\f.md:1 and x${fwd}/f.md:1\n`, r), [], name);
+    });
+  }
+});
+
+test('spaced checked root mid-token with a code-file tail is not a repo citation', () => {
+  withRoot('checked root', { 'scripts/plain.mjs': 'a\nb\n' }, (r) => {
+    const fwd = r.replace(/\\/g, '/');
+    assert.deepEqual(spKinds(`see prefix${fwd}/scripts/missing.mjs:1\n`, r), []);
+  });
+});
+
+test('unspaced checked root containing + $ ^ , & = # % [ ] ( ) in the middle of its name is matched as a whole root', () => {
+  withRoot('meta+nospace$^(x)[1]y', { 'scripts/plain.mjs': 'a\nb\n' }, (r) => {
+    const fwd = r.replace(/\\/g, '/');
+    assert.deepEqual(spKinds(`see ${fwd}/scripts/plain.mjs:2\n`, r), []);
+  });
+});
 test('cleanup', () => { rmSync(root, { recursive: true, force: true }); });
