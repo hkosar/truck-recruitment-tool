@@ -28,8 +28,17 @@
 //  CITATION  `path:line`, `path:a-b`, `path:a, b` (a path with an extension, or a bare file name that is unique or
 //            at least present in the repo) must name an existing file with at least that many lines. Citations written
 //            as `<commit>:path:line` (an older commit) and bare `:123` are not checked.
+//  QUOTE-MISMATCH  A citation `path:N` (or `path:a-b`, `path:a, b`) that is followed on the same line by a backticked quote must have
+//            that quote on the cited line(s). Exact pattern: the citation, then optionally one closing backtick, then any run of
+//            whitespace and the characters : - (en/em dash) "(" (never ")" , or ";": in "(f.ts:9), `next`" the span is the next item's),
+//            then a code span of 3+ characters. Only the span directly after a
+//            citation counts, so with two citations on one line each owns the span that follows it. Whitespace is collapsed on both
+//            sides; the match is case-sensitive; `...`, `…` and `<placeholder>` inside a quote match anything (the pieces must appear
+//            in order). With several matching files (a short path) any of them may hold the quote. Not checked: a quote that is only
+//            wildcards, a citation with no span after it, a citation that is already a CITATION finding.
 //  UNMENTIONED  For every code file the runbook cites, each `result=WORD` literal the file prints must appear as WORD
 //            somewhere in the runbook (catches a line the code prints that the runbook never mentions, e.g. SKIPPED).
+//            This checker's own source (scripts/check-runbook-vs-code.mjs) is skipped: its comments only describe the syntax.
 import { execFileSync } from 'node:child_process';
 import { readFileSync, readdirSync, statSync } from 'node:fs';
 import { join, posix, resolve } from 'node:path';
@@ -60,7 +69,17 @@ function makeSource(root) {
   return { top, files, read: (f) => git('show', `HEAD:${f}`) };
 }
 
-const lineCount = (text) => (text === '' ? 0 : text.split('\n').length - (text.endsWith('\n') ? 1 : 0));
+const SELF = 'scripts/check-runbook-vs-code.mjs';
+const squash = (s) => s.replace(/\s+/g, ' ').trim();
+// Does the (whitespace-collapsed) text contain the quote? `...`, `…` and `<placeholder>` are wildcards; the pieces must occur in order.
+function containsQuote(text, quote) {
+  const pieces = squash(quote).split(/\.\.\.|…|<[^<>]*>/).map((p) => p.trim()).filter(Boolean);
+  if (!pieces.length) return true;
+  let at = 0;
+  for (const p of pieces) { const i = text.indexOf(p, at); if (i < 0) return false; at = i + p.length; }
+  return true;
+}
+const lineCount =(text) => (text === '' ? 0 : text.split('\n').length - (text.endsWith('\n') ? 1 : 0));
 const tail = (s) => (s.length > 70 ? `${s.slice(0, 67)}...` : s);
 
 // Citations of files outside the repo are not findings: a `thr_<id>/...` thread-storage note, or a bare .md name with no folder
@@ -166,7 +185,7 @@ export function checkRunbook(markdown, { root, info } = {}) {
     let rootAlt = '';
     let midRoots = []; // [start, end) spans of the root written mid-token (glued to a path character before it); a match starting inside one is not a repo path
     if (/[^A-Za-z0-9_.:\\/-]/.test(src.top)) {
-      const rootPattern = src.top.replace(/[\\/]+$/, '').replace(/[\\/]|[.*+?^${}()|[\]]|[A-Za-z]/g, (c) => (c === '\\' || c === '/' ? '[\\\\/]' : /[A-Za-z]/.test(c) ? `[${c.toLowerCase()}${c.toUpperCase()}]` : `\\${c}`));
+      const rootPattern = src.top.replace(/[\\/]+$/, '').replace(/[\\/]|[.*+?^${}()|[\]]|[A-Za-zÀ-￿]/g, (c) => (c === '\\' || c === '/' ? '[\\\\/]' : c.toLowerCase() !== c.toUpperCase() && c.toLowerCase().length === 1 && c.toUpperCase().length === 1 ? `[${c.toLowerCase()}${c.toUpperCase()}]` : /[A-Za-z]/.test(c) ? c : `\\${c}`));
       rootAlt = `${rootPattern}[A-Za-z0-9_.-]*[\\\\/]|`; // the optional name characters let a sibling such as "<root>-old" be read whole (then it is outside, not inside)
       for (const rm of raw.matchAll(new RegExp(rootPattern, 'g'))) if (rm.index > 0 && /[A-Za-z0-9_./\\-]/.test(raw[rm.index - 1])) midRoots.push([rm.index, rm.index + rm[0].length]);
     }
@@ -200,6 +219,13 @@ export function checkRunbook(markdown, { root, info } = {}) {
         if (a < 1 || hi < a || hi > max) { ok = false; add('CITATION', n, `${tail(path)}:${part} outside file (${max} lines)`); }
       }
       if (ok) for (const f of matches) if (CODE_EXT.test(f)) citedCode.add(f);
+      // QUOTE-MISMATCH: the backticked span directly after a valid citation must be on the cited line(s)
+      const qm = ok ? /^`?[\s:\u2013\u2014(-]*`([^`]{3,})`/.exec(raw.slice(m.index + m[0].length)) : null;
+      if (qm && !matches.some((f) => {
+        const flines = read(f).split('\n').map((l) => l.replace(/\r$/, ''));
+        const picked = m[4].split(/, ?/).flatMap((part) => { const [a, b] = part.split('-').map(Number); return flines.slice(a - 1, b ?? a); });
+        return containsQuote(squash(picked.join(' ')), qm[1]);
+      })) add('QUOTE-MISMATCH', n, `${tail(path)}:${m[4]} does not contain \`${tail(qm[1])}\``);
     }
   });
 
@@ -225,6 +251,7 @@ export function checkRunbook(markdown, { root, info } = {}) {
 
   // UNMENTIONED result= values of cited code files
   for (const f of [...citedCode].sort()) {
+    if (f === SELF) continue;
     const vals = new Set([...read(f).matchAll(/result=([A-Z][A-Z_]+)/g)].map((m) => m[1]));
     for (const v of vals) if (!new RegExp(`\\b${v}\\b`).test(markdown)) add('UNMENTIONED', 0, `${f} prints result=${v}; the runbook never mentions ${v}`);
   }

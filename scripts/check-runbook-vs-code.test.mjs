@@ -1,6 +1,6 @@
 import { test } from 'node:test';
 import assert from 'node:assert/strict';
-import { mkdtempSync, mkdirSync, writeFileSync, rmSync } from 'node:fs';
+import { mkdtempSync, mkdirSync, writeFileSync, rmSync, readFileSync } from 'node:fs';
 import { tmpdir } from 'node:os';
 import { join } from 'node:path';
 import { spawnSync } from 'node:child_process';
@@ -408,4 +408,78 @@ test('unspaced checked root containing + $ ^ , & = # % [ ] ( ) in the middle of 
     assert.deepEqual(spKinds(`see ${fwd}/scripts/plain.mjs:2\n`, r), []);
   });
 });
+// TRUCKRECRU-105: the checker's own source has `result=WORD` in a comment; citing it must not give an UNMENTIONED finding.
+test('citing the checker itself gives no UNMENTIONED finding (its comments are not output)', () => {
+  const own = readFileSync(fileURLToPath(new URL('./check-runbook-vs-code.mjs', import.meta.url)), 'utf8');
+  withRoot('self root', { 'scripts/check-runbook-vs-code.mjs': own, 'scripts/probe.mjs': "emit('result=SKIPPED');\n" }, (r) => {
+    assert.deepEqual(checkRunbook('see scripts/check-runbook-vs-code.mjs:1\n', { root: r }), []);
+    // other files are still checked
+    assert.match(checkRunbook('see scripts/probe.mjs:1\n', { root: r })[0], /^UNMENTIONED .*result=SKIPPED/);
+  });
+});
+
+// TRUCKRECRU-109: a citation followed by a backticked quote must have the quote on the cited line(s).
+test('QUOTE-MISMATCH: the quoted text must be on the cited line', () => {
+  withRoot('quote root', { 'scripts/q.mjs': "const a = 1;\nemit('hello   world');\nconst z = 3;\n" }, (r) => {
+    const k = (md) => spKinds(md, r);
+    assert.deepEqual(k('see scripts/q.mjs:2 `emit(\'hello world\')`\n'), []); // whitespace collapsed
+    assert.deepEqual(k('see `scripts/q.mjs:2` - `hello world`\n'), []); // citation itself in a code span, dash separator
+    assert.deepEqual(k('see scripts/q.mjs:2 (`hello`)\n'), []);
+    assert.deepEqual(k('see scripts/q.mjs:3 (`hello world`)\n'), ['QUOTE-MISMATCH']);
+    // the runbook style "`output` (file:N), `next item`": a span after ")" or "," belongs to the next item, never to the citation
+    assert.deepEqual(k('x (scripts/q.mjs:3), `hello world` and (scripts/q.mjs:3); `hello world` and scripts/q.mjs:3, `hello world`\n'), []);
+    assert.deepEqual(k('see scripts/q.mjs:1-3 `const z`\n'), []); // range
+    assert.deepEqual(k('see scripts/q.mjs:1, 3 `const z`\n'), []); // list
+    assert.deepEqual(k('see scripts/q.mjs:2 `emit(...world\')`\n'), []); // wildcard pieces in order
+    assert.deepEqual(k('see scripts/q.mjs:2 `<x> hello <y>`\n'), []);
+    assert.deepEqual(k('see scripts/q.mjs:3 `hello world`\n'), ['QUOTE-MISMATCH']);
+    assert.deepEqual(k('see scripts/q.mjs:2 `Hello world`\n'), ['QUOTE-MISMATCH']); // case-sensitive
+    assert.deepEqual(k('see scripts/q.mjs:2 `world...hello`\n'), ['QUOTE-MISMATCH']); // order matters
+    assert.deepEqual(k('see scripts/q.mjs:1-2 `const z`\n'), ['QUOTE-MISMATCH']);
+    // not the recognised pattern: no finding
+    assert.deepEqual(k('see scripts/q.mjs:3 and then `hello world`\n'), []);
+    assert.deepEqual(k('see scripts/q.mjs:3 `ab`\n'), []); // under 3 characters
+    assert.deepEqual(k('see scripts/q.mjs:3 `...`\n'), []); // only wildcards
+    assert.deepEqual(k('see scripts/q.mjs:3\n`hello world`\n'), []); // next line
+    // a bad citation is only a CITATION finding
+    assert.deepEqual(k('see scripts/q.mjs:99 `hello world`\n'), ['CITATION']);
+    const out = checkRunbook('x\nsee scripts/q.mjs:3 `hello world`\n', { root: r });
+    assert.match(out[0], /^QUOTE-MISMATCH line=2 scripts\/q\.mjs:3 does not contain `hello world`$/);
+  });
+});
+
+// TRUCKRECRU-159: two citations on one line are each checked; each owns the quote right after it.
+test('two citations on the same line are each checked', () => {
+  withRoot('two root', { 'scripts/a.mjs': 'one\ntwo\n', 'scripts/b.mjs': 'alpha\nbeta\n' }, (r) => {
+    const k = (md) => spKinds(md, r);
+    assert.deepEqual(k('see scripts/a.mjs:2 and scripts/b.mjs:2\n'), []);
+    assert.deepEqual(k('see scripts/a.mjs:2 and scripts/b.mjs:3\n'), ['CITATION']);
+    assert.deepEqual(k('see scripts/a.mjs:3 and scripts/b.mjs:3\n'), ['CITATION', 'CITATION']);
+    assert.deepEqual(k('see scripts/a.mjs:2 and scripts/gone.mjs:1\n'), ['CITATION']);
+    assert.deepEqual(k('see scripts/a.mjs:2 `two` and scripts/b.mjs:2 `beta`\n'), []);
+    assert.deepEqual(k('see scripts/a.mjs:2 `beta` and scripts/b.mjs:2 `two`\n'), ['QUOTE-MISMATCH', 'QUOTE-MISMATCH']);
+    assert.deepEqual(k('see scripts/a.mjs:2 `two` and scripts/b.mjs:2 `two`\n'), ['QUOTE-MISMATCH']);
+  });
+});
+
+// TRUCKRECRU-159: a checked root with non-ASCII letters; the runbook may spell their case differently.
+test('Unicode-case checked root: any letter case matches, siblings are outside', () => {
+  for (const name of ['Ärger É root', 'Ärger-ÉÖ']) {
+    withRoot(name, { 'scripts/plain.mjs': 'a\nb\n' }, (r) => {
+      const fwd = r.replace(/\\/g, '/');
+      const bs = fwd.replace(/\//g, '\\');
+      for (const [spell, s] of [[fwd, '/'], [bs, '\\'], [fwd.toUpperCase(), '/'], [bs.toLowerCase(), '\\']]) {
+        const label = `${name} | ${spell}`;
+        assert.deepEqual(spKinds(`see ${spell}${s}scripts${s}plain.mjs:2\n`, r), [], label);
+        assert.deepEqual(spKinds(`see ${spell}${s}scripts${s}plain.mjs:99\n`, r), ['CITATION'], label);
+        assert.deepEqual(spKinds(`see ${spell}${s}scripts${s}gone.mjs:1\n`, r), ['CITATION'], label);
+        const info = [];
+        assert.deepEqual(spKinds(`see ${spell}x${s}scripts${s}gone.mjs:1\n`, r, info), [], label);
+        assert.equal(info.length, 1, label);
+      }
+      assert.deepEqual(spKinds(`see x${fwd.toLowerCase()}/scripts/gone.mjs:1\n`, r), [], 'mid-token');
+    });
+  }
+});
+
 test('cleanup', () => { rmSync(root, { recursive: true, force: true }); });
