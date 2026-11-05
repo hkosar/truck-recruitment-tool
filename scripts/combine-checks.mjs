@@ -4,6 +4,7 @@
 //
 // How to run (from the repository root):
 //   node scripts/combine-checks.mjs --runbook <runbook.md> [--junction <worktree that has the node_modules>] [--pg17-bin <dir>]
+//                                   [--timeout <minutes>]
 //
 // What it does, in order:
 //   1. Preflight: reports whether pipeline/node_modules and app/node_modules exist. With --junction <worktree>, a missing one is
@@ -22,6 +23,13 @@
 //   3. Prints a summary table. Exit code 0 only if every step passed and no interruption arrived; 1 if a step failed or was
 //      skipped/interrupted (an interruption during a step that then exits 0 still counts: that step is INTERRUPTED and an
 //      "interruption" FAIL row is added); 2 for bad usage or a refused preflight (nothing was run).
+// Progress: a line is printed when each step starts and when it ends (name, result, elapsed seconds).
+// --timeout <minutes> (default none; at most 35791 minutes, Node's timer limit) applies ONLY to steps that start no PostgreSQL (today: the
+//   runbook check). When it runs out, ONLY the child this run started for that step is stopped (child.kill on our own handle; a grandchild
+//   is not signalled), the step is marked TIMEOUT and the run FAILs. The two scripts-test steps (they include PostgreSQL lifecycle tests)
+//   and the two real-DB steps get NO timeout: on Windows child.kill ends a process without its exit/finally code, so its own
+//   pg_ctl -D <own folder> stop would never run and a PostgreSQL server would be left running. Their START line and row say so.
+// --help prints the usage and these limits.
 // The guard stops connects to non-loopback addresses and lookups answered with one; it does not stop dns.lookup itself (see net-guard.mjs).
 // It never signals or stops a process it did not start: each step is waited for (Ctrl+C reaches the step through the console; this
 // script then skips the remaining steps and cleans up).
@@ -36,12 +44,19 @@ import { pathToFileURL } from 'node:url';
 const root = resolve(import.meta.dirname, '..');
 export const DEFAULT_PG17_BIN = 'C:\\Users\\hunte\\.bb\\tools\\pg17\\bin';
 export const MODULE_DIRS = ['pipeline', 'app'];
-const USAGE = 'usage: node scripts/combine-checks.mjs --runbook <runbook.md> [--junction <worktree with node_modules>] [--pg17-bin <dir>]';
+const USAGE = 'usage: node scripts/combine-checks.mjs --runbook <runbook.md> [--junction <worktree with node_modules>] [--pg17-bin <dir>] [--timeout <minutes>] [--help]';
+/** The largest delay setTimeout accepts; a larger one fires after 1 ms (TimeoutOverflowWarning). */
+export const MAX_TIMER_MS = 2147483647;
+export const HELP = `${USAGE}
+  --timeout <minutes>    per-step limit, greater than 0 and at most ${Math.floor(MAX_TIMER_MS / 60000)} (Node's timer limit). NOT applied to
+                         steps that start PostgreSQL (both scripts-test steps and both real-DB steps): stopping them early would skip
+                         their own pg_ctl -D <own folder> stop and leave a PostgreSQL server running. Today it limits only the runbook check.`;
 
-/** Reads the command line. Returns { ok: true, options } or { ok: false, error }. Pure. */
+/** Reads the command line. Returns { ok: true, options }, { ok: true, help: true } or { ok: false, error }. Pure. */
 export function parseArgs(argv) {
-  const options = { runbook: undefined, junction: undefined, pg17Bin: DEFAULT_PG17_BIN };
-  const flags = { '--runbook': 'runbook', '--junction': 'junction', '--pg17-bin': 'pg17Bin' };
+  if (argv.length === 1 && (argv[0] === '--help' || argv[0] === '-h')) return { ok: true, help: true };
+  const options = { runbook: undefined, junction: undefined, pg17Bin: DEFAULT_PG17_BIN, timeoutMinutes: undefined };
+  const flags = { '--runbook': 'runbook', '--junction': 'junction', '--pg17-bin': 'pg17Bin', '--timeout': 'timeoutMinutes' };
   const seen = new Set();
   for (let i = 0; i < argv.length; i++) {
     const a = argv[i];
@@ -55,6 +70,12 @@ export function parseArgs(argv) {
     options[flags[name]] = value;
   }
   if (!options.runbook) return { ok: false, error: '--runbook <path> is required' };
+  if (options.timeoutMinutes !== undefined) {
+    const m = Number(options.timeoutMinutes);
+    if (!Number.isFinite(m) || m <= 0) return { ok: false, error: '--timeout needs a number of minutes greater than 0' };
+    if (m * 60000 > MAX_TIMER_MS) return { ok: false, error: `--timeout ${options.timeoutMinutes} is too long: at most ${Math.floor(MAX_TIMER_MS / 60000)} minutes (Node's timer limit)` };
+    options.timeoutMinutes = m;
+  }
   return { ok: true, options };
 }
 
@@ -114,9 +135,10 @@ export function createJunctions(plans, made = []) {
  * own identity (file id, volume, creation time) is the one recorded when this run made it, so a junction another tool put in its
  * place, even to the same target, is left alone. Anything else (a real folder, a link to somewhere else, a replacement link, no
  * recorded identity, already gone) is left alone and reported. Returns [{ link, result }].
+ * `readIdentity` exists for the tests (to simulate an identity read that fails); any failure to read it keeps the link and reports it.
  * Limit: the check and the removal are two steps; a replacement made in the moment between them is not detected.
  */
-export function removeJunctions(made) {
+export function removeJunctions(made, readIdentity = linkIdentity) {
   const out = [];
   for (const { link, target, identity } of made) {
     let st;
@@ -127,7 +149,7 @@ export function removeJunctions(made) {
     if (normPath(now) !== normPath(target)) { out.push({ link, result: 'NOT REMOVED: points somewhere else (left untouched)' }); continue; }
     if (!identity) { out.push({ link, result: 'NOT REMOVED: its identity was not recorded when it was made (left untouched)' }); continue; }
     let id;
-    try { id = linkIdentity(link); } catch { out.push({ link, result: 'NOT REMOVED: cannot read its identity (left untouched)' }); continue; }
+    try { id = readIdentity(link); } catch { out.push({ link, result: 'NOT REMOVED: cannot read its identity (left untouched)' }); continue; }
     if (id.ino !== identity.ino || id.dev !== identity.dev || id.birthtimeNs !== identity.birthtimeNs) {
       out.push({ link, result: 'NOT REMOVED: not the junction this run made (replaced by another link; left untouched)' });
       continue;
@@ -142,15 +164,18 @@ export function removeJunctions(made) {
   return out;
 }
 
-/** The steps, in order. Pure: only builds descriptions. `guard` is the file:// URL of net-guard.mjs. */
+/**
+ * The steps, in order. Pure: only builds descriptions. `guard` is the file:// URL of net-guard.mjs.
+ * ownsPostgres: the step starts PostgreSQL servers and stops them itself in its exit/finally code, so --timeout is never applied to it.
+ */
 export function buildSteps({ options, guard, tempWithSpace }) {
   const node = process.execPath;
   const guarded = (...rest) => [`--import=${guard}`, ...rest];
   return [
-    { name: 'scripts tests (normal TEMP)', cmd: node, args: guarded('--test', ...scriptTestFiles()), env: {} },
-    { name: 'scripts tests (TEMP with a space)', cmd: node, args: guarded('--test', ...scriptTestFiles()), env: { TEMP: tempWithSpace, TMP: tempWithSpace } },
-    { name: 'real-DB suites PG16', cmd: node, args: guarded('scripts/run-real-db-suites.mjs'), env: {}, dropEnv: ['PG_BIN'] },
-    { name: 'real-DB suites PG17', cmd: node, args: guarded('scripts/run-real-db-suites.mjs'), env: { PG_BIN: options.pg17Bin } },
+    { name: 'scripts tests (normal TEMP)', cmd: node, args: guarded('--test', ...scriptTestFiles()), env: {}, ownsPostgres: true },
+    { name: 'scripts tests (TEMP with a space)', cmd: node, args: guarded('--test', ...scriptTestFiles()), env: { TEMP: tempWithSpace, TMP: tempWithSpace }, ownsPostgres: true },
+    { name: 'real-DB suites PG16', cmd: node, args: guarded('scripts/run-real-db-suites.mjs'), env: {}, dropEnv: ['PG_BIN'], ownsPostgres: true },
+    { name: 'real-DB suites PG17', cmd: node, args: guarded('scripts/run-real-db-suites.mjs'), env: { PG_BIN: options.pg17Bin }, ownsPostgres: true },
     { name: 'runbook vs code', cmd: node, args: guarded('scripts/check-runbook-vs-code.mjs', options.runbook), env: {} },
   ];
 }
@@ -180,26 +205,30 @@ export function formatSummary(rows) {
   return [line('STEP', 'RESULT', 'DETAIL'), line('-'.repeat(w), '-'.repeat(r), '-'.repeat(6)), ...rows.map((x) => line(x.name, x.result, x.detail ?? ''))].join('\n');
 }
 
-const runStep = (spawnFn, step, cwd) => new Promise((done) => {
+const runStep = (spawnFn, step, cwd, timeoutMs) => new Promise((done) => {
   const started = Date.now();
   const env = stepEnv(process.env, step);
   const child = spawnFn(step.cmd, step.args, { cwd, env, stdio: 'inherit', windowsHide: true });
-  child.on('error', (e) => done({ code: null, error: e.message, seconds: (Date.now() - started) / 1000 }));
-  child.on('close', (code, signal) => done({ code, signal, seconds: (Date.now() - started) / 1000 }));
+  let timedOut = false;
+  const timer = timeoutMs && !step.ownsPostgres ? setTimeout(() => { timedOut = true; try { child.kill(); } catch { /* already gone */ } }, timeoutMs) : null; // our own child handle only
+  const finish = (r) => { if (timer) clearTimeout(timer); done({ ...r, timedOut, seconds: (Date.now() - started) / 1000 }); };
+  child.on('error', (e) => finish({ code: null, error: e.message }));
+  child.on('close', (code, signal) => finish({ code, signal }));
 });
 
 const SIGNALS = ['SIGINT', 'SIGTERM', 'SIGBREAK', 'SIGHUP'];
 
 /**
  * The whole run; returns the exit code. `deps` exists for the tests only: spawn (the step starter), repoRoot, signals (the emitter
- * whose SIGINT/SIGTERM/SIGBREAK/SIGHUP events mean "interrupted"), log/error (output).
+ * whose SIGINT/SIGTERM/SIGBREAK/SIGHUP events mean "interrupted"), log/error (output), readIdentity (the identity read used when removing junctions).
  * Any interruption seen from the start of the run until the result line is printed makes the result FAIL (exit 1), even if the
  * step that was running when it arrived exits 0.
  */
 export async function main(argv, deps = {}) {
-  const { spawn: spawnFn = spawn, repoRoot = root, signals = process, log = console.log, error = console.error } = deps;
+  const { spawn: spawnFn = spawn, repoRoot = root, signals = process, log = console.log, error = console.error, readIdentity = linkIdentity } = deps;
   const parsed = parseArgs(argv);
   if (!parsed.ok) { error(`${parsed.error}\n${USAGE}`); return 2; }
+  if (parsed.help) { log(HELP); return 0; }
   const { options } = parsed;
   if (!existsSync(options.runbook)) { error('the runbook file does not exist'); return 2; }
 
@@ -222,14 +251,21 @@ export async function main(argv, deps = {}) {
       for (const m of made) log(`preflight: created junction ${m.link} -> ${m.target}`);
       tempWithSpace = mkdtempSync(join(tmpdir(), 'combine checks '));
       const guard = pathToFileURL(join(repoRoot, 'scripts', 'net-guard.mjs')).href;
+      const runStarted = Date.now();
+      const elapsed = () => `${((Date.now() - runStarted) / 1000).toFixed(1)} s into the run`;
+      const timeoutMs = options.timeoutMinutes ? options.timeoutMinutes * 60000 : undefined;
+      if (timeoutMs) log(`--timeout ${options.timeoutMinutes} min: applied only to steps that start no PostgreSQL; steps that start PostgreSQL are never stopped early, so they always stop their own servers`);
       for (const step of buildSteps({ options, guard, tempWithSpace })) {
         if (aborted) { rows.push({ name: step.name, result: 'SKIPPED', detail: 'interrupted before it started' }); continue; }
+        const noTimeout = timeoutMs && step.ownsPostgres;
         log(`\n===== ${step.name} =====`);
+        log(`[progress] START ${step.name} (${elapsed()}${timeoutMs ? (noTimeout ? ', no timeout: this step starts PostgreSQL and must stop it itself' : `, timeout ${options.timeoutMinutes} min`) : ''})`);
         current = step.name;
-        const r = await runStep(spawnFn, step, repoRoot);
+        const r = await runStep(spawnFn, step, repoRoot, timeoutMs);
         const interrupted = aborted && aborted.during === step.name;
-        const result = interrupted ? 'INTERRUPTED' : r.code === 0 ? 'PASS' : 'FAIL';
-        rows.push({ name: step.name, result, detail: `${r.error ? `could not start: ${r.error}; ` : ''}exit ${r.code ?? r.signal}, ${r.seconds.toFixed(1)} s${interrupted ? `; ${aborted.signal} arrived while it ran` : ''}` });
+        const result = interrupted ? 'INTERRUPTED' : r.timedOut ? 'TIMEOUT' : r.code === 0 ? 'PASS' : 'FAIL';
+        rows.push({ name: step.name, result, detail: `${r.error ? `could not start: ${r.error}; ` : ''}exit ${r.code ?? r.signal}, ${r.seconds.toFixed(1)} s${r.timedOut ? `; stopped after ${options.timeoutMinutes} min (timeout)` : ''}${noTimeout ? '; --timeout not applied (starts PostgreSQL)' : ''}${interrupted ? `; ${aborted.signal} arrived while it ran` : ''}` });
+        log(`[progress] END ${step.name} -> ${result}, ${r.seconds.toFixed(1)} s (${elapsed()})`);
       }
     } catch (e) {
       rows.push({ name: 'combine-checks itself', result: 'FAIL', detail: String(e.stack ?? e) });
@@ -239,7 +275,7 @@ export async function main(argv, deps = {}) {
         try { rmSync(tempWithSpace, { recursive: true, force: true }); } catch (e) { rows.push({ name: 'cleanup: TEMP with a space', result: 'FAIL', detail: String(e.message) }); }
         if (existsSync(tempWithSpace)) rows.push({ name: 'cleanup: TEMP with a space', result: 'FAIL', detail: `${tempWithSpace} still exists` });
       }
-      for (const x of removeJunctions(made)) rows.push({ name: 'cleanup: junction', result: x.result === 'removed' ? 'PASS' : 'FAIL', detail: `${x.link}: ${x.result}` });
+      for (const x of removeJunctions(made, readIdentity)) rows.push({ name: 'cleanup: junction', result: x.result === 'removed' ? 'PASS' : 'FAIL', detail: `${x.link}: ${x.result}` });
     }
     current = 'summary';
     if (aborted) rows.push({ name: 'interruption', result: 'FAIL', detail: `${aborted.signal} received during ${aborted.during}; the run is not a pass` });
