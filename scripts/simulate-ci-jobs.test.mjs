@@ -330,3 +330,49 @@ test('--run: a node_modules link that points elsewhere, or a real folder, is sti
   assert.equal(real.code, 1, real.text);
   assert.match(real.text, /already exists/);
 });
+
+// ---- Round 4 regressions (Codex review of 2b8755b): Windows letter-case and 8.3 aliases of a correct link ----
+// alias.cjs links pipeline/<NM> to the owned borrowed folder spelled as an alias: "upper" = other letter case, "short" = 8.3 short name.
+const ALIAS_JS = `const fs = require('fs'); const cp = require('child_process');
+const mode = process.argv[2];
+const nm = ['node', 'modules'].join('_'); const pl = ['pipe', 'line'].join('');
+const target = require('path').join(process.env.CI_SIM_BORROW, pl, nm);
+let alias = target.toUpperCase();
+if (mode === 'short') {
+  const r = cp.spawnSync('cmd', ['/d', '/s', '/c', '"for %I in ("' + target + '") do @echo %~sI"'], { encoding: 'utf8', windowsVerbatimArguments: true });
+  alias = (r.stdout || '').trim();
+  if (!alias || alias.toLowerCase() === target.toLowerCase()) { console.log('no 8.3 short name on this volume'); process.exit(0); }
+}
+fs.symlinkSync(alias, pl + '/' + nm, 'junction');
+`;
+const aliasStep = (mode) => ONE_JOB(`      - name: Alias\n        run: |\n          node alias.cjs ${mode}\n          npm ci --prefix pipeline\n`);
+
+test('--run (Windows): a correct link spelled in other letter case is accepted (finding 1, round 3)', (t) => {
+  if (process.platform !== 'win32') { t.skip('Windows only'); return; }
+  const upper = runFixture(t, aliasStep('upper'), { 'alias.cjs': ALIAS_JS });
+  if (!upper) return;
+  assert.equal(upper.code, 0, upper.text);
+});
+
+test('--run (Windows): a repeated install whose --prefix differs only in letter case is accepted (finding 1, round 3)', (t) => {
+  if (process.platform !== 'win32') { t.skip('Windows only'); return; }
+  const r = runFixture(t, ONE_JOB('      - name: Case\n        run: |\n          npm ci --prefix PIPELINE\n          npm install --prefix pipeline\n'));
+  if (!r) return;
+  assert.equal(r.code, 0, r.text);
+});
+
+test('--run (Windows): a correct link spelled by its 8.3 short name is accepted (finding 1, round 3)', (t) => {
+  if (process.platform !== 'win32') { t.skip('Windows only'); return; }
+  const r = runFixture(t, aliasStep('short'), { 'alias.cjs': ALIAS_JS });
+  if (!r) return;
+  assert.equal(r.code, 0, r.text);
+  assert.match(r.text, /Alias: passed/);
+});
+
+test('--run (Windows): a link to another folder is still refused when spelled in other letter case', (t) => {
+  if (process.platform !== 'win32') { t.skip('Windows only'); return; }
+  const r = runFixture(t, ONE_JOB(`      - name: Odd\n        working-directory: pipeline\n        run: |\n          node -e "require('fs').mkdirSync('../other');require('fs').symlinkSync('../OTHER','${NM}','junction')"\n          npm ci\n`));
+  if (!r) return;
+  assert.equal(r.code, 1, r.text);
+  assert.match(r.text, /points somewhere else/);
+});

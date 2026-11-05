@@ -471,7 +471,8 @@ let st = null;
 try { st = lstatSync(to); } catch (e) { if (e.code !== 'ENOENT') throw e; }
 if (st && !st.isSymbolicLink()) { console.error('ci-sim npm shim: ' + to + ' already exists'); process.exit(1); }
 if (st) {
-  if (!existsSync(to) || realpathSync(to) !== realpathSync(from)) { console.error('ci-sim npm shim: ' + to + ' already exists and points somewhere else'); process.exit(1); }
+  const canon = (x) => { const r = realpathSync.native(x); return process.platform === 'win32' ? r.toLowerCase() : r; };
+  if (!existsSync(to) || canon(to) !== canon(from)) { console.error('ci-sim npm shim: ' + to + ' already exists and points somewhere else'); process.exit(1); }
 } else {
   symlinkSync(from, to, 'junction');
   appendFileSync(process.env.CI_SIM_LINKS_LOG, to + '\\n');
