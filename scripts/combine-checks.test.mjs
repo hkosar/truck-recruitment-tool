@@ -2,14 +2,12 @@
 // no step of the real run is started; temporary folders hold stand-in node_modules.
 // Run: node --test scripts/combine-checks.test.mjs
 import assert from 'node:assert/strict';
-import { execFileSync } from 'node:child_process';
 import { EventEmitter } from 'node:events';
 import { existsSync, lstatSync, mkdirSync, mkdtempSync, readFileSync, rmdirSync, rmSync, symlinkSync, writeFileSync } from 'node:fs';
 import { tmpdir } from 'node:os';
 import { join } from 'node:path';
 import test from 'node:test';
-import { createHash } from 'node:crypto';
-import { DEFAULT_PG17_BIN, GIT_READ_OPTIONS, MAX_TIMER_MS, buildSteps, createJunctions, formatSummary, gitEnv, main, parseArgs, planJunction, removeJunctions, stagingCheck, stepEnv } from './combine-checks.mjs';
+import { DEFAULT_PG17_BIN, MAX_TIMER_MS, buildSteps, createJunctions, formatSummary, main, parseArgs, planJunction, removeJunctions, stepEnv } from './combine-checks.mjs';
 
 const NM = ['node', 'modules'].join('_'); // built from parts so the CI simulator (scripts/simulate-ci-jobs.mjs) does not read this file as a use of an installed package folder
 const tmp = mkdtempSync(join(tmpdir(), 'combine-checks-test-'));
@@ -20,8 +18,9 @@ const fresh = () => { const d = join(tmp, `d${n++}`); mkdirSync(d); return d; };
 const fakeTree = (dirs) => { const r = fresh(); for (const d of dirs) { mkdirSync(join(r, d, NM), { recursive: true }); writeFileSync(join(r, d, NM, 'marker.txt'), 'keep'); } for (const d of ['pipeline', 'app']) mkdirSync(join(r, d), { recursive: true }); return r; };
 
 test('parseArgs: runbook required, defaults, both flag styles, unknown/duplicate/missing values refused', () => {
-  assert.deepEqual(parseArgs(['--runbook', 'r.md']), { ok: true, options: { runbook: 'r.md', junction: undefined, pg17Bin: DEFAULT_PG17_BIN, timeoutMinutes: undefined, stagingCheck: undefined } });
-  assert.deepEqual(parseArgs(['--runbook=r.md', '--junction', 'w', '--pg17-bin=p', '--timeout', '1.5', '--staging-check=s']).options, { runbook: 'r.md', junction: 'w', pg17Bin: 'p', timeoutMinutes: 1.5, stagingCheck: 's' });
+  assert.deepEqual(parseArgs(['--runbook', 'r.md']), { ok: true, options: { runbook: 'r.md', junction: undefined, pg17Bin: DEFAULT_PG17_BIN, timeoutMinutes: undefined } });
+  assert.deepEqual(parseArgs(['--runbook=r.md', '--junction', 'w', '--pg17-bin=p', '--timeout', '1.5']).options, { runbook: 'r.md', junction: 'w', pg17Bin: 'p', timeoutMinutes: 1.5 });
+  assert.match(parseArgs(['--runbook', 'a', '--staging-check', 'x']).error, /unknown argument/);
   for (const bad of ['0', '-1', 'abc', 'Infinity']) assert.match(parseArgs(['--runbook', 'a', '--timeout', bad]).error, /greater than 0|needs a value/, bad);
   assert.match(parseArgs([]).error, /--runbook/);
   assert.match(parseArgs(['--runbook']).error, /needs a value/);
@@ -248,149 +247,7 @@ test('--help prints the usage and the PostgreSQL timeout limit; exit 0, nothing 
   assert.equal(spawned, 0);
   assert.match(out.join('\n'), /usage: node scripts\/combine-checks\.mjs/);
   assert.match(out.join('\n'), /NOT applied to\s+steps that start PostgreSQL/);
-  assert.match(out.join('\n'), /no fsmonitor/i);
-});
-
-/** A fake git for stagingCheck: answers by command; `over` replaces single answers (key = the joined args). Records the calls. */
-const fakeGit = (over = {}, calls = []) => (p, a, input) => {
-  const key = a.join(' ');
-  calls.push(input === undefined ? key : `${key} <stdin>`);
-  if (Object.hasOwn(over, key)) return over[key];
-  if (key === 'rev-parse --show-toplevel') return { status: 0, out: p };
-  if (key === 'rev-parse HEAD') return { status: 0, out: 'abc123' };
-  if (key === 'symbolic-ref -q HEAD') return { status: 1, out: '' };
-  if (key === 'ls-files -s -z') return { status: 0, out: '100644 e69d 0\ta.txt\0' };
-  if (key === 'check-attr -z --stdin filter') return { status: 0, out: 'a.txt\0filter\0unspecified\0' };
-  if (key.startsWith('config --get ')) return { status: 1, out: '' };
-  return { status: 0, out: '' }; // status --porcelain: clean
-};
-
-test('stagingCheck: PASS only if top folder, detached and clean; reads only these git facts; failures are FAIL', () => {
-  const calls = [];
-  const pass = stagingCheck('S', fakeGit({}, calls));
-  assert.equal(pass.result, 'PASS');
-  assert.match(pass.detail, /HEAD abc123; detached; clean/);
-  assert.deepEqual(calls, ['rev-parse --show-toplevel', 'rev-parse HEAD', 'symbolic-ref -q HEAD', 'ls-files -s -z', 'check-attr -z --stdin filter <stdin>', 'status --porcelain']);
-  assert.match(stagingCheck('S', fakeGit({ 'symbolic-ref -q HEAD': { status: 0, out: 'refs/heads/x' } })).detail, /on branch refs\/heads\/x.*needs detached and clean/);
-  const dirty = stagingCheck('S', fakeGit({ 'status --porcelain': { status: 0, out: ' M a\n?? b' } }));
-  assert.equal(dirty.result, 'FAIL');
-  assert.match(dirty.detail, /2 changed path/);
-  for (const key of ['rev-parse --show-toplevel', 'rev-parse HEAD', 'symbolic-ref -q HEAD', 'ls-files -s -z', 'check-attr -z --stdin filter', 'status --porcelain']) {
-    assert.equal(stagingCheck('S', fakeGit({ [key]: { status: 128, out: '', error: 'x' } })).result, 'FAIL', key);
-  }
-  assert.match(stagingCheck('S', fakeGit({ 'rev-parse --show-toplevel': { status: 0, out: 'C:/elsewhere' } })).detail, /git reads the checkout at C:\/elsewhere, not this folder/);
-  // submodules and filter drivers with a configured command are refused before git status runs
-  const c1 = [];
-  assert.match(stagingCheck('S', fakeGit({ 'ls-files -s -z': { status: 0, out: '160000 abcd 0\tsub\0' } }, c1)).detail, /refused before git status: the folder has submodules/);
-  assert.ok(!c1.includes('status --porcelain'));
-  const lfs = { 'check-attr -z --stdin filter': { status: 0, out: 'a.txt\0filter\0lfs\0' } };
-  const c2 = [];
-  assert.match(stagingCheck('S', fakeGit({ ...lfs, 'config --get filter.lfs.clean': { status: 0, out: 'git-lfs clean -- %f' } }, c2)).detail, /filter driver "lfs" whose clean command git status could run/);
-  assert.ok(!c2.includes('status --porcelain'));
-  assert.match(stagingCheck('S', fakeGit({ ...lfs, 'config --get filter.lfs.process': { status: 0, out: 'git-lfs filter-process' } })).detail, /filter driver "lfs" whose process command/);
-  assert.equal(stagingCheck('S', fakeGit(lfs)).result, 'PASS'); // attribute names a driver with no command: git runs nothing
-  assert.equal(stagingCheck('S', fakeGit({ 'check-attr -z --stdin filter': { status: 0, out: 'a.txt\0filter\0set\0' } })).result, 'PASS');
-});
-
-/** A throwaway repo with one committed file, HEAD detached (or on its branch when attached). Returns [dir, git]. */
-const throwawayRepo = (attached = false) => {
-  const d = fresh();
-  const git = (...a) => execFileSync('git', ['-C', d, '-c', 'user.name=t', '-c', 'user.email=t@t', ...a], { encoding: 'utf8', env: gitEnv(process.env) }).trim();
-  git('init', '-q');
-  writeFileSync(join(d, 'f.txt'), 'x');
-  git('add', 'f.txt');
-  git('commit', '-q', '-m', 'one');
-  if (!attached) git('checkout', '-q', '--detach');
-  return [d, git];
-};
-const indexSnapshot = (d) => { const f = join(d, '.git', 'index'); return { sha256: createHash('sha256').update(readFileSync(f)).digest('hex'), mtimeMs: lstatSync(f).mtimeMs, size: lstatSync(f).size }; };
-/** A hook command (git runs it through its shell) that appends one line to `marker` when started. Quoted: TEMP may contain a space. */
-const markerHook = (marker) => {
-  const hook = join(fresh(), 'marker-hook.cjs'); // outside the repo, so it is not an untracked file there
-  writeFileSync(hook, `require('node:fs').appendFileSync(${JSON.stringify(marker)}, 'invoked\\n');\n`);
-  return `"${process.execPath.replace(/\\/g, '/')}" "${hook.replace(/\\/g, '/')}"`;
-};
-
-test('stagingCheck on a real throwaway repo (read-only: HEAD, index bytes and mtime, and files unchanged)', () => {
-  const [d, git] = throwawayRepo(true);
-  assert.equal(stagingCheck(d).result, 'FAIL'); // on a branch
-  git('checkout', '-q', '--detach');
-  writeFileSync(join(d, 'f.txt'), 'x'); // same content, newer mtime: a status that may refresh the index would want to write it
-  const before = git('rev-parse', 'HEAD');
-  const index = indexSnapshot(d);
-  const row = stagingCheck(d);
-  assert.equal(row.result, 'PASS');
-  assert.ok(row.detail.includes(before));
-  writeFileSync(join(d, 'g.txt'), 'new');
-  assert.equal(stagingCheck(d).result, 'FAIL'); // untracked file
-  assert.deepEqual(indexSnapshot(d), index);
-  assert.equal(git('rev-parse', 'HEAD'), before);
-  assert.equal(readFileSync(join(d, 'g.txt'), 'utf8'), 'new');
-});
-
-test('regression (cc P2): a configured fsmonitor hook is never started by stagingCheck (and every git read disables it)', () => {
-  assert.deepEqual(GIT_READ_OPTIONS, ['--no-optional-locks', '-c', 'core.fsmonitor=false']);
-  const [d, git] = throwawayRepo();
-  const marker = join(fresh(), 'fsmonitor-marker.txt');
-  git('config', 'core.fsmonitor', markerHook(marker));
-  writeFileSync(join(d, 'f.txt'), 'x');
-  // control: plain git status in this repo does start the hook, so the check below can see it
-  git('status', '--porcelain');
-  assert.equal(existsSync(marker), true, 'the harmless hook must work for this test to mean anything');
-  rmSync(marker);
-  const index = indexSnapshot(d);
-  const row = stagingCheck(d);
-  assert.equal(row.result, 'PASS');
-  assert.equal(existsSync(marker), false, 'stagingCheck started the fsmonitor hook');
-  assert.deepEqual(indexSnapshot(d), index);
-  writeFileSync(join(d, 'g.txt'), 'new');
-  assert.equal(stagingCheck(d).result, 'FAIL');
-  assert.equal(existsSync(marker), false);
-});
-
-test('regression (cc P2): a filter driver with a configured command is refused before git status, and never started', () => {
-  const [d, git] = throwawayRepo();
-  writeFileSync(join(d, '.gitattributes'), '*.txt filter=probe\n');
-  git('add', '.gitattributes');
-  git('commit', '-q', '-m', 'attr');
-  git('checkout', '-q', '--detach');
-  const marker = join(fresh(), 'filter-marker.txt');
-  git('config', 'filter.probe.clean', markerHook(marker));
-  writeFileSync(join(d, 'f.txt'), 'y'); // same size, new content and mtime: git status compares content and so runs the clean filter
-  git('status', '--porcelain'); // control: the filter really is started by plain git status
-  assert.equal(existsSync(marker), true, 'the harmless filter must work for this test to mean anything');
-  rmSync(marker);
-  const row = stagingCheck(d);
-  assert.equal(row.result, 'FAIL');
-  assert.match(row.detail, /refused before git status: tracked files use filter driver "probe" whose clean command/);
-  assert.equal(existsSync(marker), false, 'stagingCheck started the filter');
-});
-
-test('regression (cc P3): inherited GIT_DIR / GIT_WORK_TREE / GIT_INDEX_FILE / ... cannot make the check describe another folder', () => {
-  const [target] = throwawayRepo(true);
-  writeFileSync(join(target, 'untracked.txt'), 'dirty');
-  const [unrelated] = throwawayRepo(); // detached and clean: would PASS if git read it instead
-  const want = /on branch refs\/heads\/\w+; 1 changed path\(s\) \(needs detached and clean\)/;
-  assert.match(stagingCheck(target).detail, want);
-  const vars = { GIT_DIR: join(unrelated, '.git'), GIT_WORK_TREE: unrelated, GIT_INDEX_FILE: join(unrelated, '.git', 'index'), GIT_COMMON_DIR: join(unrelated, '.git'), GIT_OBJECT_DIRECTORY: join(unrelated, '.git', 'objects'), GIT_CEILING_DIRECTORIES: tmp, GIT_CONFIG_PARAMETERS: "'core.fsmonitor'='true'" };
-  const saved = Object.fromEntries(Object.keys(vars).map((k) => [k, process.env[k]]));
-  let row;
-  try { Object.assign(process.env, vars); row = stagingCheck(target); }
-  finally { for (const [k, v] of Object.entries(saved)) { if (v === undefined) delete process.env[k]; else process.env[k] = v; } }
-  assert.equal(row.result, 'FAIL');
-  assert.match(row.detail, want);
-  assert.ok(row.detail.startsWith(target));
-  assert.deepEqual(gitEnv({ PATH: 'a', git_dir: 'x', GIT_WORK_TREE: 'y', GIT_INDEX_FILE: 'z', GIT_CONFIG_COUNT: '1', GIT_CONFIG_KEY_0: 'k', Node_Options: 'n', GITHUB_X: 'kept' }), { PATH: 'a', GITHUB_X: 'kept' });
-});
-
-test('main --staging-check adds a row that fails the run when the folder is not detached and clean', async () => {
-  const good = await fakeRun({ extraArgs: ['--staging-check', 'S'], deps: { git: fakeGit() } });
-  assert.equal(good.code, 0);
-  assert.match(good.text, /staging check \(read-only\)\s+PASS/);
-  assert.match(good.text, /RESULT: PASS \(6 rows\)/);
-  const bad = await fakeRun({ extraArgs: ['--staging-check', 'S'], deps: { git: () => ({ status: 128, out: '', error: 'nope' }) } });
-  assert.equal(bad.code, 1);
-  assert.match(bad.text, /staging check \(read-only\)\s+FAIL/);
+  assert.doesNotMatch(out.join('\n'), /staging-check/);
 });
 
 test('stepEnv drops NODE_OPTIONS (any case) and dropEnv, then adds the step env; buildSteps loads the guard as an --import file URL', () => {
