@@ -42,16 +42,28 @@ import { RECORDED_PROJECT_REFS, parseSupabaseDbTarget, type SupabaseDbTarget } f
  * Every visible row of pg_settings is read and compared BY NAME (never by category: the category text is translated by lc_messages, which
  * a role or database can set to a non-English value). A name without a dot that is not in CHECKED_SETTINGS, HARMLESS_LOGGING_SETTINGS (of
  * its 68 entries, 43 were counted as probed on a real server, though debug_discard_caches is refused by this build and jit_expressions and jit_tuple_deforming are moot with jit off, and 25 were judged harmless by kind, by reading, and not tested) or OTHER_KNOWN_SETTINGS
- * (the other PostgreSQL 16.15 settings) is refused, and a set of sentinel names must come back or the read is not trusted. Any server major
- * version other than 16 is refused first (role_password_server_version_unverified) until it has been audited: for 17 that audit must cover
- * transaction_timeout (a FATAL like exit_on_error) and every other new setting. client_connection_check_interval is set to 0 (a dropped
+ * (the other PostgreSQL 16.15 settings) is refused, and a set of sentinel names must come back or the read is not trusted. Only server majors
+ * 16 and 17 are accepted; the major is read right after the search_path (before any other setting is touched) and any other one (15, 18, an
+ * unreadable number) is refused (role_password_server_version_unverified), as is a settings read that names another major.
+ * PostgreSQL 17 (audited against a real 17.11 listing: 379 names without a dot, 19 new and 3 removed compared with 16.15; TRUCKRECRU-142):
+ * transaction_timeout (user-settable, per role, database, server or startup option) ends the session with a FATAL when it expires, and
+ * a FATAL inside the ALTER writes a CONTEXT line quoting the statement (measured: the nested EXECUTE text appears in the log). It is
+ * therefore set to 0 (SET LOCAL; on 17 this disarms a timer already running for the open transaction, measured) and must then read 0, or
+ * the run is refused. event_triggers is harmless: event triggers do not fire for ALTER ROLE (a shared object; measured on 16 and 17), and
+ * trace_connection_negotiation only logs connection negotiation (postmaster-level, before any statement). The other 16 new names are
+ * storage, replication, planner or buffer settings. The 17 list leaves out db_user_namespace, old_snapshot_threshold and
+ * trace_recovery_messages (removed in 17), and the 16 list leaves out the 19 new names, so either server reporting the other's name is refused.
+ * client_connection_check_interval is set to 0 (a dropped
  * client would otherwise end the session with a FATAL whose CONTEXT quotes the statement; Linux only, accepted everywhere).
  * What remains (exactly): (1) a FATAL termination of the session while the ALTER runs (an administrator command, a crash or a
  * shutdown; PL/pgSQL cannot catch FATAL and ALTER ROLE accepts no bind parameter): the log's CONTEXT line then quotes the statement;
  * (2) any other LOG or WARNING raised inside the ALTER by code this module does not name (an extension, a preloaded library or a host
  * hook, e.g. Supabase supautils, not verified): it carries the same CONTEXT at the default log_min_messages = warning; (3) a setting
  * that a role without pg_read_all_settings cannot see is not read (on 16.15, 21 of the 368 rows are hidden from such a role; only 2 of
- * them are logging settings, log_directory and log_filename, both destination-only). The window for (1) and (2) is at most the lock wait (10 s, or less as above) plus the statement's run
+ * them are logging settings, log_directory and log_filename, both destination-only; on 17.11 the same 21 names are hidden).
+ * idle_in_transaction_session_timeout (16 and 17) ends the session only while it waits for the client between statements, so its FATAL has
+ * no CONTEXT (measured on both with the verifier bound: nothing stored, no part of the verifier in the log); idle_session_timeout only
+ * applies outside a transaction (judged by reading, not tested). The window for (1) and (2) is at most the lock wait (10 s, or less as above) plus the statement's run
  * time; any rollback_not_confirmed or unknown result is a STOP. The node-postgres error then holds the text in its `where` field in
  * memory; it is never printed (only the classifier's id and SQLSTATE are). Extension settings other than pgaudit.log and
  * auto_explain.log_min_duration are not covered.
@@ -91,8 +103,12 @@ export const LOCK_WAIT_LOG_MARGIN_MS = 100;
 export const MIN_DEADLOCK_TIMEOUT_MS = 200;
 /** The first statements after begin: only pg_catalog (then pg_temp) on the search path, then the user-settable settings that could write the statement, with the verifier, to the log are switched off. */
 export const SEARCH_PATH_SQL = 'set local search_path = pg_catalog, pg_temp';
-/** debug_print_* log the parse tree; exit_on_error turns an error inside the ALTER into a FATAL, whose CONTEXT the DO block cannot replace; jit = off keeps JIT (and jit_dump_bitcode) out of the transaction; client_connection_check_interval = 0 (Linux; accepted on every platform) stops a client that drops during the lock wait from becoming a FATAL connection to client lost whose CONTEXT quotes the statement. PostgreSQL 17's transaction_timeout is not handled: that major version is refused until audited. */
+/** debug_print_* log the parse tree; exit_on_error turns an error inside the ALTER into a FATAL, whose CONTEXT the DO block cannot replace; jit = off keeps JIT (and jit_dump_bitcode) out of the transaction; client_connection_check_interval = 0 (Linux; accepted on every platform) stops a client that drops during the lock wait from becoming a FATAL connection to client lost whose CONTEXT quotes the statement. Sent on 16 and 17. */
 export const SESSION_SAFETY_SQL: readonly string[] = ['set local debug_print_parse = off', 'set local debug_print_rewritten = off', 'set local debug_print_plan = off', 'set local exit_on_error = off', 'set local jit = off', 'set local client_connection_check_interval = 0'];
+/** PostgreSQL 17 only (16 has no such setting and would reject it): transaction_timeout = 0, so the timeout's FATAL (whose CONTEXT quotes the statement) cannot end the session during the ALTER; must then read 0. */
+export const PG17_SESSION_SAFETY_SQL: readonly string[] = ['set local transaction_timeout = 0'];
+/** The first statement after the search_path: the major decides which session settings exist. */
+export const SERVER_VERSION_SQL = "select pg_catalog.current_setting('server_version_num') as v";
 export const lockTimeoutSql = (ms: number): string => `set local lock_timeout = '${Math.floor(ms)}ms'`;
 /** Must read off after SESSION_SAFETY_SQL; the four *_stats settings are superuser-only (cannot be switched off here), and log_parser_stats writes the statement in CONTEXT. Missing counts as on. */
 export const MUST_BE_OFF_SETTINGS: readonly string[] = ['debug_print_parse', 'debug_print_rewritten', 'debug_print_plan', 'exit_on_error', 'jit', 'log_parser_stats', 'log_planner_stats', 'log_executor_stats', 'log_statement_stats'];
@@ -119,27 +135,46 @@ export const HARMLESS_LOGGING_SETTINGS: readonly string[] = ['allow_in_place_tab
  * is translated by lc_messages (superuser-only to set, so a role or database can carry a translated one).
  */
 export const OTHER_KNOWN_SETTINGS: readonly string[] = `archive_cleanup_command archive_command archive_library archive_mode archive_timeout array_nulls authentication_timeout autovacuum autovacuum_analyze_scale_factor autovacuum_analyze_threshold autovacuum_freeze_max_age autovacuum_max_workers autovacuum_multixact_freeze_max_age autovacuum_naptime autovacuum_vacuum_cost_delay autovacuum_vacuum_cost_limit autovacuum_vacuum_insert_scale_factor autovacuum_vacuum_insert_threshold autovacuum_vacuum_scale_factor autovacuum_vacuum_threshold autovacuum_work_mem backend_flush_after backslash_quote bgwriter_delay bgwriter_flush_after bgwriter_lru_maxpages bgwriter_lru_multiplier block_size bonjour bonjour_name bytea_output check_function_bodies checkpoint_completion_target checkpoint_flush_after checkpoint_timeout checkpoint_warning client_encoding client_min_messages commit_delay commit_siblings config_file constraint_exclusion cpu_index_tuple_cost cpu_operator_cost cpu_tuple_cost createrole_self_grant cursor_tuple_fraction data_checksums data_directory data_directory_mode DateStyle db_user_namespace debug_assertions default_statistics_target default_table_access_method default_tablespace default_text_search_config default_toast_compression default_transaction_deferrable default_transaction_isolation default_transaction_read_only dynamic_library_path dynamic_shared_memory_type effective_cache_size effective_io_concurrency enable_async_append enable_bitmapscan enable_gathermerge enable_hashagg enable_hashjoin enable_incremental_sort enable_indexonlyscan enable_indexscan enable_material enable_memoize enable_mergejoin enable_nestloop enable_parallel_append enable_parallel_hash enable_partition_pruning enable_partitionwise_aggregate enable_partitionwise_join enable_presorted_aggregate enable_seqscan enable_sort enable_tidscan escape_string_warning external_pid_file extra_float_digits file_extend_method from_collapse_limit fsync full_page_writes geqo geqo_effort geqo_generations geqo_pool_size geqo_seed geqo_selection_bias geqo_threshold gin_fuzzy_search_limit gin_pending_list_limit gss_accept_delegation hash_mem_multiplier hba_file hot_standby hot_standby_feedback huge_page_size huge_pages icu_validation_level ident_file idle_in_transaction_session_timeout idle_session_timeout in_hot_standby integer_datetimes IntervalStyle jit_above_cost jit_inline_above_cost jit_optimize_above_cost jit_provider join_collapse_limit krb_caseins_users krb_server_keyfile lc_messages lc_monetary lc_numeric lc_time listen_addresses lo_compat_privileges local_preload_libraries logical_decoding_work_mem maintenance_io_concurrency maintenance_work_mem max_connections max_files_per_process max_function_args max_identifier_length max_index_keys max_locks_per_transaction max_logical_replication_workers max_parallel_apply_workers_per_subscription max_parallel_maintenance_workers max_parallel_workers max_parallel_workers_per_gather max_pred_locks_per_page max_pred_locks_per_relation max_pred_locks_per_transaction max_prepared_transactions max_replication_slots max_slot_wal_keep_size max_stack_depth max_standby_archive_delay max_standby_streaming_delay max_sync_workers_per_subscription max_wal_senders max_wal_size max_worker_processes min_dynamic_shared_memory min_parallel_index_scan_size min_parallel_table_scan_size min_wal_size old_snapshot_threshold output_plugin_libraries parallel_leader_participation parallel_setup_cost parallel_tuple_cost password_encryption plan_cache_mode port primary_conninfo primary_slot_name quote_all_identifiers random_page_cost recovery_end_command recovery_min_apply_delay recovery_prefetch recovery_target recovery_target_action recovery_target_inclusive recovery_target_lsn recovery_target_name recovery_target_time recovery_target_timeline recovery_target_xid recursive_worktable_factor reserved_connections restore_command restrict_nonsystem_relation_kind row_security scram_iterations search_path segment_size seq_page_cost server_encoding server_version server_version_num session_preload_libraries session_replication_role shared_buffers shared_memory_size shared_memory_size_in_huge_pages shared_memory_type shared_preload_libraries ssl ssl_ca_file ssl_cert_file ssl_ciphers ssl_crl_dir ssl_crl_file ssl_dh_params_file ssl_ecdh_curve ssl_key_file ssl_library ssl_max_protocol_version ssl_min_protocol_version ssl_passphrase_command ssl_passphrase_command_supports_reload ssl_prefer_server_ciphers standard_conforming_strings superuser_reserved_connections synchronize_seqscans synchronous_commit synchronous_standby_names tcp_keepalives_count tcp_keepalives_idle tcp_keepalives_interval tcp_user_timeout temp_buffers temp_file_limit temp_tablespaces TimeZone timezone_abbreviations track_commit_timestamp transaction_deferrable transaction_isolation transaction_read_only transform_null_equals unix_socket_directories unix_socket_group unix_socket_permissions vacuum_buffer_usage_limit vacuum_cost_delay vacuum_cost_limit vacuum_cost_page_dirty vacuum_cost_page_hit vacuum_cost_page_miss vacuum_failsafe_age vacuum_freeze_min_age vacuum_freeze_table_age vacuum_multixact_failsafe_age vacuum_multixact_freeze_min_age vacuum_multixact_freeze_table_age wal_block_size wal_buffers wal_compression wal_decode_buffer_size wal_init_zero wal_keep_size wal_level wal_log_hints wal_receiver_create_temp_slot wal_receiver_status_interval wal_receiver_timeout wal_recycle wal_retrieve_retry_interval wal_segment_size wal_sender_timeout wal_skip_threshold wal_sync_method wal_writer_delay wal_writer_flush_after work_mem xmlbinary xmloption`.split(' ');
-/** Supported server: only this major version has been audited (any other is refused until it is). */
-export const AUDITED_SERVER_MAJOR = 16;
+/** PostgreSQL 17 only, read by name: must read 0 after PG17_SESSION_SAFETY_SQL (missing or unreadable counts as not 0). */
+export const PG17_CHECKED_SETTINGS: readonly string[] = ['transaction_timeout'];
+/** New in PostgreSQL 17 and in the logging, statistics, developer or statement-behaviour groups: event_triggers (superuser-only; event triggers do not fire for ALTER ROLE, measured on 16 and 17) and trace_connection_negotiation (postmaster-level; logs connection negotiation only, before any statement; judged by reading, not tested). */
+export const PG17_HARMLESS_LOGGING_SETTINGS: readonly string[] = ['event_triggers', 'trace_connection_negotiation'];
+/** The other names new in PostgreSQL 17.11 (taken from a real 17.11 listing compared with 16.15): storage, WAL summarization, replication, planner and SLRU buffer settings that cannot write a statement to the log. */
+export const PG17_OTHER_KNOWN_SETTINGS: readonly string[] = ['allow_alter_system', 'commit_timestamp_buffers', 'enable_group_by_reordering', 'huge_pages_status', 'io_combine_limit', 'max_notify_queue_pages', 'multixact_member_buffers',
+  'multixact_offset_buffers', 'notify_buffers', 'serializable_buffers', 'subtransaction_buffers', 'summarize_wal', 'sync_replication_slots', 'synchronized_standby_slots', 'transaction_buffers', 'wal_summary_keep_time'];
+/** In the 16 lists above but removed in PostgreSQL 17: a 17 server reporting one is refused as unclassified. */
+export const PG16_ONLY_SETTINGS: readonly string[] = ['db_user_namespace', 'old_snapshot_threshold', 'trace_recovery_messages'];
+/** Supported servers: only these major versions have been audited (any other is refused until it is). */
+export const AUDITED_SERVER_MAJORS: readonly number[] = [16, 17];
 /** Must come back from the settings read, or the read is not trusted (a locale or a rename must not make it silently empty). */
 export const SENTINEL_SETTINGS: readonly string[] = ['server_version_num', 'log_statement', 'log_min_duration_statement', 'log_min_messages', 'debug_print_parse', 'track_activities', 'client_connection_check_interval'];
 /** All of pg_settings (visible rows), compared by name only. */
 export const SETTINGS_SQL = 'select name, setting from pg_catalog.pg_settings '
   + "union all select 'pgaudit.log', coalesce(pg_catalog.current_setting('pgaudit.log', true), 'none') "
   + "union all select 'auto_explain.log_min_duration', coalesce(pg_catalog.current_setting('auto_explain.log_min_duration', true), '-1')";
-const CLASSIFIED_SETTINGS: ReadonlySet<string> = new Set([...CHECKED_SETTINGS, ...HARMLESS_LOGGING_SETTINGS, ...OTHER_KNOWN_SETTINGS, 'pgaudit.log', 'auto_explain.log_min_duration']);
+const EXTENSION_CHECKED = ['pgaudit.log', 'auto_explain.log_min_duration'];
+/** The names each audited major may report: 16 = the 16.15 lists; 17 = the same without the three removed names, plus the 19 new ones. */
+const CLASSIFIED_SETTINGS: ReadonlyMap<number, ReadonlySet<string>> = new Map([
+  [16, new Set([...CHECKED_SETTINGS, ...HARMLESS_LOGGING_SETTINGS, ...OTHER_KNOWN_SETTINGS, ...EXTENSION_CHECKED])],
+  [17, new Set([...CHECKED_SETTINGS, ...HARMLESS_LOGGING_SETTINGS, ...OTHER_KNOWN_SETTINGS, ...EXTENSION_CHECKED, ...PG17_CHECKED_SETTINGS, ...PG17_HARMLESS_LOGGING_SETTINGS, ...PG17_OTHER_KNOWN_SETTINGS].filter((s) => !PG16_ONLY_SETTINGS.includes(s)))],
+]);
 /** Customized options of extensions always contain a dot; they are not covered (see the header) except the two read by name. */
 const isExtensionSetting = (name: string): boolean => name.includes('.');
-/** Null when the server is the audited major version; a reason word otherwise (a missing or unreadable number counts as not audited). */
+/** The major version of a server_version_num text (NaN when missing or unreadable). */
+export const majorOf = (serverVersionNum: unknown): number => { const v = typeof serverVersionNum === 'string' && /^[0-9]{6}$/.test(serverVersionNum) ? Number(serverVersionNum) : Number.NaN; return Math.floor(v / 10000); };
+/** Null when the server is an audited major version; a reason word otherwise (a missing or unreadable number counts as not audited). */
 export function serverVersionProblem(settings: Map<string, string>): string | null {
-  const v = Number(settings.get('server_version_num'));
-  return Number.isInteger(v) && Math.floor(v / 10000) === AUDITED_SERVER_MAJOR ? null : 'server_version_num is not an audited major version';
+  return AUDITED_SERVER_MAJORS.includes(majorOf(settings.get('server_version_num'))) ? null : 'server_version_num is not an audited major version';
 }
 export const EXPIRY_MARGIN_HOURS = 24;
 /** Why the server settings let the verifier reach the log, or null when they do not. A setting that cannot be read or is not classified counts as unsafe. */
 export function loggingProblem(settings: Map<string, string>): string | null {
   for (const name of SENTINEL_SETTINGS) if (!settings.has(name)) return `${name} was not returned`;
-  for (const name of settings.keys()) if (!CLASSIFIED_SETTINGS.has(name) && !isExtensionSetting(name)) return `${name} is not classified`;
+  const major = majorOf(settings.get('server_version_num'));
+  const classified = CLASSIFIED_SETTINGS.get(major);
+  if (!classified) return 'server_version_num is not an audited major version';
+  for (const name of settings.keys()) if (!classified.has(name) && !isExtensionSetting(name)) return `${name} is not classified`;
+  if (major === 17 && (settings.get('transaction_timeout') ?? '').trim() !== '0') return 'transaction_timeout is not 0';
   if (Number(settings.get('client_connection_check_interval')) !== 0) return 'client_connection_check_interval is not 0';
   for (const name of MUST_BE_OFF_SETTINGS) if ((settings.get(name) ?? 'missing').trim().toLowerCase() !== 'off') return `${name} is not off`;
   const num = (name: string): number => { const v = settings.get(name); return v === undefined || v.trim() === '' ? Number.NaN : Number(v); };
@@ -266,7 +301,13 @@ export async function runRolePassword(client: RebuiltSqlClient, plan: RolePasswo
   try {
     // Search path and session safety first: nothing below can resolve a look-alike object, debug_print_* cannot log the statement, and no error inside the ALTER becomes a FATAL.
     await client.query(SEARCH_PATH_SQL);
+    // The major decides which session settings exist (16 rejects transaction_timeout); anything but 16 or 17 is refused here, before any other statement.
+    const major = majorOf(((await client.query(SERVER_VERSION_SQL)).rows as { v?: unknown }[])[0]?.v);
+    if (!AUDITED_SERVER_MAJORS.includes(major)) {
+      throw new RunnerRefusal('role_password_server_version_unverified', 'the server is not PostgreSQL 16 or 17, the only major versions whose settings have been audited for this action; refusing; nothing changed');
+    }
     for (const sql of SESSION_SAFETY_SQL) await client.query(sql);
+    if (major === 17) for (const sql of PG17_SESSION_SAFETY_SQL) await client.query(sql);
     // Keep a stricter timeout that is already in force (0 means none); otherwise set ours for this transaction only.
     const settings = new Map(((await client.query(SETTINGS_SQL)).rows as { name: string; setting: string }[]).map((r) => [r.name, r.setting]));
     const needsOurs = (name: string, limitMs: number): boolean => { const ms = Number(settings.get(name)); return !(Number.isFinite(ms) && ms > 0 && ms <= limitMs); };
@@ -285,8 +326,8 @@ export async function runRolePassword(client: RebuiltSqlClient, plan: RolePasswo
     if (settings.get('pg_stat_statements.track') === 'all' && settings.get('pg_stat_statements.track_utility') !== 'off') {
       throw new RunnerRefusal('role_password_refused', 'pg_stat_statements.track is "all" with track_utility on, which would record the nested role statement; refusing; nothing changed');
     }
-    if (serverVersionProblem(settings) !== null) {
-      throw new RunnerRefusal('role_password_server_version_unverified', 'the server is not PostgreSQL 16, the only major version whose settings have been audited for this action; refusing; nothing changed');
+    if (serverVersionProblem(settings) !== null || majorOf(settings.get('server_version_num')) !== major) {
+      throw new RunnerRefusal('role_password_server_version_unverified', 'the settings read does not name the same audited PostgreSQL major version (16 or 17) as the first read; refusing; nothing changed');
     }
     if (loggingProblem(settings) !== null) {
       throw new RunnerRefusal('role_password_logging_refused', 'a server logging setting would write the bound verifier to the server log, or is not one this tool has classified; refusing; nothing changed');

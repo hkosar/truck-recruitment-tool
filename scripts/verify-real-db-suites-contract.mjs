@@ -138,14 +138,18 @@ check('TLS cluster files: ssl on, forward-slash quoted key paths; recruiter_main
 check('supported majors are exactly 16 and 17, and the default bin folder is still the PostgreSQL 16 install', JSON.stringify(SUPPORTED_PG_MAJORS) === '[16,17]'
   && /const candidates = \[process\.env\.PG_BIN, 'C:\\\\Program Files\\\\PostgreSQL\\\\16\\\\bin'\]\.filter\(Boolean\);/.test(code));
 check('the version gate reads pg_ctl --version through supportedPgMajor, refuses before the temp folder is made, and prints the major as its first output line',
-  /const ver = sh\(exe\(pgBin, 'pg_ctl'\), \['--version'\]\);\n\s*pgMajor = supportedPgMajor\(ver\.stdout\);\n\s*if \(!pgMajor\) \{\n\s*console\.error\(`REFUSED: /.test(code)
+  /const ver = sh\(exe\(pgBin, 'pg_ctl'\), \['--version'\]\);\n\s*pgMajor = supportedPgMajor\(ver\);\n\s*if \(!pgMajor\) \{\n\s*console\.error\(`REFUSED: /.test(code)
   && code.indexOf('pgMajor = supportedPgMajor(') < code.indexOf('mkdtempSync(join') && code.indexOf('pgMajor = supportedPgMajor(') > code.indexOf('nonLoopbackConnectionVars(process.env)')
   && /console\.log\(`PostgreSQL major \$\{pgMajor\} \(bin folder \$\{pgBin\}\)`\);/.test(code)
   && !/console\.log\(/.test(code.slice(code.indexOf('const bad = nonLoopbackConnectionVars(process.env);'), code.indexOf('console.log(`PostgreSQL major'))) && /cluster \(\$\{label\}\): PostgreSQL \$\{pgMajor\} on/.test(code));
-check('supportedPgMajor accepts 16.x and 17.x pg_ctl output and refuses 15, 18, 160, two version lines, a bare number and no output',
-  supportedPgMajor('pg_ctl (PostgreSQL) 16.15\n') === 16 && supportedPgMajor('pg_ctl (PostgreSQL) 17.11') === 17
-  && [ 'pg_ctl (PostgreSQL) 15.8', 'pg_ctl (PostgreSQL) 18.1', 'pg_ctl (PostgreSQL) 160.1', 'pg_ctl (PostgreSQL) 16.1\npg_ctl (PostgreSQL) 18.1', 'pg_ctl 16.1', '16.4', '', undefined]
-    .every((v) => supportedPgMajor(v) === undefined));
+check('supportedPgMajor needs a successful pg_ctl (status 0, no signal) and exactly one full line "pg_ctl (PostgreSQL) 16|17.N" (CRLF allowed), and refuses everything else',
+  /const PG_CTL_VERSION_LINE = \/\^pg_ctl \\\(PostgreSQL\\\) \(16\|17\)\\\.\(0\|\[1-9\]\[0-9\]\*\)\$\/;/.test(code)
+  && supportedPgMajor({ status: 0, signal: null, stdout: 'pg_ctl (PostgreSQL) 16.15\r\n' }) === 16 && supportedPgMajor({ status: 0, signal: null, stdout: 'pg_ctl (PostgreSQL) 17.11\r\n' }) === 17
+  && ['pg_ctl (PostgreSQL) 15.8', 'pg_ctl (PostgreSQL) 18.1', 'pg_ctl (PostgreSQL) 18beta1', 'pg_ctl (PostgreSQL) 160.1', 'pg_ctl (PostgreSQL) 17.11garbage', 'not_pg_ctl (PostgreSQL) 17.11',
+    'pg_ctl (PostgreSQL) 17.11\npg_ctl (PostgreSQL) 18beta1', 'pg_ctl (PostgreSQL) 17.11.18', 'pg_ctl (PostgreSQL) 017.11', 'pg_ctl (PostgreSQL) 16.1\npg_ctl (PostgreSQL) 18.1', 'pg_ctl 16.1', '16.4', '', undefined]
+    .every((v) => supportedPgMajor({ status: 0, signal: null, stdout: v }) === undefined)
+  && supportedPgMajor({ status: 1, signal: null, stdout: 'pg_ctl (PostgreSQL) 17.11' }) === undefined && supportedPgMajor({ status: 0, signal: 'SIGTERM', stdout: 'pg_ctl (PostgreSQL) 17.11' }) === undefined
+  && supportedPgMajor('pg_ctl (PostgreSQL) 17.11') === undefined);
 
 if (failures.length) {
   console.error(`FAIL real-database suite runner contract: ${failures.length} check(s) failed:\n- ${failures.join('\n- ')}`);
