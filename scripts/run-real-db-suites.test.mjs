@@ -6,7 +6,7 @@ import { join, parse, resolve } from 'node:path';
 import { test } from 'node:test';
 import {
   ADMIN_CONNECT_TIMEOUT_MS, CHILD_COLOR_OFF, DEFAULT_TIMEOUT_MS, ENV_ALLOW, EXCLUDED_FILES, SUITE_FILES, SUITE_IDS, adminClientConfig, classifyOutcome, describePkiFailure, endStrayOnPorts, executeSuite, formatLimit, findSkipLines, isSafeToDelete, makeSh, maskSecrets,
-  nonLoopbackConnectionVars, orderNotice, orderSuites, pgServerOptions, resolveTimeoutMs, restoreStatements, runSuites, scrubbedEnv, STRAY_BACKENDS_SQL, STRAY_COUNT_SQL, stripAnsi, summarize, terminateStrayBackends, tlsClusterFiles, vitestArgs,
+  nonLoopbackConnectionVars, orderNotice, orderSuites, pgServerOptions, resolveTimeoutMs, restoreStatements, runSuites, scrubbedEnv, STRAY_BACKENDS_SQL, STRAY_COUNT_SQL, stripAnsi, summarize, SUPPORTED_PG_MAJORS, supportedPgMajor, terminateStrayBackends, tlsClusterFiles, vitestArgs,
 } from './run-real-db-suites.mjs';
 
 const ok = { status: 0 };
@@ -422,4 +422,14 @@ test('time limit text: under 1 second is shown in ms, never "0 s" (T53 item 5)',
   const o = classifyOutcome({ kind: 'tsx', r: { error: { code: 'ETIMEDOUT' }, status: null }, out: '', timeoutMs: 50 });
   assert.match(o.reason, /exceeded the 50 ms time limit/);
   assert.ok(!/\b0 s\b/.test(o.reason));
+});
+
+test('PostgreSQL version gate: 16.x and 17.x pg_ctl output only', () => {
+  assert.deepEqual(SUPPORTED_PG_MAJORS, [16, 17]);
+  assert.equal(supportedPgMajor('pg_ctl (PostgreSQL) 16.15\n'), 16);
+  assert.equal(supportedPgMajor('pg_ctl (PostgreSQL) 17.11\r\n'), 17);
+  for (const v of ['pg_ctl (PostgreSQL) 15.8', 'pg_ctl (PostgreSQL) 18.1', 'pg_ctl (PostgreSQL) 18beta1', 'pg_ctl (PostgreSQL) 160.1', 'pg_ctl (PostgreSQL) 9.6.24',
+    'pg_ctl (PostgreSQL) 16.1\npg_ctl (PostgreSQL) 17.1', 'pg_ctl 16.1', '16.4', '', undefined, null]) {
+    assert.equal(supportedPgMajor(v), undefined, String(v));
+  }
 });

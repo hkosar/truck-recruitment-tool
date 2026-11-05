@@ -75,10 +75,14 @@ begin
   end if;
 end $x$`;
 
+/** The shim's empty stand-in extension (test_ext5, or tsm_system_rows emptied by a3-build-test-db.mjs where test_ext5 is not installed, as in the
+ *  PostgreSQL 17 binaries): the one extension that owns st_x, found the way M1 finds PostGIS. A scalar subquery, so two owners are an error. */
+const STANDIN_EXT_SQL = `(select d0.refobjid from pg_depend d0 join pg_proc p0 on p0.oid = d0.objid where d0.classid = 'pg_proc'::regclass and d0.refclassid = 'pg_extension'::regclass and d0.deptype = 'e' and p0.proname = 'st_x')`;
+
 /** Hosted Supabase: the migrations' "revoke ... from public" on the PostGIS routines was run by a non-owner, so PUBLIC keeps EXECUTE. */
 const PUBLIC_EXECUTE_SQL = `do $p$ declare r record; begin
   for r in select d.objid::regprocedure as fn from pg_depend d join pg_extension e on e.oid = d.refobjid
-           where d.classid = 'pg_proc'::regclass and d.refclassid = 'pg_extension'::regclass and d.deptype = 'e' and e.extname = 'test_ext5' loop
+           where d.classid = 'pg_proc'::regclass and d.refclassid = 'pg_extension'::regclass and d.deptype = 'e' and e.oid = ${STANDIN_EXT_SQL} loop
     execute format('grant execute on routine %s to public', r.fn);
   end loop;
 end $p$`;
@@ -86,7 +90,7 @@ end $p$`;
 /** Hosted-like worst case for EXECUTE: PUBLIC has none on the PostGIS stand-ins, the runner has it without grant option. */
 const NO_PUBLIC_EXECUTE_SQL = `do $p$ declare r record; begin
   for r in select d.objid::regprocedure as fn from pg_depend d join pg_extension e on e.oid = d.refobjid
-           where d.classid = 'pg_proc'::regclass and d.refclassid = 'pg_extension'::regclass and d.deptype = 'e' and e.extname = 'test_ext5' loop
+           where d.classid = 'pg_proc'::regclass and d.refclassid = 'pg_extension'::regclass and d.deptype = 'e' and e.oid = ${STANDIN_EXT_SQL} loop
     execute format('revoke execute on routine %s from public', r.fn);
     execute format('grant execute on routine %s to ${RUNNER}', r.fn);
   end loop;
@@ -386,7 +390,7 @@ async function main(): Promise<void> {
       {
         const s = await runAsRunner(dbUrl, 'postgis-placement');
         const ev = s.events.find((e) => e.msg === 'staging-sql.postgis_placement');
-        // The shim's PostGIS stand-ins belong to test_ext5, not an extension named postgis, so the true answer here is "absent"
+        // The shim's PostGIS stand-ins belong to its stand-in extension (STANDIN_EXT_SQL), not an extension named postgis, so the true answer here is "absent"
         // (as in backout-rehearsal-a3.test.ts); this proves only that the read runs for the runner login.
         check(`${label}: postgis-placement runs as the runner (stand-in extension: "absent")`, s.error === undefined && ev?.schema === 'absent', `${describe(s.error)} ${JSON.stringify(ev)}`);
       }
@@ -431,7 +435,7 @@ async function main(): Promise<void> {
       try {
         check('negative EXECUTE: the runner has EXECUTE on the PostGIS stand-ins without grant option and PUBLIC has none',
           (await o.admin.query(`select count(*)::int as n, bool_and(has_function_privilege($1, p.oid, 'execute') and not has_function_privilege($1, p.oid, 'execute with grant option') and not has_function_privilege('public', p.oid, 'execute')) as ok
-             from pg_proc p join pg_depend d on d.objid = p.oid and d.classid = 'pg_proc'::regclass and d.deptype = 'e' join pg_extension e on e.oid = d.refobjid where e.extname = 'test_ext5'`, [RUNNER])).rows[0].ok === true);
+             from pg_proc p join pg_depend d on d.objid = p.oid and d.classid = 'pg_proc'::regclass and d.deptype = 'e' join pg_extension e on e.oid = d.refobjid where e.oid = ${STANDIN_EXT_SQL}`, [RUNNER])).rows[0].ok === true);
         check('negative EXECUTE: M1 stops with P0001 and the specific EXECUTE grant-option message', o.error?.code === 'P0001' && o.error?.message === NEG_EXEC_MESSAGE, `error=${o.error?.code ?? ''} ${o.error?.message ?? ''}`);
         check('negative EXECUTE: the runner reported the failed step and no step_done', o.events.some((e) => e.msg === 'staging-sql.step_failed') && !o.events.some((e) => e.msg === 'staging-sql.step_done'));
         check('negative EXECUTE: nothing was applied (catalogue snapshot incl. default privileges identical, no recruiter_* role)', o.before.digest === o.after.digest && o.before.n === o.after.n

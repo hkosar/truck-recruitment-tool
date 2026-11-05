@@ -6,7 +6,7 @@
 import { existsSync, readFileSync, readdirSync } from 'node:fs';
 import { resolve } from 'node:path';
 import { pathToFileURL } from 'node:url';
-import { EXCLUDED_FILES, SUITE_FILES, SUITE_IDS, nonLoopbackConnectionVars, pgServerOptions, scrubbedEnv, tlsClusterFiles } from './run-real-db-suites.mjs';
+import { EXCLUDED_FILES, SUITE_FILES, SUITE_IDS, SUPPORTED_PG_MAJORS, nonLoopbackConnectionVars, pgServerOptions, scrubbedEnv, supportedPgMajor, tlsClusterFiles } from './run-real-db-suites.mjs';
 
 const root = resolve(import.meta.dirname, '..');
 const src = readFileSync(resolve(root, 'scripts/run-real-db-suites.mjs'), 'utf8').replace(/\r\n/g, '\n');
@@ -134,8 +134,21 @@ check('TLS cluster files: ssl on, forward-slash quoted key paths; recruiter_main
   && /^hostssl\s+all recruiter_maintenance 127\.0\.0\.1\/32 scram-sha-256$/.test(hbaLines[0]) && /^hostnossl all recruiter_maintenance 127\.0\.0\.1\/32 reject$/.test(hbaLines[1])
   && (() => { try { tlsClusterFiles({ certFile: "C:\\x'y", keyFile: 'k' }); return false; } catch { return true; } })());
 
+// ---- PostgreSQL version gate: 16 (default install) or 17 only, checked before anything is created, and the major is printed first.
+check('supported majors are exactly 16 and 17, and the default bin folder is still the PostgreSQL 16 install', JSON.stringify(SUPPORTED_PG_MAJORS) === '[16,17]'
+  && /const candidates = \[process\.env\.PG_BIN, 'C:\\\\Program Files\\\\PostgreSQL\\\\16\\\\bin'\]\.filter\(Boolean\);/.test(code));
+check('the version gate reads pg_ctl --version through supportedPgMajor, refuses before the temp folder is made, and prints the major as its first output line',
+  /const ver = sh\(exe\(pgBin, 'pg_ctl'\), \['--version'\]\);\n\s*pgMajor = supportedPgMajor\(ver\.stdout\);\n\s*if \(!pgMajor\) \{\n\s*console\.error\(`REFUSED: /.test(code)
+  && code.indexOf('pgMajor = supportedPgMajor(') < code.indexOf('mkdtempSync(join') && code.indexOf('pgMajor = supportedPgMajor(') > code.indexOf('nonLoopbackConnectionVars(process.env)')
+  && /console\.log\(`PostgreSQL major \$\{pgMajor\} \(bin folder \$\{pgBin\}\)`\);/.test(code)
+  && !/console\.log\(/.test(code.slice(code.indexOf('const bad = nonLoopbackConnectionVars(process.env);'), code.indexOf('console.log(`PostgreSQL major'))) && /cluster \(\$\{label\}\): PostgreSQL \$\{pgMajor\} on/.test(code));
+check('supportedPgMajor accepts 16.x and 17.x pg_ctl output and refuses 15, 18, 160, two version lines, a bare number and no output',
+  supportedPgMajor('pg_ctl (PostgreSQL) 16.15\n') === 16 && supportedPgMajor('pg_ctl (PostgreSQL) 17.11') === 17
+  && [ 'pg_ctl (PostgreSQL) 15.8', 'pg_ctl (PostgreSQL) 18.1', 'pg_ctl (PostgreSQL) 160.1', 'pg_ctl (PostgreSQL) 16.1\npg_ctl (PostgreSQL) 18.1', 'pg_ctl 16.1', '16.4', '', undefined]
+    .every((v) => supportedPgMajor(v) === undefined));
+
 if (failures.length) {
   console.error(`FAIL real-database suite runner contract: ${failures.length} check(s) failed:\n- ${failures.join('\n- ')}`);
   process.exit(1);
 }
-console.log(`PASS real-database suite runner contract: loopback-only, refuses non-loopback connection variables, no network or secret store, no process killed, cleanup in finally (each of the four clusters stopped by its own folder, temp folder with the throwaway TLS key and app/dist removed), retention-secure runs its TLS scenario, allow-listed child environment, failures, skips and timeouts give a non-zero exit, suite list matches the ${gated.length} env-gated real-PostgreSQL test files on disk (${EXCLUDED_FILES.length} excluded with a reason)`);
+console.log(`PASS real-database suite runner contract: PostgreSQL 16 or 17 only (major printed first), loopback-only, refuses non-loopback connection variables, no network or secret store, no process killed, cleanup in finally (each of the four clusters stopped by its own folder, temp folder with the throwaway TLS key and app/dist removed), retention-secure runs its TLS scenario, allow-listed child environment, failures, skips and timeouts give a non-zero exit, suite list matches the ${gated.length} env-gated real-PostgreSQL test files on disk (${EXCLUDED_FILES.length} excluded with a reason)`);

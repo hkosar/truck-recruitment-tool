@@ -48,12 +48,18 @@ async function main(): Promise<void> {
     check('baseline: zero event triggers is a valid, observed zero', base.eventTriggers.total === 0 && base.eventTriggers.listed.length === 0);
     check('baseline: no pgrst.db_schemas setting on authenticator', base.authenticator.authenticator_exists === true && base.authenticator.role_wide_entries === 0 && base.authenticator.this_database_entries === 0 && base.authenticator.names_public_if_single === null);
 
-    check('server major: the real cluster is PostgreSQL 16 (the local runner cluster), as version number and as printed line', serverMajor(base.serverVersionNum) === '16' && /^16[0-9]{4}$/.test(String(base.serverVersionNum)));
+    // The local runner uses PostgreSQL 16 or 17 (scripts/run-real-db-suites.mjs); the preflight must report the cluster actually used,
+    // read here independently of the preflight's own query.
+    const own = (await c.query("select current_setting('server_version_num')::int as num, current_setting('server_version') as v")).rows[0] as { num: number; v: string };
+    const ownMajor = String(Math.floor(own.num / 10000));
+    check(`server major: the real cluster is PostgreSQL ${ownMajor} (16 or 17, the local runner cluster), and the preflight's version number and major match it`,
+      ['16', '17'].includes(ownMajor) && own.v.startsWith(`${ownMajor}.`) && String(base.serverVersionNum) === String(own.num) && serverMajor(base.serverVersionNum) === ownMajor
+      && new RegExp(`^${ownMajor}[0-9]{4}$`).test(String(base.serverVersionNum)));
     const majorOut: string[] = [];
     const lm = console.log;
     console.log = (...a: unknown[]) => { majorOut.push(String(a[0])); };
     try { reportEnvironmentPreflight(base); } finally { console.log = lm; }
-    check('server major: the report prints exactly one staging-sql.server_major line and it says "16"', majorOut.filter((x) => x.includes('staging-sql.server_major')).length === 1 && majorOut.includes('{"msg":"staging-sql.server_major","major":"16"}'));
+    check(`server major: the report prints exactly one staging-sql.server_major line and it says "${ownMajor}"`, majorOut.filter((x) => x.includes('staging-sql.server_major')).length === 1 && majorOut.includes(`{"msg":"staging-sql.server_major","major":"${ownMajor}"}`));
 
     // ---- partial grants are told apart from full ones (the review's counterexample)
     await c.query('alter default privileges in schema public grant select on tables to authenticated; alter default privileges in schema public grant select on sequences to authenticated;');

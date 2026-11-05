@@ -22,6 +22,7 @@
 import { createRequire } from 'node:module';
 import { readFileSync, readdirSync, writeFileSync } from 'node:fs';
 import { join, resolve } from 'node:path';
+import { shimForServer } from './a3-shim-standin.mjs';
 
 const root = resolve(import.meta.dirname, '..');
 const require = createRequire(join(root, 'app', 'package.json'));
@@ -158,6 +159,8 @@ alter database ${dbName} set search_path = ${path};
 `)
       .replace(ext, `create extension test_ext5 schema ${postgisSchema};`);
   }
+  // test_ext5 (the shim's empty stand-in extension) is missing from the PostgreSQL 17 binaries: see scripts/a3-shim-standin.mjs.
+  shim = await shimForServer(shim, (sql) => db.query(sql));
   await run('supabase-shim', shim);
 
   const substitutions = [];

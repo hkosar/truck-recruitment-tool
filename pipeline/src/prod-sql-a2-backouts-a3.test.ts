@@ -64,7 +64,9 @@ async function main(): Promise<void> {
   const check = (name: string, ok: boolean) => { assert.ok(ok, name); console.log(`PASS ${name}`); n += 1; };
 
   // ---- Build the state before the July A2 migrations: shim, the 17 migrations up to and including the hardening one, fixtures.
-  await q(read('supabase/tests/a3/harness/supabase-shim.sql'));
+  // test_ext5 (the shim's empty stand-in extension) is missing from the PostgreSQL 17 binaries: see scripts/a3-shim-standin.mjs.
+  const standin = await import(pathToFileURL(resolve(REPOSITORY_ROOT, 'scripts/a3-shim-standin.mjs')).href) as { shimForServer: (shim: string, query: typeof q) => Promise<string> };
+  await q(await standin.shimForServer(read('supabase/tests/a3/harness/supabase-shim.sql'), q));
   const applied: string[] = [];
   for (const file of readdirSync(resolve(REPOSITORY_ROOT, 'supabase/migrations')).filter((f) => /^\d{14}_.+\.sql$/.test(f)).sort()) {
     if (file > HARDENING) break;

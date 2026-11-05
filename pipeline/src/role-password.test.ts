@@ -374,6 +374,44 @@ async function main(): Promise<void> {
   check('local verifier equals the one PostgreSQL computed for the same password and salt (byte for byte)', scramSha256Verifier(PW, Buffer.from(salt!, 'base64'), Number(iter)) === server);
   await admin.query('drop role tr_ref_role');
 
+  // PostgreSQL 17 (scripts/run-real-db-suites.mjs with a PostgreSQL 17 PG_BIN; hosted staging-2 is 17): role-password is audited for 16
+  // only and must refuse a 17 server by design (role_password_server_version_unverified, before the verifier is bound; desk review
+  // thr_qdqhq8wv42: transaction_timeout and the unclassified 17 settings are not audited). On 17 this test proves exactly that refusal on
+  // the real server, for both actions through the executor with the admin connection and as a non-superuser CREATEROLE runner through the
+  // executor's own client, and stops: the PostgreSQL 16 real-server checks below would all be this refusal. Any other major is refused here.
+  const serverNum = Number((await admin.query("select current_setting('server_version_num') as v")).rows[0].v);
+  const pgMajor = Math.floor(serverNum / 10000);
+  assert.ok(pgMajor === 16 || pgMajor === 17, `refusing: the real cluster must be PostgreSQL 16 or 17 (server_version_num ${serverNum})`);
+  if (pgMajor === 17) {
+    const versionRefused = (r: { lines: string[]; error?: unknown }): boolean => r.error instanceof RunnerRefusal && r.error.id === 'role_password_server_version_unverified'
+      && r.lines.length === 1 && JSON.parse(r.lines[0]!).result === 'rolled_back';
+    for (const [action, spec] of Object.entries(ROLE_PASSWORD_ACTIONS)) {
+      const role = spec.role;
+      await admin.query(`drop role if exists ${role}`);
+      await admin.query(`create role ${role} nologin nocreatedb connection limit 7`);
+      const before = await attrs(role);
+      const p = planRolePassword({ action, dbUrl: pooler(REBUILT), confirm: spec.confirmation, password: PW });
+      const run = await captured(() => executeRolePassword(p, () => ({ connect: async () => undefined, end: async () => undefined, query: (s: string, a?: unknown[]) => admin.query(s, a) })));
+      check(`${role} on PostgreSQL 17 (server_version_num ${serverNum}): refused by design with role_password_server_version_unverified through the real executor path, rolled back, no password stored, attributes unchanged, still cannot log in`,
+        versionRefused(run) && (await rolePw(role)) === null && (await attrs(role)) === before && !(await loginAs(role, PW)).ok);
+      await admin.query(`drop role ${role}`);
+    }
+    const RUNNER_PW = randomBytes(18).toString('hex');
+    await admin.query('drop role if exists tr_runner');
+    await admin.query(`create role tr_runner login createrole password '${RUNNER_PW}'`);
+    await admin.query('create role recruiter_app nologin');
+    await admin.query('grant recruiter_app to tr_runner with admin option');
+    const runnerPlan = planRolePassword({ ...base, password: `${PW}-runner` });
+    const viaRunner = await captured(() => executeRolePassword({ ...runnerPlan, target: { ...runnerPlan.target, host: u.hostname, port: Number(u.port), user: 'tr_runner', password: RUNNER_PW, database: decodeURIComponent(u.pathname.slice(1)) } }));
+    check('recruiter_app on PostgreSQL 17, as a non-superuser CREATEROLE runner through the executor\'s default TLS-hardened client (loopback exemption): refused by design with role_password_server_version_unverified, rolled back, no password stored, still cannot log in',
+      versionRefused(viaRunner) && (await rolePw('recruiter_app')) === null && !(await loginAs('recruiter_app', `${PW}-runner`)).ok);
+    await admin.query('drop role recruiter_app');
+    await admin.query('drop role tr_runner');
+    check('every event line printed during the real-PostgreSQL 17 runs too is a fixed, verifier-free and password-free event', eventsClean());
+    console.log(`role-password: ${n} checks passed (offline and real PostgreSQL 17: the by-design version refusal; the PostgreSQL 16 real-server checks need a 16 cluster)`);
+    return;
+  }
+
   for (const [action, spec] of Object.entries(ROLE_PASSWORD_ACTIONS)) {
     const role = spec.role;
     await admin.query(`drop role if exists ${role}`);

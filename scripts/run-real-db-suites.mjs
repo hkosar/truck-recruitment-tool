@@ -1,6 +1,6 @@
 #!/usr/bin/env node
 // LOCAL ONLY: runs the real-PostgreSQL suites listed in SUITE_FILES (17 suites, see the "Not covered" list below) against throwaway
-// PostgreSQL 16 clusters that this script creates and always removes: one shared by 15 suites, a second one only for role-password
+// PostgreSQL 16 (default) or 17 (PG_BIN) clusters that this script creates and always removes: one shared by 15 suites, a second one only for role-password
 // (it drops and recreates recruiter_app / recruiter_maintenance, which are cluster-wide, and needs pg_stat_statements preloaded and a
 // server log it can read), and a third one only for retention-secure's TLS scenario (ssl=on with a throwaway CA, recruiter_maintenance
 // allowed in over hostssl + scram-sha-256 only), and a fourth one only for m1-supabase-runner (it applies M1 as a NOSUPERUSER
@@ -10,6 +10,10 @@
 // How to run (from the repository root; app/node_modules and pipeline/node_modules must already exist, nothing is installed):
 //   node scripts/run-real-db-suites.mjs
 //   PG_BIN="C:\Program Files\PostgreSQL\16\bin" node scripts/run-real-db-suites.mjs     (only if PostgreSQL 16 is elsewhere)
+//   PG_BIN="<PostgreSQL 17 folder>\bin" node scripts/run-real-db-suites.mjs                 (the same suites on PostgreSQL 17, as hosted staging-2)
+// Only major 16 or 17 is accepted (pg_ctl --version); the first output line names the major and bin folder used. On 17 role-password
+// proves its by-design refusal (role_password_server_version_unverified) instead of its PostgreSQL 16 runs, and the A3 shim's empty
+// stand-in extension is built from tsm_system_rows when test_ext5 is not installed (scripts/a3-build-test-db.mjs).
 // Output: one "PASS <suite>", "FAIL <suite>: <reason>" or "TIMEOUT <suite>: ..." line per suite, then a summary. The exit code is 0 only
 // when every listed suite ran and passed; a failed, timed-out, skipped, missing or interrupted suite gives a non-zero exit code.
 // Test switches: RDB_SUITES_INJECT_FAIL=<suite id> replaces that one suite with a command that fails; RDB_SUITES_INJECT_HANG=<suite id>
@@ -363,6 +367,16 @@ export const EXCLUDED_FILES = [
 ];
 export const SUITE_IDS = [...new Set(SUITE_FILES.map((f) => f.id))];
 
+/** The PostgreSQL major versions this script runs on: 16 (the default install, the line's audited version) and 17 (hosted staging-2). */
+export const SUPPORTED_PG_MAJORS = [16, 17];
+
+/** The major version from `pg_ctl --version` output ("pg_ctl (PostgreSQL) 17.11"), or undefined when it is not exactly one supported
+ *  major (anything else, two version lines, or no version at all). Pure. */
+export function supportedPgMajor(versionOutput) {
+  const found = [...String(versionOutput ?? '').matchAll(/\(PostgreSQL\)\s+(\d+)\.\d+/g)].map((m) => Number(m[1]));
+  return found.length === 1 && SUPPORTED_PG_MAJORS.includes(found[0]) ? found[0] : undefined;
+}
+
 function findPgBin() {
   const candidates = [process.env.PG_BIN, 'C:\\Program Files\\PostgreSQL\\16\\bin'].filter(Boolean);
   for (const dir of candidates) {
@@ -394,6 +408,7 @@ async function run() {
   let dir;
   const dataDirs = []; // the clusters this run made (main, role-password, tls, m1-supabase-runner), each stopped by its own folder
   let pgBin;
+  let pgMajor;
   let clusterTouched = false;
   let builtDist = false;
   let interrupted = false;
@@ -447,16 +462,18 @@ async function run() {
     }
     pgBin = findPgBin();
     if (!pgBin) {
-      console.error('REFUSED: PostgreSQL 16 bin folder not found. Set PG_BIN or install it under "C:\\Program Files\\PostgreSQL\\16\\bin".');
+      console.error('REFUSED: PostgreSQL bin folder not found. Set PG_BIN (PostgreSQL 16 or 17) or install PostgreSQL 16 under "C:\\Program Files\\PostgreSQL\\16\\bin".');
       process.exitCode = 2;
       return;
     }
     const ver = sh(exe(pgBin, 'pg_ctl'), ['--version']);
-    if (!/\b16\./.test(ver.stdout ?? '')) {
-      console.error('REFUSED: the PostgreSQL bin folder is not version 16.');
+    pgMajor = supportedPgMajor(ver.stdout);
+    if (!pgMajor) {
+      console.error(`REFUSED: the PostgreSQL bin folder is not version ${SUPPORTED_PG_MAJORS.join(' or ')} (pg_ctl --version: ${String(ver.stdout ?? '').trim().slice(0, 80) || 'no output'}).`);
       process.exitCode = 2;
       return;
     }
+    console.log(`PostgreSQL major ${pgMajor} (bin folder ${pgBin})`);
     const need = [
       join(root, 'app', 'node_modules', 'pg', 'package.json'),
       join(root, 'app', 'node_modules', 'vitest', 'vitest.mjs'),
@@ -520,7 +537,7 @@ async function run() {
       }
       let pid = '?';
       try { pid = readFileSync(join(clusterDir, 'postmaster.pid'), 'utf8').split('\n')[0]; } catch { /* reported as ? */ }
-      console.log(`cluster (${label}): PostgreSQL 16 on 127.0.0.1:${p}, postmaster pid ${pid}, folder ${clusterDir}`);
+      console.log(`cluster (${label}): PostgreSQL ${pgMajor} on 127.0.0.1:${p}, postmaster pid ${pid}, folder ${clusterDir}`);
       return p;
     };
     const port = await startCluster(dataDir, join(dir, 'server.log'), {}, 'main');
