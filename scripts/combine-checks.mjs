@@ -4,6 +4,7 @@
 //
 // How to run (from the repository root):
 //   node scripts/combine-checks.mjs --runbook <runbook.md> [--junction <worktree that has the node_modules>] [--pg17-bin <dir>]
+//                                   [--timeout <minutes>] [--staging-check <path>]
 //
 // What it does, in order:
 //   1. Preflight: reports whether pipeline/node_modules and app/node_modules exist. With --junction <worktree>, a missing one is
@@ -22,12 +23,17 @@
 //   3. Prints a summary table. Exit code 0 only if every step passed and no interruption arrived; 1 if a step failed or was
 //      skipped/interrupted (an interruption during a step that then exits 0 still counts: that step is INTERRUPTED and an
 //      "interruption" FAIL row is added); 2 for bad usage or a refused preflight (nothing was run).
+// Progress: a line is printed when each step starts and when it ends (name, result, elapsed seconds).
+// --timeout <minutes> (default none) applies to each step: when it runs out, ONLY the child this run started for that step is stopped
+//   (child.kill on our own handle; a grandchild that child started is not signalled), the step is marked TIMEOUT and the run FAILs.
+// --staging-check <path> adds one row that only reads three git facts of that folder (git -C <path> rev-parse HEAD, symbolic-ref -q HEAD,
+//   status --porcelain; --no-optional-locks so even git's index refresh writes nothing). PASS only if HEAD is detached and the tree is clean.
 // The guard stops connects to non-loopback addresses and lookups answered with one; it does not stop dns.lookup itself (see net-guard.mjs).
 // It never signals or stops a process it did not start: each step is waited for (Ctrl+C reaches the step through the console; this
 // script then skips the remaining steps and cleans up).
 // Undo: delete this script and combine-checks.test.mjs.
 
-import { spawn } from 'node:child_process';
+import { execFileSync, spawn } from 'node:child_process';
 import { existsSync, lstatSync, mkdtempSync, readdirSync, readlinkSync, rmSync, rmdirSync, statSync, symlinkSync } from 'node:fs';
 import { tmpdir } from 'node:os';
 import { join, resolve } from 'node:path';
@@ -36,12 +42,12 @@ import { pathToFileURL } from 'node:url';
 const root = resolve(import.meta.dirname, '..');
 export const DEFAULT_PG17_BIN = 'C:\\Users\\hunte\\.bb\\tools\\pg17\\bin';
 export const MODULE_DIRS = ['pipeline', 'app'];
-const USAGE = 'usage: node scripts/combine-checks.mjs --runbook <runbook.md> [--junction <worktree with node_modules>] [--pg17-bin <dir>]';
+const USAGE = 'usage: node scripts/combine-checks.mjs --runbook <runbook.md> [--junction <worktree with node_modules>] [--pg17-bin <dir>] [--timeout <minutes>] [--staging-check <path>]';
 
 /** Reads the command line. Returns { ok: true, options } or { ok: false, error }. Pure. */
 export function parseArgs(argv) {
-  const options = { runbook: undefined, junction: undefined, pg17Bin: DEFAULT_PG17_BIN };
-  const flags = { '--runbook': 'runbook', '--junction': 'junction', '--pg17-bin': 'pg17Bin' };
+  const options = { runbook: undefined, junction: undefined, pg17Bin: DEFAULT_PG17_BIN, timeoutMinutes: undefined, stagingCheck: undefined };
+  const flags = { '--runbook': 'runbook', '--junction': 'junction', '--pg17-bin': 'pg17Bin', '--timeout': 'timeoutMinutes', '--staging-check': 'stagingCheck' };
   const seen = new Set();
   for (let i = 0; i < argv.length; i++) {
     const a = argv[i];
@@ -55,6 +61,11 @@ export function parseArgs(argv) {
     options[flags[name]] = value;
   }
   if (!options.runbook) return { ok: false, error: '--runbook <path> is required' };
+  if (options.timeoutMinutes !== undefined) {
+    const m = Number(options.timeoutMinutes);
+    if (!Number.isFinite(m) || m <= 0) return { ok: false, error: '--timeout needs a number of minutes greater than 0' };
+    options.timeoutMinutes = m;
+  }
   return { ok: true, options };
 }
 
@@ -114,9 +125,10 @@ export function createJunctions(plans, made = []) {
  * own identity (file id, volume, creation time) is the one recorded when this run made it, so a junction another tool put in its
  * place, even to the same target, is left alone. Anything else (a real folder, a link to somewhere else, a replacement link, no
  * recorded identity, already gone) is left alone and reported. Returns [{ link, result }].
+ * `readIdentity` exists for the tests (to simulate an identity read that fails); any failure to read it keeps the link and reports it.
  * Limit: the check and the removal are two steps; a replacement made in the moment between them is not detected.
  */
-export function removeJunctions(made) {
+export function removeJunctions(made, readIdentity = linkIdentity) {
   const out = [];
   for (const { link, target, identity } of made) {
     let st;
@@ -127,7 +139,7 @@ export function removeJunctions(made) {
     if (normPath(now) !== normPath(target)) { out.push({ link, result: 'NOT REMOVED: points somewhere else (left untouched)' }); continue; }
     if (!identity) { out.push({ link, result: 'NOT REMOVED: its identity was not recorded when it was made (left untouched)' }); continue; }
     let id;
-    try { id = linkIdentity(link); } catch { out.push({ link, result: 'NOT REMOVED: cannot read its identity (left untouched)' }); continue; }
+    try { id = readIdentity(link); } catch { out.push({ link, result: 'NOT REMOVED: cannot read its identity (left untouched)' }); continue; }
     if (id.ino !== identity.ino || id.dev !== identity.dev || id.birthtimeNs !== identity.birthtimeNs) {
       out.push({ link, result: 'NOT REMOVED: not the junction this run made (replaced by another link; left untouched)' });
       continue;
@@ -180,24 +192,55 @@ export function formatSummary(rows) {
   return [line('STEP', 'RESULT', 'DETAIL'), line('-'.repeat(w), '-'.repeat(r), '-'.repeat(6)), ...rows.map((x) => line(x.name, x.result, x.detail ?? ''))].join('\n');
 }
 
-const runStep = (spawnFn, step, cwd) => new Promise((done) => {
+const runStep = (spawnFn, step, cwd, timeoutMs) => new Promise((done) => {
   const started = Date.now();
   const env = stepEnv(process.env, step);
   const child = spawnFn(step.cmd, step.args, { cwd, env, stdio: 'inherit', windowsHide: true });
-  child.on('error', (e) => done({ code: null, error: e.message, seconds: (Date.now() - started) / 1000 }));
-  child.on('close', (code, signal) => done({ code, signal, seconds: (Date.now() - started) / 1000 }));
+  let timedOut = false;
+  const timer = timeoutMs ? setTimeout(() => { timedOut = true; try { child.kill(); } catch { /* already gone */ } }, timeoutMs) : null; // our own child handle only
+  const finish = (r) => { if (timer) clearTimeout(timer); done({ ...r, timedOut, seconds: (Date.now() - started) / 1000 }); };
+  child.on('error', (e) => finish({ code: null, error: e.message }));
+  child.on('close', (code, signal) => finish({ code, signal }));
 });
+
+const STAGING_ROW = 'staging check (read-only)';
+
+/** Runs `git --no-optional-locks -C <path> <args>`; returns { status, out, error }. Read-only commands only (see stagingCheck). */
+const gitRead = (path, args) => {
+  const env = stepEnv(process.env, {});
+  try { return { status: 0, out: execFileSync('git', ['--no-optional-locks', '-C', path, ...args], { env, encoding: 'utf8', windowsHide: true, stdio: ['ignore', 'pipe', 'pipe'] }).trim() }; }
+  catch (e) { return { status: e.status ?? null, out: String(e.stdout ?? '').trim(), error: String(e.stderr || e.message).trim() }; }
+};
+
+/**
+ * The --staging-check row: reads three facts from the folder with git and writes nothing. PASS only if HEAD is detached and the
+ * tree is clean. `git` is injectable for the tests: (path, args) => { status, out, error }.
+ */
+export function stagingCheck(path, git = gitRead) {
+  const fail = (what, r) => ({ name: STAGING_ROW, result: 'FAIL', detail: `cannot read ${what} of ${path}: ${r.error ?? `git exit ${r.status}`}` });
+  const head = git(path, ['rev-parse', 'HEAD']);
+  if (head.status !== 0) return fail('HEAD', head);
+  const sym = git(path, ['symbolic-ref', '-q', 'HEAD']); // exit 1 and no output when HEAD is detached
+  const detached = sym.status === 1 && sym.out === '';
+  if (!detached && sym.status !== 0) return fail('the branch state', sym);
+  const st = git(path, ['status', '--porcelain']);
+  if (st.status !== 0) return fail('the status', st);
+  const changed = st.out === '' ? 0 : st.out.split('\n').length;
+  const detail = `${path}: HEAD ${head.out}; ${detached ? 'detached' : `on branch ${sym.out}`}; ${changed ? `${changed} changed path(s)` : 'clean'}`;
+  const pass = detached && !changed;
+  return { name: STAGING_ROW, result: pass ? 'PASS' : 'FAIL', detail: pass ? detail : `${detail} (needs detached and clean)` };
+}
 
 const SIGNALS = ['SIGINT', 'SIGTERM', 'SIGBREAK', 'SIGHUP'];
 
 /**
  * The whole run; returns the exit code. `deps` exists for the tests only: spawn (the step starter), repoRoot, signals (the emitter
- * whose SIGINT/SIGTERM/SIGBREAK/SIGHUP events mean "interrupted"), log/error (output).
+ * whose SIGINT/SIGTERM/SIGBREAK/SIGHUP events mean "interrupted"), log/error (output), readIdentity (the identity read used when removing junctions), git (the staging-check reader).
  * Any interruption seen from the start of the run until the result line is printed makes the result FAIL (exit 1), even if the
  * step that was running when it arrived exits 0.
  */
 export async function main(argv, deps = {}) {
-  const { spawn: spawnFn = spawn, repoRoot = root, signals = process, log = console.log, error = console.error } = deps;
+  const { spawn: spawnFn = spawn, repoRoot = root, signals = process, log = console.log, error = console.error, readIdentity = linkIdentity, git = gitRead } = deps;
   const parsed = parseArgs(argv);
   if (!parsed.ok) { error(`${parsed.error}\n${USAGE}`); return 2; }
   const { options } = parsed;
@@ -222,14 +265,25 @@ export async function main(argv, deps = {}) {
       for (const m of made) log(`preflight: created junction ${m.link} -> ${m.target}`);
       tempWithSpace = mkdtempSync(join(tmpdir(), 'combine checks '));
       const guard = pathToFileURL(join(repoRoot, 'scripts', 'net-guard.mjs')).href;
+      const runStarted = Date.now();
+      const elapsed = () => `${((Date.now() - runStarted) / 1000).toFixed(1)} s into the run`;
+      const timeoutMs = options.timeoutMinutes ? options.timeoutMinutes * 60000 : undefined;
       for (const step of buildSteps({ options, guard, tempWithSpace })) {
         if (aborted) { rows.push({ name: step.name, result: 'SKIPPED', detail: 'interrupted before it started' }); continue; }
         log(`\n===== ${step.name} =====`);
+        log(`[progress] START ${step.name} (${elapsed()}${timeoutMs ? `, timeout ${options.timeoutMinutes} min` : ''})`);
         current = step.name;
-        const r = await runStep(spawnFn, step, repoRoot);
+        const r = await runStep(spawnFn, step, repoRoot, timeoutMs);
         const interrupted = aborted && aborted.during === step.name;
-        const result = interrupted ? 'INTERRUPTED' : r.code === 0 ? 'PASS' : 'FAIL';
-        rows.push({ name: step.name, result, detail: `${r.error ? `could not start: ${r.error}; ` : ''}exit ${r.code ?? r.signal}, ${r.seconds.toFixed(1)} s${interrupted ? `; ${aborted.signal} arrived while it ran` : ''}` });
+        const result = interrupted ? 'INTERRUPTED' : r.timedOut ? 'TIMEOUT' : r.code === 0 ? 'PASS' : 'FAIL';
+        rows.push({ name: step.name, result, detail: `${r.error ? `could not start: ${r.error}; ` : ''}exit ${r.code ?? r.signal}, ${r.seconds.toFixed(1)} s${r.timedOut ? `; stopped after ${options.timeoutMinutes} min (timeout)` : ''}${interrupted ? `; ${aborted.signal} arrived while it ran` : ''}` });
+        log(`[progress] END ${step.name} -> ${result}, ${r.seconds.toFixed(1)} s (${elapsed()})`);
+      }
+      if (options.stagingCheck) {
+        log('\n[progress] START staging check (read-only)');
+        const row = stagingCheck(options.stagingCheck, git);
+        rows.push(row);
+        log(`[progress] END staging check (read-only) -> ${row.result}`);
       }
     } catch (e) {
       rows.push({ name: 'combine-checks itself', result: 'FAIL', detail: String(e.stack ?? e) });
@@ -239,7 +293,7 @@ export async function main(argv, deps = {}) {
         try { rmSync(tempWithSpace, { recursive: true, force: true }); } catch (e) { rows.push({ name: 'cleanup: TEMP with a space', result: 'FAIL', detail: String(e.message) }); }
         if (existsSync(tempWithSpace)) rows.push({ name: 'cleanup: TEMP with a space', result: 'FAIL', detail: `${tempWithSpace} still exists` });
       }
-      for (const x of removeJunctions(made)) rows.push({ name: 'cleanup: junction', result: x.result === 'removed' ? 'PASS' : 'FAIL', detail: `${x.link}: ${x.result}` });
+      for (const x of removeJunctions(made, readIdentity)) rows.push({ name: 'cleanup: junction', result: x.result === 'removed' ? 'PASS' : 'FAIL', detail: `${x.link}: ${x.result}` });
     }
     current = 'summary';
     if (aborted) rows.push({ name: 'interruption', result: 'FAIL', detail: `${aborted.signal} received during ${aborted.during}; the run is not a pass` });
