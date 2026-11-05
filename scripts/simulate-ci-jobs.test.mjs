@@ -8,6 +8,7 @@ import { tmpdir } from 'node:os';
 import { join, resolve } from 'node:path';
 import test from 'node:test';
 import { analyze, expandToken, findBash, fsSource, gitSource, main, memSource, parseArgs, parseWorkflow, parseYaml, readCommands, splitSegments } from './simulate-ci-jobs.mjs';
+import { withPrivateTemp } from './test-util.mjs';
 
 const root = resolve(import.meta.dirname, '..');
 const wf = (jobs) => `name: CI\non:\n  push:\njobs:\n${jobs}`;
@@ -166,13 +167,6 @@ test('parseArgs', () => {
 function git(cwd, ...args) {
   const r = spawnSync('git', ['-c', 'user.name=t', '-c', 'user.email=t@example.invalid', ...args], { cwd, encoding: 'utf8' });
   assert.equal(r.status, 0, r.stderr);
-}
-
-/** Runs fn with TMPDIR/TEMP/TMP pointing at a private folder, so the simulator's ci-sim-* folders can only be this run's own; other processes on the PC use the shared temp folder at the same time. */
-function withPrivateTemp(runs, fn) {
-  const saved = { TMPDIR: process.env.TMPDIR, TEMP: process.env.TEMP, TMP: process.env.TMP };
-  Object.assign(process.env, { TMPDIR: runs, TEMP: runs, TMP: runs });
-  try { return fn(); } finally { for (const [k, v] of Object.entries(saved)) { if (v === undefined) delete process.env[k]; else process.env[k] = v; } }
 }
 
 test('--run: fresh clone, only installed packages are junctioned, steps run, clone is deleted', (t) => {
