@@ -3,8 +3,19 @@
 // queries against it, stops it with pg_ctl -D <its own folder> and deletes the folder. It reports what hosted staging-2 (PostgreSQL 17)
 // behaviour depends on: server_version_num, every pg_auth_members row (admin/inherit/set options, grantor), whether the MAINTAIN
 // privilege exists and on which relations it is explicitly granted (to anyone other than the owner: listed; the owner's own entries:
-// counted), transaction_timeout and createrole_self_grant (quoted, so the empty default shows as '').
+// counted), every default ACL (pg_default_acl), every per-role/per-database setting (pg_db_role_setting), transaction_timeout and
+// createrole_self_grant (quoted, so the empty default shows as '').
 // It contacts no hosted or staging database, reads no secret store, installs nothing and needs no node_modules (it uses psql).
+//
+// --apply-m1 (TRUCKRECRU-149): on the same kind of throwaway cluster (bootstrap superuser tr_test_admin, the login
+// a3-build-test-db.mjs uses; the folder also holds that tool's A3_TASK_OWNED token), it builds one baseline database tr_probe_m1 the
+// way run-real-db-suites.mjs builds the m1-supabase-runner ones (a3-build-test-db.mjs --no-m1 --no-m1b --no-m1c, PostGIS in public),
+// runs every probe there (BEFORE), applies M1 the way that suite's case 2 does (pipeline/src/pg17-probe-apply-m1.ts: the shared
+// NOSUPERUSER CREATEROLE runner setup, then the staging runner's real apply-m1 plan and executor logged in as that runner; no SQL file
+// is changed), runs every probe again (AFTER) and prints, per probe, the rows only BEFORE (-) and only AFTER (+). The probes stay
+// read-only; the build and M1 write only into this run's own cluster. Needs app/node_modules (pg) and pipeline/node_modules (pg, tsx);
+// the build and M1 children get this process's --import/--require preloads (e.g. the network guard) as arguments, never NODE_OPTIONS.
+//   node --import=file:///C:/.../scripts/net-guard.mjs scripts/pg17-probe.mjs --apply-m1
 //
 // How to run (from the repository root):
 //   node --import ./scripts/net-guard.mjs scripts/pg17-probe.mjs                 (Windows: --import=file:///C:/.../scripts/net-guard.mjs)
@@ -18,7 +29,7 @@
 // the same cleanup path (exit 1). A process 'exit' handler is the last resort for any other way out; if initdb or pg_ctl start is still
 // running then, it keeps the folder, names it and the pending process id, and exits nonzero. Nothing can clean up after SIGKILL /
 // Task Manager "End task": delete .pg17-probe-* by hand after stopping it with pg_ctl -D <folder>\data stop.
-// Undo: delete this script and pg17-probe.test.mjs.
+// Undo: delete this script and pg17-probe.test.mjs (and, for --apply-m1, pipeline/src/pg17-probe-apply-m1.ts).
 
 import { spawn, spawnSync } from 'node:child_process';
 import { randomBytes } from 'node:crypto';
@@ -33,6 +44,16 @@ const root = resolve(import.meta.dirname, '..');
 export const DEFAULT_PG17_BIN = 'C:\\Users\\hunte\\.bb\\tools\\pg17\\bin';
 export const DIR_PREFIX = '.pg17-probe-';
 const ADMIN_USER = 'tr_probe_admin';
+/** --apply-m1: the bootstrap superuser a3-build-test-db.mjs connects as, and the baseline database M1 is applied to. */
+export const A3_ADMIN_USER = 'tr_test_admin';
+export const M1_DB = 'tr_probe_m1';
+const TSX_LOADER = join(root, 'pipeline', 'node_modules', 'tsx', 'dist', 'loader.mjs');
+const APPLY_M1_HELPER = join(root, 'pipeline', 'src', 'pg17-probe-apply-m1.ts');
+const BUILD_DB = join(root, 'scripts', 'a3-build-test-db.mjs');
+
+/** --apply-m1's installed packages that are missing: app's pg (a3-build-test-db.mjs), pipeline's pg and tsx (the M1 helper). Also used by
+ *  pg17-probe.test.mjs to skip its --apply-m1 tests where they are not installed (the repo-checks CI job installs only pipeline). */
+export const missingApplyM1Deps = () => [join(root, 'app', 'node_modules', 'pg'), join(root, 'pipeline', 'node_modules', 'pg'), TSX_LOADER].filter((p) => !existsSync(p));
 
 /** The probes, in output order. Each is one read-only statement; psql prints its rows unaligned with a header line. */
 export const PROBES = [
@@ -73,6 +94,21 @@ where a.privilege_type = 'MAINTAIN' and a.grantee = c.relowner`,
     id: 'maintain_default_acl_relations (relacl null: owner holds MAINTAIN by default; sequences have no MAINTAIN and are not counted)',
     sql: `select count(*) as relations_with_default_acl from pg_catalog.pg_class where relacl is null and relkind in ('r', 'p', 'm', 'v', 'f')`,
   },
+  {
+    id: 'default_acls (pg_default_acl)',
+    sql: `select pg_catalog.pg_get_userbyid(d.defaclrole) as role, coalesce(n.nspname, '(every schema)') as schema, d.defaclobjtype as objtype, d.defaclacl::text as acl
+from pg_catalog.pg_default_acl d
+left join pg_catalog.pg_namespace n on n.oid = d.defaclnamespace
+order by 1, 2, 3`,
+  },
+  {
+    id: 'role_settings (pg_db_role_setting)',
+    sql: `select coalesce(r.rolname, '(every role)') as role, coalesce(db.datname, '(every database)') as database, s.setconfig::text as settings
+from pg_catalog.pg_db_role_setting s
+left join pg_catalog.pg_roles r on r.oid = s.setrole
+left join pg_catalog.pg_database db on db.oid = s.setdatabase
+order by 1, 2`,
+  },
   { id: 'transaction_timeout', sql: 'show transaction_timeout' },
   { id: 'createrole_self_grant', sql: `select pg_catalog.quote_literal(pg_catalog.current_setting('createrole_self_grant')) as createrole_self_grant_quoted` },
 ];
@@ -87,9 +123,63 @@ export function isOwnProbeDir(dir, base) {
 }
 
 /** The psql arguments of one probe: loopback host, no psqlrc, stop on the first error, unaligned output with headers. Pure. */
-export function psqlArgs({ port, sql }) {
-  return ['-X', '-q', '-w', '-h', '127.0.0.1', '-p', String(Number(port)), '-U', ADMIN_USER, '-d', 'postgres', '-v', 'ON_ERROR_STOP=1',
+export function psqlArgs({ port, sql, user = ADMIN_USER, database = 'postgres' }) {
+  return ['-X', '-q', '-w', '-h', '127.0.0.1', '-p', String(Number(port)), '-U', user, '-d', database, '-v', 'ON_ERROR_STOP=1',
     '-A', '-F', ' | ', '-P', 'footer=off', '-P', 'null=NULL', '-c', sql];
+}
+
+/** The command line options: none, or --apply-m1. Anything else is an error (the run refuses before it starts). Pure. */
+export function parseProbeArgs(argv) {
+  const unknown = argv.filter((a) => a !== '--apply-m1');
+  return unknown.length ? { error: `unknown option(s): ${unknown.join(' ')} (the only option is --apply-m1)` } : { applyM1: argv.includes('--apply-m1') };
+}
+
+/** The --import / --require preloads of execArgv (e.g. the network guard), in order, as standalone arguments for a node child. Pure. */
+export function preloadArgs(execArgv) {
+  const out = [];
+  for (let i = 0; i < execArgv.length; i++) {
+    const a = execArgv[i];
+    if (/^--(import|require)=/.test(a)) out.push(a);
+    else if ((a === '--import' || a === '--require' || a === '-r') && i + 1 < execArgv.length) out.push(a, execArgv[++i]);
+  }
+  return out;
+}
+
+/** The header and data rows of one probe's psql output (unaligned, header first, no footer); blank lines dropped. Pure. */
+export function probeRows(text) {
+  const lines = String(text ?? '').split(/\r?\n/).map((l) => l.trimEnd()).filter(Boolean);
+  return { header: lines[0] ?? '', rows: lines.slice(1) };
+}
+
+/** Per probe id (in the order of ids): the rows only in before (removed) and only in after (added), counted as multisets so a
+ *  duplicated row is not lost; a probe missing on either side is not comparable. Pure. */
+export function diffProbes(before, after, ids = PROBES.map((p) => p.id)) {
+  return ids.map((id) => {
+    if (!before.has(id) || !after.has(id)) return { id, comparable: false, removed: [], added: [] };
+    const b = probeRows(before.get(id));
+    const a = probeRows(after.get(id));
+    const minus = (xs, ys) => {
+      const left = new Map();
+      for (const y of ys) left.set(y, (left.get(y) ?? 0) + 1);
+      return xs.filter((x) => { const n = left.get(x) ?? 0; if (n > 0) { left.set(x, n - 1); return false; } return true; });
+    };
+    return { id, comparable: true, headerBefore: b.header, headerAfter: a.header, removed: minus(b.rows, a.rows), added: minus(a.rows, b.rows) };
+  });
+}
+
+/** The printed lines of a diffProbes result. Pure. */
+export function formatDiff(diff) {
+  const out = [];
+  for (const d of diff) {
+    out.push(`\n== diff ${d.id}`);
+    if (!d.comparable) { out.push('  NOT COMPARABLE: the probe failed before or after M1'); continue; }
+    if (d.headerBefore !== d.headerAfter) out.push(`  header before: ${d.headerBefore}`, `  header after:  ${d.headerAfter}`);
+    else out.push(`  (${d.headerBefore})`);
+    if (!d.removed.length && !d.added.length) out.push('  no change');
+    for (const r of d.removed) out.push(`  - ${r}`);
+    for (const r of d.added) out.push(`  + ${r}`);
+  }
+  return out;
 }
 
 /** The child environment of psql: the scrubbed allow-list plus the throwaway password and a read-only default. Pure. */
@@ -111,13 +201,13 @@ export function interruptExitCode(sig) {
 /** Runs one child without blocking the event loop, so a signal handler runs while the child works. Never rejects; resolves with
  *  { status, signal, stdout, stderr, error }. capture false: stdio ignored (pg_ctl start: the server would inherit the pipes).
  *  onStart(pid) runs right after the spawn and onEnd() once the child has ended, both synchronously (an 'exit' handler can rely on them). */
-function runAsync(cmd, args, { env, timeout = 0, capture = true, onStart, onEnd }) {
+function runAsync(cmd, args, { env, cwd, timeout = 0, capture = true, onStart, onEnd }) {
   return new Promise((resolveRun) => {
     let ended = false;
     const done = (r) => { if (ended) return; ended = true; onEnd?.(); resolveRun(r); };
     let child;
     try {
-      child = spawn(cmd, args, { env, windowsHide: true, timeout, stdio: capture ? ['ignore', 'pipe', 'pipe'] : 'ignore' });
+      child = spawn(cmd, args, { env, cwd, windowsHide: true, timeout, stdio: capture ? ['ignore', 'pipe', 'pipe'] : 'ignore' });
     } catch (error) {
       done({ status: null, signal: null, stdout: '', stderr: '', error });
       return;
@@ -148,9 +238,25 @@ async function run() {
   const baseEnv = scrubbedEnv(process.env);
   const sh = makeSh(baseEnv);
   const password = randomBytes(24).toString('base64url').replace(/[^A-Za-z0-9]/g, 'x');
-  const mask = (text) => maskSecrets(String(text ?? ''), [password]);
+  const runnerPw = randomBytes(24).toString('base64url').replace(/[^A-Za-z0-9]/g, 'x'); // --apply-m1: the runner login's throwaway password
+  const mask = (text) => maskSecrets(String(text ?? ''), [password, runnerPw]);
   let failed = false;
   const fail = (msg) => { failed = true; console.error(`ERROR: ${mask(msg)}`); };
+
+  const opts = parseProbeArgs(process.argv.slice(2));
+  if (opts.error) {
+    console.error(`REFUSED: ${opts.error}`);
+    return 2;
+  }
+  const { applyM1 } = opts;
+  const adminUser = applyM1 ? A3_ADMIN_USER : ADMIN_USER;
+  if (applyM1) {
+    const missing = missingApplyM1Deps();
+    if (missing.length) {
+      console.error(`REFUSED: --apply-m1 needs the installed packages; missing: ${missing.join(', ')}`);
+      return 2;
+    }
+  }
 
   const bad = nonLoopbackConnectionVars(process.env);
   if (bad.length) {
@@ -291,7 +397,8 @@ async function run() {
     dataDir = join(dir, 'data');
     const pwFile = join(dir, 'pw.txt');
     writeFileSync(pwFile, password);
-    const init = await launch(setupChildren, exe(pgBin, 'initdb'), ['-D', dataDir, '-U', ADMIN_USER, '-A', 'scram-sha-256', `--pwfile=${pwFile}`, '-E', 'UTF8'], {}, 'initdb');
+    if (applyM1) writeFileSync(join(dir, 'A3_TASK_OWNED'), randomBytes(24).toString('base64url')); // a3-build-test-db.mjs's ownership token
+    const init = await launch(setupChildren, exe(pgBin, 'initdb'), ['-D', dataDir, '-U', adminUser, '-A', 'scram-sha-256', `--pwfile=${pwFile}`, '-E', 'UTF8'], {}, 'initdb');
     rmSync(pwFile, { force: true });
     stopIfInterrupted();
     if (init.error || init.status !== 0) throw new Error('initdb failed: ' + `${init.error ?? ''}${init.stdout ?? ''}${init.stderr ?? ''}`.split('\n').slice(-6).join(' | '));
@@ -322,16 +429,55 @@ async function run() {
       stopIfInterrupted();
     }
 
-    for (const p of PROBES) {
-      const r = await launch(queryChildren, psqlBin, psqlArgs({ port, sql: p.sql }), { env: psqlEnv(baseEnv, password), timeout: 60000 });
-      stopIfInterrupted();
-      console.log(`\n== ${p.id}`);
-      if (r.error || r.status !== 0 || r.signal) {
-        fail(`probe ${p.id} failed (status ${r.status}${r.signal ? `, signal ${r.signal}` : ''}): ${`${r.error ?? ''}${r.stderr ?? ''}${r.stdout ?? ''}`.trim()}`);
-        continue;
+    /** Runs every probe (read-only) on one database and prints it; returns probe id -> raw output for the probes that succeeded. */
+    const probeAll = async (database) => {
+      const outputs = new Map();
+      for (const p of PROBES) {
+        const r = await launch(queryChildren, psqlBin, psqlArgs({ port, sql: p.sql, user: adminUser, database }), { env: psqlEnv(baseEnv, password), timeout: 60000 });
+        stopIfInterrupted();
+        console.log(`\n== ${p.id}`);
+        if (r.error || r.status !== 0 || r.signal) {
+          fail(`probe ${p.id} failed (status ${r.status}${r.signal ? `, signal ${r.signal}` : ''}): ${`${r.error ?? ''}${r.stderr ?? ''}${r.stdout ?? ''}`.trim()}`);
+          continue;
+        }
+        process.stdout.write(mask(r.stdout));
+        if (r.stderr && r.stderr.trim()) fail(`probe ${p.id} wrote to stderr: ${r.stderr.trim()}`);
+        else outputs.set(p.id, r.stdout);
       }
-      process.stdout.write(mask(r.stdout));
-      if (r.stderr && r.stderr.trim()) fail(`probe ${p.id} wrote to stderr: ${r.stderr.trim()}`);
+      return outputs;
+    };
+
+    if (!applyM1) await probeAll('postgres');
+    else {
+      // The build and M1 children are node processes; they get this process's preloads (the network guard) as arguments.
+      const preloads = preloadArgs(process.execArgv);
+      const tail = (r, n) => mask(`${r.error ?? ''}${r.stdout ?? ''}${r.stderr ?? ''}`).split('\n').map((l) => l.trim()).filter(Boolean).slice(-n).join(' | ');
+      console.log(`\n#### building baseline database ${M1_DB} (scripts/a3-build-test-db.mjs --no-m1 --no-m1b --no-m1c, PostGIS in public)`);
+      const build = await launch(queryChildren, process.execPath, [...preloads, BUILD_DB, '--owner-dir', dir, '--port', String(port), '--db', M1_DB, '--no-m1', '--no-m1b', '--no-m1c'],
+        { env: { ...baseEnv, A3_PGPASSWORD: password }, timeout: 600000 });
+      stopIfInterrupted();
+      if (build.error || build.status !== 0 || build.signal) throw new Error(`building ${M1_DB} failed (status ${build.status}${build.signal ? `, signal ${build.signal}` : ''}): ${tail(build, 8)}`);
+      console.log(`built ${M1_DB} (a3-build-test-db.mjs exit 0)`);
+
+      console.log(`\n#### BEFORE M1 (database ${M1_DB}, as ${adminUser})`);
+      const before = await probeAll(M1_DB);
+
+      console.log(`\n#### applying M1 as a NOSUPERUSER CREATEROLE runner (pipeline/src/pg17-probe-apply-m1.ts: real apply-m1 plan and executor)`);
+      const adminUrl = `postgresql://${adminUser}:${encodeURIComponent(password)}@127.0.0.1:${port}/${M1_DB}`;
+      const apply = await launch(queryChildren, process.execPath, [...preloads, '--import', pathToFileURL(TSX_LOADER).href, APPLY_M1_HELPER],
+        { env: { ...baseEnv, PG17_PROBE_ADMIN_URL: adminUrl, PG17_PROBE_RUNNER_PW: runnerPw }, timeout: 600000 });
+      stopIfInterrupted();
+      process.stdout.write(mask(apply.stdout));
+      if (apply.stderr && apply.stderr.trim()) console.error(mask(apply.stderr.trimEnd()));
+      if (apply.error || apply.status !== 0 || apply.signal) fail(`the M1 step failed (status ${apply.status}${apply.signal ? `, signal ${apply.signal}` : ''})${apply.error ? `: ${apply.error}` : ''}`);
+
+      console.log(`\n#### AFTER M1 (database ${M1_DB}, as ${adminUser})`);
+      const after = await probeAll(M1_DB);
+
+      console.log('\n#### DIFF (- only before M1, + only after M1)');
+      const diff = diffProbes(before, after);
+      for (const line of formatDiff(diff)) console.log(mask(line));
+      if (diff.some((d) => !d.comparable)) fail('at least one probe could not be compared (see NOT COMPARABLE above)');
     }
   } catch (e) {
     if (!interrupted) fail(e?.message ?? String(e));
