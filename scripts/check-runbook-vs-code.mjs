@@ -161,9 +161,17 @@ export function checkRunbook(markdown, { root, info } = {}) {
 
     // CITATION
     const re = new RegExp(`(^|[^A-Za-z0-9_./\\\\-])((?:[0-9a-f]{7,40}:)?)((?:[A-Za-z]:[/\\\\])?(?:[A-Za-z0-9_.-]+[/\\\\])*[A-Za-z0-9_.-]+\\.${CITE_EXT}):(\\d+(?:-\\d+)?(?:, ?\\d+(?:-\\d+)?)*)`, 'g');
-    for (const m of raw.matchAll(re)) {
+    // A checked folder whose own path contains spaces (a TEMP folder such as C:\Users\Jo Smith\...) cannot match the space-free path pattern:
+    // hide the spaces of that exact folder path for the scan and put them back in the path that is looked up.
+    const SP = 'SPACE_0x20_';
+    let scanned = raw;
+    if (src.top.includes(' ')) {
+      const rootRe = new RegExp(src.top.replace(/[\\/]|[.*+?^${}()|[\]]/g, (c) => (c === '\\' || c === '/' ? '[\\\\/]' : `\\${c}`)), 'gi');
+      scanned = raw.replace(rootRe, (s) => s.replace(/ /g, SP));
+    }
+    for (const m of scanned.matchAll(re)) {
       if (m[2]) continue; // older commit
-      let path = normalizePath(m[3]);
+      let path = normalizePath(m[3].split(SP).join(' '));
       let insideByDrive = false;
       if (/^[A-Za-z]:\//.test(path)) { // Windows drive path: a repo path when inside the folder being checked, otherwise INFO
         const top = posix.normalize(normalizePath(src.top)).replace(/\/+$/, '');
