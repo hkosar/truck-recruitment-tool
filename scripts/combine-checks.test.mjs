@@ -8,7 +8,8 @@ import { existsSync, lstatSync, mkdirSync, mkdtempSync, readFileSync, rmdirSync,
 import { tmpdir } from 'node:os';
 import { join } from 'node:path';
 import test from 'node:test';
-import { DEFAULT_PG17_BIN, buildSteps, createJunctions, formatSummary, main, parseArgs, planJunction, removeJunctions, stagingCheck, stepEnv } from './combine-checks.mjs';
+import { createHash } from 'node:crypto';
+import { DEFAULT_PG17_BIN, GIT_READ_OPTIONS, MAX_TIMER_MS, buildSteps, createJunctions, formatSummary, gitEnv, main, parseArgs, planJunction, removeJunctions, stagingCheck, stepEnv } from './combine-checks.mjs';
 
 const NM = ['node', 'modules'].join('_'); // built from parts so the CI simulator (scripts/simulate-ci-jobs.mjs) does not read this file as a use of an installed package folder
 const tmp = mkdtempSync(join(tmpdir(), 'combine-checks-test-'));
@@ -28,6 +29,14 @@ test('parseArgs: runbook required, defaults, both flag styles, unknown/duplicate
   assert.match(parseArgs(['--runbook', 'a', '--runbook', 'b']).error, /twice/);
   assert.match(parseArgs(['--runbook', 'a', '--nope']).error, /unknown argument/);
   assert.match(parseArgs(['--runbook', 'a', 'stray']).error, /unknown argument/);
+  assert.deepEqual(parseArgs(['--help']), { ok: true, help: true });
+  assert.deepEqual(parseArgs(['-h']), { ok: true, help: true });
+});
+
+test('regression (cc minor): --timeout beyond Node\'s timer range is refused, not turned into a 1 ms timer', () => {
+  assert.equal(MAX_TIMER_MS, 2147483647);
+  assert.equal(parseArgs(['--runbook', 'a', '--timeout', '35791']).options.timeoutMinutes, 35791); // 2,147,460,000 ms: fits
+  for (const bad of ['35792', '36000', '1e9']) assert.match(parseArgs(['--runbook', 'a', '--timeout', bad]).error, /too long: at most 35791 minutes/, bad);
 });
 
 test('planJunction: present is left alone, missing without a source is reported, a source gives create', () => {
@@ -112,7 +121,7 @@ test('regression: a replacement junction to the SAME target (made by someone els
 
 /** Runs main() in a throwaway repo with a fake step starter: every step "exits" with codes[i] (default 0) on the next tick;
  *  before step `signalAt` (1-based) exits, `signal` is emitted on a private emitter. Nothing real is started or signalled. */
-async function fakeRun({ codes = [], signalAt = 0, signal = 'SIGINT', hangAt = 0, extraArgs = [], deps = {}, junction = false } = {}) {
+async function fakeRun({ codes = [], signalAt = 0, signal = 'SIGINT', hangAt = 0, delays = [], extraArgs = [], deps = {}, junction = false } = {}) {
   const src = junction ? fakeTree(['pipeline', 'app']) : null;
   const r = fakeTree(junction ? [] : ['pipeline', 'app']);
   mkdirSync(join(r, 'scripts'));
@@ -124,9 +133,12 @@ async function fakeRun({ codes = [], signalAt = 0, signal = 'SIGINT', hangAt = 0
   const spawn = () => {
     const child = new EventEmitter();
     const i = ++started;
-    child.kill = () => { killed.push(i); process.nextTick(() => child.emit('close', null, 'SIGTERM')); return true; };
-    if (i !== hangAt) process.nextTick(() => { if (i === signalAt) signals.emit(signal, signal); child.emit('close', codes[i - 1] ?? 0, null); });
-    return child; // step `hangAt` never ends by itself: only child.kill() (a timeout) ends it
+    let closed = false;
+    const close = (...a) => { if (!closed) { closed = true; child.emit('close', ...a); } };
+    child.kill = () => { killed.push(i); process.nextTick(() => close(null, 'SIGTERM')); return true; };
+    const end = () => { if (i === signalAt) signals.emit(signal, signal); close(codes[i - 1] ?? 0, null); };
+    if (i !== hangAt) { if (delays[i - 1]) setTimeout(end, delays[i - 1]); else process.nextTick(end); }
+    return child; // step `hangAt` never ends by itself: only child.kill() (a timeout) ends it; delays[i-1] ms makes step i slow
   };
   const out = [];
   const args = ['--runbook', runbook, ...(junction ? ['--junction', src] : []), ...extraArgs];
@@ -187,63 +199,192 @@ test('regression: when the identity of a junction cannot be read at cleanup, the
   for (const d of ['pipeline', 'app']) assert.equal(readFileSync(join(x.src, d, NM, 'marker.txt'), 'utf8'), 'keep');
 });
 
-test('progress: a START and an END line per step; --timeout stops only the hung child, marks TIMEOUT and fails; no timeout by default', async () => {
+test('progress: a START and an END line per step; --timeout stops only the hung runbook child, marks TIMEOUT and fails; no timeout by default', async () => {
   const ok = await fakeRun();
   assert.equal((ok.text.match(/\[progress\] START /g) ?? []).length, 5);
   assert.equal((ok.text.match(/\[progress\] END .* -> PASS, \d+\.\d s/g) ?? []).length, 5);
   assert.doesNotMatch(ok.text, /timeout \d/);
-  const t = await fakeRun({ hangAt: 3, extraArgs: ['--timeout', '0.0005'] });
-  assert.deepEqual(t.killed, [3]);
-  assert.equal(t.started, 5); // later steps still run
+  const t = await fakeRun({ hangAt: 5, extraArgs: ['--timeout', '0.0005'] });
+  assert.deepEqual(t.killed, [5]);
   assert.equal(t.code, 1);
-  assert.match(t.text, /real-DB suites PG16\s+TIMEOUT.*stopped after 0\.0005 min/);
-  assert.match(t.text, /\[progress\] END real-DB suites PG16 -> TIMEOUT/);
+  assert.match(t.text, /runbook vs code\s+TIMEOUT.*stopped after 0\.0005 min/);
+  assert.match(t.text, /\[progress\] START runbook vs code \(.*timeout 0\.0005 min\)/);
+  assert.match(t.text, /\[progress\] END runbook vs code -> TIMEOUT/);
   assert.doesNotMatch(t.text, /RESULT: PASS/);
   const fast = await fakeRun({ extraArgs: ['--timeout', '5'] });
   assert.deepEqual(fast.killed, []);
   assert.equal(fast.code, 0);
 });
 
-test('stagingCheck: PASS only if detached and clean; reads only the three git facts; failures are FAIL', () => {
-  const calls = [];
-  const mk = (sym, status, head = { status: 0, out: 'abc123' }) => (p, a) => { calls.push(a.join(' ')); return a[0] === 'rev-parse' ? head : a[0] === 'symbolic-ref' ? sym : status; };
-  const detached = { status: 1, out: '' };
-  const clean = { status: 0, out: '' };
-  const pass = stagingCheck('S', mk(detached, clean));
-  assert.equal(pass.result, 'PASS');
-  assert.match(pass.detail, /HEAD abc123; detached; clean/);
-  assert.deepEqual(calls, ['rev-parse HEAD', 'symbolic-ref -q HEAD', 'status --porcelain']);
-  assert.equal(stagingCheck('S', mk({ status: 0, out: 'refs/heads/x' }, clean)).result, 'FAIL');
-  assert.match(stagingCheck('S', mk({ status: 0, out: 'refs/heads/x' }, clean)).detail, /on branch refs\/heads\/x/);
-  const dirty = stagingCheck('S', mk(detached, { status: 0, out: ' M a\n?? b' }));
-  assert.equal(dirty.result, 'FAIL');
-  assert.match(dirty.detail, /2 changed path/);
-  assert.equal(stagingCheck('S', mk(detached, clean, { status: 128, out: '', error: 'not a repo' })).result, 'FAIL');
-  assert.equal(stagingCheck('S', mk({ status: 128, out: '', error: 'x' }, clean)).result, 'FAIL');
-  assert.equal(stagingCheck('S', mk(detached, { status: 128, out: '', error: 'x' })).result, 'FAIL');
+test('regression (cc P1): --timeout is never applied to a step that starts PostgreSQL; a slow one is waited for and the run says so', async () => {
+  const steps = buildSteps({ options: { runbook: 'r.md', pg17Bin: 'P17' }, guard: 'file:///g.mjs', tempWithSpace: 'C:/t t' });
+  assert.deepEqual(steps.map((s) => !!s.ownsPostgres), [true, true, true, true, false]); // scripts tests include PostgreSQL lifecycle tests
+  // 0.0005 min = 30 ms; each of the four PostgreSQL steps takes 120 ms, four times the limit, and must still end by itself.
+  const t = await fakeRun({ delays: [120, 120, 120, 120], extraArgs: ['--timeout', '0.0005'] });
+  assert.deepEqual(t.killed, []);
+  assert.equal(t.code, 0);
+  assert.match(t.text, /RESULT: PASS \(5 rows\)/);
+  assert.match(t.text, /--timeout 0\.0005 min: applied only to steps that start no PostgreSQL/);
+  for (const name of ['scripts tests \\(normal TEMP\\)', 'scripts tests \\(TEMP with a space\\)', 'real-DB suites PG16', 'real-DB suites PG17']) {
+    assert.match(t.text, new RegExp(`\\[progress\\] START ${name} \\(.*no timeout: this step starts PostgreSQL and must stop it itself\\)`));
+    assert.match(t.text, new RegExp(`${name}\\s+PASS\\s+exit 0, .*; --timeout not applied \\(starts PostgreSQL\\)`));
+  }
+  assert.doesNotMatch(t.text, /TIMEOUT/);
+  // a PostgreSQL step that never ends by itself is not killed either (the run waits; here the test ends it after 300 ms)
+  let release;
+  const hung = fakeRun({ hangAt: 3, extraArgs: ['--timeout', '0.0005'], deps: { spawn: (() => { let i = 0; return () => { const c = new EventEmitter(); const me = ++i; c.kill = () => { throw new Error(`step ${me} was killed`); }; if (me === 3) release = () => c.emit('close', 0, null); else process.nextTick(() => c.emit('close', 0, null)); return c; }; })() } });
+  await new Promise((r) => setTimeout(r, 300));
+  assert.equal(typeof release, 'function');
+  release();
+  const h = await hung;
+  assert.equal(h.code, 0);
+  assert.match(h.text, /real-DB suites PG16\s+PASS.*--timeout not applied/);
 });
 
-test('stagingCheck on a real throwaway repo (read-only: HEAD, index and files unchanged)', () => {
+test('--help prints the usage and the PostgreSQL timeout limit; exit 0, nothing run', async () => {
+  const out = [];
+  let spawned = 0;
+  assert.equal(await main(['--help'], { log: (s) => out.push(s), error: (s) => out.push(s), spawn: () => { spawned++; } }), 0);
+  assert.equal(spawned, 0);
+  assert.match(out.join('\n'), /usage: node scripts\/combine-checks\.mjs/);
+  assert.match(out.join('\n'), /NOT applied to\s+steps that start PostgreSQL/);
+  assert.match(out.join('\n'), /no fsmonitor/i);
+});
+
+/** A fake git for stagingCheck: answers by command; `over` replaces single answers (key = the joined args). Records the calls. */
+const fakeGit = (over = {}, calls = []) => (p, a, input) => {
+  const key = a.join(' ');
+  calls.push(input === undefined ? key : `${key} <stdin>`);
+  if (Object.hasOwn(over, key)) return over[key];
+  if (key === 'rev-parse --show-toplevel') return { status: 0, out: p };
+  if (key === 'rev-parse HEAD') return { status: 0, out: 'abc123' };
+  if (key === 'symbolic-ref -q HEAD') return { status: 1, out: '' };
+  if (key === 'ls-files -s -z') return { status: 0, out: '100644 e69d 0\ta.txt\0' };
+  if (key === 'check-attr -z --stdin filter') return { status: 0, out: 'a.txt\0filter\0unspecified\0' };
+  if (key.startsWith('config --get ')) return { status: 1, out: '' };
+  return { status: 0, out: '' }; // status --porcelain: clean
+};
+
+test('stagingCheck: PASS only if top folder, detached and clean; reads only these git facts; failures are FAIL', () => {
+  const calls = [];
+  const pass = stagingCheck('S', fakeGit({}, calls));
+  assert.equal(pass.result, 'PASS');
+  assert.match(pass.detail, /HEAD abc123; detached; clean/);
+  assert.deepEqual(calls, ['rev-parse --show-toplevel', 'rev-parse HEAD', 'symbolic-ref -q HEAD', 'ls-files -s -z', 'check-attr -z --stdin filter <stdin>', 'status --porcelain']);
+  assert.match(stagingCheck('S', fakeGit({ 'symbolic-ref -q HEAD': { status: 0, out: 'refs/heads/x' } })).detail, /on branch refs\/heads\/x.*needs detached and clean/);
+  const dirty = stagingCheck('S', fakeGit({ 'status --porcelain': { status: 0, out: ' M a\n?? b' } }));
+  assert.equal(dirty.result, 'FAIL');
+  assert.match(dirty.detail, /2 changed path/);
+  for (const key of ['rev-parse --show-toplevel', 'rev-parse HEAD', 'symbolic-ref -q HEAD', 'ls-files -s -z', 'check-attr -z --stdin filter', 'status --porcelain']) {
+    assert.equal(stagingCheck('S', fakeGit({ [key]: { status: 128, out: '', error: 'x' } })).result, 'FAIL', key);
+  }
+  assert.match(stagingCheck('S', fakeGit({ 'rev-parse --show-toplevel': { status: 0, out: 'C:/elsewhere' } })).detail, /git reads the checkout at C:\/elsewhere, not this folder/);
+  // submodules and filter drivers with a configured command are refused before git status runs
+  const c1 = [];
+  assert.match(stagingCheck('S', fakeGit({ 'ls-files -s -z': { status: 0, out: '160000 abcd 0\tsub\0' } }, c1)).detail, /refused before git status: the folder has submodules/);
+  assert.ok(!c1.includes('status --porcelain'));
+  const lfs = { 'check-attr -z --stdin filter': { status: 0, out: 'a.txt\0filter\0lfs\0' } };
+  const c2 = [];
+  assert.match(stagingCheck('S', fakeGit({ ...lfs, 'config --get filter.lfs.clean': { status: 0, out: 'git-lfs clean -- %f' } }, c2)).detail, /filter driver "lfs" whose clean command git status could run/);
+  assert.ok(!c2.includes('status --porcelain'));
+  assert.match(stagingCheck('S', fakeGit({ ...lfs, 'config --get filter.lfs.process': { status: 0, out: 'git-lfs filter-process' } })).detail, /filter driver "lfs" whose process command/);
+  assert.equal(stagingCheck('S', fakeGit(lfs)).result, 'PASS'); // attribute names a driver with no command: git runs nothing
+  assert.equal(stagingCheck('S', fakeGit({ 'check-attr -z --stdin filter': { status: 0, out: 'a.txt\0filter\0set\0' } })).result, 'PASS');
+});
+
+/** A throwaway repo with one committed file, HEAD detached (or on its branch when attached). Returns [dir, git]. */
+const throwawayRepo = (attached = false) => {
   const d = fresh();
-  const git = (...a) => execFileSync('git', ['-C', d, '-c', 'user.name=t', '-c', 'user.email=t@t', ...a], { encoding: 'utf8' }).trim();
+  const git = (...a) => execFileSync('git', ['-C', d, '-c', 'user.name=t', '-c', 'user.email=t@t', ...a], { encoding: 'utf8', env: gitEnv(process.env) }).trim();
   git('init', '-q');
   writeFileSync(join(d, 'f.txt'), 'x');
   git('add', 'f.txt');
   git('commit', '-q', '-m', 'one');
+  if (!attached) git('checkout', '-q', '--detach');
+  return [d, git];
+};
+const indexSnapshot = (d) => { const f = join(d, '.git', 'index'); return { sha256: createHash('sha256').update(readFileSync(f)).digest('hex'), mtimeMs: lstatSync(f).mtimeMs, size: lstatSync(f).size }; };
+/** A hook command (git runs it through its shell) that appends one line to `marker` when started. Quoted: TEMP may contain a space. */
+const markerHook = (marker) => {
+  const hook = join(fresh(), 'marker-hook.cjs'); // outside the repo, so it is not an untracked file there
+  writeFileSync(hook, `require('node:fs').appendFileSync(${JSON.stringify(marker)}, 'invoked\\n');\n`);
+  return `"${process.execPath.replace(/\\/g, '/')}" "${hook.replace(/\\/g, '/')}"`;
+};
+
+test('stagingCheck on a real throwaway repo (read-only: HEAD, index bytes and mtime, and files unchanged)', () => {
+  const [d, git] = throwawayRepo(true);
   assert.equal(stagingCheck(d).result, 'FAIL'); // on a branch
   git('checkout', '-q', '--detach');
+  writeFileSync(join(d, 'f.txt'), 'x'); // same content, newer mtime: a status that may refresh the index would want to write it
   const before = git('rev-parse', 'HEAD');
+  const index = indexSnapshot(d);
   const row = stagingCheck(d);
   assert.equal(row.result, 'PASS');
   assert.ok(row.detail.includes(before));
   writeFileSync(join(d, 'g.txt'), 'new');
   assert.equal(stagingCheck(d).result, 'FAIL'); // untracked file
+  assert.deepEqual(indexSnapshot(d), index);
   assert.equal(git('rev-parse', 'HEAD'), before);
   assert.equal(readFileSync(join(d, 'g.txt'), 'utf8'), 'new');
 });
 
+test('regression (cc P2): a configured fsmonitor hook is never started by stagingCheck (and every git read disables it)', () => {
+  assert.deepEqual(GIT_READ_OPTIONS, ['--no-optional-locks', '-c', 'core.fsmonitor=false']);
+  const [d, git] = throwawayRepo();
+  const marker = join(fresh(), 'fsmonitor-marker.txt');
+  git('config', 'core.fsmonitor', markerHook(marker));
+  writeFileSync(join(d, 'f.txt'), 'x');
+  // control: plain git status in this repo does start the hook, so the check below can see it
+  git('status', '--porcelain');
+  assert.equal(existsSync(marker), true, 'the harmless hook must work for this test to mean anything');
+  rmSync(marker);
+  const index = indexSnapshot(d);
+  const row = stagingCheck(d);
+  assert.equal(row.result, 'PASS');
+  assert.equal(existsSync(marker), false, 'stagingCheck started the fsmonitor hook');
+  assert.deepEqual(indexSnapshot(d), index);
+  writeFileSync(join(d, 'g.txt'), 'new');
+  assert.equal(stagingCheck(d).result, 'FAIL');
+  assert.equal(existsSync(marker), false);
+});
+
+test('regression (cc P2): a filter driver with a configured command is refused before git status, and never started', () => {
+  const [d, git] = throwawayRepo();
+  writeFileSync(join(d, '.gitattributes'), '*.txt filter=probe\n');
+  git('add', '.gitattributes');
+  git('commit', '-q', '-m', 'attr');
+  git('checkout', '-q', '--detach');
+  const marker = join(fresh(), 'filter-marker.txt');
+  git('config', 'filter.probe.clean', markerHook(marker));
+  writeFileSync(join(d, 'f.txt'), 'y'); // same size, new content and mtime: git status compares content and so runs the clean filter
+  git('status', '--porcelain'); // control: the filter really is started by plain git status
+  assert.equal(existsSync(marker), true, 'the harmless filter must work for this test to mean anything');
+  rmSync(marker);
+  const row = stagingCheck(d);
+  assert.equal(row.result, 'FAIL');
+  assert.match(row.detail, /refused before git status: tracked files use filter driver "probe" whose clean command/);
+  assert.equal(existsSync(marker), false, 'stagingCheck started the filter');
+});
+
+test('regression (cc P3): inherited GIT_DIR / GIT_WORK_TREE / GIT_INDEX_FILE / ... cannot make the check describe another folder', () => {
+  const [target] = throwawayRepo(true);
+  writeFileSync(join(target, 'untracked.txt'), 'dirty');
+  const [unrelated] = throwawayRepo(); // detached and clean: would PASS if git read it instead
+  const want = /on branch refs\/heads\/\w+; 1 changed path\(s\) \(needs detached and clean\)/;
+  assert.match(stagingCheck(target).detail, want);
+  const vars = { GIT_DIR: join(unrelated, '.git'), GIT_WORK_TREE: unrelated, GIT_INDEX_FILE: join(unrelated, '.git', 'index'), GIT_COMMON_DIR: join(unrelated, '.git'), GIT_OBJECT_DIRECTORY: join(unrelated, '.git', 'objects'), GIT_CEILING_DIRECTORIES: tmp, GIT_CONFIG_PARAMETERS: "'core.fsmonitor'='true'" };
+  const saved = Object.fromEntries(Object.keys(vars).map((k) => [k, process.env[k]]));
+  let row;
+  try { Object.assign(process.env, vars); row = stagingCheck(target); }
+  finally { for (const [k, v] of Object.entries(saved)) { if (v === undefined) delete process.env[k]; else process.env[k] = v; } }
+  assert.equal(row.result, 'FAIL');
+  assert.match(row.detail, want);
+  assert.ok(row.detail.startsWith(target));
+  assert.deepEqual(gitEnv({ PATH: 'a', git_dir: 'x', GIT_WORK_TREE: 'y', GIT_INDEX_FILE: 'z', GIT_CONFIG_COUNT: '1', GIT_CONFIG_KEY_0: 'k', Node_Options: 'n', GITHUB_X: 'kept' }), { PATH: 'a', GITHUB_X: 'kept' });
+});
+
 test('main --staging-check adds a row that fails the run when the folder is not detached and clean', async () => {
-  const good = await fakeRun({ extraArgs: ['--staging-check', 'S'], deps: { git: (p, a) => a[0] === 'rev-parse' ? { status: 0, out: 'abc' } : a[0] === 'symbolic-ref' ? { status: 1, out: '' } : { status: 0, out: '' } } });
+  const good = await fakeRun({ extraArgs: ['--staging-check', 'S'], deps: { git: fakeGit() } });
   assert.equal(good.code, 0);
   assert.match(good.text, /staging check \(read-only\)\s+PASS/);
   assert.match(good.text, /RESULT: PASS \(6 rows\)/);

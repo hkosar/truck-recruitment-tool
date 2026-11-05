@@ -24,10 +24,19 @@
 //      skipped/interrupted (an interruption during a step that then exits 0 still counts: that step is INTERRUPTED and an
 //      "interruption" FAIL row is added); 2 for bad usage or a refused preflight (nothing was run).
 // Progress: a line is printed when each step starts and when it ends (name, result, elapsed seconds).
-// --timeout <minutes> (default none) applies to each step: when it runs out, ONLY the child this run started for that step is stopped
-//   (child.kill on our own handle; a grandchild that child started is not signalled), the step is marked TIMEOUT and the run FAILs.
-// --staging-check <path> adds one row that only reads three git facts of that folder (git -C <path> rev-parse HEAD, symbolic-ref -q HEAD,
-//   status --porcelain; --no-optional-locks so even git's index refresh writes nothing). PASS only if HEAD is detached and the tree is clean.
+// --timeout <minutes> (default none; at most 35791 minutes, Node's timer limit) applies ONLY to steps that start no PostgreSQL (today: the
+//   runbook check). When it runs out, ONLY the child this run started for that step is stopped (child.kill on our own handle; a grandchild
+//   is not signalled), the step is marked TIMEOUT and the run FAILs. The two scripts-test steps (they include PostgreSQL lifecycle tests)
+//   and the two real-DB steps get NO timeout: on Windows child.kill ends a process without its exit/finally code, so its own
+//   pg_ctl -D <own folder> stop would never run and a PostgreSQL server would be left running. Their START line and row say so.
+// --staging-check <path> adds one row that only reads git facts of that folder and runs no configured program. Reads: rev-parse
+//   --show-toplevel (must be <path> itself), rev-parse HEAD, symbolic-ref -q HEAD, ls-files -s, check-attr filter, config filter.*,
+//   status --porcelain. Every git call gets --no-optional-locks (so even the index refresh writes nothing) and -c core.fsmonitor=false
+//   (no fsmonitor hook or daemon is started), and runs with every inherited GIT_* variable removed (GIT_DIR, GIT_WORK_TREE,
+//   GIT_INDEX_FILE, GIT_CONFIG_PARAMETERS, ...), so it describes <path> and not a folder named by the environment. It refuses (FAIL,
+//   before status) when a tracked file uses a filter driver with a configured clean/process command (status could run it) or when the
+//   folder has submodules (not checked). PASS only if HEAD is detached and the tree is clean.
+// --help prints the usage and these limits.
 // The guard stops connects to non-loopback addresses and lookups answered with one; it does not stop dns.lookup itself (see net-guard.mjs).
 // It never signals or stops a process it did not start: each step is waited for (Ctrl+C reaches the step through the console; this
 // script then skips the remaining steps and cleans up).
@@ -42,10 +51,20 @@ import { pathToFileURL } from 'node:url';
 const root = resolve(import.meta.dirname, '..');
 export const DEFAULT_PG17_BIN = 'C:\\Users\\hunte\\.bb\\tools\\pg17\\bin';
 export const MODULE_DIRS = ['pipeline', 'app'];
-const USAGE = 'usage: node scripts/combine-checks.mjs --runbook <runbook.md> [--junction <worktree with node_modules>] [--pg17-bin <dir>] [--timeout <minutes>] [--staging-check <path>]';
+const USAGE = 'usage: node scripts/combine-checks.mjs --runbook <runbook.md> [--junction <worktree with node_modules>] [--pg17-bin <dir>] [--timeout <minutes>] [--staging-check <path>] [--help]';
+/** The largest delay setTimeout accepts; a larger one fires after 1 ms (TimeoutOverflowWarning). */
+export const MAX_TIMER_MS = 2147483647;
+export const HELP = `${USAGE}
+  --timeout <minutes>    per-step limit, greater than 0 and at most ${Math.floor(MAX_TIMER_MS / 60000)} (Node's timer limit). NOT applied to
+                         steps that start PostgreSQL (both scripts-test steps and both real-DB steps): stopping them early would skip
+                         their own pg_ctl -D <own folder> stop and leave a PostgreSQL server running. Today it limits only the runbook check.
+  --staging-check <path> read-only git facts of <path>: must be the top of its own checkout, HEAD detached, tree clean. No fsmonitor
+                         hook runs, inherited GIT_* variables are ignored, and it refuses (FAIL) when a tracked file uses a filter driver
+                         with a configured command or the folder has submodules.`;
 
-/** Reads the command line. Returns { ok: true, options } or { ok: false, error }. Pure. */
+/** Reads the command line. Returns { ok: true, options }, { ok: true, help: true } or { ok: false, error }. Pure. */
 export function parseArgs(argv) {
+  if (argv.length === 1 && (argv[0] === '--help' || argv[0] === '-h')) return { ok: true, help: true };
   const options = { runbook: undefined, junction: undefined, pg17Bin: DEFAULT_PG17_BIN, timeoutMinutes: undefined, stagingCheck: undefined };
   const flags = { '--runbook': 'runbook', '--junction': 'junction', '--pg17-bin': 'pg17Bin', '--timeout': 'timeoutMinutes', '--staging-check': 'stagingCheck' };
   const seen = new Set();
@@ -64,6 +83,7 @@ export function parseArgs(argv) {
   if (options.timeoutMinutes !== undefined) {
     const m = Number(options.timeoutMinutes);
     if (!Number.isFinite(m) || m <= 0) return { ok: false, error: '--timeout needs a number of minutes greater than 0' };
+    if (m * 60000 > MAX_TIMER_MS) return { ok: false, error: `--timeout ${options.timeoutMinutes} is too long: at most ${Math.floor(MAX_TIMER_MS / 60000)} minutes (Node's timer limit)` };
     options.timeoutMinutes = m;
   }
   return { ok: true, options };
@@ -154,15 +174,18 @@ export function removeJunctions(made, readIdentity = linkIdentity) {
   return out;
 }
 
-/** The steps, in order. Pure: only builds descriptions. `guard` is the file:// URL of net-guard.mjs. */
+/**
+ * The steps, in order. Pure: only builds descriptions. `guard` is the file:// URL of net-guard.mjs.
+ * ownsPostgres: the step starts PostgreSQL servers and stops them itself in its exit/finally code, so --timeout is never applied to it.
+ */
 export function buildSteps({ options, guard, tempWithSpace }) {
   const node = process.execPath;
   const guarded = (...rest) => [`--import=${guard}`, ...rest];
   return [
-    { name: 'scripts tests (normal TEMP)', cmd: node, args: guarded('--test', ...scriptTestFiles()), env: {} },
-    { name: 'scripts tests (TEMP with a space)', cmd: node, args: guarded('--test', ...scriptTestFiles()), env: { TEMP: tempWithSpace, TMP: tempWithSpace } },
-    { name: 'real-DB suites PG16', cmd: node, args: guarded('scripts/run-real-db-suites.mjs'), env: {}, dropEnv: ['PG_BIN'] },
-    { name: 'real-DB suites PG17', cmd: node, args: guarded('scripts/run-real-db-suites.mjs'), env: { PG_BIN: options.pg17Bin } },
+    { name: 'scripts tests (normal TEMP)', cmd: node, args: guarded('--test', ...scriptTestFiles()), env: {}, ownsPostgres: true },
+    { name: 'scripts tests (TEMP with a space)', cmd: node, args: guarded('--test', ...scriptTestFiles()), env: { TEMP: tempWithSpace, TMP: tempWithSpace }, ownsPostgres: true },
+    { name: 'real-DB suites PG16', cmd: node, args: guarded('scripts/run-real-db-suites.mjs'), env: {}, dropEnv: ['PG_BIN'], ownsPostgres: true },
+    { name: 'real-DB suites PG17', cmd: node, args: guarded('scripts/run-real-db-suites.mjs'), env: { PG_BIN: options.pg17Bin }, ownsPostgres: true },
     { name: 'runbook vs code', cmd: node, args: guarded('scripts/check-runbook-vs-code.mjs', options.runbook), env: {} },
   ];
 }
@@ -197,7 +220,7 @@ const runStep = (spawnFn, step, cwd, timeoutMs) => new Promise((done) => {
   const env = stepEnv(process.env, step);
   const child = spawnFn(step.cmd, step.args, { cwd, env, stdio: 'inherit', windowsHide: true });
   let timedOut = false;
-  const timer = timeoutMs ? setTimeout(() => { timedOut = true; try { child.kill(); } catch { /* already gone */ } }, timeoutMs) : null; // our own child handle only
+  const timer = timeoutMs && !step.ownsPostgres ? setTimeout(() => { timedOut = true; try { child.kill(); } catch { /* already gone */ } }, timeoutMs) : null; // our own child handle only
   const finish = (r) => { if (timer) clearTimeout(timer); done({ ...r, timedOut, seconds: (Date.now() - started) / 1000 }); };
   child.on('error', (e) => finish({ code: null, error: e.message }));
   child.on('close', (code, signal) => finish({ code, signal }));
@@ -205,24 +228,72 @@ const runStep = (spawnFn, step, cwd, timeoutMs) => new Promise((done) => {
 
 const STAGING_ROW = 'staging check (read-only)';
 
-/** Runs `git --no-optional-locks -C <path> <args>`; returns { status, out, error }. Read-only commands only (see stagingCheck). */
-const gitRead = (path, args) => {
-  const env = stepEnv(process.env, {});
-  try { return { status: 0, out: execFileSync('git', ['--no-optional-locks', '-C', path, ...args], { env, encoding: 'utf8', windowsHide: true, stdio: ['ignore', 'pipe', 'pipe'] }).trim() }; }
+/** The environment for the staging-check git reads: like stepEnv, plus every GIT_* variable removed (any case). Pure. */
+export function gitEnv(parent) {
+  const out = stepEnv(parent, {});
+  for (const k of Object.keys(out)) if (k.toUpperCase().startsWith('GIT_')) delete out[k];
+  return out;
+}
+
+/** Options given to every staging-check git call: no optional locks, no fsmonitor hook or daemon. */
+export const GIT_READ_OPTIONS = ['--no-optional-locks', '-c', 'core.fsmonitor=false'];
+
+/**
+ * Runs `git --no-optional-locks -c core.fsmonitor=false -C <path> <args>` with gitEnv; `input` (optional) goes to its stdin.
+ * Returns { status, out, error }. Read-only commands only (see stagingCheck).
+ */
+const gitRead = (path, args, input) => {
+  const env = gitEnv(process.env);
+  const opts = { env, encoding: 'utf8', windowsHide: true, maxBuffer: 256 * 1024 * 1024, stdio: [input === undefined ? 'ignore' : 'pipe', 'pipe', 'pipe'], ...(input === undefined ? {} : { input }) };
+  try { return { status: 0, out: execFileSync('git', [...GIT_READ_OPTIONS, '-C', path, ...args], opts).trim() }; }
   catch (e) { return { status: e.status ?? null, out: String(e.stdout ?? '').trim(), error: String(e.stderr || e.message).trim() }; }
 };
 
 /**
- * The --staging-check row: reads three facts from the folder with git and writes nothing. PASS only if HEAD is detached and the
- * tree is clean. `git` is injectable for the tests: (path, args) => { status, out, error }.
+ * Before `git status` (the only read that can start a configured program besides fsmonitor): refuses submodules (their own config
+ * is not checked) and tracked files whose filter attribute names a driver with a configured clean/process command (status may run
+ * it to compare a changed file). Returns null when status is safe, else a FAIL row. ls-files, check-attr and config start nothing.
+ */
+function refuseConfiguredPrograms(path, git) {
+  const refuse = (why) => ({ name: STAGING_ROW, result: 'FAIL', detail: `${path}: refused before git status: ${why}` });
+  const ls = git(path, ['ls-files', '-s', '-z']);
+  if (ls.status !== 0) return refuse(`cannot list tracked files: ${ls.error ?? `git exit ${ls.status}`}`);
+  const entries = ls.out.split('\0').filter(Boolean);
+  if (entries.some((e) => e.startsWith('160000 '))) return refuse('the folder has submodules (not checked)');
+  if (!entries.length) return null;
+  const paths = entries.map((e) => e.slice(e.indexOf('\t') + 1));
+  const attr = git(path, ['check-attr', '-z', '--stdin', 'filter'], `${paths.join('\0')}\0`);
+  if (attr.status !== 0) return refuse(`cannot read the filter attributes: ${attr.error ?? `git exit ${attr.status}`}`);
+  const parts = attr.out.split('\0');
+  const drivers = new Set();
+  for (let i = 0; i + 2 < parts.length; i += 3) if (!['unspecified', 'unset', 'set'].includes(parts[i + 2])) drivers.add(parts[i + 2]);
+  for (const d of drivers) {
+    for (const key of ['clean', 'process']) {
+      const c = git(path, ['config', '--get', `filter.${d}.${key}`]); // exit 1: not set
+      if (c.status === 0) return refuse(`tracked files use filter driver "${d}" whose ${key} command git status could run`);
+      if (c.status !== 1) return refuse(`cannot read filter.${d}.${key}: ${c.error ?? `git exit ${c.status}`}`);
+    }
+  }
+  return null;
+}
+
+/**
+ * The --staging-check row: reads facts from the folder with git, writes nothing and starts no configured program. PASS only if
+ * <path> is the top of its checkout, HEAD is detached and the tree is clean. `git` is injectable for the tests:
+ * (path, args, input) => { status, out, error }.
  */
 export function stagingCheck(path, git = gitRead) {
   const fail = (what, r) => ({ name: STAGING_ROW, result: 'FAIL', detail: `cannot read ${what} of ${path}: ${r.error ?? `git exit ${r.status}`}` });
+  const top = git(path, ['rev-parse', '--show-toplevel']);
+  if (top.status !== 0) return fail('the checkout top folder', top);
+  if (normPath(top.out) !== normPath(path)) return { name: STAGING_ROW, result: 'FAIL', detail: `${path}: git reads the checkout at ${top.out}, not this folder` };
   const head = git(path, ['rev-parse', 'HEAD']);
   if (head.status !== 0) return fail('HEAD', head);
   const sym = git(path, ['symbolic-ref', '-q', 'HEAD']); // exit 1 and no output when HEAD is detached
   const detached = sym.status === 1 && sym.out === '';
   if (!detached && sym.status !== 0) return fail('the branch state', sym);
+  const refused = refuseConfiguredPrograms(path, git);
+  if (refused) return refused;
   const st = git(path, ['status', '--porcelain']);
   if (st.status !== 0) return fail('the status', st);
   const changed = st.out === '' ? 0 : st.out.split('\n').length;
@@ -243,6 +314,7 @@ export async function main(argv, deps = {}) {
   const { spawn: spawnFn = spawn, repoRoot = root, signals = process, log = console.log, error = console.error, readIdentity = linkIdentity, git = gitRead } = deps;
   const parsed = parseArgs(argv);
   if (!parsed.ok) { error(`${parsed.error}\n${USAGE}`); return 2; }
+  if (parsed.help) { log(HELP); return 0; }
   const { options } = parsed;
   if (!existsSync(options.runbook)) { error('the runbook file does not exist'); return 2; }
 
@@ -268,15 +340,17 @@ export async function main(argv, deps = {}) {
       const runStarted = Date.now();
       const elapsed = () => `${((Date.now() - runStarted) / 1000).toFixed(1)} s into the run`;
       const timeoutMs = options.timeoutMinutes ? options.timeoutMinutes * 60000 : undefined;
+      if (timeoutMs) log(`--timeout ${options.timeoutMinutes} min: applied only to steps that start no PostgreSQL; steps that start PostgreSQL are never stopped early, so they always stop their own servers`);
       for (const step of buildSteps({ options, guard, tempWithSpace })) {
         if (aborted) { rows.push({ name: step.name, result: 'SKIPPED', detail: 'interrupted before it started' }); continue; }
+        const noTimeout = timeoutMs && step.ownsPostgres;
         log(`\n===== ${step.name} =====`);
-        log(`[progress] START ${step.name} (${elapsed()}${timeoutMs ? `, timeout ${options.timeoutMinutes} min` : ''})`);
+        log(`[progress] START ${step.name} (${elapsed()}${timeoutMs ? (noTimeout ? ', no timeout: this step starts PostgreSQL and must stop it itself' : `, timeout ${options.timeoutMinutes} min`) : ''})`);
         current = step.name;
         const r = await runStep(spawnFn, step, repoRoot, timeoutMs);
         const interrupted = aborted && aborted.during === step.name;
         const result = interrupted ? 'INTERRUPTED' : r.timedOut ? 'TIMEOUT' : r.code === 0 ? 'PASS' : 'FAIL';
-        rows.push({ name: step.name, result, detail: `${r.error ? `could not start: ${r.error}; ` : ''}exit ${r.code ?? r.signal}, ${r.seconds.toFixed(1)} s${r.timedOut ? `; stopped after ${options.timeoutMinutes} min (timeout)` : ''}${interrupted ? `; ${aborted.signal} arrived while it ran` : ''}` });
+        rows.push({ name: step.name, result, detail: `${r.error ? `could not start: ${r.error}; ` : ''}exit ${r.code ?? r.signal}, ${r.seconds.toFixed(1)} s${r.timedOut ? `; stopped after ${options.timeoutMinutes} min (timeout)` : ''}${noTimeout ? '; --timeout not applied (starts PostgreSQL)' : ''}${interrupted ? `; ${aborted.signal} arrived while it ran` : ''}` });
         log(`[progress] END ${step.name} -> ${result}, ${r.seconds.toFixed(1)} s (${elapsed()})`);
       }
       if (options.stagingCheck) {
