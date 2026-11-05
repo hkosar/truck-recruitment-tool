@@ -12,7 +12,7 @@
 //   PG_BIN="C:\Program Files\PostgreSQL\16\bin" node scripts/run-real-db-suites.mjs     (only if PostgreSQL 16 is elsewhere)
 //   PG_BIN="<PostgreSQL 17 folder>\bin" node scripts/run-real-db-suites.mjs                 (the same suites on PostgreSQL 17, as hosted staging-2)
 // Only major 16 or 17 is accepted (pg_ctl --version); the first output line names the major and bin folder used. On 17 role-password
-// proves its by-design refusal (role_password_server_version_unverified) instead of its PostgreSQL 16 runs, and the A3 shim's empty
+// runs all its real-server checks plus the 17-only transaction_timeout ones (TRUCKRECRU-142), and the A3 shim's empty
 // stand-in extension is built from tsm_system_rows when test_ext5 is not installed (scripts/a3-build-test-db.mjs).
 // Output: one "PASS <suite>", "FAIL <suite>: <reason>" or "TIMEOUT <suite>: ..." line per suite, then a summary. The exit code is 0 only
 // when every listed suite ran and passed; a failed, timed-out, skipped, missing or interrupted suite gives a non-zero exit code.

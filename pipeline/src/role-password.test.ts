@@ -13,6 +13,7 @@ import { relative, resolve } from 'node:path';
 import { pathToFileURL } from 'node:url';
 import pg from 'pg';
 import {
+  AUDITED_SERVER_MAJORS, PG16_ONLY_SETTINGS, PG17_CHECKED_SETTINGS, PG17_HARMLESS_LOGGING_SETTINGS, PG17_OTHER_KNOWN_SETTINGS, PG17_SESSION_SAFETY_SQL, SERVER_VERSION_SQL, majorOf, serverVersionProblem,
   CHECKED_SETTINGS, CLIENT_QUERY_TIMEOUT_MS, HARMLESS_LOGGING_SETTINGS, OTHER_KNOWN_SETTINGS, SENTINEL_SETTINGS, MUST_BE_OFF_SETTINGS, SESSION_SAFETY_SQL, LOCK_TIMEOUT_SQL, SEARCH_PATH_SQL, lockTimeoutSql, ROLE_PASSWORD_RESULTS, ROLE_PASSWORD_ACTIONS, ROLE_PASSWORD_ROLES, ROLE_PASSWORD_VARIABLES, SETTINGS_SQL, SET_VERIFIER_SQL, STATEMENT_TIMEOUT_SQL, doAlterSql, executeRolePassword, loggingProblem, passwordProblem, newRolePasswordClient, planRolePassword, rolePasswordClientOptions, runRolePassword, scramSha256Verifier,
 } from './role-password.js';
 import { DbTlsRefusal, isDbSecurityFailure, isLoopbackHost } from './db-tls.js';
@@ -93,7 +94,7 @@ async function main(): Promise<void> {
   // ---- executor against a fake client: statements, events, rollback, unknown commit, redaction
   const sent: string[] = [];
   const bound: [string, unknown[]][] = [];
-  const fake = (over: { settings?: Record<string, string>; expired?: boolean; rows?: (sql: string, call: number) => unknown[]; failOn?: RegExp; failCommit?: boolean; failRollback?: boolean } = {}): RebuiltSqlClient => {
+  const fake = (over: { settings?: Record<string, string>; firstVersion?: string; expired?: boolean; rows?: (sql: string, call: number) => unknown[]; failOn?: RegExp; failCommit?: boolean; failRollback?: boolean } = {}): RebuiltSqlClient => {
     let facts = 0;
     return {
       connect: async () => undefined,
@@ -101,6 +102,7 @@ async function main(): Promise<void> {
       query: async (sql: string, args?: unknown[]) => {
         sent.push(sql);
         if (args && /set_config/.test(sql)) bound.push([sql, args]);
+        if (sql === SERVER_VERSION_SQL) return { rows: [{ v: over.firstVersion ?? settingsMap(over.settings ?? {}).get('server_version_num') ?? null }] };
         if (/pg_catalog.pg_settings/.test(sql)) return { rows: [...settingsMap(over.settings ?? {})].map(([name, setting]) => ({ name, setting })) };
         if (over.failOn?.test(sql)) throw Object.assign(new Error(`boom ${PW} ${plan.verifier}`), { code: '42501' });
         if (sql === 'commit' && over.failCommit) throw Object.assign(new Error('commit lost'), { code: '08006' });
@@ -113,12 +115,43 @@ async function main(): Promise<void> {
   let r = await captured(() => runRolePassword(fake(), plan));
   const alter = sent.filter((s) => /^do \$\$/.test(s));
   const k = SESSION_SAFETY_SQL.length;
-  check('success: begin, search_path = pg_catalog, debug_print_* / exit_on_error / jit off / client_connection_check_interval 0, settings read, statement_timeout, lock_timeout, verifier bound to set_config, one constant DO block, commit; one committed event', r.error === undefined && sent[0] === 'begin' && sent[1] === SEARCH_PATH_SQL && sent.slice(2, 2 + k).join() === SESSION_SAFETY_SQL.join() && k === 6 && /pg_settings/.test(sent[2 + k]!) && sent[3 + k] === STATEMENT_TIMEOUT_SQL && sent[4 + k] === LOCK_TIMEOUT_SQL
-    && sent.includes(SET_VERIFIER_SQL) && alter.length === 1 && alter[0] === doAlterSql('recruiter_app') && sent[sent.length - 1] === 'commit' && r.lines.length === 1 && JSON.parse(r.lines[0]!).result === 'committed');
+  check('success (PostgreSQL 16): begin, search_path = pg_catalog, server version read, debug_print_* / exit_on_error / jit off / client_connection_check_interval 0, settings read, statement_timeout, lock_timeout, verifier bound to set_config, one constant DO block, commit; one committed event; no transaction_timeout statement (16 has none)', r.error === undefined && sent[0] === 'begin' && sent[1] === SEARCH_PATH_SQL && sent[2] === SERVER_VERSION_SQL && sent.slice(3, 3 + k).join() === SESSION_SAFETY_SQL.join() && k === 6 && /pg_settings/.test(sent[3 + k]!) && sent[4 + k] === STATEMENT_TIMEOUT_SQL && sent[5 + k] === LOCK_TIMEOUT_SQL
+    && sent.includes(SET_VERIFIER_SQL) && alter.length === 1 && alter[0] === doAlterSql('recruiter_app') && sent[sent.length - 1] === 'commit' && r.lines.length === 1 && JSON.parse(r.lines[0]!).result === 'committed' && !sent.some((x) => /transaction_timeout/.test(x)));
   check('the verifier and the plain password are in NO statement text sent to the server (the verifier is only a bind parameter); the DO text has both handlers', !sent.some((s) => s.includes(PW) || s.includes(plan.verifier) || /SCRAM-SHA-256/.test(s))
     && /exception when query_canceled then raise exception using errcode = 'query_canceled', message = 'role password statement failed'; when others then raise exception using errcode = sqlstate, message = 'role password statement failed'/.test(alter[0]!)
     && /format\('alter role recruiter_app login password %L'/.test(alter[0]!) && !/\$1|\$2/.test(alter[0]!));
   check('the verifier is passed as the one bind parameter of set_config, and no event line holds the password or the verifier', bound.length === 1 && bound[0]![0] === SET_VERIFIER_SQL && bound[0]![1]!.length === 1 && bound[0]![1]![0] === plan.verifier && !r.lines.join('\n').includes(PW) && !r.lines.join('\n').includes(plan.verifier));
+  // ---- PostgreSQL 17 (TRUCKRECRU-142): transaction_timeout is switched off for the transaction and must read 0; the 17 name lists apply.
+  const PG17: Record<string, string> = { server_version_num: '170011', transaction_timeout: '0' };
+  sent.length = 0;
+  r = await captured(() => runRolePassword(fake({ settings: PG17 }), plan));
+  check('success (PostgreSQL 17): the same sequence with "set local transaction_timeout = 0" right after the common session settings and before the settings read and the verifier; one committed event', r.error === undefined && PG17_SESSION_SAFETY_SQL.join() === 'set local transaction_timeout = 0'
+    && sent[2] === SERVER_VERSION_SQL && sent.slice(3, 3 + k).join() === SESSION_SAFETY_SQL.join() && sent[3 + k] === 'set local transaction_timeout = 0' && /pg_settings/.test(sent[4 + k]!) && sent.indexOf(SET_VERIFIER_SQL) > 4 + k && sent[sent.length - 1] === 'commit' && JSON.parse(r.lines[0]!).result === 'committed');
+  for (const [label, tt] of [['1s (the SET LOCAL did not take effect)', '1000'], ['unreadable', 'x'], ['empty', ''], ['-1', '-1']] as [string, string][]) {
+    sent.length = 0;
+    r = await captured(() => runRolePassword(fake({ settings: { ...PG17, transaction_timeout: tt } }), plan));
+    check(`PostgreSQL 17 with transaction_timeout reading ${label} after the SET LOCAL: refused (role_password_logging_refused) before the verifier is bound; rolled back`, r.error instanceof RunnerRefusal && r.error.id === 'role_password_logging_refused' && !sent.some((x) => /set_config|^do |^commit/.test(x)) && JSON.parse(r.lines[0]!).result === 'rolled_back');
+  }
+  check('PostgreSQL 17 with no transaction_timeout row in the read counts as not 0 and is refused', (() => { const m = settingsMap(PG17); m.delete('transaction_timeout'); return loggingProblem(m) === 'transaction_timeout is not 0'; })());
+  sent.length = 0;
+  r = await captured(() => runRolePassword(fake({ settings: PG17, failOn: /^set local transaction_timeout/ }), plan));
+  check('PostgreSQL 17, a refused SET LOCAL transaction_timeout fails closed: rolled back, verifier never bound, no ALTER, no commit', r.error !== undefined && !sent.some((x) => /set_config|^do |^commit/.test(x)) && sent.includes('rollback') && JSON.parse(r.lines[0]!).result === 'rolled_back');
+  check('name lists per major: a 17-only name (event_triggers, transaction_timeout, io_combine_limit) on a 16 server is refused; a name removed in 17 (db_user_namespace, old_snapshot_threshold, trace_recovery_messages) on a 17 server is refused; every 17 name is accepted on 17',
+    ['event_triggers', 'transaction_timeout', 'io_combine_limit', 'trace_connection_negotiation'].every((s) => loggingProblem(settingsMap({ [s]: '0' })) === `${s} is not classified`)
+    && PG16_ONLY_SETTINGS.join() === 'db_user_namespace,old_snapshot_threshold,trace_recovery_messages' && PG16_ONLY_SETTINGS.every((s) => loggingProblem(settingsMap({ ...PG17, [s]: 'x' })) === `${s} is not classified` && loggingProblem(settingsMap({ [s]: 'x' })) === null)
+    && [...PG17_HARMLESS_LOGGING_SETTINGS, ...PG17_OTHER_KNOWN_SETTINGS].every((s) => loggingProblem(settingsMap({ ...PG17, [s]: 'on' })) === null)
+    && OTHER_KNOWN_SETTINGS.filter((s) => !PG16_ONLY_SETTINGS.includes(s) && s !== 'server_version_num').every((s) => loggingProblem(settingsMap({ ...PG17, [s]: 'x' })) === null)
+    && PG17_CHECKED_SETTINGS.join() === 'transaction_timeout' && PG17_HARMLESS_LOGGING_SETTINGS.length + PG17_OTHER_KNOWN_SETTINGS.length + PG17_CHECKED_SETTINGS.length === 19
+    && new Set([...CHECKED_SETTINGS, ...HARMLESS_LOGGING_SETTINGS, ...OTHER_KNOWN_SETTINGS, ...PG17_CHECKED_SETTINGS, ...PG17_HARMLESS_LOGGING_SETTINGS, ...PG17_OTHER_KNOWN_SETTINGS]).size === CHECKED_SETTINGS.length + HARMLESS_LOGGING_SETTINGS.length + OTHER_KNOWN_SETTINGS.length + 19);
+  check('the PostgreSQL 17 checks apply on 17 only and every other 17 logging rule stays (log_statement=all, a *_stats setting, exit_on_error on are refused on 17 too)', loggingProblem(settingsMap(PG17)) === null
+    && ([{ log_statement: 'all' }, { log_parser_stats: 'on' }, { exit_on_error: 'on' }, { client_connection_check_interval: '5' }, { log_lock_failures: 'off' }] as Record<string, string>[]).every((o) => loggingProblem(settingsMap({ ...PG17, ...o })) !== null));
+  check('audited majors are exactly 16 and 17; majorOf reads only a six-digit server_version_num', AUDITED_SERVER_MAJORS.join() === '16,17' && majorOf('170011') === 17 && majorOf('160015') === 16 && [undefined, '', 'x', '17', '1700110', ' 170011', 170011].every((x) => Number.isNaN(majorOf(x)))
+    && serverVersionProblem(settingsMap(PG17)) === null && serverVersionProblem(settingsMap({ server_version_num: '180000' })) !== null);
+  for (const [label, first, read] of [['first read 17, settings read 16', '170011', '160015'], ['first read 16, settings read 17', '160015', '170011']] as [string, string, string][]) {
+    sent.length = 0;
+    r = await captured(() => runRolePassword(fake({ firstVersion: first, settings: { server_version_num: read, transaction_timeout: '0' } }), plan));
+    check(`server major mismatch (${label}): refused (role_password_server_version_unverified) before the verifier is bound; rolled back`, r.error instanceof RunnerRefusal && r.error.id === 'role_password_server_version_unverified' && !sent.some((x) => /set_config|^do |^commit/.test(x)) && JSON.parse(r.lines[0]!).result === 'rolled_back');
+  }
   sent.length = 0;
   r = await captured(() => runRolePassword(fake({ rows: () => [] }), plan));
   check('role missing: refused, rolled back, no ALTER ever sent', r.error instanceof RunnerRefusal && sent.every((s) => !/^do \$\$/.test(s)) && sent.includes('rollback') && JSON.parse(r.lines[0]!).result === 'rolled_back');
@@ -231,12 +264,16 @@ async function main(): Promise<void> {
     && ['log_statement', 'log_min_duration_statement', 'debug_print_parse', 'log_min_messages', 'track_activities'].every((s) => SENTINEL_SETTINGS.includes(s)));
   check('client_connection_check_interval must read 0 (SET LOCAL sets it); a name nobody classified is refused, a dotted extension setting is not', loggingProblem(settingsMap({ client_connection_check_interval: '1000' })) !== null
     && loggingProblem(settingsMap({ transaction_timeout: '0' })) !== null && loggingProblem(settingsMap({ 'supautils.something': 'x', 'pg_stat_statements.max': '5000' })) === null
-    && OTHER_KNOWN_SETTINGS.every((s) => loggingProblem(settingsMap({ [s]: 'x' })) === null));
-  for (const [label, ver] of [['PostgreSQL 17.6 (server_version_num 170006)', '170006'], ['PostgreSQL 15', '150013'], ['PostgreSQL 18', '180000'], ['an unreadable version', 'x'], ['an empty version', '']] as [string, string][]) {
+    && OTHER_KNOWN_SETTINGS.filter((s) => s !== 'server_version_num').every((s) => loggingProblem(settingsMap({ [s]: 'x' })) === null) && loggingProblem(settingsMap({ server_version_num: 'x' })) !== null);
+  for (const [label, ver] of [['PostgreSQL 15', '150013'], ['PostgreSQL 18', '180000'], ['PostgreSQL 14', '140019'], ['an unreadable version', 'x'], ['an empty version', '']] as [string, string][]) {
     sent.length = 0;
     r = await captured(() => runRolePassword(fake({ settings: { server_version_num: ver } }), plan));
-    check(`server_version_num on ${label}: refused with role_password_server_version_unverified before the verifier is bound; rolled back`, r.error instanceof RunnerRefusal && r.error.id === 'role_password_server_version_unverified' && !sent.some((x) => /set_config|^do |^commit/.test(x)) && JSON.parse(r.lines[0]!).result === 'rolled_back');
+    check(`server_version_num on ${label}: refused with role_password_server_version_unverified right after the version read (no session setting, no settings read, verifier never bound); rolled back`, r.error instanceof RunnerRefusal && r.error.id === 'role_password_server_version_unverified'
+      && sent.slice(0, 3).join() === ['begin', SEARCH_PATH_SQL, SERVER_VERSION_SQL].join() && sent[3] === 'rollback' && sent.length === 4 && JSON.parse(r.lines[0]!).result === 'rolled_back');
   }
+  sent.length = 0;
+  r = await captured(() => runRolePassword(fake({ settings: { server_version_num: '170006', transaction_timeout: '0' } }), plan));
+  check('server_version_num on PostgreSQL 17.6 (170006): accepted (audited for TRUCKRECRU-142) and committed', r.error === undefined && JSON.parse(r.lines[0]!).result === 'committed' && sent.includes('set local transaction_timeout = 0'));
   {
     sent.length = 0;
     const noVer = fake(); const q0 = noVer.query.bind(noVer);
@@ -374,43 +411,11 @@ async function main(): Promise<void> {
   check('local verifier equals the one PostgreSQL computed for the same password and salt (byte for byte)', scramSha256Verifier(PW, Buffer.from(salt!, 'base64'), Number(iter)) === server);
   await admin.query('drop role tr_ref_role');
 
-  // PostgreSQL 17 (scripts/run-real-db-suites.mjs with a PostgreSQL 17 PG_BIN; hosted staging-2 is 17): role-password is audited for 16
-  // only and must refuse a 17 server by design (role_password_server_version_unverified, before the verifier is bound; desk review
-  // thr_qdqhq8wv42: transaction_timeout and the unclassified 17 settings are not audited). On 17 this test proves exactly that refusal on
-  // the real server, for both actions through the executor with the admin connection and as a non-superuser CREATEROLE runner through the
-  // executor's own client, and stops: the PostgreSQL 16 real-server checks below would all be this refusal. Any other major is refused here.
+  // PostgreSQL 16 and 17 (scripts/run-real-db-suites.mjs with a PostgreSQL 17 PG_BIN; hosted staging-2 is 17) both run every real-server check below;
+  // the transaction_timeout checks run on 17 only (16 has no such setting). Any other major is refused here.
   const serverNum = Number((await admin.query("select current_setting('server_version_num') as v")).rows[0].v);
   const pgMajor = Math.floor(serverNum / 10000);
   assert.ok(pgMajor === 16 || pgMajor === 17, `refusing: the real cluster must be PostgreSQL 16 or 17 (server_version_num ${serverNum})`);
-  if (pgMajor === 17) {
-    const versionRefused = (r: { lines: string[]; error?: unknown }): boolean => r.error instanceof RunnerRefusal && r.error.id === 'role_password_server_version_unverified'
-      && r.lines.length === 1 && JSON.parse(r.lines[0]!).result === 'rolled_back';
-    for (const [action, spec] of Object.entries(ROLE_PASSWORD_ACTIONS)) {
-      const role = spec.role;
-      await admin.query(`drop role if exists ${role}`);
-      await admin.query(`create role ${role} nologin nocreatedb connection limit 7`);
-      const before = await attrs(role);
-      const p = planRolePassword({ action, dbUrl: pooler(REBUILT), confirm: spec.confirmation, password: PW });
-      const run = await captured(() => executeRolePassword(p, () => ({ connect: async () => undefined, end: async () => undefined, query: (s: string, a?: unknown[]) => admin.query(s, a) })));
-      check(`${role} on PostgreSQL 17 (server_version_num ${serverNum}): refused by design with role_password_server_version_unverified through the real executor path, rolled back, no password stored, attributes unchanged, still cannot log in`,
-        versionRefused(run) && (await rolePw(role)) === null && (await attrs(role)) === before && !(await loginAs(role, PW)).ok);
-      await admin.query(`drop role ${role}`);
-    }
-    const RUNNER_PW = randomBytes(18).toString('hex');
-    await admin.query('drop role if exists tr_runner');
-    await admin.query(`create role tr_runner login createrole password '${RUNNER_PW}'`);
-    await admin.query('create role recruiter_app nologin');
-    await admin.query('grant recruiter_app to tr_runner with admin option');
-    const runnerPlan = planRolePassword({ ...base, password: `${PW}-runner` });
-    const viaRunner = await captured(() => executeRolePassword({ ...runnerPlan, target: { ...runnerPlan.target, host: u.hostname, port: Number(u.port), user: 'tr_runner', password: RUNNER_PW, database: decodeURIComponent(u.pathname.slice(1)) } }));
-    check('recruiter_app on PostgreSQL 17, as a non-superuser CREATEROLE runner through the executor\'s default TLS-hardened client (loopback exemption): refused by design with role_password_server_version_unverified, rolled back, no password stored, still cannot log in',
-      versionRefused(viaRunner) && (await rolePw('recruiter_app')) === null && !(await loginAs('recruiter_app', `${PW}-runner`)).ok);
-    await admin.query('drop role recruiter_app');
-    await admin.query('drop role tr_runner');
-    check('every event line printed during the real-PostgreSQL 17 runs too is a fixed, verifier-free and password-free event', eventsClean());
-    console.log(`role-password: ${n} checks passed (offline and real PostgreSQL 17: the by-design version refusal; the PostgreSQL 16 real-server checks need a 16 cluster)`);
-    return;
-  }
 
   for (const [action, spec] of Object.entries(ROLE_PASSWORD_ACTIONS)) {
     const role = spec.role;
@@ -553,7 +558,7 @@ async function main(): Promise<void> {
     const lplan = planRolePassword({ ...base, password: LPW });
     const lm = /^SCRAM-SHA-256\$4096:([^$]+)\$([^:]+):(.+)$/.exec(lplan.verifier)!;
     const lparts = [lplan.verifier, lm[1]!, lm[2]!, lm[3]!, LPW];
-    const runAsRunner = async (settings: string[], plan = lplan, direct = false, options?: string, during?: () => Promise<void>) => {
+    const runAsRunner = async (settings: string[], plan = lplan, direct = false, options?: string, during?: () => Promise<void>, wrap?: (c: RebuiltSqlClient) => RebuiltSqlClient, module: { runRolePassword: typeof runRolePassword } = { runRolePassword }) => {
       for (const st of settings) await admin.query(`alter role tr_runner set ${st}`);
       const c = open({ host: u.hostname, port: Number(u.port), user: 'tr_runner', password: RUNNER_PW, database: dbName, ...(options ? { options } : {}) });
       c.on('error', () => undefined);
@@ -561,7 +566,7 @@ async function main(): Promise<void> {
       try {
         // direct = negative control: the old shape (bind parameter to set_config) with no refusal, to prove the log setting WOULD write it.
         if (direct) { await c.query('begin'); await c.query(SET_VERIFIER_SQL, [plan.verifier]); await c.query('rollback'); return undefined; }
-        const run = captured(() => runRolePassword(c as unknown as RebuiltSqlClient, plan));
+        const run = captured(() => module.runRolePassword(wrap ? wrap(c as unknown as RebuiltSqlClient) : c as unknown as RebuiltSqlClient, plan));
         if (during) await during();
         return await run;
       } finally {
@@ -690,6 +695,91 @@ async function main(): Promise<void> {
       const ro = await runAsRunner([...loud, 'default_transaction_read_only = on']);
       check(`real server, the same loud settings with a read-only error inside the ALTER: rolled back with the fixed message, and the log holds no part of the verifier${LOG ? '' : ' (log not checked)'}`, JSON.parse(ro!.lines[0]!).result === 'rolled_back' && (ro!.error as Error).message === 'role password statement failed' && (await logClean(mark2)));
     }
+    // ---- TRUCKRECRU-142: event triggers and timeouts that end the session with a FATAL (16 and 17), and transaction_timeout (17 only).
+    const passthrough = (c: RebuiltSqlClient, before?: (q: string) => Promise<void>, after?: (q: string) => Promise<void>, seen: string[] = []): RebuiltSqlClient => ({
+      connect: async () => undefined, end: async () => undefined,
+      query: async (q: string, a?: unknown[]) => { seen.push(q); if (before) await before(q); const res = await c.query(q, a); if (after) await after(q); return res; },
+    });
+    {
+      // Event triggers do not fire for ALTER ROLE (a shared object), so no event trigger function sees the statement; a CREATE TABLE is the control.
+      await admin.query('create table public.tr_evt_log(tag text)');
+      await admin.query('create function public.tr_evt_fn() returns event_trigger language plpgsql as $f$ begin insert into public.tr_evt_log values (tg_tag); end $f$');
+      await admin.query('create event trigger tr_evt_start on ddl_command_start execute function public.tr_evt_fn()');
+      await admin.query('create event trigger tr_evt_end on ddl_command_end execute function public.tr_evt_fn()');
+      await admin.query('alter role recruiter_app nologin password null');
+      const et = await runAsRunner([]);
+      const etTags = (await admin.query('select tag from public.tr_evt_log')).rows.map((x: { tag: string }) => x.tag);
+      await admin.query('create table public.tr_evt_ctl(x int)');
+      const ctlTags = (await admin.query('select tag from public.tr_evt_log')).rows.map((x: { tag: string }) => x.tag);
+      await admin.query('drop event trigger tr_evt_start');
+      await admin.query('drop event trigger tr_evt_end');
+      await admin.query('drop table public.tr_evt_ctl, public.tr_evt_log');
+      await admin.query('drop function public.tr_evt_fn()');
+      check(`real server (PostgreSQL ${pgMajor}), ddl_command_start and ddl_command_end event triggers in the database: they do not fire for the ALTER ROLE (no row), the run commits, and they do fire for a CREATE TABLE (control)`,
+        et!.error === undefined && JSON.parse(et!.lines[0]!).result === 'committed' && etTags.length === 0 && ctlTags.join() === 'CREATE TABLE,CREATE TABLE');
+    }
+    {
+      // idle_in_transaction_session_timeout ends the session while it waits between statements: here after the verifier is bound, before the ALTER.
+      const mark = logMark();
+      await admin.query('alter role recruiter_app nologin password null');
+      const seenIdle: string[] = [];
+      const res = await runAsRunner(['idle_in_transaction_session_timeout = 500'], lplan, false, undefined, undefined, (c) => passthrough(c, undefined, async (q) => { if (q === SET_VERIFIER_SQL) await sleep(1500); }, seenIdle));
+      const lg = LOG ? await logSince(mark) : '';
+      check(`real server (PostgreSQL ${pgMajor}), idle_in_transaction_session_timeout = 500ms ends the session after the verifier is bound: the run fails (rollback_not_confirmed), no password is stored, and the log has the timeout FATAL but no part of the verifier${LOG ? '' : ' (log not checked)'}`,
+        res!.error !== undefined && JSON.parse(res!.lines[0]!).result === 'rollback_not_confirmed' && seenIdle.includes(SET_VERIFIER_SQL) && (await rolePw('recruiter_app')) === null
+        && (!LOG || (/idle-in-transaction timeout/.test(lg) && lparts.every((x) => !lg.includes(x)))));
+    }
+    if (pgMajor === 17) {
+      for (const [label, settings, options, holdMs] of [['transaction_timeout = 1s per role', ["transaction_timeout = '1s'"], undefined, 3000], ['transaction_timeout = 1s as a client startup option', [], '-c transaction_timeout=1s', 2000]] as [string, string[], string | undefined, number][]) {
+        const mark = logMark();
+        await admin.query('alter role recruiter_app nologin password null');
+        const held = await holdRole();
+        const res = await runAsRunner(settings, lplan, false, options, async () => { await sleep(holdMs); await held.query('rollback'); });
+        await held.end();
+        const lg = LOG ? await logSince(mark) : '';
+        check(`real server (17), runner session with ${label} and the role row locked for ${holdMs / 1000} s: the module sets transaction_timeout = 0 for its transaction, so the ALTER waits past 1 s and commits, the role logs in, and the log has no transaction timeout FATAL and no part of the verifier${LOG ? '' : ' (log not checked)'}`,
+          res!.error === undefined && JSON.parse(res!.lines[0]!).result === 'committed' && (await loginAs('recruiter_app', LPW)).ok && !/transaction timeout/.test(lg) && lparts.every((x) => !lg.includes(x)));
+      }
+      {
+        // The timeout fires before the guard is sent (the client waits 1.5 s first): a FATAL before the verifier is bound.
+        const mark = logMark();
+        await admin.query('alter role recruiter_app nologin password null');
+        const seenEarly: string[] = [];
+        const res = await runAsRunner(["transaction_timeout = '1s'"], lplan, false, undefined, undefined, (c) => passthrough(c, async (q) => { if (q === PG17_SESSION_SAFETY_SQL[0]) await sleep(1500); }, undefined, seenEarly));
+        const lg = LOG ? await logSince(mark) : '';
+        check(`real server (17), transaction_timeout = 1s firing before the module's SET LOCAL arrives: the run fails (rollback_not_confirmed), the verifier was never sent, no password is stored, and the log has the transaction timeout FATAL but no part of the verifier${LOG ? '' : ' (log not checked)'}`,
+          res!.error !== undefined && JSON.parse(res!.lines[0]!).result === 'rollback_not_confirmed' && !seenEarly.includes(SET_VERIFIER_SQL) && (await rolePw('recruiter_app')) === null
+          && (!LOG || (/terminating connection due to transaction timeout/.test(lg) && lparts.every((x) => !lg.includes(x)))));
+      }
+      {
+        // Negative control: a copy of the module WITHOUT the transaction_timeout guard (no SET LOCAL, no read check). The timeout's FATAL ends the
+        // session inside the ALTER: nothing is stored, but the log's CONTEXT line quotes the statement with the verifier (what the guard prevents).
+        const modSrc = readFileSync(resolve(REPOSITORY_ROOT, 'pipeline/src/role-password.ts'), 'utf8');
+        const setGuard = "export const PG17_SESSION_SAFETY_SQL: readonly string[] = ['set local transaction_timeout = 0'];";
+        const readGuard = "  if (major === 17 && (settings.get('transaction_timeout') ?? '').trim() !== '0') return 'transaction_timeout is not 0';\n";
+        const noGuard = modSrc.replace(setGuard, 'export const PG17_SESSION_SAFETY_SQL: readonly string[] = [];').replace(readGuard, '');
+        check('the no-guard mutant differs from the real module by exactly the two transaction_timeout guards', modSrc.split(setGuard).length === 2 && modSrc.split(readGuard).length === 2 && noGuard.length === modSrc.length - setGuard.length - readGuard.length + 'export const PG17_SESSION_SAFETY_SQL: readonly string[] = [];'.length);
+        let ngDir: string | undefined;
+        try {
+          ngDir = mkdtempSync(resolve(tmpdir(), 'rpw-mutant-'));
+          const ngPath = resolve(ngDir, 'role-password-noguard.ts');
+          writeFileSync(ngPath, noGuard.replace(/from '\.\/([\w-]+)\.js'/g, (_m, f: string) => `from '${pathToFileURL(resolve(REPOSITORY_ROOT, 'pipeline/src', `${f}.ts`)).href}'`));
+          const ng = await import(pathToFileURL(ngPath).href) as { runRolePassword: typeof runRolePassword };
+          const NPW = randomBytes(36).toString('base64url');
+          const nplan = planRolePassword({ ...base, password: NPW });
+          const nSalt = /^SCRAM-SHA-256\$4096:([^$]+)\$/.exec(nplan.verifier)![1]!;
+          const mark = logMark();
+          await admin.query('alter role recruiter_app nologin password null');
+          const held = await holdRole();
+          const res = await runAsRunner(["transaction_timeout = '1s'"], nplan, false, undefined, async () => { await sleep(3000); await held.query('rollback'); }, undefined, ng);
+          await held.end();
+          const lg = LOG ? await logSince(mark) : '';
+          check(`negative control (17): without the guard, transaction_timeout = 1s ends the session inside the ALTER with FATAL 25P04: rollback_not_confirmed and no password stored${LOG ? ', and the log DOES hold the verifier (the CONTEXT of the FATAL quotes the ALTER), so the guard protects something real' : ''}`,
+            (res!.error as { code?: string } | undefined)?.code === '25P04' && JSON.parse(res!.lines[0]!).result === 'rollback_not_confirmed' && (await rolePw('recruiter_app')) === null
+            && (!LOG || (/^(CONTEXT:\s+|\t)SQL statement "alter role recruiter_app login password '/m.test(lg) && lg.includes(nSalt))));
+        } finally { if (ngDir) rmSync(ngDir, { recursive: true, force: true }); }
+      }
+    } else console.log('note: the transaction_timeout checks need PostgreSQL 17 (16 has no such setting); not counted');
     // B2 (r3 review): look-alike objects earlier on the runner's search_path.
     {
       const lookalike = ['create schema if not exists shadow authorization tr_runner',
