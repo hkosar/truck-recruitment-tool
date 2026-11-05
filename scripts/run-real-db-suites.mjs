@@ -370,13 +370,17 @@ export const SUITE_IDS = [...new Set(SUITE_FILES.map((f) => f.id))];
 /** The PostgreSQL major versions this script runs on: 16 (the default install, the line's audited version) and 17 (hosted staging-2). */
 export const SUPPORTED_PG_MAJORS = [16, 17];
 
-/** The major version from `pg_ctl --version` output ("pg_ctl (PostgreSQL) 17.11"), or undefined when it is not exactly one supported
- *  major (anything else, two version lines, or no version at all). Pure. */
-export function supportedPgMajor(versionOutput) {
-  const found = [...String(versionOutput ?? '').matchAll(/\(PostgreSQL\)\s+(\d+)\.\d+/g)].map((m) => Number(m[1]));
-  return found.length === 1 && SUPPORTED_PG_MAJORS.includes(found[0]) ? found[0] : undefined;
-}
+/** The one full-line shape `pg_ctl --version` prints on the supported installs ("pg_ctl (PostgreSQL) 16.15", "pg_ctl (PostgreSQL) 17.11"):
+ *  no vendor suffix, no leading zero, no third number, no pre-release tag. */
+const PG_CTL_VERSION_LINE = /^pg_ctl \(PostgreSQL\) (16|17)\.(0|[1-9][0-9]*)$/;
 
+/** The major version from a finished `pg_ctl --version` process ({ status, signal, stdout }), or undefined unless the process
+ *  succeeded (status 0, no signal) and its whole trimmed output is exactly one line of the shape above. Anything else fails closed. Pure. */
+export function supportedPgMajor(result) {
+  if (!result || typeof result !== 'object' || result.status !== 0 || result.signal || typeof result.stdout !== 'string') return undefined;
+  const m = result.stdout.trim().match(PG_CTL_VERSION_LINE);
+  return m ? Number(m[1]) : undefined;
+}
 function findPgBin() {
   const candidates = [process.env.PG_BIN, 'C:\\Program Files\\PostgreSQL\\16\\bin'].filter(Boolean);
   for (const dir of candidates) {
@@ -467,7 +471,7 @@ async function run() {
       return;
     }
     const ver = sh(exe(pgBin, 'pg_ctl'), ['--version']);
-    pgMajor = supportedPgMajor(ver.stdout);
+    pgMajor = supportedPgMajor(ver);
     if (!pgMajor) {
       console.error(`REFUSED: the PostgreSQL bin folder is not version ${SUPPORTED_PG_MAJORS.join(' or ')} (pg_ctl --version: ${String(ver.stdout ?? '').trim().slice(0, 80) || 'no output'}).`);
       process.exitCode = 2;

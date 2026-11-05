@@ -424,12 +424,36 @@ test('time limit text: under 1 second is shown in ms, never "0 s" (T53 item 5)',
   assert.ok(!/\b0 s\b/.test(o.reason));
 });
 
-test('PostgreSQL version gate: 16.x and 17.x pg_ctl output only', () => {
+test('PostgreSQL version gate: only a successful pg_ctl printing exactly one 16.x or 17.x line', () => {
   assert.deepEqual(SUPPORTED_PG_MAJORS, [16, 17]);
-  assert.equal(supportedPgMajor('pg_ctl (PostgreSQL) 16.15\n'), 16);
-  assert.equal(supportedPgMajor('pg_ctl (PostgreSQL) 17.11\r\n'), 17);
-  for (const v of ['pg_ctl (PostgreSQL) 15.8', 'pg_ctl (PostgreSQL) 18.1', 'pg_ctl (PostgreSQL) 18beta1', 'pg_ctl (PostgreSQL) 160.1', 'pg_ctl (PostgreSQL) 9.6.24',
-    'pg_ctl (PostgreSQL) 16.1\npg_ctl (PostgreSQL) 17.1', 'pg_ctl 16.1', '16.4', '', undefined, null]) {
-    assert.equal(supportedPgMajor(v), undefined, String(v));
-  }
+  const run = (stdout, extra = {}) => supportedPgMajor({ status: 0, signal: null, stdout, ...extra });
+  // the exact outputs of the installed binaries (both end in CRLF on Windows)
+  assert.equal(run('pg_ctl (PostgreSQL) 16.15\r\n'), 16);
+  assert.equal(run('pg_ctl (PostgreSQL) 17.11\r\n'), 17);
+  assert.equal(run('pg_ctl (PostgreSQL) 16.15\n'), 16);
+  assert.equal(run('pg_ctl (PostgreSQL) 17.0'), 17);
+  assert.equal(run('pg_ctl (PostgreSQL) 17.11\r\n\r\n'), 17);
+  assert.equal(run('pg_ctl (PostgreSQL) 17.11\r'), 17);
+  const refused = [
+    // the five review counterexamples
+    'pg_ctl (PostgreSQL) 17.11garbage', 'not_pg_ctl (PostgreSQL) 17.11', 'pg_ctl (PostgreSQL) 17.11\npg_ctl (PostgreSQL) 18beta1',
+    'pg_ctl (PostgreSQL) 17.11.18', 'pg_ctl (PostgreSQL) 017.11',
+    // other majors and shapes
+    'pg_ctl (PostgreSQL) 15.8', 'pg_ctl (PostgreSQL) 18.1', 'pg_ctl (PostgreSQL) 18beta1', 'pg_ctl (PostgreSQL) 160.1', 'pg_ctl (PostgreSQL) 9.6.24',
+    'pg_ctl (PostgreSQL) 17.01', 'pg_ctl (PostgreSQL) 17', 'pg_ctl (PostgreSQL) 17.', 'pg_ctl (PostgreSQL) 17.11 (Debian)', 'pg_ctl  (PostgreSQL) 17.11', ' x pg_ctl (PostgreSQL) 17.11',
+    'pg_ctl (PostgreSQL) 16.1\npg_ctl (PostgreSQL) 17.1', 'pg_ctl (PostgreSQL) 16.1\r\npg_ctl (PostgreSQL) 17.1\r\n', 'pg_ctl (PostgreSQL) 17.11\r\nextra\r\n',
+    'extra\r\npg_ctl (PostgreSQL) 17.11\r\n', 'pg_ctl (PostgreSQL) 17.1\r1', 'pg_ctl 16.1', '16.4', '', '\r\n',
+  ];
+  for (const v of refused) assert.equal(run(v), undefined, JSON.stringify(v));
+  // a failing process never passes, whatever it printed
+  assert.equal(run('pg_ctl (PostgreSQL) 17.11\r\n', { status: 1 }), undefined);
+  assert.equal(run('pg_ctl (PostgreSQL) 17.11\r\n', { status: null }), undefined);
+  assert.equal(run('pg_ctl (PostgreSQL) 17.11\r\n', { status: undefined }), undefined);
+  assert.equal(run('pg_ctl (PostgreSQL) 17.11\r\n', { signal: 'SIGTERM' }), undefined);
+  assert.equal(run('pg_ctl (PostgreSQL) 17.11\r\n', { error: new Error('spawn') , status: null }), undefined);
+  assert.equal(run(undefined), undefined);
+  assert.equal(run(null), undefined);
+  assert.equal(run(Buffer.from('pg_ctl (PostgreSQL) 17.11')), undefined);
+  // the old string-only call can no longer pass
+  for (const v of ['pg_ctl (PostgreSQL) 17.11', undefined, null]) assert.equal(supportedPgMajor(v), undefined, String(v));
 });
