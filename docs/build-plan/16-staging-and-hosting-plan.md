@@ -623,7 +623,8 @@ column, changed type, dropped check, changed default and row security, column-le
 disabled, wrong-function and wrong-timing triggers, wrong function search paths including the non-public PostGIS one, restored DELETE on batches,
 PUBLIC and inherited EXECUTE, table/function privileges for `recruiter_api`, missing trigger/function/disabled
 trigger with `batch_delete` absent, a whitespace-only change of the body (accepted), plus the valid interrupted and backed-out states). Also proved locally: a fresh apply and a backout followed
-by the three re-applies give snapshots identical after normalization, with the role matrix 62/62.
+by the three re-applies give snapshots identical after normalization, with the role matrix 62/62 (historical:
+measured before TRUCKRECRU-143 added six probes; the current matrix has 68 probes and must pass 68/68).
 
 **Staging rehearsal (T-REPLAY, approval 15)** runs against the **new** staging project and
 proves more than the snapshot: after the backout, **a staging fixture signs in on the legacy

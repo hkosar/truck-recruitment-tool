@@ -1740,12 +1740,19 @@ alter default privileges in schema internal revoke execute on functions from pub
 -- new tables to anon/authenticated) would have handed every table this file creates to those roles.
 -- The loop revokes everything from those three on every table, view and sequence in internal whose
 -- ACL names one of them, whatever default ACL put it there (relations without such an entry are left
--- as they are, so a clean database and a re-apply after the backouts are unchanged by it). The default-
--- privilege revokes stop the runner's schema-internal entry from handing out later tables (M1b and
--- M1c revoke on their own tables too). Not covered here: the runner's global default privileges (a
--- per-schema revoke cannot remove a global grant), other roles' default privileges, grants this
--- runner cannot revoke (made by another grantor), and rights anon or authenticated inherit through
--- another role; the role matrix probes the effective privileges.
+-- as they are, so a clean database and a re-apply after the backouts are unchanged by it). It acts
+-- only on relations the runner owns, directly or through a role whose privileges it has
+-- (pg_has_role USAGE, the same test PostgreSQL uses for ownership): the owner always holds every
+-- grant option, so that revoke cannot fail. On a relation another role owns, a revoke by the runner
+-- can raise 42501 (measured on PostgreSQL 16 and 17 when anon holds only a table-level right such as
+-- TRUNCATE or MAINTAIN) and would abort the whole file, so such relations are left untouched. The default-privilege revokes stop the runner's schema-internal entry
+-- from handing out later tables (M1b and M1c revoke on their own tables too). Not covered here:
+-- relations owned by a role the runner does not inherit, the runner's global default privileges (a
+-- per-schema revoke cannot remove a global grant), other roles' default privileges, grants made by
+-- another grantor, and rights anon or authenticated inherit through another role. The role matrix
+-- probes the effective privileges of anon and authenticated on every existing non-extension relation
+-- in public and internal (whoever granted them), so anything left here stops the run there; it does not audit
+-- default privileges that no existing relation has used yet.
 do $revoke_internal_relations$
 declare
   r record;
@@ -1756,6 +1763,7 @@ begin
     join pg_namespace n on n.oid = c.relnamespace
     where n.nspname = 'internal'
       and c.relkind in ('r', 'p', 'v', 'm', 'f', 'S')
+      and pg_has_role(current_user, c.relowner, 'USAGE')
       and exists (
         select 1 from aclexplode(c.relacl) a
         where a.grantee in (0, 'anon'::regrole, 'authenticated'::regrole))

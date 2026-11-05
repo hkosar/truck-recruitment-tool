@@ -20,7 +20,13 @@
 //      has default privileges in schema internal (and public) that grant new tables and sequences to anon and authenticated (and in
 //      internal to PUBLIC), and the existing internal relations are granted to them too (runs on a copy of the pristine public
 //      database, made at the start like case 4's).
-// In every applied case, after M1 and again after M1b/M1c: anon and authenticated hold no effective privilege on any app table,
+//   6. PostGIS in public, plus Codex review thr_phw7jjfvc9 B1 (TRUCKRECRU-143 round 2): an ordinary table in internal owned by
+//      another role (not the runner, which neither owns it nor inherits its owner), on which anon holds only MAINTAIN (PostgreSQL 17)
+//      or only TRUNCATE (16: no MAINTAIN there; also a table-only right). M1's internal sweep must leave that table alone (a revoke by
+//      the runner there raised 42501 and aborted M1) and apply; its ACL is unchanged through M1, M1b, M1c and the matrix, and the role
+//      matrix then refuses (role_matrix_failed, exactly 1 of 68: anon's internal no-privilege probe, naming that table) and leaves
+//      nothing behind (runs on a copy of the pristine public database, like case 5's).
+// In every applied case but 6, after M1 and again after M1b/M1c: anon and authenticated hold no effective privilege on any app table,
 // view or sequence in public and internal (MAINTAIN included on PostgreSQL 17+), and an unqualified VACUUM (VERBOSE) as each of
 // them, outside any transaction, processes no app table (from its "vacuuming" notices; a superuser VACUUM of one table proves the
 // notices are read).
@@ -47,6 +53,8 @@ const FAKE_URL = `postgresql://postgres.${REF}:redacted-pw@aws-0-us-east-2.poole
 const RUNNER = 'tr_m1_runner';
 /** A second Supabase-like login that did not create recruiter_api, so it has no ADMIN on it (the role matrix's missing-ADMIN case). */
 const NO_ADMIN_RUNNER = 'tr_m1_runner_noadmin';
+/** Case 6: owns one internal table; the runner is not a member of it. */
+const OTHER_OWNER = 'tr_m1_other_owner';
 const M1_ROLES = ['recruiter_api', 'recruiter_app', 'recruiter_maintenance'];
 const NEG_EXEC_MESSAGE = 'M1: the runner cannot pass on EXECUTE on PostGIS routine(s) st_distance, st_dwithin, st_makeline, st_makepoint, st_setsrid, st_x, st_y to recruiter_api (it needs EXECUTE WITH GRANT OPTION, or PUBLIC must keep EXECUTE)';
 const NEG_MESSAGE = 'M1: the runner cannot pass on USAGE on PostGIS schema extensions to recruiter_api (it needs USAGE WITH GRANT OPTION on that schema)';
@@ -199,7 +207,9 @@ async function main(): Promise<void> {
   const negCopyUrl = (() => { const u = new URL(URLS.neg as string); u.pathname = `${u.pathname}_exec`; return u.toString(); })();
   // Case 5's database: a copy of the pristine public database (taken before case 2 touches it).
   const daclCopyUrl = (() => { const u = new URL(URLS.public as string); u.pathname = `${u.pathname}_dacl`; return u.toString(); })();
-  const existingM1Roles = () => onCluster(async (c) => (await c.query("select rolname from pg_roles where rolname = any($1) order by rolname", [[...M1_ROLES, RUNNER, NO_ADMIN_RUNNER]])).rows.map((r) => r.rolname as string));
+  // Case 6's database: a copy of the pristine public database (taken before case 2 touches it).
+  const unownedCopyUrl = (() => { const u = new URL(URLS.public as string); u.pathname = `${u.pathname}_unowned`; return u.toString(); })();
+  const existingM1Roles = () => onCluster(async (c) => (await c.query("select rolname from pg_roles where rolname = any($1) order by rolname", [[...M1_ROLES, RUNNER, NO_ADMIN_RUNNER, OTHER_OWNER]])).rows.map((r) => r.rolname as string));
 
   /** Drops the case's database (only if it carries a task ownership comment) and every role the case made. */
   const dropCase = async (dbUrl: string) => {
@@ -210,7 +220,7 @@ async function main(): Promise<void> {
         assert.match(comment ?? '', /^a3-task-owned:/, `refusing: ${db} is not task-owned`);
         await c.query(`drop database ${db}`);
       }
-      for (const r of [...M1_ROLES, RUNNER, NO_ADMIN_RUNNER]) await c.query(`drop role if exists ${r}`);
+      for (const r of [...M1_ROLES, RUNNER, NO_ADMIN_RUNNER, OTHER_OWNER]) await c.query(`drop role if exists ${r}`);
     });
   };
 
@@ -247,6 +257,10 @@ async function main(): Promise<void> {
     runnerUrl.username = opts.login ?? RUNNER;
     runnerUrl.password = runnerPw;
     const client = new pg.Client({ connectionString: runnerUrl.toString() });
+    // Every query result the executor got back (read-only copy for the test; the executor itself prints only fixed counts).
+    const results: unknown[] = [];
+    const query = client.query.bind(client) as (...a: unknown[]) => Promise<unknown>;
+    (client as unknown as { query: (...a: unknown[]) => Promise<unknown> }).query = async (...a: unknown[]) => { const r = await query(...a); results.push(r); return r; };
     const real = planRebuiltSqlRun({ action, dbUrl: FAKE_URL, confirm: REBUILT_STAGING_SQL_ACTIONS[action]!.confirmation, recordedRebuiltRef: REF });
     const plan = opts.alter ? opts.alter(real) : real;
     const log = console.log; const err = console.error;
@@ -262,7 +276,17 @@ async function main(): Promise<void> {
       console.log = log; console.error = err;
       await client.end().catch(() => undefined);
     }
-    return { error, events, plan };
+    return { error, events, plan, results };
+  };
+  /** The role matrix's own list of failed probes (its final role_matrix row), from the results runAsRunner kept. */
+  const matrixFailures = (results: unknown[]) => {
+    for (const r of [...results].reverse()) {
+      for (const one of [...(Array.isArray(r) ? r : [r])].reverse()) {
+        const m = (one as { rows?: Array<{ role_matrix?: { failed?: unknown } }> }).rows?.[0]?.role_matrix;
+        if (m) return m.failed as Array<{ actor: string; test: string; expected: string; observed: string }>;
+      }
+    }
+    return undefined;
   };
   const describe = (e: (Error & { code?: string; id?: string }) | undefined) => `error=${e?.id ?? ''} ${e?.code ?? ''} ${e?.message ?? ''}`;
 
@@ -485,7 +509,7 @@ async function main(): Promise<void> {
   };
 
   try {
-    for (const [srcUrl, copyUrl] of [[URLS.neg, negCopyUrl], [URLS.public, daclCopyUrl]] as const) {
+    for (const [srcUrl, copyUrl] of [[URLS.neg, negCopyUrl], [URLS.public, daclCopyUrl], [URLS.public, unownedCopyUrl]] as const) {
       const src = new URL(srcUrl as string).pathname.slice(1);
       const copy = new URL(copyUrl).pathname.slice(1);
       await onCluster(async (c) => {
@@ -541,9 +565,63 @@ async function main(): Promise<void> {
             and x.grantee in (0, 'anon'::regrole, 'authenticated'::regrole)`, [RUNNER])).rows[0].n as number;
       check('internal default ACL: before M1 the runner\'s default privileges in schema internal hand new tables and sequences to anon, authenticated and PUBLIC', defaults > 0, String(defaults));
     });
+    // 6. PostGIS in public, plus a table in internal owned by another role with only a table-level right for anon (Codex review
+    //    thr_phw7jjfvc9 B1, TRUCKRECRU-143 round 2). M1 applies and leaves it; the role matrix refuses it.
+    {
+      const label = 'unowned internal table';
+      let right = '';
+      const o = await applyAsRunner(unownedCopyUrl, async (a) => {
+        await a.query(PUBLIC_EXECUTE_SQL);
+        right = (await a.query(`select current_setting('server_version_num')::int >= 170000 as v`)).rows[0].v ? 'MAINTAIN' : 'TRUNCATE';
+        await a.query(`create role ${OTHER_OWNER}`);
+        await a.query(`create table internal.review_unowned (id int)`);
+        await a.query(`alter table internal.review_unowned owner to ${OTHER_OWNER}`);
+        await a.query(`grant ${right} on internal.review_unowned to anon`);
+        const f = (await a.query(`select pg_has_role($1, $2, 'MEMBER') as member, has_table_privilege('anon', 'internal.review_unowned', $3) as granted,
+            (select relacl::text from pg_class where oid = 'internal.review_unowned'::regclass) as acl`, [RUNNER, OTHER_OWNER, right])).rows[0];
+        check(`${label}: before M1 internal.review_unowned is owned by ${OTHER_OWNER} (the runner is not a member) and anon holds only ${right} on it`,
+          f.member === false && f.granted === true && f.acl === `{${OTHER_OWNER}=arwdDxt${right === 'MAINTAIN' ? 'm' : ''}/${OTHER_OWNER},anon=${right === 'MAINTAIN' ? 'm' : 'D'}/${OTHER_OWNER}}`, JSON.stringify(f));
+      });
+      try {
+        const acl = async () => (await o.admin.query(`select relacl::text as a from pg_class where oid = 'internal.review_unowned'::regclass`)).rows[0].a as string;
+        const aclBefore = await acl();
+        check(`${label}: M1 applies as the Supabase-like runner (its internal sweep does not touch a relation the runner does not own)`,
+          o.error === undefined && o.events.some((e) => e.msg === 'staging-sql.step_done'), describe(o.error));
+        const exposedAfter = async (stage: string) => {
+          const x = await apiExposure(o.admin);
+          const want = ['internal.review_unowned:anon'];
+          check(`${label}: after ${stage} the only API-role privilege left on the ${x.relations} app relations is anon's ${right} on internal.review_unowned (ACL unchanged)`,
+            JSON.stringify(x.exposed) === JSON.stringify(want) && JSON.stringify(x.maintain) === JSON.stringify(x.pg17 ? want : []) && (await acl()) === aclBefore,
+            `exposed=${x.exposed.join(',')} maintain=${x.maintain.join(',')} acl=${await acl()}`);
+        };
+        await exposedAfter('M1');
+        for (const action of ['apply-m1b', 'apply-m1c']) {
+          const s = await runAsRunner(unownedCopyUrl, action);
+          check(`${label}: ${action} applies as the Supabase-like runner`, s.error === undefined && s.events.some((e) => e.msg === 'staging-sql.step_done'), describe(s.error));
+        }
+        await exposedAfter('M1b and M1c');
+        const before = await stateOf(o.admin);
+        const s = await runAsRunner(unownedCopyUrl, 'role-matrix-m1');
+        const ev = s.events.find((e) => e.msg === 'staging-sql.role_matrix');
+        const failed = matrixFailures(s.results);
+        check(`${label}: role-matrix-m1 refuses (role_matrix_failed, 1 of 68 failed, step_failed not step_done)`,
+          s.error?.id === 'role_matrix_failed' && JSON.stringify(ev) === '{"msg":"staging-sql.role_matrix","ok":false,"total":68,"passed":67,"failed":1}'
+          && !s.events.some((e) => e.msg === 'staging-sql.step_done'), `${describe(s.error)} ${JSON.stringify(ev)}`);
+        check(`${label}: the failing probe is anon's no-privilege probe for schema internal, held on review_unowned only`,
+          failed?.length === 1 && failed[0]!.actor === 'anon' && failed[0]!.test === 'no privilege on any app table/sequence in internal (incl. MAINTAIN on 17+)'
+          && / relations, held on: review_unowned$/.test(failed[0]!.observed), JSON.stringify(failed));
+        const cmp = compareStates(before, await stateOf(o.admin), MATRIX_FULL_RUN_SEQUENCES);
+        check(`${label}: the refused role matrix left nothing behind (catalogue, table rows, sequences only ${MATRIX_FULL_RUN_SEQUENCES.join(', ')} moved forward; review_unowned's ACL unchanged)`,
+          cmp.problems.length === 0 && JSON.stringify(cmp.advanced) === JSON.stringify(MATRIX_FULL_RUN_SEQUENCES) && (await acl()) === aclBefore, `${cmp.problems.join('; ')} advanced=${cmp.advanced.join(',')}`);
+      } finally {
+        await o.admin.end();
+      }
+      await dropCase(unownedCopyUrl);
+      check(`${label}: case cleaned up (its database and roles dropped)`, (await existingM1Roles()).length === 0);
+    }
   } finally {
     // Leaves the cluster without the case roles even after a failed check (later cases and reruns need them absent).
-    for (const v of [...Object.values(URLS), negCopyUrl, daclCopyUrl]) await dropCase(v as string).catch(() => undefined);
+    for (const v of [...Object.values(URLS), negCopyUrl, daclCopyUrl, unownedCopyUrl]) await dropCase(v as string).catch(() => undefined);
   }
   console.log(`PASS m1-supabase-runner: ${n} checks passed`);
 }

@@ -277,7 +277,9 @@ select pg_temp.record_no_privileges('anon', 'no privilege on any app table/seque
 select pg_temp.record_no_privileges('authenticated', 'no privilege on any app table/sequence in public (incl. MAINTAIN on 17+)', 'public');
 select pg_temp.record_no_privileges('authenticated', 'no privilege on any app table/sequence in internal (incl. MAINTAIN on 17+)', 'internal');
 -- A table the migration role creates in internal now (undone by the final rollback) gives them nothing
--- either: no default privilege of the migration role (global or for schema internal) hands it out.
+-- either: no table default privilege of the migration role (global or for schema internal) hands it
+-- out. Not probed: sequence default privileges (no sequence is created here) and other roles'
+-- default privileges that no existing relation has used yet.
 create table internal._role_matrix_new_table_probe (id int);
 select pg_temp.record_no_privileges('anon', 'a new internal table gets no privilege (default privileges)', 'internal', 'internal._role_matrix_new_table_probe');
 select pg_temp.record_no_privileges('authenticated', 'a new internal table gets no privilege (default privileges)', 'internal', 'internal._role_matrix_new_table_probe');
