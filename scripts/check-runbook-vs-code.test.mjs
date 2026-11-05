@@ -208,7 +208,7 @@ test('command line prints INFO lines without changing the exit code', () => {
   const r = spawnSync(process.execPath, [script, md, '--root', root], { encoding: 'utf8' });
   assert.equal(r.status, 0);
   assert.match(r.stdout, /^INFO OUTSIDE-REPO line=1 /m);
-  assert.match(r.stdout, /^SUMMARY findings=0 info=1$/m);
+  assert.match(r.stdout, /^SUMMARY findings=0 info=1 quotes_checked=0$/m);
 });
 
 test('Windows drive paths: inside the checked folder they are repo paths, anywhere else INFO', () => {
@@ -448,6 +448,46 @@ test('QUOTE-MISMATCH: the quoted text must be on the cited line', () => {
   });
 });
 
+// TRUCKRECRU-109 review B1: a backticked citation's own closing backtick is never re-read as the opening of a quote, so prose
+// after it is not a quote. Reproductions from the Codex review (thr_ebmu8d64k7, quote-boundaries.mjs), exact text.
+test('QUOTE-MISMATCH: prose after a backticked citation is not a quote', () => {
+  withRoot('quote boundary root', { 'scripts/q.mjs': "const a = 1;\nemit('hello   world');\nconst z = 3;\n" }, (r) => {
+    const k = (md) => spKinds(md, r);
+    assert.deepEqual(k('see `scripts/q.mjs:1` and then `const z`'), []);
+    assert.deepEqual(k('see `scripts/q.mjs:1` contains `const a`'), []); // backticked citation followed by prose
+    assert.deepEqual(k('see `scripts/q.mjs:1`, then `const a`'), []); // comma plus prose
+    assert.deepEqual(k('see `scripts/q.mjs:1`; `const a`'), []);
+    assert.deepEqual(k('see `scripts/q.mjs:1` — `const a`'), []);
+    assert.deepEqual(k('see scripts/q.mjs:1 and then `const z`'), []);
+    assert.deepEqual(k('see `scripts/q.mjs:1` and `scripts/q.mjs:3`'), []); // two backticked citations joined by prose
+    // the direct quoted-citation + separator + quote case is still checked, both ways
+    assert.deepEqual(k('see `scripts/q.mjs:1` — `const z`'), ['QUOTE-MISMATCH']);
+    assert.deepEqual(k('see `scripts/q.mjs:3` - `hello world`'), ['QUOTE-MISMATCH']);
+    assert.deepEqual(k('see `scripts/q.mjs:3`: `const z`'), []);
+    // a citation inside a longer code span is not followed by its closing backtick: no quote
+    assert.deepEqual(k('see `scripts/q.mjs:1 foo` - `const z`'), []);
+    // two backticked citations, each with its own quote
+    assert.deepEqual(k('see `scripts/q.mjs:1` - `const a` and `scripts/q.mjs:3` - `const z`'), []);
+    assert.deepEqual(k('see `scripts/q.mjs:1` - `const z` and `scripts/q.mjs:3` - `const a`'), ['QUOTE-MISMATCH', 'QUOTE-MISMATCH']);
+  });
+});
+
+test('quotes_checked counts the quote/citation pairs actually checked; the command line prints it', () => {
+  withRoot('quote count root', { 'scripts/q.mjs': "const a = 1;\nemit('hello   world');\nconst z = 3;\n" }, (r) => {
+    const count = (md) => { const stats = {}; checkRunbook(md, { root: r, stats }); return stats.quotesChecked; };
+    assert.equal(count('see scripts/q.mjs:1\n'), 0);
+    assert.equal(count('see `scripts/q.mjs:1` and `scripts/q.mjs:3`\n'), 0);
+    assert.equal(count('see scripts/q.mjs:3 `...`\n'), 0); // only wildcards: nothing checked
+    assert.equal(count('see scripts/q.mjs:1 `const a`\nsee `scripts/q.mjs:3` - `const x`\n'), 2); // a match and a mismatch both count
+    const script = fileURLToPath(new URL('./check-runbook-vs-code.mjs', import.meta.url));
+    const md = join(r, 'quotes.md');
+    writeFileSync(md, 'see scripts/q.mjs:1 `const a`\n');
+    const run = spawnSync(process.execPath, [script, md, '--root', r], { encoding: 'utf8' });
+    assert.equal(run.status, 0, run.stderr);
+    assert.match(run.stdout, /^SUMMARY findings=0 info=0 quotes_checked=1$/m);
+  });
+});
+
 // TRUCKRECRU-159: two citations on one line are each checked; each owns the quote right after it.
 test('two citations on the same line are each checked', () => {
   withRoot('two root', { 'scripts/a.mjs': 'one\ntwo\n', 'scripts/b.mjs': 'alpha\nbeta\n' }, (r) => {
@@ -463,7 +503,7 @@ test('two citations on the same line are each checked', () => {
 });
 
 // TRUCKRECRU-159: a checked root with non-ASCII letters; the runbook may spell their case differently.
-test('Unicode-case checked root: any letter case matches, siblings are outside', () => {
+test('Unicode-case checked root: the root spelt as-is, all upper case or all lower case matches; siblings are outside', () => {
   for (const name of ['Ärger É root', 'Ärger-ÉÖ']) {
     withRoot(name, { 'scripts/plain.mjs': 'a\nb\n' }, (r) => {
       const fwd = r.replace(/\\/g, '/');
