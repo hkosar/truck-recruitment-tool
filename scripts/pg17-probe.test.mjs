@@ -10,23 +10,12 @@ import { tmpdir } from 'node:os';
 import { dirname, join, parse, resolve } from 'node:path';
 import { setTimeout as sleep } from 'node:timers/promises';
 import { test } from 'node:test';
-import { DEFAULT_PG17_BIN, DIR_PREFIX, INTERRUPT_SIGNALS, PROBES, interruptExitCode, isOwnProbeDir, psqlArgs, psqlEnv } from './pg17-probe.mjs';
+import { A3_ADMIN_USER, DEFAULT_PG17_BIN, DIR_PREFIX, INTERRUPT_SIGNALS, M1_DB, PROBES, diffProbes, formatDiff, interruptExitCode, isOwnProbeDir, parseProbeArgs, preloadArgs, probeRows, psqlArgs, psqlEnv } from './pg17-probe.mjs';
 
 const base = resolve(import.meta.dirname, '..');
 const probePath = join(import.meta.dirname, 'pg17-probe.mjs');
 const pgBin = process.env.PG_BIN || DEFAULT_PG17_BIN;
 const havePg17 = existsSync(join(pgBin, 'pg_ctl.exe')) || existsSync(join(pgBin, 'pg_ctl'));
-
-/** The --import / --require preloads of execArgv, in order, as standalone arguments. */
-function preloadArgs(execArgv) {
-  const out = [];
-  for (let i = 0; i < execArgv.length; i++) {
-    const a = execArgv[i];
-    if (/^--(import|require)=/.test(a)) out.push(a);
-    else if ((a === '--import' || a === '--require' || a === '-r') && i + 1 < execArgv.length) out.push(a, execArgv[++i]);
-  }
-  return out;
-}
 
 /** True if something accepts a TCP connection on 127.0.0.1:port within 3 s. */
 function portAccepts(port) {
@@ -78,6 +67,57 @@ test('probes: the five reported topics, each one read-only statement', () => {
   }
   const members = PROBES.find((p) => p.id.includes('pg_auth_members')).sql;
   for (const col of ['admin_option', 'inherit_option', 'set_option', 'grantor']) assert.match(members, new RegExp(col));
+});
+
+test('probes include default ACLs and per-role settings (for the --apply-m1 diff)', () => {
+  const ids = PROBES.map((p) => p.id);
+  assert.ok(ids.some((id) => id.startsWith('default_acls (pg_default_acl)')));
+  assert.ok(ids.some((id) => id.startsWith('role_settings (pg_db_role_setting)')));
+  assert.equal(new Set(ids).size, ids.length, 'probe ids are unique (the diff is keyed by id)');
+});
+
+test('psql: default login and database are the plain probe ones; --apply-m1 passes its own', () => {
+  const plain = psqlArgs({ port: 1, sql: 'select 1' });
+  assert.deepEqual(plain.slice(plain.indexOf('-U'), plain.indexOf('-U') + 4), ['-U', 'tr_probe_admin', '-d', 'postgres']);
+  const m1 = psqlArgs({ port: 1, sql: 'select 1', user: A3_ADMIN_USER, database: M1_DB });
+  assert.deepEqual(m1.slice(m1.indexOf('-U'), m1.indexOf('-U') + 4), ['-U', 'tr_test_admin', '-d', 'tr_probe_m1']);
+  assert.match(M1_DB, /^tr_[a-z0-9_]+$/, 'a3-build-test-db.mjs only builds tr_ databases');
+});
+
+test('options: none or --apply-m1; anything else is refused', () => {
+  assert.deepEqual(parseProbeArgs([]), { applyM1: false });
+  assert.deepEqual(parseProbeArgs(['--apply-m1']), { applyM1: true });
+  assert.match(parseProbeArgs(['--apply-m1', '--go']).error, /unknown option\(s\): --go/);
+  assert.match(parseProbeArgs(['apply-m1']).error, /unknown option/);
+});
+
+test('diff: rows only before (-) and only after (+), duplicates counted, header changes and failed probes shown', () => {
+  assert.deepEqual(probeRows('a | b\n1 | 2\r\n\n3 | 4\n'), { header: 'a | b', rows: ['1 | 2', '3 | 4'] });
+  assert.deepEqual(probeRows(''), { header: '', rows: [] });
+  const ids = ['same', 'changed', 'dup', 'hdr', 'gone'];
+  const before = new Map([['same', 'h\nx\n'], ['changed', 'h\nkeep\nold\n'], ['dup', 'h\nr\nr\n'], ['hdr', 'h1\nx\n'], ['gone', 'h\nx\n']]);
+  const after = new Map([['same', 'h\nx\n'], ['changed', 'h\nnew\nkeep\n'], ['dup', 'h\nr\n'], ['hdr', 'h2\nx\n']]);
+  const d = diffProbes(before, after, ids);
+  assert.deepEqual(d.map((x) => [x.id, x.comparable, x.removed, x.added]), [
+    ['same', true, [], []], ['changed', true, ['old'], ['new']], ['dup', true, ['r'], []], ['hdr', true, [], []], ['gone', false, [], []],
+  ]);
+  const text = formatDiff(d).join('\n');
+  assert.match(text, /== diff same\n {2}\(h\)\n {2}no change/);
+  assert.match(text, /== diff changed\n {2}\(h\)\n {2}- old\n {2}\+ new/);
+  assert.match(text, /header before: h1\n {2}header after: {2}h2/);
+  assert.match(text, /== diff gone\n {2}NOT COMPARABLE/);
+  assert.equal(diffProbes(new Map(), new Map()).length, PROBES.length, 'by default every probe is diffed');
+});
+
+test('an unknown option is refused before anything is created: exit 2, no probe folder', () => {
+  const before = new Set(readdirSync(base).filter((n) => n.startsWith(DIR_PREFIX)));
+  const env = { ...process.env };
+  delete env.NODE_TEST_CONTEXT;
+  delete env.NODE_OPTIONS;
+  const r = spawnSync(process.execPath, [...preloadArgs(process.execArgv), probePath, '--apply-m1', '--bogus'], { cwd: base, env, encoding: 'utf8', windowsHide: true, timeout: 60000 });
+  assert.equal(r.status, 2, `${r.stdout}${r.stderr}`);
+  assert.match(r.stderr, /REFUSED: unknown option\(s\): --bogus/);
+  assert.deepEqual(readdirSync(base).filter((n) => n.startsWith(DIR_PREFIX) && !before.has(n)), []);
 });
 
 test('the default-ACL MAINTAIN count leaves out sequences (they have no MAINTAIN privilege)', () => {
@@ -256,8 +296,11 @@ const cp = require('node:child_process');
 const fs = require('node:fs');
 const { basename } = require('node:path');
 const { syncBuiltinESMExports } = require('node:module');
-const cfg = JSON.parse(process.env.PG17_PROBE_TEST_INJECT);
-const stageOf = (name, args) => (name === 'initdb' ? 'initdb' : name === 'pg_ctl' && args.includes('start') ? 'start' : name === 'psql' ? 'query' : '');
+// The probe passes its preloads on to its own node children (build, M1 step) with a scrubbed environment: there this preload does nothing.
+const cfg = JSON.parse(process.env.PG17_PROBE_TEST_INJECT || '{"step":"none"}');
+const ends = (args, tail) => args.some((a) => String(a).endsWith(tail));
+const stageOf = (name, args) => (name === 'initdb' ? 'initdb' : name === 'pg_ctl' && args.includes('start') ? 'start' : name === 'psql' ? 'query'
+  : name === 'node' && ends(args, 'a3-build-test-db.mjs') ? 'build' : name === 'node' && ends(args, 'pg17-probe-apply-m1.ts') ? 'apply' : '');
 const original = cp.spawn;
 let injected = false;
 cp.spawn = function (cmd, args, opts) {
@@ -266,6 +309,8 @@ cp.spawn = function (cmd, args, opts) {
   injected = true;
   // The two failure cases change the real command (an invalid initdb option, a query that cannot run) and then leave the probe alone.
   if (cfg.action === 'bad-option') return original.call(this, cmd, [...args, '--test-invalid-option'], opts);
+  // --apply-m1: the M1 step refuses a runner password that is not a throwaway token, so M1 is not applied.
+  if (cfg.action === 'bad-runner-pw') return original.call(this, cmd, args, { ...opts, env: { ...opts.env, PG17_PROBE_RUNNER_PW: 'short' } });
   if (cfg.action === 'bad-query') {
     const bad = [...args];
     bad[bad.indexOf('-c') + 1] = 'select pg_catalog.test_missing_function()';
@@ -298,7 +343,7 @@ syncBuiltinESMExports();
 const probeFolders = () => readdirSync(base).filter((n) => n.startsWith(DIR_PREFIX));
 
 /** Runs the probe with the injecting preload; returns exit, output, the cluster port (if one started) and the probe folders it left. */
-async function runInjected(t, { step, action, after }) {
+async function runInjected(t, { step, action, after, args = [] }) {
   const work = mkdtempSync(join(tmpdir(), 'pg17-probe-inject-'));
   t.after(() => rmSync(work, { recursive: true, force: true }));
   const preload = join(work, 'inject.cjs');
@@ -309,7 +354,7 @@ async function runInjected(t, { step, action, after }) {
   delete env.PG17_PROBE_TEST_HOOK;
   delete env.PG17_PROBE_TEST_STANDIN;
   const before = new Set(probeFolders());
-  const child = spawn(process.execPath, [...preloadArgs(process.execArgv), '--require', preload, probePath], { cwd: base, env, stdio: ['ignore', 'pipe', 'pipe'], windowsHide: true });
+  const child = spawn(process.execPath, [...preloadArgs(process.execArgv), '--require', preload, probePath, ...args], { cwd: base, env, stdio: ['ignore', 'pipe', 'pipe'], windowsHide: true });
   t.diagnostic(`probe child pid ${child.pid}`);
   let out = '';
   child.stdout.setEncoding('utf8').on('data', (d) => { out += d; });
@@ -376,3 +421,69 @@ test('a failing query after the server started is reported, the later probes sti
   assert.ok(r.port, r.out);
   assert.equal(await portAccepts(Number(r.port)), false, 'the owned server no longer listens');
 });
+
+// ---- --apply-m1 (TRUCKRECRU-149), on real local PostgreSQL 17 (127.0.0.1 only) with the installed app/pipeline packages.
+const haveM1Deps = ['app/node_modules/pg', 'pipeline/node_modules/pg', 'pipeline/node_modules/tsx/dist/loader.mjs'].every((p) => existsSync(join(base, p)));
+const m1Skip = !havePg17 ? `no PostgreSQL 17 in ${pgBin}` : !haveM1Deps ? 'app/pipeline node_modules not installed' : false;
+
+/** The text between two section markers of the probe output (end: the next "#### " line, or the end). */
+const section = (out, title) => { const i = out.indexOf(`#### ${title}`); if (i < 0) return ''; const j = out.indexOf('\n#### ', i + 1); return out.slice(i, j < 0 ? undefined : j); };
+
+test('--apply-m1: probes before, applies M1 as a NOSUPERUSER CREATEROLE runner, probes after, prints the diff, cleans up, exit 0', { skip: m1Skip, timeout: 600000 }, async (t) => {
+  const r = await runInjected(t, { step: 'none', action: 'none', args: ['--apply-m1'] });
+  assert.equal(r.signal, null, r.out);
+  assert.equal(r.code, 0, r.out);
+  assert.match(r.out, /built tr_probe_m1 \(a3-build-test-db\.mjs exit 0\)/);
+  assert.match(r.out, /runner login tr_m1_runner: superuser=false createrole=true inherit=true/);
+  assert.match(r.out, /apply-m1 plan: 1 step\(s\) \(supabase\/pending\/M1_same_origin_signin\.sql\)/);
+  assert.match(r.out, /apply-m1 as tr_m1_runner: applied/);
+  const before = section(r.out, 'BEFORE M1');
+  const after = section(r.out, 'AFTER M1');
+  const diff = section(r.out, 'DIFF');
+  for (const id of PROBES.map((p) => p.id)) {
+    assert.ok(before.includes(`== ${id}\n`), `BEFORE lacks ${id}`);
+    assert.ok(after.includes(`== ${id}\n`), `AFTER lacks ${id}`);
+    assert.ok(diff.includes(`== diff ${id}\n`), `DIFF lacks ${id}`);
+  }
+  assert.doesNotMatch(before, /recruiter_api/, 'no recruiter_* role before M1');
+  // PostgreSQL 16+: the CREATEROLE runner that creates recruiter_api gets an ADMIN-only membership (no INHERIT, no SET).
+  assert.match(diff, /\n {2}\+ recruiter_api \| tr_m1_runner \| tr_test_admin \| t \| f \| f\n/);
+  assert.match(diff, /\n {2}\+ recruiter_api \| recruiter_app \| tr_m1_runner \| f \| t \| t\n/);
+  assert.match(diff, /== diff server_version_num\n {2}\(server_version_num\)\n {2}no change/);
+  assert.doesNotMatch(r.out, /NOT COMPARABLE|ERROR:/);
+  assert.match(r.out, /\nCLEANUP OK: cluster stopped with pg_ctl -D <own folder>, folder deleted\nRESULT: OK/);
+  assert.deepEqual(r.left, [], 'the probe folder is deleted');
+  assert.ok(r.port, r.out);
+  assert.equal(await portAccepts(Number(r.port)), false, 'the owned server no longer listens');
+});
+
+test('--apply-m1: a failing M1 step is reported, AFTER and the diff still run (no change), cleanup OK, exit 1', { skip: m1Skip, timeout: 600000 }, async (t) => {
+  const r = await runInjected(t, { step: 'apply', action: 'bad-runner-pw', args: ['--apply-m1'] });
+  assert.equal(r.signal, null, r.out);
+  assert.equal(r.code, 1, r.out);
+  assert.match(r.out, /apply-m1 step: ERROR refusing: PG17_PROBE_RUNNER_PW must be a throwaway token/);
+  assert.match(r.out, /ERROR: the M1 step failed \(status 1\)/);
+  const diff = section(r.out, 'DIFF');
+  assert.match(diff, /== diff role_membership \(pg_auth_members\)\n {2}\([^)]*\)\n {2}no change/);
+  assert.match(diff, /== diff maintain_grants [^\n]*\n {2}\([^)]*\)\n {2}no change/);
+  assert.match(r.out, /\nCLEANUP OK: /);
+  assert.match(r.out, /RESULT: FAILED\n/);
+  assert.deepEqual(r.left, [], 'the probe folder is deleted');
+  assert.equal(await portAccepts(Number(r.port)), false, 'the owned server no longer listens');
+});
+
+for (const step of ['build', 'apply']) {
+  test(`--apply-m1: SIGINT (twice) while the ${step} step runs: the server is stopped, the folder deleted, exit 130`, { skip: m1Skip, timeout: 600000 }, async (t) => {
+    const r = await runInjected(t, { step, action: 'SIGINT', args: ['--apply-m1'] });
+    assert.equal(r.signal, null, r.out);
+    assert.equal(r.code, 130, r.out);
+    assert.match(r.out, new RegExp(`TEST INJECT: ${step}:SIGINT, owned child pid \\d+`));
+    assert.match(r.out, /SIGINT again: cleanup of this run's own cluster is already running/);
+    assert.match(r.out, /\nCLEANUP OK: cluster stopped with pg_ctl -D <own folder>, folder deleted/);
+    assert.match(r.out, /RESULT: FAILED \(interrupted by SIGINT\)/);
+    assert.doesNotMatch(r.out, /RESULT: OK|CLEANUP (\(at exit\) )?INCOMPLETE|apply-m1 as tr_m1_runner: applied/);
+    assert.deepEqual(r.left, [], 'the probe folder is deleted');
+    assert.ok(r.port, r.out);
+    assert.equal(await portAccepts(Number(r.port)), false, 'the owned server no longer listens');
+  });
+}
