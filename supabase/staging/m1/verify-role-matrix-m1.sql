@@ -239,6 +239,50 @@ select pg_temp.record_denied('authenticated', 'execute search_carriers', $$selec
 select pg_temp.record_denied('authenticated', 'update profiles', $$update public.profiles set full_name = full_name$$);
 reset role;
 
+-- ---- anon and authenticated hold no privilege at all on any app table, view or sequence in public
+-- and internal (TRUCKRECRU-143). Effective privileges, read as the migration role: direct grants,
+-- grants to PUBLIC and rights inherited through other roles (pg_maintain too) all count. On
+-- PostgreSQL 17+ that includes MAINTAIN: an unqualified VACUUM / ANALYZE processes every table its
+-- caller holds MAINTAIN on, even without USAGE on the schema. PostgreSQL 16 has no MAINTAIN (naming
+-- it there is an error). Extension members (PostGIS) are the platform's, not the app's. A schema
+-- with no app relation fails the probe (it would prove nothing).
+create or replace function pg_temp.record_no_privileges(p_actor text, p_test text, p_schema text, p_rel regclass default null) returns void
+language plpgsql as $$
+declare
+  v_table_privs text := 'SELECT,INSERT,UPDATE,DELETE,TRUNCATE,REFERENCES,TRIGGER'
+    || case when current_setting('server_version_num')::int >= 170000 then ',MAINTAIN' else '' end;
+  v_n int;
+  v_held text;
+begin
+  select count(*)::int,
+         string_agg(c.relname, ',' order by c.relname) filter (where
+           case when c.relkind = 'S' then has_sequence_privilege(p_actor, c.oid, 'USAGE,SELECT,UPDATE')
+                else has_table_privilege(p_actor, c.oid, v_table_privs)
+                  or has_any_column_privilege(p_actor, c.oid, 'SELECT,INSERT,UPDATE,REFERENCES') end)
+    into v_n, v_held
+  from pg_class c
+  join pg_namespace n on n.oid = c.relnamespace
+  where n.nspname = p_schema
+    and c.relkind in ('r', 'p', 'v', 'm', 'f', 'S')
+    and (p_rel is null or c.oid = p_rel)
+    and not exists (
+      select 1 from pg_depend d
+      where d.classid = 'pg_class'::regclass and d.objid = c.oid
+        and d.refclassid = 'pg_extension'::regclass and d.deptype = 'e');
+  insert into _results values (p_actor, p_test, 'no privilege on any of > 0 relations',
+                               v_n::text || ' relations, held on: ' || coalesce(v_held, 'none'), v_n > 0 and v_held is null);
+end $$;
+select pg_temp.record_no_privileges('anon', 'no privilege on any app table/sequence in public (incl. MAINTAIN on 17+)', 'public');
+select pg_temp.record_no_privileges('anon', 'no privilege on any app table/sequence in internal (incl. MAINTAIN on 17+)', 'internal');
+select pg_temp.record_no_privileges('authenticated', 'no privilege on any app table/sequence in public (incl. MAINTAIN on 17+)', 'public');
+select pg_temp.record_no_privileges('authenticated', 'no privilege on any app table/sequence in internal (incl. MAINTAIN on 17+)', 'internal');
+-- A table the migration role creates in internal now (undone by the final rollback) gives them nothing
+-- either: no default privilege of the migration role (global or for schema internal) hands it out.
+create table internal._role_matrix_new_table_probe (id int);
+select pg_temp.record_no_privileges('anon', 'a new internal table gets no privilege (default privileges)', 'internal', 'internal._role_matrix_new_table_probe');
+select pg_temp.record_no_privileges('authenticated', 'a new internal table gets no privilege (default privileges)', 'internal', 'internal._role_matrix_new_table_probe');
+drop table internal._role_matrix_new_table_probe;
+
 -- ---- The app role without a session sees nothing.
 set local role recruiter_api;
 select pg_temp.as_session(null);

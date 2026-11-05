@@ -14,8 +14,16 @@
 // After an apply: recruiter_api works for spatial calls, and the login's recruiter_api membership is again only the ADMIN-only
 // grant PostgreSQL made (the self-check revoked exactly what it granted). Then, as the same login and through the real runner
 // plans, runbook v3.3 sections 3.2-3.6 (TRUCKRECRU-126): apply-m1b, apply-m1c, batch-delete-compare (match true), role-matrix-m1
-// (62/62, catalogue unchanged afterwards, membership still ADMIN-only) and postgis-placement. Like hosted Supabase (assumed, not
+// (68/68, catalogue unchanged afterwards, membership still ADMIN-only) and postgis-placement. Like hosted Supabase (assumed, not
 // verified), the login is made a member of anon, authenticated and service_role by the superuser.
+//   5. PostGIS in public, plus the dangerous starting state of Codex review thr_fhw66f89ay B1 (TRUCKRECRU-143): the runner login
+//      has default privileges in schema internal (and public) that grant new tables and sequences to anon and authenticated (and in
+//      internal to PUBLIC), and the existing internal relations are granted to them too (runs on a copy of the pristine public
+//      database, made at the start like case 4's).
+// In every applied case, after M1 and again after M1b/M1c: anon and authenticated hold no effective privilege on any app table,
+// view or sequence in public and internal (MAINTAIN included on PostgreSQL 17+), and an unqualified VACUUM (VERBOSE) as each of
+// them, outside any transaction, processes no app table (from its "vacuuming" notices; a superuser VACUUM of one table proves the
+// notices are read).
 // Before the passing role-matrix run, its failure paths (TRUCKRECRU-134, from Codex review thr_yb422uqwxk): a wrong gate, an error
 // right after its SET-option grant, an error mid-probe (both injected into the plan in memory, never into the file), and a second
 // login without ADMIN on recruiter_api. Each must fail closed and, once the executor has closed the connection, leave nothing behind:
@@ -139,6 +147,33 @@ const SEQUENCE_LIST_SQL = `select n.nspname || '.' || c.relname as s, c.oid::reg
 const MATRIX_FIXTURE_SEQUENCES = ['public.batch_activity_id_seq', 'public.contact_suppressions_id_seq'];
 const MATRIX_FULL_RUN_SEQUENCES = ['internal.auth_events_id_seq', ...MATRIX_FIXTURE_SEQUENCES];
 
+/** The app relations of public and internal (tables, views, sequences; extension members are the platform's). */
+const APP_RELATIONS_SQL = `select c.oid, n.nspname || '.' || c.relname as name, c.relkind::text as kind from pg_class c join pg_namespace n on n.oid = c.relnamespace
+  where n.nspname in ('public', 'internal') and c.relkind in ('r', 'p', 'v', 'm', 'f', 'S')
+    and not exists (select 1 from pg_depend d where d.classid = 'pg_class'::regclass and d.objid = c.oid and d.refclassid = 'pg_extension'::regclass and d.deptype = 'e')`;
+/** Every app relation / API role pair with any effective privilege (direct, through PUBLIC or inherited). $1: the table privileges
+ *  to test (MAINTAIN only on PostgreSQL 17+, where it exists). */
+const API_EXPOSURE_SQL = `select coalesce(array_agg(r.name || ':' || a.role order by r.name, a.role), '{}') as exposed
+  from (${APP_RELATIONS_SQL}) r cross join (values ('anon'), ('authenticated')) a(role)
+ where case when r.kind = 'S' then has_sequence_privilege(a.role, r.oid, 'USAGE,SELECT,UPDATE')
+            else has_table_privilege(a.role, r.oid, $1) or has_any_column_privilege(a.role, r.oid, 'SELECT,INSERT,UPDATE,REFERENCES') end`;
+const API_MAINTAIN_SQL = `select coalesce(array_agg(r.name || ':' || a.role order by r.name, a.role), '{}') as exposed
+  from (${APP_RELATIONS_SQL}) r cross join (values ('anon'), ('authenticated')) a(role)
+ where r.kind in ('r', 'p', 'm') and has_table_privilege(a.role, r.oid, 'MAINTAIN')`;
+const TABLE_PRIVILEGES_16 = 'SELECT,INSERT,UPDATE,DELETE,TRUNCATE,REFERENCES,TRIGGER';
+
+/** Codex review thr_fhw66f89ay B1: a Supabase-like runner whose default privileges hand new public and internal tables and
+ *  sequences to the API roles (internal also to PUBLIC), with the existing internal relations already granted (TRUCKRECRU-143). */
+const DANGEROUS_DEFAULT_ACL_SQL = [
+  'grant all on all tables in schema public to anon, authenticated, service_role',
+  `alter default privileges for role ${RUNNER} in schema public grant all on tables to anon, authenticated, service_role`,
+  'grant usage on schema internal to anon, authenticated',
+  'grant all on all tables in schema internal to anon, authenticated, public',
+  'grant all on all sequences in schema internal to anon, authenticated, public',
+  `alter default privileges for role ${RUNNER} in schema internal grant all on tables to anon, authenticated, public`,
+  `alter default privileges for role ${RUNNER} in schema internal grant all on sequences to anon, authenticated, public`,
+];
+
 async function main(): Promise<void> {
   if (!URLS.public || !URLS.ext || !URLS.neg) {
     console.log('skip M1 Supabase-runner A3 test (set M1SR_A3_PUBLIC_ADMIN_URL, M1SR_A3_EXT_ADMIN_URL and M1SR_A3_NEG_ADMIN_URL, loopback only)');
@@ -162,6 +197,8 @@ async function main(): Promise<void> {
   };
   // Case 4's database: a copy of the pristine negative database (taken before case 1 touches it; nobody is connected to it yet).
   const negCopyUrl = (() => { const u = new URL(URLS.neg as string); u.pathname = `${u.pathname}_exec`; return u.toString(); })();
+  // Case 5's database: a copy of the pristine public database (taken before case 2 touches it).
+  const daclCopyUrl = (() => { const u = new URL(URLS.public as string); u.pathname = `${u.pathname}_dacl`; return u.toString(); })();
   const existingM1Roles = () => onCluster(async (c) => (await c.query("select rolname from pg_roles where rolname = any($1) order by rolname", [[...M1_ROLES, RUNNER, NO_ADMIN_RUNNER]])).rows.map((r) => r.rolname as string));
 
   /** Drops the case's database (only if it carries a task ownership comment) and every role the case made. */
@@ -229,6 +266,49 @@ async function main(): Promise<void> {
   };
   const describe = (e: (Error & { code?: string; id?: string }) | undefined) => `error=${e?.id ?? ''} ${e?.code ?? ''} ${e?.message ?? ''}`;
 
+  /** TRUCKRECRU-143: what anon and authenticated can still reach, read by the superuser admin (effective privileges). */
+  const apiExposure = async (admin: pg.Client) => {
+    const pg17 = (await admin.query(`select current_setting('server_version_num')::int >= 170000 as v`)).rows[0].v as boolean;
+    const rels = (await admin.query(APP_RELATIONS_SQL)).rows as Array<{ name: string; kind: string }>;
+    const exposed = (await admin.query(API_EXPOSURE_SQL, [TABLE_PRIVILEGES_16 + (pg17 ? ',MAINTAIN' : '')])).rows[0].exposed as string[];
+    const maintain = pg17 ? (await admin.query(API_MAINTAIN_SQL)).rows[0].exposed as string[] : [];
+    return { pg17, relations: rels.length, internal: rels.filter((r) => r.name.startsWith('internal.')).length, exposed, maintain };
+  };
+  const checkNoApiExposure = async (label: string, stage: string, admin: pg.Client, minInternal: number) => {
+    const x = await apiExposure(admin);
+    check(`${label}: after ${stage} anon and authenticated hold no privilege on any of the ${x.relations} app tables/views/sequences in public and internal (${x.internal} in internal; MAINTAIN ${x.pg17 ? 'included, PostgreSQL 17+' : 'does not exist on PostgreSQL 16'})`,
+      x.exposed.length === 0 && x.maintain.length === 0 && x.internal >= minInternal, `internal=${x.internal} exposed=${x.exposed.join(',')} maintain=${x.maintain.join(',')}`);
+  };
+  /** The app tables (public, internal) an unqualified VACUUM processed, from its INFO "vacuuming "db.schema.table"" notices. */
+  const vacuumedAppTables = async (admin: pg.Client, run: () => Promise<unknown>) => {
+    const notices: string[] = [];
+    const onNotice = (m: { message?: string }) => { notices.push(String(m.message ?? '')); };
+    admin.on('notice', onNotice);
+    try { await run(); } finally { admin.removeListener('notice', onNotice); }
+    const db = (await admin.query('select current_database() as d')).rows[0].d as string;
+    const tables = new Set(((await admin.query(APP_RELATIONS_SQL)).rows as Array<{ name: string; kind: string }>).filter((r) => r.kind !== 'S' && r.kind !== 'v').map((r) => `${db}.${r.name}`));
+    const vacuumed = notices.map((m) => /^vacuuming "(.+)"$/.exec(m)?.[1]).filter((t): t is string => t !== undefined);
+    return { all: vacuumed.length, app: vacuumed.filter((t) => tables.has(t)).map((t) => t.slice(db.length + 1)) };
+  };
+  const checkVacuumAsApiRoles = async (label: string, admin: pg.Client) => {
+    const control = await vacuumedAppTables(admin, () => admin.query('vacuum (verbose) internal.app_sessions'));
+    check(`${label}: control: the superuser's VACUUM (VERBOSE) internal.app_sessions is seen in its notices`, JSON.stringify(control.app) === '["internal.app_sessions"]', JSON.stringify(control));
+    for (const role of ['anon', 'authenticated']) {
+      let actor = '';
+      const seen = await vacuumedAppTables(admin, async () => {
+        await admin.query(`set role ${role}`);
+        try {
+          actor = (await admin.query('select current_user as u')).rows[0].u as string;
+          await admin.query('vacuum (verbose)');
+        } finally {
+          await admin.query('reset role');
+        }
+      });
+      check(`${label}: an unqualified VACUUM (VERBOSE) as ${role}, outside any transaction, processes no app table (${seen.all} relation(s) processed in all)`,
+        actor === role && seen.app.length === 0, `actor=${actor} app tables vacuumed=${seen.app.join(',')}`);
+    }
+  };
+
   type SequenceState = { settings: string; inc: string; lastValue: string; isCalled: boolean; logCnt: string };
   /** Every sequence's settings and stored counter, read by the superuser admin from the sequence relation itself. */
   const sequenceStates = async (admin: pg.Client) => {
@@ -277,6 +357,7 @@ async function main(): Promise<void> {
     try {
       check(`${label}: the runner's apply-m1 plan is the M1 file as one step without a transaction`, o.plan.steps.length === 1 && o.plan.steps[0]!.transaction === false);
       check(`${label}: M1 applies as the Supabase-like runner`, o.error === undefined && o.events.some((e) => e.msg === 'staging-sql.step_done'), `error=${o.error?.code ?? ''} ${o.error?.message ?? ''}`);
+      await checkNoApiExposure(label, 'M1', o.admin, 12);
       const q = async (sql: string, params?: unknown[]) => (await o.admin.query(sql, params)).rows;
       const mem = await q(`select admin_option, inherit_option, set_option from pg_auth_members where roleid = 'recruiter_api'::regrole and member = $1::regrole`, [RUNNER]);
       check(`${label}: the runner's recruiter_api membership is again only PostgreSQL's ADMIN-only grant (the self-check revoked exactly its own grant)`,
@@ -303,6 +384,8 @@ async function main(): Promise<void> {
         const s = await runAsRunner(dbUrl, action);
         check(`${label}: ${action} applies as the Supabase-like runner`, s.error === undefined && s.events.some((e) => e.msg === 'staging-sql.step_done'), describe(s.error));
       }
+      await checkNoApiExposure(label, 'M1b and M1c', o.admin, 14);
+      await checkVacuumAsApiRoles(label, o.admin);
       {
         const s = await runAsRunner(dbUrl, 'batch-delete-compare');
         const ev = s.events.find((e) => e.msg === 'staging-sql.batch_delete_compare');
@@ -379,7 +462,7 @@ async function main(): Promise<void> {
         const before = await stateOf(o.admin);
         const s = await runAsRunner(dbUrl, 'role-matrix-m1');
         const ev = s.events.find((e) => e.msg === 'staging-sql.role_matrix');
-        check(`${label}: role-matrix-m1 as the runner passes 62/62`, s.error === undefined && JSON.stringify(ev) === '{"msg":"staging-sql.role_matrix","ok":true,"total":62,"passed":62,"failed":0}'
+        check(`${label}: role-matrix-m1 as the runner passes 68/68`, s.error === undefined && JSON.stringify(ev) === '{"msg":"staging-sql.role_matrix","ok":true,"total":68,"passed":68,"failed":0}'
           && s.events.some((e) => e.msg === 'staging-sql.step_done'), `${describe(s.error)} ${JSON.stringify(ev)}`);
         const cmp = compareStates(before, await stateOf(o.admin), MATRIX_FULL_RUN_SEQUENCES);
         check(`${label}: the role matrix left nothing behind (catalogue snapshot incl. membership grantor/options identical, every table's rows identical, sequences only ${MATRIX_FULL_RUN_SEQUENCES.join(', ')} moved forward)`,
@@ -402,9 +485,9 @@ async function main(): Promise<void> {
   };
 
   try {
-    {
-      const src = new URL(URLS.neg as string).pathname.slice(1);
-      const copy = new URL(negCopyUrl).pathname.slice(1);
+    for (const [srcUrl, copyUrl] of [[URLS.neg, negCopyUrl], [URLS.public, daclCopyUrl]] as const) {
+      const src = new URL(srcUrl as string).pathname.slice(1);
+      const copy = new URL(copyUrl).pathname.slice(1);
       await onCluster(async (c) => {
         const comment = (await c.query("select shobj_description(oid, 'pg_database') as c from pg_database where datname = $1", [src])).rows[0]?.c as string | undefined;
         assert.match(comment ?? '', /^a3-task-owned:/, `refusing: ${src} is not task-owned`);
@@ -449,9 +532,18 @@ async function main(): Promise<void> {
     await assertApplied('public', URLS.public, 'public', async (a) => { await a.query(PUBLIC_EXECUTE_SQL); });
     // 3. PostGIS in extensions, USAGE WITH GRANT OPTION (what Supabase is believed to give postgres; not verified on hosted).
     await assertApplied('extensions', URLS.ext, 'extensions', async (a) => { await a.query(`grant usage on schema extensions to ${RUNNER} with grant option`); });
+    // 5. PostGIS in public, with the runner's dangerous default privileges and grants (Codex review thr_fhw66f89ay B1, TRUCKRECRU-143).
+    await assertApplied('internal default ACL', daclCopyUrl, 'public', async (a) => {
+      await a.query(PUBLIC_EXECUTE_SQL);
+      for (const sql of DANGEROUS_DEFAULT_ACL_SQL) await a.query(sql);
+      const defaults = (await a.query(`select count(*)::int as n from pg_default_acl d, aclexplode(d.defaclacl) x
+          where d.defaclrole = $1::regrole and d.defaclnamespace = 'internal'::regnamespace and d.defaclobjtype in ('r', 'S')
+            and x.grantee in (0, 'anon'::regrole, 'authenticated'::regrole)`, [RUNNER])).rows[0].n as number;
+      check('internal default ACL: before M1 the runner\'s default privileges in schema internal hand new tables and sequences to anon, authenticated and PUBLIC', defaults > 0, String(defaults));
+    });
   } finally {
     // Leaves the cluster without the case roles even after a failed check (later cases and reruns need them absent).
-    for (const v of [...Object.values(URLS), negCopyUrl]) await dropCase(v as string).catch(() => undefined);
+    for (const v of [...Object.values(URLS), negCopyUrl, daclCopyUrl]) await dropCase(v as string).catch(() => undefined);
   }
   console.log(`PASS m1-supabase-runner: ${n} checks passed`);
 }

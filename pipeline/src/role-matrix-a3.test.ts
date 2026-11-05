@@ -46,26 +46,26 @@ async function offline(): Promise<void> {
   assert.ok(!planRebuiltSqlRun({ action: 'apply-m1', dbUrl: fake, confirm: REBUILT_STAGING_SQL_ACTIONS['apply-m1']!.confirmation, recordedRebuiltRef: REF }).roleMatrix, 'no other action is a matrix');
   for (const id of ['role_matrix_failed', 'role_matrix_result_missing']) assert.ok((REFUSAL_IDS as readonly string[]).includes(id), id);
 
-  const ok = await run(scripted(matrixRow({ failures: 0, failed: [], passed: 62, total: 62 })));
+  const ok = await run(scripted(matrixRow({ failures: 0, failed: [], passed: 68, total: 68 })));
   assert.equal(ok.error, undefined);
-  assert.deepEqual(ok.events.find((e) => e.msg === 'staging-sql.role_matrix'), { msg: 'staging-sql.role_matrix', ok: true, total: 62, passed: 62, failed: 0 });
+  assert.deepEqual(ok.events.find((e) => e.msg === 'staging-sql.role_matrix'), { msg: 'staging-sql.role_matrix', ok: true, total: 68, passed: 68, failed: 0 });
   assert.ok(msgs(ok).includes('staging-sql.step_done'));
 
   // counts come back as strings from some drivers (bigint): accepted
   assert.deepEqual(readRoleMatrixCounts(matrixRow({ failures: '0', passed: '3', total: '3' })), { total: 3, passed: 3, failed: 0 });
 
-  const bad = await run(scripted(matrixRow({ failures: 2, failed: [{ actor: 'editor', test: 'x', expected: 'denied', observed: 'ROW DATA' }], passed: 60, total: 62 })));
+  const bad = await run(scripted(matrixRow({ failures: 2, failed: [{ actor: 'editor', test: 'x', expected: 'denied', observed: 'ROW DATA' }], passed: 66, total: 68 })));
   assert.ok(bad.error instanceof RunnerRefusal && bad.error.id === 'role_matrix_failed');
-  assert.deepEqual(bad.events.find((e) => e.msg === 'staging-sql.role_matrix'), { msg: 'staging-sql.role_matrix', ok: false, total: 62, passed: 60, failed: 2 });
+  assert.deepEqual(bad.events.find((e) => e.msg === 'staging-sql.role_matrix'), { msg: 'staging-sql.role_matrix', ok: false, total: 68, passed: 66, failed: 2 });
   assert.ok(!msgs(bad).includes('staging-sql.step_done'), 'a failing matrix never prints step_done');
   assert.ok(!JSON.stringify(bad.events).includes('ROW DATA'), 'no probe text in any event');
 
   for (const [label, result] of [
     ['no row', [{ rows: [] }]],
     ['zero probes', matrixRow({ failures: 0, passed: 0, total: 0 })],
-    ['counts do not add up', matrixRow({ failures: 0, passed: 5, total: 62 })],
-    ['negative', matrixRow({ failures: -1, passed: 63, total: 62 })],
-    ['not a number', matrixRow({ failures: 'x', passed: 62, total: 62 })],
+    ['counts do not add up', matrixRow({ failures: 0, passed: 5, total: 68 })],
+    ['negative', matrixRow({ failures: -1, passed: 69, total: 68 })],
+    ['not a number', matrixRow({ failures: 'x', passed: 68, total: 68 })],
   ] as const) {
     const o = await run(scripted(result));
     assert.ok(o.error instanceof RunnerRefusal && o.error.id === 'role_matrix_result_missing', `${label}: refused as result_missing`);

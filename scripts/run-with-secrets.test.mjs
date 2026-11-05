@@ -115,10 +115,10 @@ test('allow-list: only enumerated events with their own keys; every value fits i
   assert.equal(run({ msg: 'staging-sql.step_failed', step: 'supabase/pending/M1c_batch_delete_audit.sql (precheck)' }).shown.step, 'supabase/pending/M1c_batch_delete_audit.sql (precheck)');
   for (const bad of ['postgresql://u:p@h/db', 'a\nb', 'x (anything)', 'db.abcdefghijklmnopqrst.supabase.co:5432']) { const r = run({ msg: 'staging-sql.step_failed', step: bad }); assert.equal(r.shown.step, '<withheld>'); assert.equal(r.fields, 1); }
   // role matrix: fixed counts only; an unexpected field (probe text) is withheld, bad values are withheld
-  assert.deepEqual(run({ msg: 'staging-sql.role_matrix', ok: false, total: 62, passed: 60, failed: 2 }), { shown: { msg: 'staging-sql.role_matrix', ok: false, total: 62, passed: 60, failed: 2 }, fields: 0 });
-  assert.deepEqual(run({ msg: 'staging-sql.role_matrix', ok: true, total: 62, passed: 62, failed: 0, observed: 'ROW DATA', test: 'select carriers' }), { shown: { msg: 'staging-sql.role_matrix', ok: true, total: 62, passed: 62, failed: 0 }, fields: 2 });
-  assert.equal(run({ msg: 'staging-sql.role_matrix', ok: 'yes', total: 62, passed: 62, failed: 0 }).shown.ok, '<withheld>');
-  assert.equal(run({ msg: 'staging-sql.role_matrix', ok: true, total: '62', passed: 62, failed: 0 }).shown.total, '<withheld>');
+  assert.deepEqual(run({ msg: 'staging-sql.role_matrix', ok: false, total: 68, passed: 66, failed: 2 }), { shown: { msg: 'staging-sql.role_matrix', ok: false, total: 68, passed: 66, failed: 2 }, fields: 0 });
+  assert.deepEqual(run({ msg: 'staging-sql.role_matrix', ok: true, total: 68, passed: 68, failed: 0, observed: 'ROW DATA', test: 'select carriers' }), { shown: { msg: 'staging-sql.role_matrix', ok: true, total: 68, passed: 68, failed: 0 }, fields: 2 });
+  assert.equal(run({ msg: 'staging-sql.role_matrix', ok: 'yes', total: 68, passed: 68, failed: 0 }).shown.ok, '<withheld>');
+  assert.equal(run({ msg: 'staging-sql.role_matrix', ok: true, total: '68', passed: 68, failed: 0 }).shown.total, '<withheld>');
   for (const id of ['role_matrix_failed', 'role_matrix_result_missing']) assert.deepEqual(run({ msg: 'staging-sql.refused', refusal: id }).shown, { msg: 'staging-sql.refused', refusal: id });
   // server major version (TRUCKRECRU-108): one key, four fixed words; a bad value is withheld and any other key is dropped
   for (const major of ['15', '16', '17', 'other']) assert.deepEqual(run({ msg: 'staging-sql.server_major', major }).shown, { msg: 'staging-sql.server_major', major });
@@ -339,7 +339,7 @@ test('a prompted secret already set under another capitalisation is refused befo
 test('allow-list: the prod-sql events pass with exactly their own keys; a free-text, unpinned or non-numeric value is withheld and counted', () => {
   const run = (o) => { const counter = { fields: 0 }; const raw = allowListLine(JSON.stringify(o), counter); return { shown: raw === null ? null : JSON.parse(raw), fields: counter.fields }; };
   const sha = 'a'.repeat(64);
-  assert.deepEqual(run({ msg: 'prod-sql.verified', action: 'm1', target: 'production', statements: 142, wrap: 'wrapped', sha256: sha }), { shown: { msg: 'prod-sql.verified', action: 'm1', target: 'production', statements: 142, wrap: 'wrapped', sha256: sha }, fields: 0 });
+  assert.deepEqual(run({ msg: 'prod-sql.verified', action: 'm1', target: 'production', statements: 145, wrap: 'wrapped', sha256: sha }), { shown: { msg: 'prod-sql.verified', action: 'm1', target: 'production', statements: 145, wrap: 'wrapped', sha256: sha }, fields: 0 });
   assert.deepEqual(run({ msg: 'prod-sql.counts', action: 'l1-counts', index: 3, counts: { sessions: 0, users_with_tokens: 2 } }).fields, 0);
   assert.deepEqual(run({ msg: 'prod-sql.result', action: 'backout-m1', result: 'unknown', statements: 102 }).fields, 0);
   assert.deepEqual(run({ msg: 'prod-sql.statement', action: 'snapshot', index: 1, command: 'select', rows: 5, digest: sha }).fields, 0);

@@ -1733,6 +1733,44 @@ alter default privileges in schema public revoke all on tables from anon, authen
 alter default privileges in schema public revoke all on sequences from anon, authenticated;
 alter default privileges in schema public revoke execute on functions from public, anon, authenticated;
 alter default privileges in schema internal revoke execute on functions from public, anon, authenticated;
+-- Schema internal: anon, authenticated and PUBLIC keep no privilege at all on any table or sequence
+-- there (TRUCKRECRU-143). Missing USAGE on the schema is not enough: on PostgreSQL 17 the table
+-- privilege MAINTAIN (part of ALL) lets an unqualified VACUUM / ANALYZE process the table without
+-- USAGE. A default-privilege entry of the runner for schema internal (Supabase-like platforms grant
+-- new tables to anon/authenticated) would have handed every table this file creates to those roles.
+-- The loop revokes everything from those three on every table, view and sequence in internal whose
+-- ACL names one of them, whatever default ACL put it there (relations without such an entry are left
+-- as they are, so a clean database and a re-apply after the backouts are unchanged by it). The default-
+-- privilege revokes stop the runner's schema-internal entry from handing out later tables (M1b and
+-- M1c revoke on their own tables too). Not covered here: the runner's global default privileges (a
+-- per-schema revoke cannot remove a global grant), other roles' default privileges, grants this
+-- runner cannot revoke (made by another grantor), and rights anon or authenticated inherit through
+-- another role; the role matrix probes the effective privileges.
+do $revoke_internal_relations$
+declare
+  r record;
+begin
+  for r in
+    select c.oid::regclass as rel, c.relkind
+    from pg_class c
+    join pg_namespace n on n.oid = c.relnamespace
+    where n.nspname = 'internal'
+      and c.relkind in ('r', 'p', 'v', 'm', 'f', 'S')
+      and exists (
+        select 1 from aclexplode(c.relacl) a
+        where a.grantee in (0, 'anon'::regrole, 'authenticated'::regrole))
+      and not exists (
+        select 1 from pg_depend d
+        where d.classid = 'pg_class'::regclass and d.objid = c.oid
+          and d.refclassid = 'pg_extension'::regclass and d.deptype = 'e')
+  loop
+    execute format('revoke all on %s %s from public, anon, authenticated',
+                   case when r.relkind = 'S' then 'sequence' else 'table' end, r.rel);
+  end loop;
+end
+$revoke_internal_relations$;
+alter default privileges in schema internal revoke all on tables from public, anon, authenticated;
+alter default privileges in schema internal revoke all on sequences from public, anon, authenticated;
 
 grant usage on schema public, internal to recruiter_api;
 

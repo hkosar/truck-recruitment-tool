@@ -258,7 +258,7 @@ citext, and no Supabase services.
 |---|---|---|---|---|
 | 1 | Full migration replay | PostGIS, pg_trgm, citext were shimmed; PG 16 vs hosted PG 15 | R1 step 4 | every file applies; checksums match |
 | 2 | Spatial self-check and app paths | stand-ins | M1 section 14 on real PostGIS; then batch page, search, map pins, batch create/refresh, batch-list distance column through the staging service | M1 commits; no `permission denied` / `does not exist` in Postgres logs |
-| 3 | Role matrix with real roles | real `anon`/`authenticated`/`service_role` and defaults | `role-matrix-m1` (rollback-only) | 62/62 |
+| 3 | Role matrix with real roles | real `anon`/`authenticated`/`service_role` and defaults | `role-matrix-m1` (rollback-only) | 68/68 (62 until TRUCKRECRU-143 added the 6 no-privilege probes) |
 | 4 | RLS + grants vs hosted defaults | platform grants differ from the shim | role matrix + `snapshot` diff | no unexplained differences |
 | 5 | Pooler, custom role, connection budget, isolation, timing | not available locally | §2.6 probe | all §2.6 criteria |
 | 6 | Hosted Auth, stateless | no GoTrue | **A5a** (doc 14 §8.1 class A) | as in doc 14 §8.1 |
