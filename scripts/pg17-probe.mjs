@@ -14,9 +14,10 @@
 // Exit code 0 only if every step succeeded and cleanup is complete; any error is printed and the exit code is 1 (2 = refused before start).
 // Interruption (Ctrl+C = SIGINT, SIGTERM, Ctrl+Break = SIGBREAK, closing the window = SIGHUP): the run stops only its own cluster with
 // pg_ctl -D <its own folder>, deletes the folder and exits with 128 + the signal number (130 for Ctrl+C). Every child process started
-// after the folder exists runs asynchronously, so a signal is handled at once instead of after the child ends. A process 'exit' handler
-// is the last resort for any other way out. Nothing can clean up after SIGKILL / Task Manager "End task": delete .pg17-probe-* by hand
-// after stopping it with pg_ctl -D <folder>\data stop.
+// after the folder exists runs asynchronously, so a signal is handled at once instead of after the child ends. An unexpected error takes
+// the same cleanup path (exit 1). A process 'exit' handler is the last resort for any other way out; if initdb or pg_ctl start is still
+// running then, it keeps the folder, names it and the pending process id, and exits nonzero. Nothing can clean up after SIGKILL /
+// Task Manager "End task": delete .pg17-probe-* by hand after stopping it with pg_ctl -D <folder>\data stop.
 // Undo: delete this script and pg17-probe.test.mjs.
 
 import { spawn, spawnSync } from 'node:child_process';
@@ -108,9 +109,12 @@ export function interruptExitCode(sig) {
 }
 
 /** Runs one child without blocking the event loop, so a signal handler runs while the child works. Never rejects; resolves with
- *  { status, signal, stdout, stderr, error }. capture false: stdio ignored (pg_ctl start: the server would inherit the pipes). */
-function runAsync(cmd, args, { env, timeout = 0, capture = true }) {
-  return new Promise((done) => {
+ *  { status, signal, stdout, stderr, error }. capture false: stdio ignored (pg_ctl start: the server would inherit the pipes).
+ *  onStart(pid) runs right after the spawn and onEnd() once the child has ended, both synchronously (an 'exit' handler can rely on them). */
+function runAsync(cmd, args, { env, timeout = 0, capture = true, onStart, onEnd }) {
+  return new Promise((resolveRun) => {
+    let ended = false;
+    const done = (r) => { if (ended) return; ended = true; onEnd?.(); resolveRun(r); };
     let child;
     try {
       child = spawn(cmd, args, { env, windowsHide: true, timeout, stdio: capture ? ['ignore', 'pipe', 'pipe'] : 'ignore' });
@@ -118,6 +122,7 @@ function runAsync(cmd, args, { env, timeout = 0, capture = true }) {
       done({ status: null, signal: null, stdout: '', stderr: '', error });
       return;
     }
+    onStart?.(child.pid);
     let stdout = '';
     let stderr = '';
     child.stdout?.setEncoding('utf8').on('data', (d) => { stdout += d; });
@@ -175,13 +180,16 @@ async function run() {
   let cleanedUp = false;
   let exitCode = null; // fixed by the first finish()
   const setupChildren = new Set(); // initdb, pg_ctl start: cleanup waits for them, so it never deletes under a server that is starting
+  const pendingSetup = new Map(); // the same setup children by step name -> pid, kept up to date synchronously for the 'exit' handler
   const queryChildren = new Set(); // psql: they end once the server is stopped
   const stopArgs = () => ['-D', dataDir, 'stop', '-m', 'fast', '-w'];
 
-  /** Starts one child unless cleanup has begun; after that nothing new may start. */
-  const launch = (set, cmd, args, opts = {}) => {
+  /** Starts one child unless cleanup has begun; after that nothing new may start. step names a setup child (tracked in pendingSetup). */
+  const launch = (set, cmd, args, opts = {}, step = null) => {
     if (cleaning) throw new Error('cleanup has begun: no new step is started');
-    const p = runAsync(cmd, args, { env: baseEnv, ...opts });
+    const track = step ? { onStart: (pid) => pendingSetup.set(step, pid ?? '?'), onEnd: () => pendingSetup.delete(step) } : {};
+    if (step) pendingSetup.set(step, '?');
+    const p = runAsync(cmd, args, { env: baseEnv, ...opts, ...track });
     set.add(p);
     p.then(() => set.delete(p));
     return p;
@@ -219,9 +227,18 @@ async function run() {
     return cleaning;
   }
 
-  /** Last resort when the process exits before cleanup finished (only synchronous work is possible in an 'exit' handler). */
+  /** Last resort when the process exits before cleanup finished (only synchronous work is possible in an 'exit' handler). While initdb or
+   *  pg_ctl start still runs, nothing proves that no server will appear in the folder (pg_ctl start may not have written postmaster.pid
+   *  yet), so the folder is kept and the exit code is nonzero. */
   function cleanupOnExit() {
     if (cleanedUp || !dir) return;
+    if (!process.exitCode) process.exitCode = 1; // exiting before cleanup finished is never a success
+    if (pendingSetup.size) {
+      const steps = [...pendingSetup].map(([step, pid]) => `${step} (pid ${pid})`).join(', ');
+      console.error(`CLEANUP (at exit) INCOMPLETE: setup step still running: ${steps}. Folder kept, because a server may still start in it: ${dir}`);
+      console.error(`  Once that process has ended: pg_ctl -D "${dataDir}" stop, then delete the folder.`);
+      return;
+    }
     let stopped = true;
     if (startTried && existsSync(join(dataDir, 'postmaster.pid'))) {
       const stop = spawnSync(pgCtl, stopArgs(), { env: baseEnv, stdio: 'ignore', windowsHide: true });
@@ -232,13 +249,13 @@ async function run() {
     }
     const ok = stopped && !existsSync(dir);
     console.error(ok ? 'CLEANUP (at exit) OK: cluster stopped with pg_ctl -D <own folder>, folder deleted' : `CLEANUP (at exit) INCOMPLETE: ${dir}`);
-    if (!process.exitCode) process.exitCode = 1; // exiting before cleanup finished is never a success
   }
 
   /** Prints the cleanup line and the result once, and fixes the exit code. */
   function finish(problems) {
     if (exitCode !== null) return exitCode;
     for (const s of INTERRUPT_SIGNALS) process.off(s, onSignal);
+    process.off('uncaughtException', onFatal);
     process.off('exit', cleanupOnExit);
     if (testHook && process.connected) process.disconnect();
     console.log(problems.length ? `\nCLEANUP INCOMPLETE: ${problems.join('; ')}` : '\nCLEANUP OK: cluster stopped with pg_ctl -D <own folder>, folder deleted');
@@ -258,7 +275,15 @@ async function run() {
     cleanup().then((problems) => process.exit(finish(problems)));
   }
 
+  /** An unexpected error (also an unhandled rejection) goes through the same cleanup as a signal instead of exiting while setup runs. */
+  function onFatal(e) {
+    fail(`unexpected error: ${e?.message ?? e}`);
+    if (cleaning) return; // cleanup is already running; whoever started it exits afterwards
+    cleanup().then((problems) => process.exit(finish(problems)));
+  }
+
   for (const s of INTERRUPT_SIGNALS) process.on(s, onSignal);
+  process.on('uncaughtException', onFatal);
   process.on('exit', cleanupOnExit);
 
   try {
@@ -266,7 +291,7 @@ async function run() {
     dataDir = join(dir, 'data');
     const pwFile = join(dir, 'pw.txt');
     writeFileSync(pwFile, password);
-    const init = await launch(setupChildren, exe(pgBin, 'initdb'), ['-D', dataDir, '-U', ADMIN_USER, '-A', 'scram-sha-256', `--pwfile=${pwFile}`, '-E', 'UTF8']);
+    const init = await launch(setupChildren, exe(pgBin, 'initdb'), ['-D', dataDir, '-U', ADMIN_USER, '-A', 'scram-sha-256', `--pwfile=${pwFile}`, '-E', 'UTF8'], {}, 'initdb');
     rmSync(pwFile, { force: true });
     stopIfInterrupted();
     if (init.error || init.status !== 0) throw new Error('initdb failed: ' + `${init.error ?? ''}${init.stdout ?? ''}${init.stderr ?? ''}`.split('\n').slice(-6).join(' | '));
@@ -275,7 +300,7 @@ async function run() {
     stopIfInterrupted();
     const logFile = join(dir, 'server.log');
     startTried = true;
-    const start = await launch(setupChildren, pgCtl, ['-D', dataDir, '-l', logFile, '-o', `-p ${port} -c listen_addresses=127.0.0.1`, '-w', 'start'], { capture: false });
+    const start = await launch(setupChildren, pgCtl, ['-D', dataDir, '-l', logFile, '-o', `-p ${port} -c listen_addresses=127.0.0.1`, '-w', 'start'], { capture: false }, 'pg_ctl start');
     stopIfInterrupted();
     if (start.error || start.status !== 0) {
       let tail = '';
