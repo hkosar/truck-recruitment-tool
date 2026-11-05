@@ -6,6 +6,7 @@
  * can only see this run's own entries; other processes on the PC use the shared temp folder at the same time.
  * The caller makes (and deletes) `dir`. The three variables are put back exactly as they were, also when fn throws.
  * os.tmpdir() reads them at call time, so it follows the change. Returns what fn returns.
+ * For a synchronous fn only: if fn returns a Promise, the variables are put back at once, before the Promise settles.
  */
 export function withPrivateTemp(dir, fn) {
   const saved = { TMPDIR: process.env.TMPDIR, TEMP: process.env.TEMP, TMP: process.env.TMP };
