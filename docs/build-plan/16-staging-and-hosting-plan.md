@@ -272,6 +272,19 @@ citext, and no Supabase services.
 | 14 | Log redaction (T-HYG) | no hosted logs | **A7**, §1.6 | per-sink rule, §1.6 |
 | 15 | Retention least privilege | no hosted roles | §4 | as in §4 |
 
+Row 3, API roles on schema `internal` (TRUCKRECRU-143, design since round 4): before it creates
+any internal table, M1 revokes the runner's own default privileges for schema `internal` on
+tables and sequences from `anon`, `authenticated` and PUBLIC, and right after creating its
+tables it revokes all from those three on them and on their identity sequences, by name (a
+schema-level revoke cannot remove the runner's global default privileges); M1b and M1c revoke
+on their own tables. M1 never changes privileges on a relation it did not create (earlier
+rounds swept existing internal relations, which could raise 42501 / 2BP01 or remove rights that
+`service_role`, `recruiter_*` roles or owners held through membership in `anon`). An existing
+internal relation that `anon` or `authenticated` can reach is therefore left as found, and the
+role matrix refuses it: STOP at runbook 3.5 with the internal no-privilege probe naming it,
+for the owner to decide before a rerun. Measured limit: the runner's global sequence default
+still reaches M1c's identity sequence (M1c revokes only its table); the matrix refuses that too.
+
 ### 1.6 Log-redaction gate A7 (T-HYG), per sink
 
 **Flows run** (doc 14 T-HYG contract, unchanged): request link, verify, confirm, sign-out,

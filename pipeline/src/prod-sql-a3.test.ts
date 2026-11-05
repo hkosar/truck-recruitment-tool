@@ -169,17 +169,17 @@ async function main(): Promise<void> {
   // ---- 2. M1 (no top-level begin/commit): the runner wraps it in one transaction.
   {
     const o = track(await run('m1'));
-    check('m1: wrapped in one transaction and committed (145 statements, one begin, one commit)', o.error === undefined && resultOf(o) === 'committed' && ranOf(o) === 145 && o.sent.filter((s) => ctlOf(s) === 'begin').length === 1 && o.sent.filter((s) => ctlOf(s) === 'commit').length === 1 && o.sent[0] === 'begin');
+    check('m1: wrapped in one transaction and committed (146 statements, one begin, one commit)', o.error === undefined && resultOf(o) === 'committed' && ranOf(o) === 146 && o.sent.filter((s) => ctlOf(s) === 'begin').length === 1 && o.sent.filter((s) => ctlOf(s) === 'commit').length === 1 && o.sent[0] === 'begin');
     check('m1: the sign-in tables and the roles exist afterwards', (await exists("to_regclass('internal.app_sessions')")) && (await q("select count(*)::int as n from pg_roles where rolname in ('recruiter_api', 'recruiter_app', 'recruiter_maintenance')")).rows[0].n === 3);
   }
   const postM1 = await fingerprint();
   check('the catalogue changed by applying M1', postM1 !== preM1);
 
-  // ---- 3. A REAL server failure in the middle of the 145-statement file: M1 run again fails at its first create that already exists.
+  // ---- 3. A REAL server failure in the middle of the 146-statement file: M1 run again fails at its first create that already exists.
   {
     const o = track(await run('m1'));
     check('m1 again: the server refuses mid-file with a SQLSTATE, the run is reported rolled_back, no commit was sent', o.error !== undefined && !(o.error instanceof RunnerRefusal) && /^[0-9A-Z]{5}$/.test(String((o.error as { code?: unknown }).code)) && resultOf(o) === 'rolled_back' && !o.sent.some((s) => ctlOf(s) === 'commit'));
-    check('m1 again: it failed in the MIDDLE of the file (some statements ran, not all)', ranOf(o) > 0 && ranOf(o) < 145);
+    check('m1 again: it failed in the MIDDLE of the file (some statements ran, not all)', ranOf(o) > 0 && ranOf(o) < 146);
     check('m1 again: everything it ran before the failure was rolled back (the catalogue fingerprint equals the post-M1 state)', (await fingerprint()) === postM1);
   }
 

@@ -158,7 +158,7 @@ const argvFor = (id: string, extra: string[] = []) => ['--target=production', `-
   let made = 0;
   const factory = (): RebuiltSqlClient => { made += 1; return new Recorder(); };
   const out = await captureLog(() => runnerMain(argvFor('m1'), ENV, factory));
-  check('plan-only is the default: no client is even created, and the plan events are fixed', made === 0 && out.error === undefined && out.events.map((e) => e.msg).join() === 'prod-sql.verified,prod-sql.plan_only' && out.events[0]!.action === 'm1' && out.events[0]!.wrap === 'wrapped' && out.events[0]!.statements === 145);
+  check('plan-only is the default: no client is even created, and the plan events are fixed', made === 0 && out.error === undefined && out.events.map((e) => e.msg).join() === 'prod-sql.verified,prod-sql.plan_only' && out.events[0]!.action === 'm1' && out.events[0]!.wrap === 'wrapped' && out.events[0]!.statements === 146);
   check('--confirm without --execute never connects, for every action', await (async () => { for (const a of PROD_SQL_ACTIONS) { await captureLog(() => runnerMain(argvFor(a.id), ENV, factory)); } return made === 0; })());
   const refused = await captureLog(() => runnerMain(argvFor('m1', ['--execute']), { PRODUCTION_DB_URL: PROD }, factory));
   check('--execute with an ambient URL is refused before any client exists', made === 0 && refused.error instanceof RunnerRefusal && refused.error.id === 'plan_refused');
@@ -221,7 +221,7 @@ const nonStatement = (sent: string[]) => sent.filter((s) => ctlOf(s) !== null ||
 {
   const c = new Recorder();
   const out = await runPlan('m1', c);
-  check('wrapped file: begin, lock timeout, every statement in order, then one commit; reported committed', out.error === undefined && c.sent[0] === 'begin' && c.sent[1] === "set local lock_timeout = '10s'" && c.sent.length === 145 + 3 && c.sent[c.sent.length - 1] === 'commit' && c.sent.filter((s) => s === 'commit').length === 1 && resultsOf(out.events).join() === 'committed' && out.events[0]!.statements === 145 && c.ended === 1);
+  check('wrapped file: begin, lock timeout, every statement in order, then one commit; reported committed', out.error === undefined && c.sent[0] === 'begin' && c.sent[1] === "set local lock_timeout = '10s'" && c.sent.length === 146 + 3 && c.sent[c.sent.length - 1] === 'commit' && c.sent.filter((s) => s === 'commit').length === 1 && resultsOf(out.events).join() === 'committed' && out.events[0]!.statements === 146 && c.ended === 1);
 }
 {
   const c = new Recorder();
@@ -255,7 +255,7 @@ const nonStatement = (sent: string[]) => sent.filter((s) => ctlOf(s) !== null ||
   // A failure in the middle of a wrapped file: rolled back, acknowledged, never committed; the driver text is not in the events.
   const c = new Recorder((sql) => { if (sql.includes('create table')) throw Object.assign(new Error('relation "secret_name" already exists at host db.example.com'), { code: '42P07' }); return { rows: [], rowCount: 0 }; });
   const out = await runPlan('m1', c);
-  check('a mid-file failure rolls back, never commits, reports rolled_back with the number of statements that ran', out.error !== undefined && c.sent[c.sent.length - 1] === 'rollback' && !c.sent.includes('commit') && resultsOf(out.events).join() === 'rolled_back' && Number(out.events[0]!.statements) < 145 && !JSON.stringify(out.events).includes('secret_name') && c.ended === 1);
+  check('a mid-file failure rolls back, never commits, reports rolled_back with the number of statements that ran', out.error !== undefined && c.sent[c.sent.length - 1] === 'rollback' && !c.sent.includes('commit') && resultsOf(out.events).join() === 'rolled_back' && Number(out.events[0]!.statements) < 146 && !JSON.stringify(out.events).includes('secret_name') && c.ended === 1);
 }
 {
   const c = new Recorder((sql) => { if (sql.includes('create table')) throw new Error('boom'); if (sql === 'rollback') throw new Error('connection lost'); return { rows: [], rowCount: 0 }; });

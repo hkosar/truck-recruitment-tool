@@ -52,6 +52,22 @@ $roles$;
 
 grant recruiter_api to recruiter_app;
 
+-- Schema internal: anon, authenticated and PUBLIC get no privilege at all on any table, view or
+-- sequence this file (or M1b / M1c, applied by the same runner) creates there (TRUCKRECRU-143).
+-- Missing USAGE on the schema is not enough: on PostgreSQL 17 the table privilege MAINTAIN (part of
+-- ALL) lets an unqualified VACUUM / ANALYZE process the table without USAGE. These two run BEFORE the
+-- first internal relation is created, so the runner's own default privileges for schema internal
+-- (Supabase-like platforms grant new tables to anon/authenticated) hand nothing to those roles.
+-- They change only the runner's own defaults for schema internal; no existing object is touched, and
+-- revoking a default entry that is absent is a no-op. A schema-level revoke cannot remove the
+-- runner's global default privileges (those apply in addition), so the tables and identity sequences
+-- created below are also revoked by name right after they are created (section 2).
+-- M1 never changes privileges on a relation it did not create: anon/authenticated/PUBLIC access to a
+-- pre-existing internal relation is left as found, and the role matrix refuses it (TRUCKRECRU-143
+-- round 4; earlier rounds swept existing relations and could raise or strip other roles' rights).
+alter default privileges in schema internal revoke all on tables from public, anon, authenticated;
+alter default privileges in schema internal revoke all on sequences from public, anon, authenticated;
+
 -- ----------------------------------------------------------------------------
 -- 1. Control rows
 -- ----------------------------------------------------------------------------
@@ -199,6 +215,24 @@ create table internal.auth_events (
   kind    text not null,
   detail  jsonb not null default '{}'::jsonb
 );
+
+-- Whatever the runner's global default privileges gave the relations created above (see the note
+-- before section 1). Each was created by the runner in this transaction (a name that already existed
+-- would have failed its create), so the runner owns it, every ACL entry on it has the runner as
+-- grantor, and nothing has used a grant option on it yet: this REVOKE (no CASCADE) cannot raise.
+revoke all on table internal.roster_lock, internal.backout_window, internal.recovery_policy,
+  internal.recovery_sets, internal.recovery_codes, internal.app_sessions, internal.signin_links,
+  internal.auth_request_buckets, internal.recovery_failures, internal.email_events,
+  internal.blocked_email_addresses, internal.auth_events
+  from public, anon, authenticated;
+-- Their identity sequences, found through the columns (never by a name that might be another object's).
+do $revoke_new_identity_sequences$
+begin
+  execute format('revoke all on sequence %s, %s from public, anon, authenticated',
+                 pg_get_serial_sequence('internal.recovery_failures', 'id'),
+                 pg_get_serial_sequence('internal.auth_events', 'id'));
+end
+$revoke_new_identity_sequences$;
 
 -- Delivery lattice (Quote-Queue migrations 0006/0007).
 create function internal.signin_links_send_status_monotonic() returns trigger
@@ -1733,71 +1767,6 @@ alter default privileges in schema public revoke all on tables from anon, authen
 alter default privileges in schema public revoke all on sequences from anon, authenticated;
 alter default privileges in schema public revoke execute on functions from public, anon, authenticated;
 alter default privileges in schema internal revoke execute on functions from public, anon, authenticated;
--- Schema internal: anon, authenticated and PUBLIC keep no privilege at all on any table or sequence
--- there (TRUCKRECRU-143). Missing USAGE on the schema is not enough: on PostgreSQL 17 the table
--- privilege MAINTAIN (part of ALL) lets an unqualified VACUUM / ANALYZE process the table without
--- USAGE. A default-privilege entry of the runner for schema internal (Supabase-like platforms grant
--- new tables to anon/authenticated) would have handed every table this file creates to those roles.
--- The loop revokes everything from those three on every table, view and sequence in internal whose
--- ACL names one of them, whatever default ACL put it there (relations without such an entry are left
--- as they are, so a clean database and a re-apply after the backouts are unchanged by it). It acts
--- only where its REVOKE (no CASCADE) cannot raise, all checked in the catalogue beforehand, so it
--- never aborts the file and never takes a privilege from any other role:
---   * the runner owns the relation, directly or through a role whose privileges it has (pg_has_role
---     USAGE, the same test PostgreSQL uses for ownership). On a relation another role owns, a revoke
---     by the runner can raise 42501 (measured on PostgreSQL 16 and 17 when anon holds only a
---     table-level right such as TRUNCATE or MAINTAIN);
---   * neither anon nor authenticated owns it (a revoke would strip the owner's own rights);
---   * neither anon nor authenticated is the grantor of any entry in its ACL or in a column's ACL.
---     If one of them passed on a right it holds WITH GRANT OPTION (to service_role, or anon to
---     authenticated), removing that grant option raises 2BP01 "dependent privileges exist"
---     (TRUCKRECRU-143 round 3, measured on PostgreSQL 16 and 17 for tables, columns, views,
---     materialized views, partitioned and foreign tables and sequences); CASCADE would take the
---     dependent grant from service_role too, so such relations are left untouched. PUBLIC can
---     never hold a grant option, so it cannot be such a grantor.
--- The owner revokes as the owner: grants that another grantor made to anon, authenticated or PUBLIC
--- stay (no error). The default-privilege revokes stop the runner's schema-internal entry
--- from handing out later tables (M1b and M1c revoke on their own tables too). Not covered here:
--- the relations skipped above, grants made by another grantor, privileges granted only on columns
--- (a relation is picked by its table ACL), the runner's global default privileges (a per-schema
--- revoke cannot remove a global grant), other roles' default privileges, and rights anon or
--- authenticated inherit through another role. The role matrix
--- probes the effective privileges of anon and authenticated on every existing non-extension relation
--- in public and internal (whoever granted them), so anything left here stops the run there; it does not audit
--- default privileges that no existing relation has used yet.
-do $revoke_internal_relations$
-declare
-  r record;
-begin
-  for r in
-    select c.oid::regclass as rel, c.relkind
-    from pg_class c
-    join pg_namespace n on n.oid = c.relnamespace
-    where n.nspname = 'internal'
-      and c.relkind in ('r', 'p', 'v', 'm', 'f', 'S')
-      and pg_has_role(current_user, c.relowner, 'USAGE')
-      and c.relowner not in ('anon'::regrole, 'authenticated'::regrole)
-      and exists (
-        select 1 from aclexplode(c.relacl) a
-        where a.grantee in (0, 'anon'::regrole, 'authenticated'::regrole))
-      and not exists (
-        select 1 from aclexplode(c.relacl) a
-        where a.grantor in ('anon'::regrole, 'authenticated'::regrole))
-      and not exists (
-        select 1 from pg_attribute t, aclexplode(t.attacl) a
-        where t.attrelid = c.oid and a.grantor in ('anon'::regrole, 'authenticated'::regrole))
-      and not exists (
-        select 1 from pg_depend d
-        where d.classid = 'pg_class'::regclass and d.objid = c.oid
-          and d.refclassid = 'pg_extension'::regclass and d.deptype = 'e')
-  loop
-    execute format('revoke all on %s %s from public, anon, authenticated',
-                   case when r.relkind = 'S' then 'sequence' else 'table' end, r.rel);
-  end loop;
-end
-$revoke_internal_relations$;
-alter default privileges in schema internal revoke all on tables from public, anon, authenticated;
-alter default privileges in schema internal revoke all on sequences from public, anon, authenticated;
 
 grant usage on schema public, internal to recruiter_api;
 
