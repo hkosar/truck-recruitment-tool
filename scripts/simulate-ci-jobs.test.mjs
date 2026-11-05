@@ -168,6 +168,13 @@ function git(cwd, ...args) {
   assert.equal(r.status, 0, r.stderr);
 }
 
+/** Runs fn with TMPDIR/TEMP/TMP pointing at a private folder, so the simulator's ci-sim-* folders can only be this run's own; other processes on the PC use the shared temp folder at the same time. */
+function withPrivateTemp(runs, fn) {
+  const saved = { TMPDIR: process.env.TMPDIR, TEMP: process.env.TEMP, TMP: process.env.TMP };
+  Object.assign(process.env, { TMPDIR: runs, TEMP: runs, TMP: runs });
+  try { return fn(); } finally { for (const [k, v] of Object.entries(saved)) { if (v === undefined) delete process.env[k]; else process.env[k] = v; } }
+}
+
 test('--run: fresh clone, only installed packages are junctioned, steps run, clone is deleted', (t) => {
   let bash;
   try { bash = findBash(); } catch { t.skip('no bash'); return; }
@@ -184,16 +191,17 @@ test('--run: fresh clone, only installed packages are junctioned, steps run, clo
   spawnSync('git', ['init', '-q', repo]);
   git(repo, 'add', '-A');
   git(repo, 'commit', '-q', '-m', 'x');
-  const before = readdirSync(tmpdir()).filter((n) => n.startsWith('ci-sim-ok-') || n.startsWith('ci-sim-bad-'));
+  const runs = join(tmp, 'runs');
+  mkdirSync(runs);
   const lines = [];
-  const code = main(['--run', '--borrow', borrow, '--node', `${process.versions.node.split('.')[0]}=${process.execPath}`], repo, { out: (s) => lines.push(s) });
+  const code = withPrivateTemp(runs, () => main(['--run', '--borrow', borrow, '--node', `${process.versions.node.split('.')[0]}=${process.execPath}`], repo, { out: (s) => lines.push(s) }));
   const text = lines.join('\n');
   assert.equal(code, 1, text);
   assert.match(text, /=== job ok on Node \d+: PASS \(junctions: pipeline\)/);
   assert.match(text, /=== job bad on Node \d+: FAIL \(junctions: none\)/);
   assert.match(text, /Install: passed/);
   assert.match(text, /Checkout: skipped \(uses: action\)/);
-  assert.deepEqual(readdirSync(tmpdir()).filter((n) => n.startsWith('ci-sim-ok-') || n.startsWith('ci-sim-bad-')), before, 'clones are deleted');
+  assert.deepEqual(readdirSync(runs), [], 'clones are deleted');
   assert.ok(existsSync(join(borrow, 'pipeline', 'node_modules', 'marker')), 'the borrowed folder is untouched');
 });
 
@@ -232,17 +240,16 @@ function runFixture(t, workflow, files = {}, { owned = false } = {}) {
   const lines = [];
   // owned: the clone's parent folder is an owned folder with its own package.json, so an escape would find something to write into
   const runs = join(tmp, 'runs');
-  const saved = { TMPDIR: process.env.TMPDIR, TEMP: process.env.TEMP, TMP: process.env.TMP };
-  if (owned) { mkdirSync(runs); writeFileSync(join(runs, 'package.json'), '{}'); Object.assign(process.env, { TMPDIR: runs, TEMP: runs, TMP: runs }); }
+  // Every run gets its own private temp folder, so the leftover check can only see this run's own ci-sim-* folders.
+  mkdirSync(runs);
+  if (owned) writeFileSync(join(runs, 'package.json'), '{}');
   let code;
-  try { code = main(['--run', '--borrow', borrow, '--node', `${process.versions.node.split('.')[0]}=${process.execPath}`], repo, { out: (s) => lines.push(s) }); } catch (e) {
+  try { code = withPrivateTemp(runs, () => main(['--run', '--borrow', borrow, '--node', `${process.versions.node.split('.')[0]}=${process.execPath}`], repo, { out: (s) => lines.push(s) })); } catch (e) {
     if (!owned) throw e;
     code = e;
-  } finally { for (const [k, v] of Object.entries(saved)) { if (v === undefined) delete process.env[k]; else process.env[k] = v; } }
-  if (owned) assert.deepEqual(readdirSync(runs).filter((n) => n !== 'package.json'), [], 'nothing was written outside the clone and the clones are gone');
+  }
+  assert.deepEqual(readdirSync(runs).filter((n) => n !== 'package.json'), [], owned ? 'nothing was written outside the clone and the clones are gone' : 'clones and shim folders are deleted');
   if (owned) return { code, text: lines.join('\n'), runs };
-  const leftovers = readdirSync(tmpdir()).filter((n) => n.startsWith('ci-sim-j-') || n.startsWith('ci-sim-shim-j-'));
-  assert.deepEqual(leftovers, [], 'clones and shim folders are deleted');
   assert.ok(existsSync(join(borrow, 'pipeline', NM, 'marker')), 'the borrowed folder is untouched');
   return { code, text: lines.join('\n') };
 }
