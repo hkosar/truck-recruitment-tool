@@ -102,6 +102,7 @@ export const KNOWN_SERVER_REFUSALS: Readonly<Record<string, RefusalId>> = {
  * changes a raise text without this table being updated. Keep the ids equal to M1_CHECK_IDS in scripts/run-with-secrets.mjs.
  */
 export const M1_CHECKS: ReadonlyArray<{ id: string; raise: string; arg?: 'schema' | 'routines' | { inner: string } }> = [
+  { id: 'm1_runner_global_default_privileges', raise: 'M1: the runner has database-wide default privileges for anon/authenticated/PUBLIC on tables or sequences; refusing' },
   { id: 'm1_postgis_extension_not_unique', raise: 'M1: expected exactly one extension (PostGIS) owning st_x' },
   { id: 'm1_postgis_schema_writable', raise: 'M1: PostGIS schema % is writable by an app role; refusing to trust it', arg: 'schema' },
   { id: 'm1_postgis_schema_usage_no_grant_option', raise: 'M1: the runner cannot pass on USAGE on PostGIS schema % to recruiter_api (it needs USAGE WITH GRANT OPTION on that schema)', arg: 'schema' },

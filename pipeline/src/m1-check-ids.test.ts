@@ -66,6 +66,7 @@ check('the wrapper allow-list copy (scripts/run-with-secrets.mjs M1_CHECK_IDS) e
 
 // ---- each text maps to its id ---------------------------------------------------------------------------------------------
 const MATCHING: Array<[string, string]> = [
+  ['M1: the runner has database-wide default privileges for anon/authenticated/PUBLIC on tables or sequences; refusing', 'm1_runner_global_default_privileges'],
   ['M1: expected exactly one extension (PostGIS) owning st_x', 'm1_postgis_extension_not_unique'],
   ['M1: PostGIS schema extensions is writable by an app role; refusing to trust it', 'm1_postgis_schema_writable'],
   ['M1: the runner cannot pass on USAGE on PostGIS schema extensions to recruiter_api (it needs USAGE WITH GRANT OPTION on that schema)', 'm1_postgis_schema_usage_no_grant_option'],
@@ -104,6 +105,8 @@ const NO_ID: Array<[string, string]> = [
   ['near miss (case)', 'm1: recruiter_api cannot run the PostGIS functions the app uses'],
   ['near miss (one word)', 'M1: recruiter_api cannot run the PostGIS functions the app needs'],
   ['near miss (missing "M1: ")', 'expected exactly one extension (PostGIS) owning st_x'],
+  ['default-privileges text with extra text after', 'M1: the runner has database-wide default privileges for anon/authenticated/PUBLIC on tables or sequences; refusing secret-Zq9981'],
+  ['default-privileges near miss (schema-wide)', 'M1: the runner has schema-wide default privileges for anon/authenticated/PUBLIC on tables or sequences; refusing'],
   ['schema with a disallowed character', 'M1: the runner cannot pass on USAGE on PostGIS schema "Ext;drop" to recruiter_api (it needs USAGE WITH GRANT OPTION on that schema)'],
   ['schema with upper case', 'M1: PostGIS schema Extensions is writable by an app role; refusing to trust it'],
   ['schema with a space (smuggled text)', 'M1: PostGIS schema secret value is writable by an app role; refusing to trust it'],

@@ -31,8 +31,6 @@ create table internal.staff_mobile_unverified (
 comment on table internal.staff_mobile_unverified is
   'Optional mobile entered by a manager when adding a person. UNVERIFIED: never used for sign-in, '
   'recovery or any confirmation (SMS is not built). Not readable by the app role.';
--- Whatever a default ACL gave the new table (TRUCKRECRU-143: on PostgreSQL 17 that includes MAINTAIN).
-revoke all on table internal.staff_mobile_unverified from public, anon, authenticated;
 
 -- ---- 3. Add a person.
 create function public.team_add_person(p_full_name text, p_email text, p_role user_role, p_mobile text)

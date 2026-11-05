@@ -34,6 +34,30 @@
 -- ============================================================================
 
 -- ----------------------------------------------------------------------------
+-- Precondition, before anything changes: no database-wide default privileges for the API roles
+-- (TRUCKRECRU-143)
+-- ----------------------------------------------------------------------------
+-- M1 revokes nothing on any table or sequence in schema internal (see the note before section 1).
+-- What it creates there must therefore get nothing from the runner's default privileges. Its
+-- schema-internal defaults are revoked below; its database-wide defaults (no schema) apply in
+-- addition and are not M1's to change, so if they hand tables or sequences to anon, authenticated or
+-- PUBLIC, M1 refuses here, before it changes anything. Reads the catalogue only.
+do $global_default_privileges$
+begin
+  if exists (
+    select 1
+    from pg_default_acl d, aclexplode(d.defaclacl) a
+    where d.defaclrole = (select oid from pg_roles where rolname = current_user)
+      and d.defaclnamespace = 0
+      and d.defaclobjtype in ('r', 'S')
+      and (a.grantee = 0 or a.grantee in (select oid from pg_roles where rolname in ('anon', 'authenticated')))
+  ) then
+    raise exception 'M1: the runner has database-wide default privileges for anon/authenticated/PUBLIC on tables or sequences; refusing';
+  end if;
+end
+$global_default_privileges$;
+
+-- ----------------------------------------------------------------------------
 -- 0. Roles (no passwords here)
 -- ----------------------------------------------------------------------------
 do $roles$
@@ -52,21 +76,24 @@ $roles$;
 
 grant recruiter_api to recruiter_app;
 
--- Schema internal: anon, authenticated and PUBLIC get no privilege at all on any table, view or
+-- Schema internal: anon, authenticated and PUBLIC must get no privilege at all on any table, view or
 -- sequence this file (or M1b / M1c, applied by the same runner) creates there (TRUCKRECRU-143).
 -- Missing USAGE on the schema is not enough: on PostgreSQL 17 the table privilege MAINTAIN (part of
 -- ALL) lets an unqualified VACUUM / ANALYZE process the table without USAGE. These two run BEFORE the
 -- first internal relation is created, so the runner's own default privileges for schema internal
--- (Supabase-like platforms grant new tables to anon/authenticated) hand nothing to those roles.
--- They change only the runner's own defaults for schema internal; no existing object is touched, and
--- revoking a default entry that is absent is a no-op. A schema-level revoke cannot remove the
--- runner's global default privileges (those apply in addition), so the tables and identity sequences
--- created below are also revoked by name right after they are created (section 2).
--- M1 never changes privileges on a relation it did not create: anon/authenticated/PUBLIC access to a
--- pre-existing internal relation is left as found, and the role matrix refuses it (TRUCKRECRU-143
--- round 4; earlier rounds swept existing relations and could raise or strip other roles' rights).
-alter default privileges in schema internal revoke all on tables from public, anon, authenticated;
-alter default privileges in schema internal revoke all on sequences from public, anon, authenticated;
+-- (Supabase-like platforms grant new tables to anon/authenticated) hand nothing to those roles; its
+-- database-wide defaults were checked by the precondition above. They change only default-privilege entries
+-- (revoking an absent entry is a no-op), touch no existing object and cannot fail on one. They stay
+-- after a backout (the backouts do not restore them), so later tables the runner creates in internal
+-- get nothing from them either (doc 16 section 1.5).
+-- M1 issues no REVOKE on any table or sequence in schema internal (TRUCKRECRU-143 round 5): such a
+-- revoke can raise (42501, 2BP01 "dependent privileges exist", also through an event trigger) or
+-- remove rights other roles hold through anon, on a fresh apply and on the re-apply path, where the
+-- retained tables already exist. Whatever access anon/authenticated/PUBLIC still have to a relation
+-- in internal (pre-existing grants, event triggers, other roles' default privileges, tables retained
+-- for a re-apply) is left as found, and the role matrix refuses it (runbook 3.5).
+alter default privileges for role current_user in schema internal revoke all on tables from anon, authenticated, public;
+alter default privileges for role current_user in schema internal revoke all on sequences from anon, authenticated, public;
 
 -- ----------------------------------------------------------------------------
 -- 1. Control rows
@@ -215,24 +242,6 @@ create table internal.auth_events (
   kind    text not null,
   detail  jsonb not null default '{}'::jsonb
 );
-
--- Whatever the runner's global default privileges gave the relations created above (see the note
--- before section 1). Each was created by the runner in this transaction (a name that already existed
--- would have failed its create), so the runner owns it, every ACL entry on it has the runner as
--- grantor, and nothing has used a grant option on it yet: this REVOKE (no CASCADE) cannot raise.
-revoke all on table internal.roster_lock, internal.backout_window, internal.recovery_policy,
-  internal.recovery_sets, internal.recovery_codes, internal.app_sessions, internal.signin_links,
-  internal.auth_request_buckets, internal.recovery_failures, internal.email_events,
-  internal.blocked_email_addresses, internal.auth_events
-  from public, anon, authenticated;
--- Their identity sequences, found through the columns (never by a name that might be another object's).
-do $revoke_new_identity_sequences$
-begin
-  execute format('revoke all on sequence %s, %s from public, anon, authenticated',
-                 pg_get_serial_sequence('internal.recovery_failures', 'id'),
-                 pg_get_serial_sequence('internal.auth_events', 'id'));
-end
-$revoke_new_identity_sequences$;
 
 -- Delivery lattice (Quote-Queue migrations 0006/0007).
 create function internal.signin_links_send_status_monotonic() returns trigger

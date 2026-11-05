@@ -138,7 +138,7 @@ export const REFUSAL_IDS = [
 ];
 
 /** Keep equal to the ids of pipeline/src/refusals.ts M1_CHECKS (a test compares them): fixed names of M1's own P0001 checks, never the message. */
-export const M1_CHECK_IDS = ['m1_postgis_extension_not_unique', 'm1_postgis_schema_writable', 'm1_postgis_schema_usage_no_grant_option', 'm1_postgis_execute_no_grant_option', 'm1_postgis_not_callable', 'm1_postgis_self_check_no_extension', 'm1_postgis_self_check_set_option_kept', 'm1_postgis_self_check_membership_kept'];
+export const M1_CHECK_IDS = ['m1_runner_global_default_privileges', 'm1_postgis_extension_not_unique', 'm1_postgis_schema_writable', 'm1_postgis_schema_usage_no_grant_option', 'm1_postgis_execute_no_grant_option', 'm1_postgis_not_callable', 'm1_postgis_self_check_no_extension', 'm1_postgis_self_check_set_option_kept', 'm1_postgis_self_check_membership_kept'];
 /** Keep equal to pipeline/src/refusals.ts DRIVER_CODES (a test compares them). */
 export const DRIVER_CODES = ['ECONNREFUSED', 'ECONNRESET', 'ECONNABORTED', 'ETIMEDOUT', 'ENOTFOUND', 'EAI_AGAIN', 'EPIPE', 'EHOSTUNREACH', 'ENETUNREACH', 'ENETDOWN', 'EADDRNOTAVAIL'];
 /** Keep equal to the action tables in pipeline/src/staging-sql-runner.ts and staging-rebuilt.ts plus owner-auth-create (a test compares them). */

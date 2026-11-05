@@ -339,7 +339,7 @@ test('a prompted secret already set under another capitalisation is refused befo
 test('allow-list: the prod-sql events pass with exactly their own keys; a free-text, unpinned or non-numeric value is withheld and counted', () => {
   const run = (o) => { const counter = { fields: 0 }; const raw = allowListLine(JSON.stringify(o), counter); return { shown: raw === null ? null : JSON.parse(raw), fields: counter.fields }; };
   const sha = 'a'.repeat(64);
-  assert.deepEqual(run({ msg: 'prod-sql.verified', action: 'm1', target: 'production', statements: 146, wrap: 'wrapped', sha256: sha }), { shown: { msg: 'prod-sql.verified', action: 'm1', target: 'production', statements: 146, wrap: 'wrapped', sha256: sha }, fields: 0 });
+  assert.deepEqual(run({ msg: 'prod-sql.verified', action: 'm1', target: 'production', statements: 145, wrap: 'wrapped', sha256: sha }), { shown: { msg: 'prod-sql.verified', action: 'm1', target: 'production', statements: 145, wrap: 'wrapped', sha256: sha }, fields: 0 });
   assert.deepEqual(run({ msg: 'prod-sql.counts', action: 'l1-counts', index: 3, counts: { sessions: 0, users_with_tokens: 2 } }).fields, 0);
   assert.deepEqual(run({ msg: 'prod-sql.result', action: 'backout-m1', result: 'unknown', statements: 102 }).fields, 0);
   assert.deepEqual(run({ msg: 'prod-sql.statement', action: 'snapshot', index: 1, command: 'select', rows: 5, digest: sha }).fields, 0);

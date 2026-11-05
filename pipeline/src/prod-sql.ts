@@ -92,8 +92,8 @@ export const PROD_SQL_ACTIONS: readonly ProdSqlAction[] = [
   // A3: the read-only permission snapshot. Each statement reports a digest so the before/after outputs can be compared without printing rows.
   { id: 'snapshot', step: 'A3, BO8', file: 'supabase/backout/pre-cutover-snapshot.sql', sha256: 'a8ef562db0047b4c58beb3ecd52bdfc0ae53385aa2dee40f30e153085dd04ece', mode: 'read_only', report: 'digest', phrase: 'RUN TNBS PRODUCTION SQL SNAPSHOT' },
   // B2-B5: M1, M1b, M1c.
-  { id: 'm1', step: 'B2', file: 'supabase/pending/M1_same_origin_signin.sql', sha256: '49f483154b6f16eed2d1931d4f8efffc7502c62b1ec5ade8ee5a162813c5feb7', mode: 'write', report: 'none', phrase: 'RUN TNBS PRODUCTION SQL M1' },
-  { id: 'm1b', step: 'B3', file: 'supabase/pending/M1b_add_person.sql', sha256: '8ecebdb4820506f4f025549ddabf85786b26b7a0faa865a595fcd9e708598faa', mode: 'write', report: 'none', phrase: 'RUN TNBS PRODUCTION SQL M1B' },
+  { id: 'm1', step: 'B2', file: 'supabase/pending/M1_same_origin_signin.sql', sha256: '628416f706a6d89ea803a099e0fd168fc42222717dc3cc3cfab88ff7c551eb6b', mode: 'write', report: 'none', phrase: 'RUN TNBS PRODUCTION SQL M1' },
+  { id: 'm1b', step: 'B3', file: 'supabase/pending/M1b_add_person.sql', sha256: '82724e06f0393adf82bbe7222f2a9ae55dbe2443c2fffdf98a8bebabcbc44768', mode: 'write', report: 'none', phrase: 'RUN TNBS PRODUCTION SQL M1B' },
   { id: 'm1c', step: 'B4', file: 'supabase/pending/M1c_batch_delete_audit.sql', sha256: '86cd3de2ab4f1b2283c344088e31d05fbc8e719ebaa17318987a7082c42dfb26', mode: 'write', report: 'none', phrase: 'RUN TNBS PRODUCTION SQL M1C' },
   // B10: the backout window on (doc 16 section 3.1 / runbook B10): the two reviewed statements, verified inside the transaction before it commits.
   { id: 'window-on', step: 'B10', file: 'supabase/rollout/backout-window-on.sql', sha256: '029707645e436a8ecbefe652e817bd94ff62001ed5a7077d7a2e3b3639c1e09d', mode: 'write', report: 'flag', flagName: 'email_edits_paused', flagExpect: true, phrase: 'RUN TNBS PRODUCTION SQL WINDOW-ON' },

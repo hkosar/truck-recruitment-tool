@@ -272,18 +272,40 @@ citext, and no Supabase services.
 | 14 | Log redaction (T-HYG) | no hosted logs | **A7**, §1.6 | per-sink rule, §1.6 |
 | 15 | Retention least privilege | no hosted roles | §4 | as in §4 |
 
-Row 3, API roles on schema `internal` (TRUCKRECRU-143, design since round 4): before it creates
-any internal table, M1 revokes the runner's own default privileges for schema `internal` on
-tables and sequences from `anon`, `authenticated` and PUBLIC, and right after creating its
-tables it revokes all from those three on them and on their identity sequences, by name (a
-schema-level revoke cannot remove the runner's global default privileges); M1b and M1c revoke
-on their own tables. M1 never changes privileges on a relation it did not create (earlier
-rounds swept existing internal relations, which could raise 42501 / 2BP01 or remove rights that
-`service_role`, `recruiter_*` roles or owners held through membership in `anon`). An existing
-internal relation that `anon` or `authenticated` can reach is therefore left as found, and the
-role matrix refuses it: STOP at runbook 3.5 with the internal no-privilege probe naming it,
-for the owner to decide before a rerun. Measured limit: the runner's global sequence default
-still reaches M1c's identity sequence (M1c revokes only its table); the matrix refuses that too.
+Row 3, API roles on schema `internal` (TRUCKRECRU-143, final design since round 5): M1 and
+M1b issue **no** REVOKE on any table or sequence in schema `internal`. Earlier rounds did (a
+sweep over existing relations, then a revoke by name on each new one), and each round's review
+found a starting state where that revoke raised 42501 or 2BP01 ("dependent privileges exist",
+also through an event trigger that used a grant option between CREATE TABLE and the revoke) or
+removed rights that `service_role`, `recruiter_*` roles or owners held through membership in
+`anon`, both on a fresh apply and on re-apply, where the backed-out tables are retained and
+already exist. Instead M1 fails closed:
+
+- **Precondition, before M1 changes anything:** if the runner has database-wide default
+  privileges (no schema) for tables or sequences that grant anything to `anon`, `authenticated`
+  or PUBLIC, M1 stops with P0001, reported as `m1_check: m1_runner_global_default_privileges`,
+  and leaves nothing behind. Those defaults are not M1's to change. Hosted staging-2's preflight
+  showed none for `anon`/`authenticated` (m1-retry run record 2026-11-05), so this is expected to
+  pass there.
+- **Before M1 creates its first internal object:** `alter default privileges for role
+  current_user in schema internal revoke all on tables / sequences from anon, authenticated,
+  public`. This changes only the runner's own default-privilege entries for schema `internal`
+  (an absent entry is a no-op), touches no existing object, and is what keeps every table and
+  sequence M1, M1b and M1c create there free of `anon`/`authenticated`/PUBLIC access.
+  **It persists:** the backouts do not restore those default entries, a re-apply runs it again
+  (no-op), and every later table or sequence that this runner creates in `internal` (later
+  migrations too) gets nothing from them. A passing fresh/backout/re-apply snapshot comparison
+  does not mean every pre-M1 default ACL was reconstructed.
+- **Everything else is left as found and refused by the role matrix:** grants already on an
+  internal relation (including relations retained for a re-apply and grants made there after a
+  backout), event triggers that grant on new tables, other roles' default privileges that reach
+  `anon` (for example through a role `anon` is a member of), and inherited rights. No protected
+  role's direct or inherited privilege is changed by M1/M1b. STOP at runbook 3.5 with the
+  internal no-privilege probe (or the new-table default-privilege probe) naming the relation,
+  for the owner to decide before a rerun. M1c (pinned, unchanged by TRUCKRECRU-143) keeps its
+  own original revoke on `internal.batch_delete_audit`.
+- Measured coverage limits of the matrix (unchanged): other creators' unused default privileges,
+  unused sequence default privileges (the matrix creates no sequence) and large objects are not probed.
 
 ### 1.6 Log-redaction gate A7 (T-HYG), per sink
 

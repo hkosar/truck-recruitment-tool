@@ -20,9 +20,11 @@
 //      has default privileges in schema internal (and public) that grant new tables and sequences to anon and authenticated (and in
 //      internal to PUBLIC) (runs on a copy of the pristine public database, made at the start like case 4's). The "grant ... on all
 //      tables/sequences in schema internal" lines of that review find no relation there before M1 (the migrations create none). After
-//      M1 the runner's default privileges for schema internal hand nothing to those roles (M1 revokes them before its first table).
-// Since TRUCKRECRU-143 round 4 M1 never changes privileges on a relation it did not create (the earlier "sweep" over existing
-// internal relations is gone). Cases 6-8 start with such relations: M1, M1b and M1c must apply without error, change nothing on
+//      M1 the runner's default privileges for schema internal hand nothing to those roles (M1 revokes them before its first table),
+//      so what M1, M1b and M1c create there gets no anon/authenticated/PUBLIC access.
+// Since TRUCKRECRU-143 round 5 M1 and M1b issue no REVOKE on any table or sequence in schema internal (round 4's by-name revokes on
+// the new relations raised 2BP01 through an event trigger and on re-apply, or stripped inherited rights there; Codex review
+// thr_xx2399pa3j). Cases 6-8 and 10-12 start with relations or hooks that leave API access: M1, M1b and M1c must apply without error, change nothing on
 // them (full table and column ACLs, owners, and the effective privileges, direct, through PUBLIC or inherited, with and without
 // grant option, of service_role, every recruiter_* role, the runner and every owner, and their USAGE/CREATE on schema internal; read
 // by the superuser before M1, after M1, after M1b/M1c and after the matrix), give anon/authenticated nothing on what they create,
@@ -39,13 +41,24 @@
 //      probes, naming exactly those relations).
 //   8. Codex review thr_v6e6ax8gt9 B1 (round 3's sweep): service_role, recruiter_review and the owner tr_m1_review_owner (whose role
 //      the runner inherits) hold SELECT on internal.hunt_effective only through their membership in anon (round 3's sweep took it
-//      from all three); plus a runner-owned table granted to anon, authenticated and PUBLIC (what the sweep used to clear), and
-//      the runner's GLOBAL default privileges (no schema) granting new tables and sequences to anon and authenticated, which a
-//      schema-level revoke cannot remove: M1's and M1b's tables and M1's identity sequences must still end up with no anon/
-//      authenticated/PUBLIC access (M1 and M1b revoke them by name). Measured, not fixed here: M1c (pinned, unchanged) revokes only
-//      its table, so the global sequence default reaches internal.batch_delete_audit_id_seq. The matrix refuses exactly 4 of 68
-//      (anon's and authenticated's internal probes naming those relations, and both "new internal table" default-privilege probes).
-// In every applied case but 6, 7 and 8, after M1 and again after M1b/M1c: anon and authenticated hold no effective privilege on any app table,
+//      from all three); plus a runner-owned table granted to anon, authenticated and PUBLIC (what the sweep used to clear). Nothing
+//      M1, M1b or M1c create is reachable by anon/authenticated. The matrix refuses exactly 2 of 68 (anon's and authenticated's
+//      internal probes naming those relations). (Round 4's version also gave the runner global default privileges; since round 5
+//      that state is case 9's refusal.)
+//   9. Round 5 precondition: the runner has DATABASE-WIDE default privileges (no schema) giving tables or sequences to anon,
+//      authenticated or PUBLIC (with and without grant option): M1 refuses with P0001, m1_check m1_runner_global_default_privileges,
+//      before it changes anything (catalogue snapshot identical, no recruiter_* role). Controls: such a default for service_role only
+//      does not refuse; an error injected at the end of M1 rolls back its default-privilege changes too; then M1 applies.
+//  10. Codex review thr_xx2399pa3j B2: a ddl_command_end event trigger that, when M1 creates internal.roster_lock, grants anon SELECT
+//      WITH GRANT OPTION and as anon passes it to service_role, and grants anon a column right on internal.auth_events. M1, M1b and
+//      M1c apply (round 4 raised 2BP01 here); service_role keeps its grant; the matrix refuses 1 of 68 naming both tables.
+//  11-12. Codex review thr_xx2399pa3j B1, the re-apply path: after M1/M1b/M1c, the backout window, credential retirement and all
+//      three backouts (the tables are retained), (11) anon passes SELECT on retained internal.app_sessions to service_role through a
+//      grant option, (12) service_role and recruiter_review hold SELECT on it only through anon. reapply-m1/-m1b/-m1c apply (round 4
+//      raised 2BP01 in 11 and removed both roles' SELECT in 12), no protected right changes (actual SELECTs in 12), and the matrix
+//      refuses 1 of 68 naming app_sessions. Case 12 also starts with the round-1 schema defaults and proves M1's default-privilege
+//      revoke persists after the backouts (a table the runner creates then gives anon nothing).
+// In every applied case but 6-12, after M1 and again after M1b/M1c: anon and authenticated hold no effective privilege on any app table,
 // view or sequence in public and internal (MAINTAIN included on PostgreSQL 17+), and an unqualified VACUUM (VERBOSE) as each of
 // them, outside any transaction, processes no app table (from its "vacuuming" notices; a superuser VACUUM of one table proves the
 // notices are read).
@@ -294,13 +307,53 @@ const INHERITED_RIGHTS_SQL = [
   'create table internal.hunt_leftover (id int)',
   `alter table internal.hunt_leftover owner to ${RUNNER}`,
   `grant select on internal.hunt_leftover to anon, authenticated, public, ${REVIEW_RECRUITER}`,
-  // The runner's global default privileges (no schema): a schema-level revoke cannot remove them.
-  `alter default privileges for role ${RUNNER} grant select on tables to anon, authenticated`,
-  `alter default privileges for role ${RUNNER} grant usage on sequences to anon, authenticated`,
 ];
-/** Case 8: the API-role privileges left on app relations after M1 (the pre-existing ones), and after M1c (its identity sequence). */
-const INHERITED_LEFT_M1 = ['internal.hunt_effective:anon', 'internal.hunt_leftover:anon', 'internal.hunt_leftover:authenticated'];
-const INHERITED_LEFT_M1C = ['internal.batch_delete_audit_id_seq:anon', 'internal.batch_delete_audit_id_seq:authenticated'];
+/** Case 8: the API-role privileges left on app relations after M1, M1b and M1c (only the pre-existing ones). */
+const INHERITED_LEFT = ['internal.hunt_effective:anon', 'internal.hunt_leftover:anon', 'internal.hunt_leftover:authenticated'];
+
+/** Case 9: database-wide default privileges (no schema) of the runner that M1's precondition must refuse, one at a time. */
+const GLOBAL_DEFAULT_VARIANTS: Array<[string, string]> = [
+  ['tables to anon', `alter default privileges for role ${RUNNER} grant select on tables to anon`],
+  ['tables to authenticated with grant option', `alter default privileges for role ${RUNNER} grant select on tables to authenticated with grant option`],
+  ['tables to PUBLIC', `alter default privileges for role ${RUNNER} grant select on tables to public`],
+  ['sequences to anon', `alter default privileges for role ${RUNNER} grant usage on sequences to anon`],
+  ['sequences to authenticated with grant option', `alter default privileges for role ${RUNNER} grant usage on sequences to authenticated with grant option`],
+];
+const GLOBAL_DEFAULT_MESSAGE = 'M1: the runner has database-wide default privileges for anon/authenticated/PUBLIC on tables or sequences; refusing';
+/** The role matrix's no-privilege probe for schema internal. */
+const INTERNAL_PROBE = 'no privilege on any app table/sequence in internal (incl. MAINTAIN on 17+)';
+/** Cases 11-12, run by the superuser admin after the three backouts (Codex review thr_xx2399pa3j B1). */
+const REAPPLY_DEPENDENT_SQL = [
+  'grant usage on schema internal to anon',
+  'grant select on internal.app_sessions to anon with grant option',
+  'set role anon',
+  'grant select on internal.app_sessions to service_role',
+  'reset role',
+];
+const REAPPLY_EFFECTIVE_SQL = [
+  `create role ${REVIEW_RECRUITER}`,
+  `grant anon to service_role, ${REVIEW_RECRUITER}`,
+  `grant usage on schema internal to service_role, ${REVIEW_RECRUITER}`,
+  'grant select on internal.app_sessions to anon',
+];
+
+/** Case 10 (Codex review thr_xx2399pa3j B2): installed by the superuser admin. The hook runs as the invoker (the runner, a member of
+ *  anon with SET): on M1's CREATE TABLE internal.roster_lock it grants anon SELECT WITH GRANT OPTION and, as anon, passes it to
+ *  service_role; on CREATE TABLE internal.auth_events it grants anon a column right. Round 4's REVOKE right after raised 2BP01. */
+const EVENT_TRIGGER_SQL = `create function public.tr_review_hook() returns event_trigger language plpgsql as $hook$
+begin
+  if exists (select 1 from pg_event_trigger_ddl_commands() where object_identity = 'internal.roster_lock') then
+    grant usage on schema internal to anon;
+    grant select on internal.roster_lock to anon with grant option;
+    set local role anon;
+    grant select on internal.roster_lock to service_role;
+    reset role;
+  end if;
+  if exists (select 1 from pg_event_trigger_ddl_commands() where object_identity = 'internal.auth_events') then
+    grant select (id) on internal.auth_events to anon;
+  end if;
+end $hook$;
+create event trigger tr_review_create_hook on ddl_command_end when tag in ('CREATE TABLE') execute function public.tr_review_hook()`;
 
 /** The relations in schema internal before M1 (non-extension tables, views, sequences): the ones M1/M1b/M1c must not touch. */
 const PREEXISTING_INTERNAL_SQL = `select coalesce(array_agg(c.oid::text order by c.oid), '{}') as oids from pg_class c
@@ -366,6 +419,12 @@ async function main(): Promise<void> {
   const depgrantCopyUrl = (() => { const u = new URL(URLS.public as string); u.pathname = `${u.pathname}_depgrant`; return u.toString(); })();
   // Case 8's database: a copy of the pristine public database (taken before case 2 touches it).
   const inheritedCopyUrl = (() => { const u = new URL(URLS.public as string); u.pathname = `${u.pathname}_inherit`; return u.toString(); })();
+  // Cases 9-12 (round 5): copies of the pristine public database too.
+  const copyOfPublic = (suffix: string) => { const u = new URL(URLS.public as string); u.pathname = `${u.pathname}_${suffix}`; return u.toString(); };
+  const globalCopyUrl = copyOfPublic('global');
+  const eventCopyUrl = copyOfPublic('event');
+  const reapplyDepCopyUrl = copyOfPublic('redep');
+  const reapplyEffCopyUrl = copyOfPublic('reeff');
   /** Case 8 makes service_role a member of anon (cluster-wide); the final cleanup revokes it if the case did not get to. */
   let serviceAnonGranted = false;
   const existingM1Roles = () => onCluster(async (c) => (await c.query("select rolname from pg_roles where rolname = any($1) order by rolname", [CASE_ROLES])).rows.map((r) => r.rolname as string));
@@ -460,13 +519,14 @@ async function main(): Promise<void> {
   /** TRUCKRECRU-143 round 4: the pre-existing internal relations and the protected roles, fixed before M1, and their privileges. */
   type Protected = { oids: string[]; roles: string[]; privs: string; snapshot: string[] };
   const protectedSnapshot = async (admin: pg.Client, p: Omit<Protected, 'snapshot'>) => (await admin.query(PROTECTED_PRIVILEGES_SQL, [p.oids, p.roles, p.privs.split(',')])).rows[0].p as string[];
-  const protectedBefore = async (label: string, admin: pg.Client, minRelations: number): Promise<Protected> => {
+  /** `exclude`: roles left out (the re-apply cases leave out M1's own three roles, whose rights a re-apply of M1 sets by design). */
+  const protectedBefore = async (label: string, admin: pg.Client, minRelations: number, exclude: readonly string[] = [], stage = 'M1'): Promise<Protected> => {
     const pg17 = (await admin.query(`select current_setting('server_version_num')::int >= 170000 as v`)).rows[0].v as boolean;
     const oids = (await admin.query(PREEXISTING_INTERNAL_SQL)).rows[0].oids as string[];
-    const roles = (await admin.query(PROTECTED_ROLES_SQL, [oids, RUNNER])).rows[0].roles as string[];
+    const roles = ((await admin.query(PROTECTED_ROLES_SQL, [oids, RUNNER])).rows[0].roles as string[]).filter((r) => !exclude.includes(r));
     const p = { oids, roles, privs: TABLE_PRIVILEGES_16 + (pg17 ? ',MAINTAIN' : '') };
     const snapshot = await protectedSnapshot(admin, p);
-    check(`${label}: before M1 ${oids.length} relation(s) already exist in internal; protected roles ${roles.join(', ')}; ${snapshot.length} privilege/ACL facts recorded`,
+    check(`${label}: before ${stage} ${oids.length} relation(s) already exist in internal; protected roles ${roles.join(', ')}; ${snapshot.length} privilege/ACL facts recorded`,
       oids.length >= minRelations && roles.includes('service_role') && roles.includes(RUNNER) && snapshot.some((s) => s.endsWith('=true/false') || s.endsWith('=true/true')), `oids=${oids.length} roles=${roles.join(',')}`);
     return { ...p, snapshot };
   };
@@ -699,7 +759,8 @@ async function main(): Promise<void> {
   };
 
   try {
-    for (const [srcUrl, copyUrl] of [[URLS.neg, negCopyUrl], [URLS.public, daclCopyUrl], [URLS.public, unownedCopyUrl], [URLS.public, depgrantCopyUrl], [URLS.public, inheritedCopyUrl]] as const) {
+    for (const [srcUrl, copyUrl] of [[URLS.neg, negCopyUrl], [URLS.public, daclCopyUrl], [URLS.public, unownedCopyUrl], [URLS.public, depgrantCopyUrl], [URLS.public, inheritedCopyUrl],
+      [URLS.public, globalCopyUrl], [URLS.public, eventCopyUrl], [URLS.public, reapplyDepCopyUrl], [URLS.public, reapplyEffCopyUrl]] as const) {
       const src = new URL(srcUrl as string).pathname.slice(1);
       const copy = new URL(copyUrl).pathname.slice(1);
       await onCluster(async (c) => {
@@ -913,9 +974,6 @@ async function main(): Promise<void> {
         prot = await protectedBefore(label, a, 2);
         check(`${label}: the protected roles include service_role, ${REVIEW_RECRUITER}, ${REVIEW_OWNER} and the runner`,
           [REVIEW_RECRUITER, REVIEW_OWNER, RUNNER, 'service_role'].every((r) => prot.roles.includes(r)), prot.roles.join(','));
-        const globals = (await a.query(`select string_agg(d.defaclobjtype::text, ',' order by d.defaclobjtype) as t from pg_default_acl d
-            where d.defaclrole = $1::regrole and d.defaclnamespace = 0`, [RUNNER])).rows[0].t as string;
-        check(`${label}: before M1 the runner has global default privileges for tables and sequences`, globals === 'S,r', globals);
       });
       try {
         check(`${label}: M1 applies as the Supabase-like runner (it touches no relation it did not create)`,
@@ -929,8 +987,8 @@ async function main(): Promise<void> {
           return fresh;
         };
         {
-          const fresh = await exposedAfter('M1', INHERITED_LEFT_M1);
-          check(`${label}: after M1 nothing M1 created (despite the runner's global default privileges) is reachable by anon or authenticated`, fresh.exposed.length === 0 && fresh.maintain.length === 0, fresh.exposed.join(','));
+          const fresh = await exposedAfter('M1', INHERITED_LEFT);
+          check(`${label}: after M1 nothing M1 created is reachable by anon or authenticated`, fresh.exposed.length === 0 && fresh.maintain.length === 0, fresh.exposed.join(','));
           const publicHeld = (await o.admin.query(`select coalesce(string_agg(c.relname, ',' order by c.relname), '') as r from pg_class c, aclexplode(c.relacl) a
               where c.relnamespace = 'internal'::regnamespace and not (c.oid = any($1::oid[])) and a.grantee in (0, 'anon'::regrole, 'authenticated'::regrole)`, [prot.oids])).rows[0].r as string;
           check(`${label}: after M1 no ACL of a relation M1 created names anon, authenticated or PUBLIC`, publicHeld === '', publicHeld);
@@ -940,9 +998,9 @@ async function main(): Promise<void> {
           check(`${label}: ${action} applies as the Supabase-like runner`, s.error === undefined && s.events.some((e) => e.msg === 'staging-sql.step_done'), describe(s.error));
         }
         {
-          const fresh = await exposedAfter('M1b and M1c', [...INHERITED_LEFT_M1, ...INHERITED_LEFT_M1C]);
-          check(`${label}: after M1b and M1c the only new relation anon/authenticated reach is M1c's identity sequence (the runner's global sequence default; M1c revokes only its table)`,
-            JSON.stringify([...fresh.exposed].sort()) === JSON.stringify(INHERITED_LEFT_M1C), fresh.exposed.join(','));
+          const fresh = await exposedAfter('M1b and M1c', INHERITED_LEFT);
+          check(`${label}: after M1b and M1c nothing M1, M1b or M1c created is reachable by anon or authenticated`,
+            fresh.exposed.length === 0 && fresh.maintain.length === 0, fresh.exposed.join(','));
           const m1b = (await o.admin.query(`select coalesce(relacl::text, '') as a from pg_class where oid = 'internal.staff_mobile_unverified'::regclass`)).rows[0].a as string;
           check(`${label}: M1b's table names none of anon, authenticated, PUBLIC in its ACL`, !/(^|[{,])(anon|authenticated|)=/.test(m1b), m1b);
         }
@@ -951,16 +1009,13 @@ async function main(): Promise<void> {
         const s = await runAsRunner(inheritedCopyUrl, 'role-matrix-m1');
         const ev = s.events.find((e) => e.msg === 'staging-sql.role_matrix');
         const failed = matrixFailures(s.results);
-        check(`${label}: role-matrix-m1 refuses (role_matrix_failed, 4 of 68 failed, step_failed not step_done)`,
-          s.error?.id === 'role_matrix_failed' && JSON.stringify(ev) === '{"msg":"staging-sql.role_matrix","ok":false,"total":68,"passed":64,"failed":4}'
+        check(`${label}: role-matrix-m1 refuses (role_matrix_failed, 2 of 68 failed, step_failed not step_done)`,
+          s.error?.id === 'role_matrix_failed' && JSON.stringify(ev) === '{"msg":"staging-sql.role_matrix","ok":false,"total":68,"passed":66,"failed":2}'
           && !s.events.some((e) => e.msg === 'staging-sql.step_done'), `${describe(s.error)} ${JSON.stringify(ev)}`);
         const probe = (role: string, test: string) => failed?.find((f) => f.actor === role && f.test === test);
-        const internalProbe = 'no privilege on any app table/sequence in internal (incl. MAINTAIN on 17+)';
-        const newTableProbe = 'a new internal table gets no privilege (default privileges)';
-        check(`${label}: the failing probes are anon's and authenticated's internal probes (naming exactly the relations left) and both new-table default-privilege probes`,
-          failed?.length === 4 && probe('anon', internalProbe)?.observed.endsWith(' relations, held on: batch_delete_audit_id_seq,hunt_effective,hunt_leftover') === true
-          && probe('authenticated', internalProbe)?.observed.endsWith(' relations, held on: batch_delete_audit_id_seq,hunt_leftover') === true
-          && probe('anon', newTableProbe) !== undefined && probe('authenticated', newTableProbe) !== undefined, JSON.stringify(failed));
+        check(`${label}: the failing probes are anon's and authenticated's internal probes, naming exactly the relations left`,
+          failed?.length === 2 && probe('anon', INTERNAL_PROBE)?.observed.endsWith(' relations, held on: hunt_effective,hunt_leftover') === true
+          && probe('authenticated', INTERNAL_PROBE)?.observed.endsWith(' relations, held on: hunt_leftover') === true, JSON.stringify(failed));
         const cmp = compareStates(before, await stateOf(o.admin), MATRIX_FULL_RUN_SEQUENCES);
         check(`${label}: the refused role matrix left nothing behind (catalogue, table rows, sequences only ${MATRIX_FULL_RUN_SEQUENCES.join(', ')} moved forward)`,
           cmp.problems.length === 0 && JSON.stringify(cmp.advanced) === JSON.stringify(MATRIX_FULL_RUN_SEQUENCES), `${cmp.problems.join('; ')} advanced=${cmp.advanced.join(',')}`);
@@ -984,9 +1039,227 @@ async function main(): Promise<void> {
       serviceAnonGranted = false;
       check(`${label}: case cleaned up (its database and roles dropped, service_role no longer a member of anon)`, (await existingM1Roles()).length === 0 && !(await serviceInAnon()));
     }
+
+    /** The role matrix as the runner must refuse with exactly `heldOn` failing probes (actor -> relations named by its internal
+     *  no-privilege probe), and leave nothing behind. */
+    const matrixRefuses = async (label: string, dbUrl: string, admin: pg.Client, heldOn: Record<string, string>) => {
+      const nFailed = Object.keys(heldOn).length;
+      const before = await stateOf(admin);
+      const s = await runAsRunner(dbUrl, 'role-matrix-m1');
+      const ev = s.events.find((e) => e.msg === 'staging-sql.role_matrix');
+      const failed = matrixFailures(s.results);
+      check(`${label}: role-matrix-m1 refuses (role_matrix_failed, ${nFailed} of 68 failed, step_failed not step_done)`,
+        s.error?.id === 'role_matrix_failed' && JSON.stringify(ev) === `{"msg":"staging-sql.role_matrix","ok":false,"total":68,"passed":${68 - nFailed},"failed":${nFailed}}`
+        && !s.events.some((e) => e.msg === 'staging-sql.step_done'), `${describe(s.error)} ${JSON.stringify(ev)}`);
+      check(`${label}: the failing probes are the internal no-privilege probes of ${Object.keys(heldOn).join(', ')}, naming ${Object.values(heldOn).join(' / ')}`,
+        failed?.length === nFailed && Object.entries(heldOn).every(([actor, rels]) => failed.find((f) => f.actor === actor && f.test === INTERNAL_PROBE)?.observed.endsWith(` relations, held on: ${rels}`) === true),
+        JSON.stringify(failed));
+      const cmp = compareStates(before, await stateOf(admin), MATRIX_FULL_RUN_SEQUENCES);
+      check(`${label}: the refused role matrix left nothing behind (catalogue, table rows, sequences only ${MATRIX_FULL_RUN_SEQUENCES.join(', ')} moved forward)`,
+        cmp.problems.length === 0 && JSON.stringify(cmp.advanced) === JSON.stringify(MATRIX_FULL_RUN_SEQUENCES), `${cmp.problems.join('; ')} advanced=${cmp.advanced.join(',')}`);
+    };
+    /** The API-role privileges left on the app relations must be exactly `want` (MAINTAIN: none). */
+    const exposedExactly = async (label: string, stage: string, admin: pg.Client, want: string[]) => {
+      const x = await apiExposure(admin);
+      check(`${label}: after ${stage} the API-role privileges left on the ${x.relations} app relations are exactly ${want.join(', ') || 'none'}`,
+        JSON.stringify([...x.exposed].sort()) === JSON.stringify([...want].sort()) && x.maintain.length === 0, `exposed=${x.exposed.join(',')} maintain=${x.maintain.join(',')}`);
+    };
+    /** The runner's default-privilege entries for schema internal that give tables or sequences to anon, authenticated or PUBLIC. */
+    const internalDefaultsToApi = async (admin: pg.Client) => (await admin.query(`select count(*)::int as n from pg_default_acl d, aclexplode(d.defaclacl) x
+        where d.defaclrole = $1::regrole and d.defaclnamespace = 'internal'::regnamespace and d.defaclobjtype in ('r', 'S')
+          and x.grantee in (0, 'anon'::regrole, 'authenticated'::regrole)`, [RUNNER])).rows[0].n as number;
+    const INTERNAL_DANGEROUS_DEFAULTS = DANGEROUS_DEFAULT_ACL_SQL.filter((s) => s.startsWith('alter default privileges') && s.includes('in schema internal'));
+
+    // 9. Round 5 precondition: the runner's database-wide default privileges for anon/authenticated/PUBLIC make M1 refuse before it
+    //    changes anything; a database-wide default for service_role only does not.
+    {
+      const label = 'database-wide default privileges';
+      const clearGlobals = async (admin: pg.Client) => {
+        for (const kind of ['tables', 'sequences']) await admin.query(`alter default privileges for role ${RUNNER} revoke all on ${kind} from anon, authenticated, public, service_role`);
+      };
+      const refusedCleanly = async (name: string, r: { error: (Error & { code?: string }) | undefined; events: Array<Record<string, unknown>> }, before: { digest: string; n: number }, after: { digest: string; n: number }, admin: pg.Client) => {
+        check(`${label} (${name}): M1 refuses with P0001 and the fixed precondition text`, r.error?.code === 'P0001' && r.error?.message === GLOBAL_DEFAULT_MESSAGE, describe(r.error));
+        check(`${label} (${name}): the refusal carries only the m1_check id m1_runner_global_default_privileges, never the message`,
+          JSON.stringify(classifyRunnerFailure(r.error)) === '{"refusal":"server_or_driver_error","err_code":"P0001","m1_check":"m1_runner_global_default_privileges"}', JSON.stringify(classifyRunnerFailure(r.error)));
+        check(`${label} (${name}): step_failed, no step_done`, r.events.some((e) => e.msg === 'staging-sql.step_failed') && !r.events.some((e) => e.msg === 'staging-sql.step_done'));
+        check(`${label} (${name}): nothing was applied (catalogue snapshot incl. default privileges and memberships identical, no recruiter_* role)`,
+          before.digest === after.digest && before.n === after.n && (await admin.query("select count(*)::int as n from pg_roles where rolname like 'recruiter\\_%'")).rows[0].n === 0, `before=${before.n} after=${after.n}`);
+      };
+      const [first, ...rest] = GLOBAL_DEFAULT_VARIANTS;
+      const o = await applyAsRunner(globalCopyUrl, async (a) => { await a.query(PUBLIC_EXECUTE_SQL); await a.query(first![1]); });
+      try {
+        await refusedCleanly(first![0], o, o.before, o.after, o.admin);
+        await clearGlobals(o.admin);
+        for (const [name, sql] of rest) {
+          await o.admin.query(sql);
+          const before = (await o.admin.query(SNAPSHOT_SQL)).rows[0];
+          const s = await runAsRunner(globalCopyUrl, 'apply-m1');
+          await refusedCleanly(name, s, before, (await o.admin.query(SNAPSHOT_SQL)).rows[0], o.admin);
+          await clearGlobals(o.admin);
+        }
+        // Controls: database-wide defaults for service_role only, plus the round-1 schema-internal defaults for the API roles.
+        await o.admin.query(`alter default privileges for role ${RUNNER} grant select on tables to service_role`);
+        await o.admin.query(`alter default privileges for role ${RUNNER} grant usage on sequences to service_role`);
+        for (const sql of INTERNAL_DANGEROUS_DEFAULTS) await o.admin.query(sql);
+        check(`${label}: control: before M1 the runner's schema-internal defaults give tables and sequences to anon, authenticated and PUBLIC`, (await internalDefaultsToApi(o.admin)) > 0);
+        {
+          // An error injected at the very end of M1 (in memory; the file is never touched): past the precondition (so 22012, not
+          // P0001), and the whole file is rolled back, M1's default-privilege changes included.
+          const before = (await o.admin.query(SNAPSHOT_SQL)).rows[0];
+          const s = await runAsRunner(globalCopyUrl, 'apply-m1', { alter: (p) => ({ ...p, steps: p.steps.map((st) => ({ ...st, sql: `${st.sql}\nselect 1/0;\n` })) }) });
+          const after = (await o.admin.query(SNAPSHOT_SQL)).rows[0];
+          check(`${label}: control: a database-wide default for service_role only passes the precondition; an error at the end of M1 (22012) rolls back everything, default privileges included`,
+            s.error?.code === '22012' && before.digest === after.digest && before.n === after.n && (await internalDefaultsToApi(o.admin)) > 0, `${describe(s.error)} before=${before.n} after=${after.n}`);
+        }
+        const s = await runAsRunner(globalCopyUrl, 'apply-m1');
+        check(`${label}: control: M1 then applies as the Supabase-like runner`, s.error === undefined && s.events.some((e) => e.msg === 'staging-sql.step_done'), describe(s.error));
+        check(`${label}: control: after M1 the runner's schema-internal defaults give nothing to anon, authenticated or PUBLIC`, (await internalDefaultsToApi(o.admin)) === 0);
+        await checkNoApiExposure(label, 'M1 (control)', o.admin, 12);
+      } finally {
+        await o.admin.end();
+      }
+      await dropCase(globalCopyUrl);
+      check(`${label}: case cleaned up (its database and roles dropped)`, (await existingM1Roles()).length === 0);
+    }
+
+    // 10. An event trigger grants on M1's new tables between CREATE TABLE and anything after it (Codex review thr_xx2399pa3j B2).
+    {
+      const label = 'event trigger on new internal tables';
+      let prot = undefined as unknown as Protected;
+      const o = await applyAsRunner(eventCopyUrl, async (a) => {
+        await a.query(PUBLIC_EXECUTE_SQL);
+        await a.query(EVENT_TRIGGER_SQL);
+        prot = await protectedBefore(label, a, 0);
+      });
+      try {
+        const chain = async (stage: string) => {
+          const f = (await o.admin.query(`select has_table_privilege('service_role', 'internal.roster_lock', 'SELECT') as s,
+              (select relacl::text from pg_class where oid = 'internal.roster_lock'::regclass) as acl`)).rows[0];
+          check(`${label}: after ${stage} service_role still holds the SELECT on internal.roster_lock that anon passed on (grant option chain kept)`,
+            f.s === true && String(f.acl).includes('service_role=r/anon') && String(f.acl).includes(`anon=r*/${RUNNER}`), JSON.stringify(f));
+        };
+        check(`${label}: M1 applies as the Supabase-like runner (no REVOKE on its new tables, so no 2BP01)`, o.error === undefined && o.events.some((e) => e.msg === 'staging-sql.step_done'), describe(o.error));
+        await chain('M1');
+        await checkProtectedUnchanged(label, 'M1', o.admin, prot);
+        const want = ['internal.auth_events:anon', 'internal.roster_lock:anon'];
+        await exposedExactly(label, 'M1', o.admin, want);
+        for (const action of ['apply-m1b', 'apply-m1c']) {
+          const s = await runAsRunner(eventCopyUrl, action);
+          check(`${label}: ${action} applies as the Supabase-like runner`, s.error === undefined && s.events.some((e) => e.msg === 'staging-sql.step_done'), describe(s.error));
+        }
+        await exposedExactly(label, 'M1b and M1c', o.admin, want);
+        await chain('M1b and M1c');
+        await matrixRefuses(label, eventCopyUrl, o.admin, { anon: 'auth_events,roster_lock' });
+        await chain('the role matrix');
+        await checkProtectedUnchanged(label, 'M1b, M1c and the role matrix', o.admin, prot);
+      } finally {
+        await o.admin.end();
+      }
+      await dropCase(eventCopyUrl);
+      check(`${label}: case cleaned up (its database and roles dropped)`, (await existingM1Roles()).length === 0);
+    }
+
+    // 11-12. The re-apply path with retained tables (Codex review thr_xx2399pa3j B1).
+    const reapplyCase = async (label: string, dbUrl: string, fixture: string[], effective: boolean) => {
+      let membershipGranted = false;
+      const o = await applyAsRunner(dbUrl, async (a) => {
+        await a.query(PUBLIC_EXECUTE_SQL);
+        // Case 12 also starts with the round-1 schema-internal defaults, to prove M1's revoke of them persists after the backouts.
+        if (effective) for (const sql of INTERNAL_DANGEROUS_DEFAULTS) await a.query(sql);
+      });
+      try {
+        check(`${label}: M1 applies as the Supabase-like runner`, o.error === undefined && o.events.some((e) => e.msg === 'staging-sql.step_done'), describe(o.error));
+        for (const action of ['apply-m1b', 'apply-m1c']) {
+          const s = await runAsRunner(dbUrl, action);
+          check(`${label}: ${action} applies as the Supabase-like runner`, s.error === undefined && s.events.some((e) => e.msg === 'staging-sql.step_done'), describe(s.error));
+        }
+        await checkNoApiExposure(label, 'M1, M1b and M1c', o.admin, 14);
+        // The backout window, credential retirement and the three backouts, as the runner (it needs pg_signal_backend to end app
+        // sessions and SELECT/REFERENCES on the Auth shim's users table for the M1b backout, as Supabase's postgres has).
+        await o.admin.query(`grant pg_signal_backend to ${RUNNER}`);
+        await o.admin.query(`grant select, references on auth.users to ${RUNNER}`);
+        for (const action of ['window-on', 'retire-app-credentials', 'backout-m1c', 'backout-m1b', 'backout-m1']) {
+          const s = await runAsRunner(dbUrl, action);
+          check(`${label}: ${action} completes as the Supabase-like runner`, s.error === undefined, describe(s.error));
+        }
+        check(`${label}: after the backouts M1's tables are retained`, (await o.admin.query(`select to_regclass('internal.app_sessions') is not null as r`)).rows[0].r === true);
+        if (effective) {
+          check(`${label}: after the backouts the runner's schema-internal defaults still give nothing to anon, authenticated or PUBLIC (M1's revoke persists)`, (await internalDefaultsToApi(o.admin)) === 0);
+          const runnerUrl = new URL(dbUrl); runnerUrl.username = RUNNER; runnerUrl.password = runnerPw;
+          const c = new pg.Client({ connectionString: runnerUrl.toString() });
+          await c.connect();
+          try {
+            await c.query('create table internal.tr_review_future (id int)');
+            await c.query('create sequence internal.tr_review_future_seq');
+            const f = (await o.admin.query(`select has_table_privilege('anon', 'internal.tr_review_future', 'SELECT') as t, has_sequence_privilege('anon', 'internal.tr_review_future_seq', 'USAGE') as s,
+                has_table_privilege('authenticated', 'internal.tr_review_future', 'SELECT') as ta`)).rows[0];
+            check(`${label}: a table and a sequence the runner creates in internal after the backouts give anon and authenticated nothing`, f.t === false && f.s === false && f.ta === false, JSON.stringify(f));
+            await c.query('drop table internal.tr_review_future');
+            await c.query('drop sequence internal.tr_review_future_seq');
+          } finally {
+            await c.end();
+          }
+        }
+        if (effective) {
+          assert.equal((await o.admin.query(`select exists (select 1 from pg_auth_members where roleid = 'anon'::regrole and member = 'service_role'::regrole) as m`)).rows[0].m, false, 'service_role must not be a member of anon before case 12');
+          membershipGranted = true;
+          serviceAnonGranted = true;
+        }
+        for (const sql of fixture) await o.admin.query(sql);
+        const prot = await protectedBefore(label, o.admin, 12, M1_ROLES, 'reapply-m1');
+        const actualReads = async (stage: string) => {
+          if (!effective) return;
+          for (const r of ['service_role', REVIEW_RECRUITER]) {
+            await o.admin.query('begin');
+            let err: (Error & { code?: string }) | undefined;
+            try {
+              await o.admin.query(`set local role ${r}`);
+              await o.admin.query('select count(*) from internal.app_sessions');
+            } catch (e) {
+              err = e as Error & { code?: string };
+            } finally {
+              await o.admin.query('rollback');
+            }
+            check(`${label}: ${stage}: ${r} can SELECT from internal.app_sessions (only through anon)`, err === undefined, `${err?.code ?? ''} ${err?.message ?? ''}`);
+          }
+        };
+        const dependency = async (stage: string) => {
+          if (effective) return;
+          const acl = (await o.admin.query(`select relacl::text as a from pg_class where oid = 'internal.app_sessions'::regclass`)).rows[0].a as string;
+          check(`${label}: ${stage}: the grant anon passed on to service_role is still there`, acl.includes('service_role=r/anon') && acl.includes(`anon=r*/${RUNNER}`), acl);
+        };
+        await actualReads('before the re-apply');
+        await dependency('before the re-apply');
+        const m1 = await runAsRunner(dbUrl, 'reapply-m1');
+        check(`${label}: reapply-m1 applies as the Supabase-like runner (no REVOKE on the retained tables, so no 2BP01)`, m1.error === undefined && m1.events.some((e) => e.msg === 'staging-sql.step_done'), describe(m1.error));
+        await checkProtectedUnchanged(label, 'reapply-m1', o.admin, prot);
+        await actualReads('after reapply-m1');
+        await dependency('after reapply-m1');
+        for (const action of ['reapply-m1b', 'reapply-m1c']) {
+          const s = await runAsRunner(dbUrl, action);
+          check(`${label}: ${action} applies as the Supabase-like runner`, s.error === undefined && s.events.some((e) => e.msg === 'staging-sql.step_done'), describe(s.error));
+        }
+        await exposedExactly(label, 'the three re-applies', o.admin, ['internal.app_sessions:anon']);
+        await checkProtectedUnchanged(label, 'reapply-m1b and reapply-m1c', o.admin, prot);
+        await matrixRefuses(label, dbUrl, o.admin, { anon: 'app_sessions' });
+        await checkProtectedUnchanged(label, 'the role matrix', o.admin, prot);
+        await actualReads('after the re-applies and the role matrix');
+        await dependency('after the re-applies and the role matrix');
+      } finally {
+        await o.admin.end();
+      }
+      await dropCase(dbUrl);
+      if (membershipGranted) {
+        await onCluster(async (c) => { await c.query('revoke anon from service_role'); });
+        serviceAnonGranted = false;
+      }
+      check(`${label}: case cleaned up (its database and roles dropped${membershipGranted ? ', service_role no longer a member of anon' : ''})`, (await existingM1Roles()).length === 0);
+    };
+    await reapplyCase('re-apply with a dependent grant on a retained table', reapplyDepCopyUrl, REAPPLY_DEPENDENT_SQL, false);
+    await reapplyCase('re-apply with rights held through anon on a retained table', reapplyEffCopyUrl, REAPPLY_EFFECTIVE_SQL, true);
   } finally {
     // Leaves the cluster without the case roles even after a failed check (later cases and reruns need them absent).
-    for (const v of [...Object.values(URLS), negCopyUrl, daclCopyUrl, unownedCopyUrl, depgrantCopyUrl, inheritedCopyUrl]) await dropCase(v as string).catch(() => undefined);
+    for (const v of [...Object.values(URLS), negCopyUrl, daclCopyUrl, unownedCopyUrl, depgrantCopyUrl, inheritedCopyUrl, globalCopyUrl, eventCopyUrl, reapplyDepCopyUrl, reapplyEffCopyUrl]) await dropCase(v as string).catch(() => undefined);
     if (serviceAnonGranted) await onCluster(async (c) => { await c.query('revoke anon from service_role'); }).catch(() => undefined);
   }
   console.log(`PASS m1-supabase-runner: ${n} checks passed`);
