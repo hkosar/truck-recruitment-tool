@@ -30,6 +30,7 @@
 //            as `<commit>:path:line` (an older commit) and bare `:123` are not checked.
 //  UNMENTIONED  For every code file the runbook cites, each `result=WORD` literal the file prints must appear as WORD
 //            somewhere in the runbook (catches a line the code prints that the runbook never mentions, e.g. SKIPPED).
+//            This checker's own source (scripts/check-runbook-vs-code.mjs) is skipped: its comments only describe the syntax.
 import { execFileSync } from 'node:child_process';
 import { readFileSync, readdirSync, statSync } from 'node:fs';
 import { join, posix, resolve } from 'node:path';
@@ -60,6 +61,7 @@ function makeSource(root) {
   return { top, files, read: (f) => git('show', `HEAD:${f}`) };
 }
 
+const SELF = 'scripts/check-runbook-vs-code.mjs';
 const lineCount = (text) => (text === '' ? 0 : text.split('\n').length - (text.endsWith('\n') ? 1 : 0));
 const tail = (s) => (s.length > 70 ? `${s.slice(0, 67)}...` : s);
 
@@ -166,7 +168,7 @@ export function checkRunbook(markdown, { root, info } = {}) {
     let rootAlt = '';
     let midRoots = []; // [start, end) spans of the root written mid-token (glued to a path character before it); a match starting inside one is not a repo path
     if (/[^A-Za-z0-9_.:\\/-]/.test(src.top)) {
-      const rootPattern = src.top.replace(/[\\/]+$/, '').replace(/[\\/]|[.*+?^${}()|[\]]|[A-Za-z]/g, (c) => (c === '\\' || c === '/' ? '[\\\\/]' : /[A-Za-z]/.test(c) ? `[${c.toLowerCase()}${c.toUpperCase()}]` : `\\${c}`));
+      const rootPattern = src.top.replace(/[\\/]+$/, '').replace(/[\\/]|[.*+?^${}()|[\]]|[A-Za-zÀ-￿]/g, (c) => (c === '\\' || c === '/' ? '[\\\\/]' : c.toLowerCase() !== c.toUpperCase() && c.toLowerCase().length === 1 && c.toUpperCase().length === 1 ? `[${c.toLowerCase()}${c.toUpperCase()}]` : /[A-Za-z]/.test(c) ? c : `\\${c}`));
       rootAlt = `${rootPattern}[A-Za-z0-9_.-]*[\\\\/]|`; // the optional name characters let a sibling such as "<root>-old" be read whole (then it is outside, not inside)
       for (const rm of raw.matchAll(new RegExp(rootPattern, 'g'))) if (rm.index > 0 && /[A-Za-z0-9_./\\-]/.test(raw[rm.index - 1])) midRoots.push([rm.index, rm.index + rm[0].length]);
     }
@@ -225,6 +227,7 @@ export function checkRunbook(markdown, { root, info } = {}) {
 
   // UNMENTIONED result= values of cited code files
   for (const f of [...citedCode].sort()) {
+    if (f === SELF) continue;
     const vals = new Set([...read(f).matchAll(/result=([A-Z][A-Z_]+)/g)].map((m) => m[1]));
     for (const v of vals) if (!new RegExp(`\\b${v}\\b`).test(markdown)) add('UNMENTIONED', 0, `${f} prints result=${v}; the runbook never mentions ${v}`);
   }
