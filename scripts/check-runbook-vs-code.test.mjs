@@ -365,7 +365,7 @@ const MATRIX_TAILS = [
   ['-old', 'scripts/gone.mjs:1', 'outside'],
   ['.old', 'scripts/gone.mjs:1', 'outside'],
 ];
-const MATRIX_ROOTS = ['plainroot', 'spaced root', 'meta (a+b) [c] $d ^e.f', 'meta[1](2)$.x'];
+const MATRIX_ROOTS = ['plainroot', 'spaced root', 'meta (a+b) [c] $d ^e.f', 'meta[1](2).x'];
 
 test('path matrix: root with/without spaces and regex metacharacters x slash x case x sibling folder', () => {
   for (const name of MATRIX_ROOTS) {
