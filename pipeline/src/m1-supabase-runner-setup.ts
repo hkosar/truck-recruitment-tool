@@ -1,5 +1,6 @@
-// A3 LOCAL only (TRUCKRECRU-149): the Supabase-like runner setup shared by m1-supabase-runner-a3.test.ts and pg17-probe-apply-m1.ts
-// (scripts/pg17-probe.mjs --apply-m1), moved here unchanged so both apply M1 from the same starting state.
+// A3 LOCAL only (TRUCKRECRU-149): a copy of the Supabase-like runner setup of m1-supabase-runner-a3.test.ts, for pg17-probe-apply-m1.ts
+// (scripts/pg17-probe.mjs --apply-m1), so both apply M1 from the same starting state. The a3 suite keeps its own copy (a staging runbook
+// cites that file, so it stays unchanged); scripts/pg17-probe.test.mjs fails if the two copies differ.
 
 /** A made-up rebuilt-staging ref and URL: planRebuiltSqlRun only plans with them; the executor gets an injected loopback client. */
 export const REF = 'abcdefghijklmnopqrst';

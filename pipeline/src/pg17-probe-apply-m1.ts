@@ -1,6 +1,6 @@
 // A3 LOCAL only (TRUCKRECRU-149): the M1 step of scripts/pg17-probe.mjs --apply-m1, on that probe's own throwaway cluster. It does
-// what m1-supabase-runner-a3.test.ts does before its case 2 (PostGIS in public): as the superuser, the shared runner setup
-// (m1-supabase-runner-setup.ts: a NOSUPERUSER CREATEROLE INHERIT login, the handover, membership of anon/authenticated/service_role)
+// what m1-supabase-runner-a3.test.ts does before its case 2 (PostGIS in public): as the superuser, that suite's runner setup
+// (copied in m1-supabase-runner-setup.ts: a NOSUPERUSER CREATEROLE INHERIT login, the handover, membership of anon/authenticated/service_role)
 // and PUBLIC EXECUTE on the PostGIS stand-ins; then, logged in as that runner, the staging runner's real apply-m1 plan and executor
 // (planRebuiltSqlRun / executeRebuiltSqlPlan) with an injected loopback client. No SQL file is changed or altered in memory.
 // Env: PG17_PROBE_ADMIN_URL (superuser URL of a loopback tr_ database built with a3-build-test-db.mjs --no-m1 --no-m1b --no-m1c),

@@ -51,6 +51,10 @@ const TSX_LOADER = join(root, 'pipeline', 'node_modules', 'tsx', 'dist', 'loader
 const APPLY_M1_HELPER = join(root, 'pipeline', 'src', 'pg17-probe-apply-m1.ts');
 const BUILD_DB = join(root, 'scripts', 'a3-build-test-db.mjs');
 
+/** --apply-m1's installed packages that are missing: app's pg (a3-build-test-db.mjs), pipeline's pg and tsx (the M1 helper). Also used by
+ *  pg17-probe.test.mjs to skip its --apply-m1 tests where they are not installed (the repo-checks CI job installs only pipeline). */
+export const missingApplyM1Deps = () => [join(root, 'app', 'node_modules', 'pg'), join(root, 'pipeline', 'node_modules', 'pg'), TSX_LOADER].filter((p) => !existsSync(p));
+
 /** The probes, in output order. Each is one read-only statement; psql prints its rows unaligned with a header line. */
 export const PROBES = [
   { id: 'server_version_num', sql: 'show server_version_num' },
@@ -247,7 +251,7 @@ async function run() {
   const { applyM1 } = opts;
   const adminUser = applyM1 ? A3_ADMIN_USER : ADMIN_USER;
   if (applyM1) {
-    const missing = [join(root, 'app', 'node_modules', 'pg'), join(root, 'pipeline', 'node_modules', 'pg'), TSX_LOADER].filter((p) => !existsSync(p));
+    const missing = missingApplyM1Deps();
     if (missing.length) {
       console.error(`REFUSED: --apply-m1 needs the installed packages; missing: ${missing.join(', ')}`);
       return 2;

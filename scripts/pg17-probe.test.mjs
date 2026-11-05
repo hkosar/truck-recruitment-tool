@@ -10,7 +10,7 @@ import { tmpdir } from 'node:os';
 import { dirname, join, parse, resolve } from 'node:path';
 import { setTimeout as sleep } from 'node:timers/promises';
 import { test } from 'node:test';
-import { A3_ADMIN_USER, DEFAULT_PG17_BIN, DIR_PREFIX, INTERRUPT_SIGNALS, M1_DB, PROBES, diffProbes, formatDiff, interruptExitCode, isOwnProbeDir, parseProbeArgs, preloadArgs, probeRows, psqlArgs, psqlEnv } from './pg17-probe.mjs';
+import { A3_ADMIN_USER, DEFAULT_PG17_BIN, DIR_PREFIX, INTERRUPT_SIGNALS, M1_DB, PROBES, diffProbes, formatDiff, interruptExitCode, isOwnProbeDir, missingApplyM1Deps, parseProbeArgs, preloadArgs, probeRows, psqlArgs, psqlEnv } from './pg17-probe.mjs';
 
 const base = resolve(import.meta.dirname, '..');
 const probePath = join(import.meta.dirname, 'pg17-probe.mjs');
@@ -423,8 +423,28 @@ test('a failing query after the server started is reported, the later probes sti
 });
 
 // ---- --apply-m1 (TRUCKRECRU-149), on real local PostgreSQL 17 (127.0.0.1 only) with the installed app/pipeline packages.
-const haveM1Deps = ['app/node_modules/pg', 'pipeline/node_modules/pg', 'pipeline/node_modules/tsx/dist/loader.mjs'].every((p) => existsSync(join(base, p)));
+const haveM1Deps = missingApplyM1Deps().length === 0;
 const m1Skip = !havePg17 ? `no PostgreSQL 17 in ${pgBin}` : !haveM1Deps ? 'app/pipeline node_modules not installed' : false;
+
+test('--apply-m1 uses an exact copy of the m1-supabase-runner-a3.test.ts runner setup (m1-supabase-runner-setup.ts)', () => {
+  const read = (name) => readFileSync(join(base, 'pipeline', 'src', name), 'utf8').replace(/\r\n/g, '\n');
+  const a3 = read('m1-supabase-runner-a3.test.ts');
+  const copy = read('m1-supabase-runner-setup.ts');
+  const decl = (text, name, prefix) => {
+    const m = new RegExp(`^${prefix}const ${name} = ('[^'\\n]*'|\`[^\`]*\`);$`, 'm').exec(text);
+    assert.ok(m, `${name} is declared`);
+    return m[1];
+  };
+  for (const name of ['REF', 'FAKE_URL', 'RUNNER', 'HANDOVER_SQL', 'STANDIN_EXT_SQL', 'PUBLIC_EXECUTE_SQL']) assert.equal(decl(copy, name, 'export '), decl(a3, name, ''), name);
+  // The superuser's setup statements, in the a3 suite's order.
+  const statements = ['`create role ${RUNNER} login nosuperuser createrole inherit password ${pwLiteral}`', 'HANDOVER_SQL', '`grant anon, authenticated, service_role to ${RUNNER}`'];
+  const at = (text, needles) => needles.map((s) => { const i = text.indexOf(s); assert.ok(i >= 0, s); return i; });
+  const inA3 = at(a3, statements.map((s) => `await admin.query(${s});`));
+  assert.deepEqual([...inA3].sort((x, y) => x - y), inA3, 'the a3 suite runs them in this order');
+  const body = /export const runnerSetupStatements = \(pwLiteral: string\): string\[\] => \[\n([\s\S]*?)\n\];/.exec(copy);
+  assert.ok(body, 'runnerSetupStatements is declared');
+  assert.deepEqual(body[1].split('\n').map((l) => l.trim()), statements.map((s) => `${s},`));
+});
 
 /** The text between two section markers of the probe output (end: the next "#### " line, or the end). */
 const section = (out, title) => { const i = out.indexOf(`#### ${title}`); if (i < 0) return ''; const j = out.indexOf('\n#### ', i + 1); return out.slice(i, j < 0 ? undefined : j); };
