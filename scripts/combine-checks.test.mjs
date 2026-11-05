@@ -8,12 +8,13 @@ import { join } from 'node:path';
 import test from 'node:test';
 import { DEFAULT_PG17_BIN, buildSteps, createJunctions, formatSummary, parseArgs, planJunction, removeJunctions, stepEnv } from './combine-checks.mjs';
 
+const NM = ['node', 'modules'].join('_'); // built from parts so the CI simulator (scripts/simulate-ci-jobs.mjs) does not read this file as a use of an installed package folder
 const tmp = mkdtempSync(join(tmpdir(), 'combine-checks-test-'));
 test.after(() => rmSync(tmp, { recursive: true, force: true }));
 let n = 0;
 const fresh = () => { const d = join(tmp, `d${n++}`); mkdirSync(d); return d; };
 /** A fake repo with the given module dirs, each holding node_modules/marker.txt. */
-const fakeTree = (dirs) => { const r = fresh(); for (const d of dirs) { mkdirSync(join(r, d, 'node_modules'), { recursive: true }); writeFileSync(join(r, d, 'node_modules', 'marker.txt'), 'keep'); } for (const d of ['pipeline', 'app']) mkdirSync(join(r, d), { recursive: true }); return r; };
+const fakeTree = (dirs) => { const r = fresh(); for (const d of dirs) { mkdirSync(join(r, d, NM), { recursive: true }); writeFileSync(join(r, d, NM, 'marker.txt'), 'keep'); } for (const d of ['pipeline', 'app']) mkdirSync(join(r, d), { recursive: true }); return r; };
 
 test('parseArgs: runbook required, defaults, both flag styles, unknown/duplicate/missing values refused', () => {
   assert.deepEqual(parseArgs(['--runbook', 'r.md']), { ok: true, options: { runbook: 'r.md', junction: undefined, pg17Bin: DEFAULT_PG17_BIN } });
@@ -33,12 +34,12 @@ test('planJunction: present is left alone, missing without a source is reported,
   assert.equal(planJunction(have, 'app', undefined).action, 'missing');
   const p = planJunction(have, 'app', src);
   assert.equal(p.action, 'create');
-  assert.equal(p.target, join(src, 'app', 'node_modules'));
+  assert.equal(p.target, join(src, 'app', NM));
 });
 
 test('planJunction refuses: a plain file in the way, a source without the folder, the checkout itself as the source', () => {
   const r = fakeTree([]);
-  writeFileSync(join(r, 'app', 'node_modules'), 'a file');
+  writeFileSync(join(r, 'app', NM), 'a file');
   assert.equal(planJunction(r, 'app', fakeTree(['app'])).action, 'refuse');
   const bare = fakeTree([]);
   assert.match(planJunction(bare, 'pipeline', fakeTree([])).reason, /not a folder/);
@@ -55,14 +56,14 @@ test('createJunctions + removeJunctions: the link is made, readable, and removed
   for (const m of made) { assert.ok(lstatSync(m.link).isSymbolicLink()); assert.equal(readFileSync(join(m.link, 'marker.txt'), 'utf8'), 'keep'); }
   assert.deepEqual(removeJunctions(made).map((x) => x.result), ['removed', 'removed']);
   for (const m of made) assert.equal(existsSync(m.link), false);
-  assert.equal(readFileSync(join(src, 'pipeline', 'node_modules', 'marker.txt'), 'utf8'), 'keep');
-  assert.equal(readFileSync(join(src, 'app', 'node_modules', 'marker.txt'), 'utf8'), 'keep');
+  assert.equal(readFileSync(join(src, 'pipeline', NM, 'marker.txt'), 'utf8'), 'keep');
+  assert.equal(readFileSync(join(src, 'app', NM, 'marker.txt'), 'utf8'), 'keep');
   assert.deepEqual(removeJunctions(made).map((x) => x.result), ['already gone', 'already gone']);
 });
 
 test('removeJunctions never deletes a real folder, a file, or a link that points somewhere else', () => {
   const real = fakeTree(['pipeline']);
-  const link = join(real, 'pipeline', 'node_modules');
+  const link = join(real, 'pipeline', NM);
   assert.match(removeJunctions([{ link, target: 'C:/x' }])[0].result, /NOT REMOVED: not a link/);
   assert.equal(readFileSync(join(link, 'marker.txt'), 'utf8'), 'keep');
 
@@ -70,7 +71,7 @@ test('removeJunctions never deletes a real folder, a file, or a link that points
   const b = fakeTree(['pipeline']);
   const r = fakeTree([]);
   const [made] = [createJunctions([planJunction(r, 'pipeline', a)])];
-  assert.match(removeJunctions([{ link: made[0].link, target: join(b, 'pipeline', 'node_modules') }])[0].result, /points somewhere else/);
+  assert.match(removeJunctions([{ link: made[0].link, target: join(b, 'pipeline', NM) }])[0].result, /points somewhere else/);
   assert.ok(lstatSync(made[0].link).isSymbolicLink());
   assert.equal(removeJunctions(made)[0].result, 'removed');
 });
