@@ -395,15 +395,14 @@ test('the checked root appearing mid-token is not a repo citation', () => {
   }
 });
 
-// TODO(TRUCKRECRU-154): real checker bugs found by the matrix; not fixed here. Remove `todo` once the checker is fixed.
-test('spaced checked root mid-token with a code-file tail is not a repo citation', { todo: 'spaced root: the tail fragment after a mid-token root is checked as a repo-relative file (CITATION line=1 file not found: root/scripts/missing.mjs)' }, () => {
+test('spaced checked root mid-token with a code-file tail is not a repo citation', () => {
   withRoot('checked root', { 'scripts/plain.mjs': 'a\nb\n' }, (r) => {
     const fwd = r.replace(/\\/g, '/');
     assert.deepEqual(spKinds(`see prefix${fwd}/scripts/missing.mjs:1\n`, r), []);
   });
 });
 
-test('unspaced checked root containing + $ ^ , & = # % [ ] ( ) in the middle of its name is matched as a whole root', { todo: 'unspaced root with + $ ^ , & = # % [ ] ( ) in the middle of its name: the path token stops at that character, so a good citation is reported as CITATION file not found: <tail-after-char>/scripts/p.mjs' }, () => {
+test('unspaced checked root containing + $ ^ , & = # % [ ] ( ) in the middle of its name is matched as a whole root', () => {
   withRoot('meta+nospace$^(x)[1]y', { 'scripts/plain.mjs': 'a\nb\n' }, (r) => {
     const fwd = r.replace(/\\/g, '/');
     assert.deepEqual(spKinds(`see ${fwd}/scripts/plain.mjs:2\n`, r), []);

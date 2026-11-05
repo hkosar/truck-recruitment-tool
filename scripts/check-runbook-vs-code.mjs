@@ -162,14 +162,19 @@ export function checkRunbook(markdown, { root, info } = {}) {
     // CITATION
     // A checked folder whose own path contains spaces (a TEMP folder such as C:\Users\Jo Smith\...) cannot match the space-free path pattern,
     // so that exact folder path (either slash, any letter case) is one more allowed start of a path. No text is rewritten, so nothing can collide.
+    // The same holds for a folder name with any character the path pattern does not allow (+ $ ^ , & = # % [ ] ( ) ...).
     let rootAlt = '';
-    if (src.top.includes(' ')) {
+    let midRoots = []; // [start, end) spans of the root written mid-token (glued to a path character before it); a match starting inside one is not a repo path
+    if (/[^A-Za-z0-9_.:\\/-]/.test(src.top)) {
       const rootPattern = src.top.replace(/[\\/]+$/, '').replace(/[\\/]|[.*+?^${}()|[\]]|[A-Za-z]/g, (c) => (c === '\\' || c === '/' ? '[\\\\/]' : /[A-Za-z]/.test(c) ? `[${c.toLowerCase()}${c.toUpperCase()}]` : `\\${c}`));
       rootAlt = `${rootPattern}[A-Za-z0-9_.-]*[\\\\/]|`; // the optional name characters let a sibling such as "<root>-old" be read whole (then it is outside, not inside)
+      for (const rm of raw.matchAll(new RegExp(rootPattern, 'g'))) if (rm.index > 0 && /[A-Za-z0-9_./\\-]/.test(raw[rm.index - 1])) midRoots.push([rm.index, rm.index + rm[0].length]);
     }
     const re = new RegExp(`(^|[^A-Za-z0-9_./\\\\-])((?:[0-9a-f]{7,40}:)?)((?:${rootAlt}[A-Za-z]:[/\\\\])?(?:[A-Za-z0-9_.-]+[/\\\\])*[A-Za-z0-9_.-]+\\.${CITE_EXT}):(\\d+(?:-\\d+)?(?:, ?\\d+(?:-\\d+)?)*)`, 'g');
     for (const m of raw.matchAll(re)) {
       if (m[2]) continue; // older commit
+      const start = m.index + m[1].length;
+      if (midRoots.some(([a, b]) => start > a && start < b)) continue; // fragment of a mid-token root
       let path = normalizePath(m[3]);
       let insideByDrive = false;
       if (/^[A-Za-z]:\//.test(path)) { // Windows drive path: a repo path when inside the folder being checked, otherwise INFO
