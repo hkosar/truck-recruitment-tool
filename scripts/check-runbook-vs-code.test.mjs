@@ -305,4 +305,55 @@ test('../ citations stay INFO; the repo-folder rule uses the first two folder le
   assert.deepEqual(k('see mixeddir/nothere.md:1\n'), ['CITATION']);
 });
 
+// A checked folder whose own path has spaces (or the text SPACE_0x20_) is matched as a whole; no text of a citation is ever rewritten.
+const SENT = 'SPACE_0x20_';
+function withRoot(name, files, fn) {
+  const base = mkdtempSync(join(tmpdir(), 'runbook-check-sp-'));
+  const r = join(base, name);
+  for (const [f, body] of Object.entries(files)) { mkdirSync(join(r, f, '..'), { recursive: true }); writeFileSync(join(r, f), body); }
+  try { fn(r); } finally { rmSync(base, { recursive: true, force: true }); }
+}
+const spKinds = (md, r, info = []) => checkRunbook(md, { root: r, info }).map((f) => f.split(' ')[0]);
+
+test('spaced checked root: absolute citations match with either slash and any case; sibling and mid-token roots do not', () => {
+  withRoot('checked root', { 'scripts/plain.mjs': 'a\nb\n', 'docs/n.md': 'x\n' }, (r) => {
+    const fwd = r.replace(/\\/g, '/');
+    const bs = fwd.replace(/\//g, '\\');
+    for (const [base, s] of [[fwd, '/'], [bs, '\\'], [fwd.toUpperCase(), '/']]) {
+      assert.deepEqual(spKinds(`see ${base}${s}scripts${s}plain.mjs:2\n`, r), [], base);
+      assert.deepEqual(spKinds(`see ${base}${s}scripts${s}plain.mjs:99\n`, r), ['CITATION'], base);
+      assert.deepEqual(spKinds(`see ${base}${s}scripts${s}gone.mjs:1\n`, r), ['CITATION'], base);
+    }
+    const info = [];
+    assert.deepEqual(spKinds(`see ${fwd}x/scripts/plain.mjs:1 and ${fwd}-old/scripts/gone.mjs:1\n`, r, info), [], 'sibling folders are outside');
+    assert.equal(info.length, 2);
+  });
+});
+
+test('a file literally named with the sentinel is found, not rewritten', () => {
+  for (const name of ['checked root', 'checkedroot']) {
+    withRoot(name, { [`scripts/literal${SENT}file.mjs`]: 'one\n' }, (r) => {
+      assert.deepEqual(spKinds(`see scripts/literal${SENT}file.mjs:1\n`, r), [], name);
+    });
+  }
+});
+
+test('a missing sentinel-named file is not satisfied by its de-sentinelled twin', () => {
+  for (const name of ['checked root', 'checkedroot']) {
+    withRoot(name, { 'scripts/hidden file.mjs': 'one\n', 'scripts/other.mjs': 'one\n' }, (r) => {
+      assert.deepEqual(spKinds(`see scripts/hidden${SENT}file.mjs:1\n`, r), ['CITATION'], name);
+    });
+  }
+});
+
+test('a checked root that itself contains the sentinel keeps its text (spaced or not)', () => {
+  for (const name of [`checked${SENT}root`, `checked root${SENT}x`]) {
+    withRoot(name, { 'scripts/plain.mjs': 'a\nb\n' }, (r) => {
+      const fwd = r.replace(/\\/g, '/');
+      assert.deepEqual(spKinds(`see ${fwd}/scripts/plain.mjs:2\n`, r), [], name);
+      assert.deepEqual(spKinds(`see ${fwd}/scripts/plain.mjs:99\n`, r), ['CITATION'], name);
+    });
+  }
+});
+
 test('cleanup', () => { rmSync(root, { recursive: true, force: true }); });
