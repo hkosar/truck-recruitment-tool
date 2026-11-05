@@ -4,7 +4,7 @@
 // network guard) is passed on to the child as an argument, never through NODE_OPTIONS.
 import assert from 'node:assert/strict';
 import { spawn, spawnSync } from 'node:child_process';
-import { existsSync, mkdtempSync, readFileSync, rmSync, writeFileSync } from 'node:fs';
+import { existsSync, mkdtempSync, readFileSync, readdirSync, rmSync, writeFileSync } from 'node:fs';
 import { connect } from 'node:net';
 import { tmpdir } from 'node:os';
 import { dirname, join, parse, resolve } from 'node:path';
@@ -246,4 +246,133 @@ test('an uncaught error during initdb waits for initdb, then cleans up: folder d
   assert.doesNotMatch(r.out, /CLEANUP \(at exit\)/);
   assert.equal(r.record.folderExistsAtEnd, true, 'the folder was deleted while initdb still ran');
   assert.equal(existsSync(r.dir), false, 'the folder is deleted once initdb has ended');
+});
+
+// ---- Crashes, exits and signals at real setup steps. Unlike the stand-in tests above, initdb, pg_ctl start and psql run for real (local
+// PostgreSQL 17, 127.0.0.1 only). A --require preload written by this test lets the real child be spawned unchanged, then acts on the probe
+// itself: it throws, rejects, exits or raises signals (twice, like a repeated Ctrl+C). The probe is our own child and the only thing acted on.
+const INJECT = `'use strict';
+const cp = require('node:child_process');
+const fs = require('node:fs');
+const { basename } = require('node:path');
+const { syncBuiltinESMExports } = require('node:module');
+const cfg = JSON.parse(process.env.PG17_PROBE_TEST_INJECT);
+const stageOf = (name, args) => (name === 'initdb' ? 'initdb' : name === 'pg_ctl' && args.includes('start') ? 'start' : name === 'psql' ? 'query' : '');
+const original = cp.spawn;
+let injected = false;
+cp.spawn = function (cmd, args, opts) {
+  const name = basename(String(cmd)).toLowerCase().replace(/\\.exe$/, '');
+  if (injected || stageOf(name, args) !== cfg.step) return original.call(this, cmd, args, opts);
+  injected = true;
+  // The two failure cases change the real command (an invalid initdb option, a query that cannot run) and then leave the probe alone.
+  if (cfg.action === 'bad-option') return original.call(this, cmd, [...args, '--test-invalid-option'], opts);
+  if (cfg.action === 'bad-query') {
+    const bad = [...args];
+    bad[bad.indexOf('-c') + 1] = 'select pg_catalog.test_missing_function()';
+    return original.call(this, cmd, bad, opts);
+  }
+  const child = original.call(this, cmd, args, opts);
+  const act = () => {
+    console.error('TEST INJECT: ' + cfg.step + ':' + cfg.action + ', owned child pid ' + child.pid);
+    if (cfg.action === 'exit' || cfg.action === 'exit-signal') process.exit(0);
+    else if (cfg.action === 'throw') throw new Error('test crash during ' + cfg.step);
+    else if (cfg.action === 'reject') Promise.reject(new Error('test rejection during ' + cfg.step));
+    else { process.emit(cfg.action, cfg.action); process.emit(cfg.action, cfg.action); }
+  };
+  if (cfg.after === 'close') child.once('close', () => setImmediate(act));
+  else setImmediate(act);
+  return child;
+};
+const sync = cp.spawnSync;
+cp.spawnSync = function (cmd, args, opts) {
+  if (cfg.action === 'exit-signal' && args.includes('stop')) {
+    console.error('TEST INJECT: duplicate SIGINT events during the synchronous exit cleanup');
+    process.emit('SIGINT', 'SIGINT');
+    process.emit('SIGINT', 'SIGINT');
+  }
+  return sync.call(this, cmd, args, opts);
+};
+syncBuiltinESMExports();
+`;
+
+const probeFolders = () => readdirSync(base).filter((n) => n.startsWith(DIR_PREFIX));
+
+/** Runs the probe with the injecting preload; returns exit, output, the cluster port (if one started) and the probe folders it left. */
+async function runInjected(t, { step, action, after }) {
+  const work = mkdtempSync(join(tmpdir(), 'pg17-probe-inject-'));
+  t.after(() => rmSync(work, { recursive: true, force: true }));
+  const preload = join(work, 'inject.cjs');
+  writeFileSync(preload, INJECT);
+  const env = { ...process.env, PG17_PROBE_TEST_INJECT: JSON.stringify({ step, action, after }) };
+  delete env.NODE_TEST_CONTEXT;
+  delete env.NODE_OPTIONS;
+  delete env.PG17_PROBE_TEST_HOOK;
+  delete env.PG17_PROBE_TEST_STANDIN;
+  const before = new Set(probeFolders());
+  const child = spawn(process.execPath, [...preloadArgs(process.execArgv), '--require', preload, probePath], { cwd: base, env, stdio: ['ignore', 'pipe', 'pipe'], windowsHide: true });
+  t.diagnostic(`probe child pid ${child.pid}`);
+  let out = '';
+  child.stdout.setEncoding('utf8').on('data', (d) => { out += d; });
+  child.stderr.setEncoding('utf8').on('data', (d) => { out += d; });
+  const { code, signal } = await new Promise((ok) => child.once('close', (c, s) => ok({ code: c, signal: s })));
+  const left = probeFolders().filter((n) => !before.has(n));
+  const port = /cluster: 127\.0\.0\.1:(\d+),/.exec(out)?.[1];
+  t.diagnostic(`probe exit code ${code}, signal ${signal}; folders left ${JSON.stringify(left)}\n${out}`);
+  return { code, signal, out, port, left };
+}
+
+const INJECT_CASES = [
+  // [label, step, action, after, exit code, cleanup line, result line, cluster started]
+  ['an uncaught error while pg_ctl start runs waits for it, stops the server it started, deletes the folder, exits 1', 'start', 'throw', undefined, 1, /\nCLEANUP OK: /, /RESULT: FAILED\n/, true, /ERROR: unexpected error: test crash during start/],
+  ['an unhandled rejection while pg_ctl start runs waits for it, stops the server it started, deletes the folder, exits 1', 'start', 'reject', undefined, 1, /\nCLEANUP OK: /, /RESULT: FAILED\n/, true, /ERROR: unexpected error: test rejection during start/],
+  ['process.exit right after pg_ctl start ended: the exit handler stops the server and deletes the folder, exit is nonzero', 'start', 'exit', 'close', 1, /CLEANUP \(at exit\) OK: cluster stopped with pg_ctl -D <own folder>, folder deleted/, null, true],
+  ['SIGINT (twice) right after pg_ctl start ended: one cleanup, folder deleted, exit 130', 'start', 'SIGINT', 'close', 130, /\nCLEANUP OK: /, /RESULT: FAILED \(interrupted by SIGINT\)/, true, /SIGINT again: cleanup of this run's own cluster is already running/],
+  ['SIGINT (twice) during the synchronous exit cleanup: the server is still stopped, folder deleted, exit nonzero', 'query', 'exit-signal', undefined, 1, /CLEANUP \(at exit\) OK: cluster stopped with pg_ctl -D <own folder>, folder deleted/, null, true, /SIGINT again: cleanup of this run's own cluster is already running/],
+  ['SIGINT (twice) while initdb runs: folder deleted, exit 130', 'initdb', 'SIGINT', undefined, 130, /\nCLEANUP OK: /, /RESULT: FAILED \(interrupted by SIGINT\)/, false, /SIGINT again: /],
+  ['SIGINT (twice) while pg_ctl start runs: the server is stopped, folder deleted, exit 130', 'start', 'SIGINT', undefined, 130, /\nCLEANUP OK: /, /RESULT: FAILED \(interrupted by SIGINT\)/, undefined, /SIGINT again: /],
+  ['SIGTERM (twice) while pg_ctl start runs: the server is stopped, folder deleted, exit 143', 'start', 'SIGTERM', undefined, 143, /\nCLEANUP OK: /, /RESULT: FAILED \(interrupted by SIGTERM\)/, undefined, /SIGTERM again: /],
+  ['SIGBREAK (twice) while pg_ctl start runs: the server is stopped, folder deleted, exit 149', 'start', 'SIGBREAK', undefined, 149, /\nCLEANUP OK: /, /RESULT: FAILED \(interrupted by SIGBREAK\)/, undefined, /SIGBREAK again: /],
+  ['SIGHUP (twice) while pg_ctl start runs: the server is stopped, folder deleted, exit 129', 'start', 'SIGHUP', undefined, 129, /\nCLEANUP OK: /, /RESULT: FAILED \(interrupted by SIGHUP\)/, undefined, /SIGHUP again: /],
+];
+
+for (const [label, step, action, after, wantCode, cleanupLine, resultLine, clusterStarted, extra] of INJECT_CASES) {
+  test(label, { skip: havePg17 ? false : `no PostgreSQL 17 in ${pgBin}`, timeout: 120000 }, async (t) => {
+    const r = await runInjected(t, { step, action, after });
+    assert.equal(r.signal, null, r.out);
+    assert.equal(r.code, wantCode, r.out);
+    assert.match(r.out, new RegExp(`TEST INJECT: ${step}:${action}, owned child pid \\d+`), r.out);
+    assert.match(r.out, cleanupLine, r.out);
+    if (resultLine) assert.match(r.out, resultLine, r.out);
+    if (extra) assert.match(r.out, extra, r.out);
+    assert.doesNotMatch(r.out, /RESULT: OK/);
+    assert.doesNotMatch(r.out, /CLEANUP (\(at exit\) )?INCOMPLETE/, r.out);
+    assert.deepEqual(r.left, [], 'the probe folder is deleted');
+    if (clusterStarted === true) assert.ok(r.port, `the cluster should have started:\n${r.out}`);
+    if (clusterStarted === false) assert.equal(r.port, undefined, 'no cluster was started');
+    if (r.port) assert.equal(await portAccepts(Number(r.port)), false, 'the owned server no longer listens');
+  });
+}
+
+test('a failing initdb is reported, the folder is deleted, exit 1', { skip: havePg17 ? false : `no PostgreSQL 17 in ${pgBin}`, timeout: 120000 }, async (t) => {
+  const r = await runInjected(t, { step: 'initdb', action: 'bad-option' });
+  assert.equal(r.signal, null, r.out);
+  assert.equal(r.code, 1, r.out);
+  assert.match(r.out, /ERROR: initdb failed: /);
+  assert.match(r.out, /\nCLEANUP OK: cluster stopped with pg_ctl -D <own folder>, folder deleted/);
+  assert.match(r.out, /RESULT: FAILED\n/);
+  assert.equal(r.port, undefined, 'no cluster was started');
+  assert.deepEqual(r.left, [], 'the probe folder is deleted');
+});
+
+test('a failing query after the server started is reported, the later probes still run, the server is stopped, the folder deleted, exit 1', { skip: havePg17 ? false : `no PostgreSQL 17 in ${pgBin}`, timeout: 120000 }, async (t) => {
+  const r = await runInjected(t, { step: 'query', action: 'bad-query' });
+  assert.equal(r.signal, null, r.out);
+  assert.equal(r.code, 1, r.out);
+  assert.match(r.out, /ERROR: probe server_version_num failed \(status 1\): .*test_missing_function/s);
+  assert.match(r.out, /== createrole_self_grant/);
+  assert.match(r.out, /\nCLEANUP OK: cluster stopped with pg_ctl -D <own folder>, folder deleted/);
+  assert.match(r.out, /RESULT: FAILED\n/);
+  assert.deepEqual(r.left, [], 'the probe folder is deleted');
+  assert.ok(r.port, r.out);
+  assert.equal(await portAccepts(Number(r.port)), false, 'the owned server no longer listens');
 });
